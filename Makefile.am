@@ -1,6 +1,6 @@
 # Makefile for Twist
 #
-# Copyright (C) 2026 Chris
+# Copyright (C) 2026 Chris Burdess
 #
 # This file is part of Twist.
 #
@@ -17,8 +17,30 @@
 # You should have received a copy of the GNU General Public License
 # along with Twist.  If not, see <https://www.gnu.org/licenses/>.
 
-# Subdirectories to build
-SUBDIRS = src doc tests
+# Subdirectories (none for skeleton)
+SUBDIRS =
+
+# The program to build
+bin_PROGRAMS = twist
+
+# Source files
+twist_SOURCES = src/twist.c src/twist.h
+
+# Compilation flags
+twist_CPPFLAGS = -I$(top_srcdir)/src
+AM_CFLAGS = -Wall -Wextra -Werror -pedantic -std=c11 $(twist_CPPFLAGS)
+
+# Version info
+twist_VERSION = 0.1
+
+# Define package name and version
+AM_CPPFLAGS = \
+	-DPACKAGE_NAME="\"twist\"" \
+	-DPACKAGE_VERSION="\"0.1\"" \
+	-DPACKAGE_BUGREPORT="\"dog@gnu.org\""
+
+# Installation directories
+bindir = @bindir@
 
 # Files to distribute
 EXTRA_DIST = \
@@ -27,7 +49,12 @@ EXTRA_DIST = \
 	NEWS \
 	ChangeLog \
 	INSTALL \
-	COPYING
+	HACKING \
+	THANKS \
+	TODO \
+	COPYING \
+	bootstrap \
+	config.h.in
 
 # Clean files
 DISTCLEANFILES = \
@@ -35,14 +62,3 @@ DISTCLEANFILES = \
 	config.cache \
 	config.log \
 	configure.lineno
-
-# Maintainer targets
-.PHONY: maintainer-clean-docs
-maintainer-clean-docs:
-	-rm -rf doc/*.aux doc/*.cp doc/*.cps doc/*.dvi \
-		doc/*.fn doc/*.fns doc/*.ky doc/*.kys doc/*.log \
-		doc/*.pg doc/*.pgs doc/*.toc doc/*.tp doc/*.vr
-
-# Ensure the build-aux directory exists
-$(srcdir)/build-aux:
-	mkdir -p $@

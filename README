@@ -1,11 +1,36 @@
-Twist - A sample GNU-style program
-======================================
+Twist - HTTP Client Skeleton
+============================
 
-Copyright (C) 2026 Chris
+Copyright (C) 2026 Chris Burdess
 
 * What is Twist?
 
-Twist is a program that...
+Twist is a curl-compatible HTTP client. This is currently a **skeleton**
+implementation that will be built out to support HTTP/3, HTTP/2, and HTTP/1.x.
+
+* Dependencies
+
+This skeleton uses:
+  - **quickstep** library for QUIC and TLS
+  - **GNU readline** for interactive input
+
+No other dependencies are used without explicit approval.
+
+* Build and Install
+
+Quick setup:
+
+  ./bootstrap
+  ./configure --with-quickstep=../quickstep
+  make
+  make install
+
+See INSTALL for detailed instructions.
+
+* Project Status
+
+This is a **skeleton** - only basic structure is in place.
+Implementation of HTTP protocols and curl compatibility will follow.
 
 * License
 
@@ -21,60 +46,3 @@ GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
-
-* Important Note
-
-This program is NOT part of the GNU Project.
-
-While this program follows the conventions and licensing of the GNU
-Project, it has not been officially accepted as a GNU package.  The
-Free Software Foundation has not reviewed or endorsed this program,
-and it should not be referred to as "GNU Twist" or as part of the GNU
-Project until such time as it is officially accepted.
-
-For information about the GNU Project and its standards, see:
-<https://www.gnu.org/>
-<https://www.gnu.org/prep/standards/>
-
-* Documentation
-
-The manual for Twist is not yet available.  For now, see the
-information in this file and the man page (twist(1)).
-
-* Mailing Lists
-
-There are currently no mailing lists for Twist.  Please send bug
-reports and suggestions to <chris@localhost>.
-
-* Bug Reports
-
-Please report bugs to <chris@localhost>.  Include the following
-information in your bug report:
-
-  - The version of Twist you are using
-  - The operating system and version
-  - The hardware architecture
-  - A complete description of the problem
-  - The exact steps to reproduce the problem
-
-* Contributing
-
-See the HACKING file for information on how to contribute to Twist.
-
-* Building from Source
-
-See the INSTALL file for detailed build and installation instructions.
-
-In brief:
-
-  ./bootstrap
-  ./configure
-  make
-  make check
-  make install
-
-See Also
---------
-
-The GNU Project home page: <https://www.gnu.org/>
-GNU Coding Standards: <https://www.gnu.org/prep/standards/>

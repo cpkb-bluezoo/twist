@@ -1,41 +1,19 @@
 Twist TODO List
 ================
 
-This file contains a list of tasks and features that need to be
-implemented or improved in Twist.
+Skeleton phase (current)
+-----------------------
 
-High Priority
--------------
+  [x] Basic project structure
+  [x] quickstep integration (QUIC/TLS)
+  [x] GNU readline integration
+  [x] configure.ac and Makefile.am
 
-  - Review and test the build system on various platforms
-  - Add more comprehensive test cases
-  - Improve documentation (manual, man pages)
+Next steps
+----------
 
-Medium Priority
----------------
-
-  - Implement core functionality (currently a skeleton)
-  - Add command-line option parsing library
-  - Add internationalization support (gettext)
-  - Add logging functionality
-
-Low Priority
-------------
-
-  - Add support for additional file formats
-  - Add configuration file support
-  - Add GUI interface (optional)
-  - Add Windows support (via MinGW or Cygwin)
-
-Completed Tasks
---------------
-
-  - Initial project structure following GNU conventions
-  - Basic build system setup (autoconf, automake)
-  - License and legal files (COPYING, README)
-  - Documentation files (AUTHORS, NEWS, ChangeLog, INSTALL)
-  - Development guidelines (HACKING)
-  - Example source code and test framework
-
-If you would like to contribute to any of these tasks, please contact
-the maintainer at <chris@localhost>.
+  [ ] Implement curl-compatible CLI argument parsing
+  [ ] HTTP/1.x protocol support
+  [ ] HTTP/2 protocol support (via quickstep)
+  [ ] HTTP/3 protocol support (via quickstep)
+  [ ] Full curl option compatibility

@@ -2,9 +2,6 @@
 *.lo
 *.la
 *.a
-*.so
-*.so.*
-.config
 config.cache
 config.log
 config.status
@@ -12,47 +9,24 @@ configure
 configure.lineno
 libtool
 stamp-h1
-
-# Automake generated files
 Makefile
 Makefile.in
-*.Makefile.in
 aclocal.m4
 compile
 depcomp
 install-sh
 missing
 mkinstalldirs
-ylwrap
 
 # Build artifacts
 *.o
 *.obj
-*.exe
-*.dll
-*.dylib
-*.app
-*.test
-*.trs
-*.log
-
-# Debug files
-*.core
-*.stackdump
 
 # Editor files
 *~
 *.swp
 *.swo
-*#
 
 # IDE files
 .idea/
 .vscode/
-*.user
-*.suo
-*.sln
-
-# OS-specific files
-.DS_Store
-Thumbs.db

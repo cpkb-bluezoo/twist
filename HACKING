@@ -1,125 +1,27 @@
 Twist Hacking Guide
 ====================
 
-Copyright (C) 2026 Chris
+Copyright (C) 2026 Chris Burdess
 
-This file contains guidelines for contributing to Twist.
+Development
+-----------
 
-Reporting Bugs
---------------
+Twist uses:
+  - quickstep library (../quickstep) for QUIC and TLS
+  - GNU readline for interactive input
 
-When reporting bugs, please include:
+No other dependencies may be added without explicit approval.
 
-  1. The version of Twist you are using
-  2. The operating system and version
-  3. The hardware architecture
-  4. A complete description of the problem
-  5. The exact steps to reproduce the problem
-  6. Any relevant configuration or environment settings
-
-Bugs can be reported to <chris@localhost>.
-
-Submitting Patches
-------------------
-
-Patches are welcome!  Please follow these guidelines when submitting patches:
-
-  1. Follow the existing coding style in the project
-  2. Include a ChangeLog entry for your changes
-  3. Update NEWS if the change is user-visible
-  4. Keep changes focused and minimal
-  5. Include a clear description of the problem and solution
-  6. Use the same license (GPLv3+) for all new code
-  7. Ensure all new files have appropriate copyright notices
-
-To submit a patch, you can:
-
-  - Email it to <chris@localhost>
-  - Use a pull request if the project uses a version control system
-    that supports them
-
-Please include the following information in your submission:
-
-  - Your name and email address
-  - A description of the change
-  - The rationale for the change
-  - Any testing you have performed
-
-Coding Standards
-----------------
-
-Twist follows GNU coding standards where applicable.  Key points:
-
-  1. Use consistent indentation (preferably 2 or 4 spaces, no tabs)
-  2. Limit lines to 79 characters where possible
-  3. Use descriptive variable and function names
-  4. Comment your code, but prefer clear code over comments
-  5. Include copyright notices at the top of each source file
-  6. Use International English for all user-facing text
-  7. Follow POSIX standards for portability
-
-Building from Git
------------------
-
-To build Twist from the Git repository:
-
-  1. Ensure you have the following tools installed:
-     - GNU autoconf
-     - GNU automake
-     - GNU libtool (if needed)
-     - A C compiler (gcc recommended)
-     - make
-
-  2. Run the bootstrap script:
-     ./bootstrap
-
-  3. Configure and build:
-     ./configure
-     make
-
-  4. Optionally run tests:
-     make check
-
-  5. Install (requires appropriate permissions):
-     make install
-
-Development Environment
-----------------------
-
-The following tools are recommended for development:
-
-  - gcc or clang (C compiler)
-  - gdb (debugger)
-  - valgrind (memory checker)
-  - GNU make
-  - git (version control)
-
-Contribution Agreement
-----------------------
-
-By contributing code to Twist, you agree to license your contributions
-under the GNU General Public License version 3 or later.  You also
-certify that:
-
-  1. You have the right to submit the code under this license
-  2. The code is your original work or you have obtained proper
-     permission to submit it
-  3. You grant a copyright license to the project maintainers
-
-Maintainer Information
-----------------------
-
-The current maintainer of Twist is:
-
-  Chris <chris@localhost>
-
-If you have questions about development or want to discuss major
-changes, please contact the maintainer.
-
-See Also
+Building
 --------
 
-GNU Coding Standards: <https://www.gnu.org/prep/standards/>
-GNU Maintenance Guide: <https://www.gnu.org/software/maintain/html_node/index.html>
-GNU Autoconf Manual: <https://www.gnu.org/software/autoconf/manual/>
-GNU Automake Manual: <https://www.gnu.org/software/automake/manual/>
+  ./bootstrap
+  ./configure --with-quickstep=../quickstep
+  make
+
+Contributing
+------------
+
+See INSTALL for build requirements.
+
+All contributions must follow GPLv3+ licensing.

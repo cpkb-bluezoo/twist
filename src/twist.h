@@ -1,6 +1,6 @@
-/* twist.h - Header file for Twist
+/* twist.h - Twist HTTP client header
 
-   Copyright (C) 2026 Chris
+   Copyright (C) 2026 Chris Burdess
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -19,20 +19,12 @@
 #ifndef TWIST_H
 #define TWIST_H
 
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
+#include <stddef.h>
 
-/* Program version */
-#define TWIST_VERSION PACKAGE_VERSION
-
-/* Exit codes */
-#define TWIST_EXIT_SUCCESS 0
-#define TWIST_EXIT_FAILURE 1
-
-/* Function declarations */
-void twist_print_version(void);
-void twist_print_help(void);
-int twist_process_file(const char *filename);
+/* Dependencies */
+#include <quickstep/conn.h>
+#include <quickstep/tls.h>
+#include <readline/readline.h>
+#include <readline/history.h>
 
 #endif /* TWIST_H */

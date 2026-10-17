@@ -1,9 +1,9 @@
 Twist NEWS -- history of user-visible changes
 
-Copyright (C) 2026 Chris
+Copyright (C) 2026 Chris Burdess
 
-Please send Twist bug reports to <chris@localhost>
+Please send Twist bug reports to <dog@gnu.org>
 
 Version 0.1 - unreleased
 
-  * Initial release
+  * Initial skeleton with quickstep and GNU readline support

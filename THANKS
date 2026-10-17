@@ -1,38 +1,13 @@
 People Who Have Helped Twist
 ==========================
 
-This file acknowledges people who have contributed to Twist in
-various ways.  This is not a complete list; see the ChangeLog for a
-detailed history of changes and contributors.
-
 Maintainer
 ----------
 
-  Chris <chris@localhost>
+  Chris Burdess <dog@gnu.org>
 
-Contributors
+Dependencies
 ------------
 
-None yet.  Be the first!
-
-Testers
--------
-
-None yet.  Bug reports and testing are always welcome.
-
-Documentation Contributors
---------------------------
-
-None yet.
-
-Special Thanks
--------------
-
-  To the Free Software Foundation for their guidance on free software
-  best practices and for maintaining the GNU General Public License.
-
-  To the GNU Project for establishing standards and conventions that
-  this project follows.
-
-If you have contributed to Twist and would like to be listed here,
-please let the maintainer know at <chris@localhost>.
+  Quickstep developers (QUIC and TLS)
+  GNU Readline maintainers
