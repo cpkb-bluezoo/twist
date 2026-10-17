@@ -1,0 +1,41 @@
+Twist TODO List
+================
+
+This file contains a list of tasks and features that need to be
+implemented or improved in Twist.
+
+High Priority
+-------------
+
+  - Review and test the build system on various platforms
+  - Add more comprehensive test cases
+  - Improve documentation (manual, man pages)
+
+Medium Priority
+---------------
+
+  - Implement core functionality (currently a skeleton)
+  - Add command-line option parsing library
+  - Add internationalization support (gettext)
+  - Add logging functionality
+
+Low Priority
+------------
+
+  - Add support for additional file formats
+  - Add configuration file support
+  - Add GUI interface (optional)
+  - Add Windows support (via MinGW or Cygwin)
+
+Completed Tasks
+--------------
+
+  - Initial project structure following GNU conventions
+  - Basic build system setup (autoconf, automake)
+  - License and legal files (COPYING, README)
+  - Documentation files (AUTHORS, NEWS, ChangeLog, INSTALL)
+  - Development guidelines (HACKING)
+  - Example source code and test framework
+
+If you would like to contribute to any of these tasks, please contact
+the maintainer at <chris@localhost>.
