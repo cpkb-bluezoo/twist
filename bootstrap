@@ -1,0 +1,71 @@
+#!/bin/sh
+# Bootstrap script for Twist
+#
+# Copyright (C) 2026 Chris
+#
+# This file is part of Twist.
+#
+# Twist is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# Twist is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with Twist.  If not, see <https://www.gnu.org/licenses/>.
+
+# This script generates the configure script and other build files.
+# It requires GNU autoconf, automake, and libtool.
+
+set -e
+
+PACKAGE=twist
+VERSION=0.1
+
+echo "Bootstrapping $PACKAGE $VERSION..."
+
+# Check for required tools
+for tool in autoconf automake; do
+    if ! command -v $tool > /dev/null 2>&1; then
+        echo "Error: $tool is required but not found."
+        echo "Please install GNU autoconf and GNU automake."
+        exit 1
+    fi
+done
+
+# Create build-aux directory if it doesn't exist
+mkdir -p build-aux
+
+# Generate aclocal.m4
+echo "Generating aclocal.m4..."
+aclocal --install || {
+    echo "Error: aclocal failed."
+    exit 1
+}
+
+# Generate configure script
+echo "Generating configure script..."
+autoconf || {
+    echo "Error: autoconf failed."
+    exit 1
+}
+
+# Generate Makefile.in files
+echo "Generating Makefile.in files..."
+automake --add-missing --copy || {
+    echo "Error: automake failed."
+    exit 1
+}
+
+echo ""
+echo "Bootstrap complete.  You can now run:"
+echo "  ./configure [OPTIONS]"
+echo "  make"
+echo "  make install"
+echo ""
+echo "For a default installation, run:"
+echo "  ./configure && make && make install"

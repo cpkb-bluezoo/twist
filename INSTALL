@@ -1,0 +1,202 @@
+Installation Instructions for Twist
+=====================================
+
+Copyright (C) 2026 Chris
+
+This file contains generic installation instructions.  For specific
+instructions for a particular system, see the README file.
+
+   Briefly, the shell commands `./configure; make; make install' should
+configure, compile, and install this package.
+
+   The `configure' shell script attempts to guess correct values for
+various system-dependent variables used during compilation.  It uses
+the values it finds, or the defaults if it cannot find a suitable value,
+to create a `Makefile' in each directory of the package.
+
+   The `Makefile' contains rules for building the package.  To build
+the package, you need to run `make'.  This will create the executables,
+libraries, and so on that the package provides.
+
+   Finally, `make install' will install the built files into the
+installation directories that were chosen during configuration.
+
+   By default, `make install' will install the package's files in
+`/usr/local/bin', `/usr/local/man', etc.  You can specify an
+installation prefix other than `/usr/local' by giving `configure' the
+option `--prefix=PATH'.
+
+Compilers and Options
+---------------------
+
+   Some systems require unusual options for compilation or linking that
+the `configure' script does not know about.  Run `./configure --help'
+for information on some of the options that `configure' accepts.
+
+   For some systems, you may need to set environment variables to specify
+libraries or include files.  To do this, you can use the following
+variables when running `configure':
+
+     CPPFLAGS   C preprocessor flags, e.g. `-I<include dir>' if you have
+                 headers in a non-standard directory `<include dir>'.
+     LIBS       library flags, e.g. `-L<lib dir>' if you have libraries
+                 in a non-standard directory `<lib dir>'.
+
+   You can also set the CC and CXX environment variables to specify
+a particular C or C++ compiler to use.
+
+Installation Names
+------------------
+
+   By default, `make install' will install the package's commands under
+`/usr/local/bin', data files under `/usr/local/share', etc.  You can
+specify an installation prefix other than `/usr/local' by giving
+`configure' the option `--prefix=PATH'.
+
+   You can specify separate installation prefixes for
+architecture-specific files and architecture-independent files.  If you
+pass the option `--exec-prefix=PATH' to `configure', the package will
+use PATH as the prefix for installing programs and libraries.
+Documentation and other data files will still use the regular prefix.
+
+   In addition, if you use an unusual directory layout you can specify
+the installation directories for each type of file by giving options to
+configure.  For example:
+
+     ./configure --prefix=/usr/local --exec-prefix=/usr/local 
+                 --bindir=/usr/local/bin --sbindir=/usr/local/sbin 
+                 --libexecdir=/usr/local/libexec 
+                 --datadir=/usr/local/share --sysconfdir=/etc
+                 --sharedstatedir=/usr/local/com --localstatedir=/var
+                 --libdir=/usr/local/lib --includedir=/usr/local/include
+                 --oldincludedir=/usr/include --infodir=/usr/local/info
+                 --mandir=/usr/local/man
+
+Optional Features
+-----------------
+
+   Some packages pay attention to `--enable-FEATURE' options that they
+get from `configure', where FEATURE indicates an optional part of the
+package.  For example, `--enable-debug' might enable debugging output
+for a program.  You can use `--disable-FEATURE' to disable such a
+feature.
+
+   Run `./configure --help' to see all available options.
+
+Specifying the System Type
+--------------------------
+
+   There may be some features that `configure' cannot figure out
+automatically, but that can be specified by the user.  You can specify
+the system type by giving `configure' the option `--build=TYPE', where
+TYPE can be either a short system type like `sun4' or a canonical
+system type like `sparc-sun-sunos4.1.3'.
+
+Sharing Defaults
+----------------
+
+   If you want to set default values for `configure' scripts you run in
+the future, you can create a site shell script called `config.site'
+that gives default values for variables like `CC', `cppflags', etc.
+This is useful for setting system-specific variables that you want to
+use for all packages you compile.  `configure' looks for `PREFIX/share/config.site'
+if it exists, then `PREFIX/etc/config.site' if it exists, where PREFIX
+is the installation prefix you specified or the default `/usr/local'.
+
+Operating System Specifics
+--------------------------
+
+   On some systems, you need to specify the machine type to configure.
+For example, on a SparcStation, you can use:
+
+     ./configure sparc-sun-sunos4.1.3
+
+   However, `configure' can usually determine the machine type itself.
+
+   On systems that have a case-insensitive or case-tracking file system,
+such as Windows 95, the installation directory should be specified in
+lowercase.  For example:
+
+     ./configure --prefix=c:/gnu
+
+   Some packages require a different version of the GNU C library than
+the one found by `configure'.  In that case, you can specify the
+library version explicitly.  For example:
+
+     ./configure --with-gnu-ld=ld
+
+   On some systems, the assembler needs special flags.  You can specify
+them with the `ASFLAGS' environment variable.  For example:
+
+     ASFLAGS='-traditional-cpp' ./configure
+
+Installation
+------------
+
+   To install the package:
+
+     1. Run `configure' with appropriate options to generate a Makefile.
+
+     2. Type `make' to compile the package.
+
+     3. Optionally, type `make check' to run any self-tests that come
+        with the package.
+
+     4. Type `make install' to install the programs and any data files
+        and documentation.
+
+     5. Optionally, type `make installcheck' to verify the installation.
+        This is not required, but it can catch installation problems.
+
+     6. Optionally, type `make clean' to remove the program binaries
+        and object files from the source directory.
+
+   The commands `make clean' and `make distclean' can be used to remove
+files that were created by `make'.  `make clean' removes the files
+from the build that are created by the compilation process, while
+`make distclean' also removes the files that `configure' created.
+
+   If the package supports it, `make uninstall' can be used to remove the
+files that were installed by `make install'.
+
+   The files `configure' and `Makefile.in' are designed to be used with
+a Bourne-compatible shell.  If your `/bin/sh' is buggy, try using bash
+or ksh instead.
+
+Compilers
+---------
+
+   The GNU build system requires a C compiler that conforms to the ISO
+C89 standard.  If your system does not have such a compiler, you can
+install the GNU C compiler (gcc) from <https://gcc.gnu.org/>.
+
+   If you are using a C++ compiler, it must support the ISO C++98
+standard.  If your compiler does not support this standard, you can
+install g++ from <https://gcc.gnu.org/>.
+
+Troubleshooting
+---------------
+
+   If you encounter problems during the build or installation, first
+check the README file for any system-specific instructions.
+
+   If the build fails, check the config.log file for error messages.
+This file contains the output of the configure script and can help
+diagnose problems.
+
+   If you need help, you can send a bug report to <chris@localhost>.
+Please include the following information in your report:
+
+     * The version of the package you are trying to install.
+     * The system type (output of `uname -a').
+     * The output of `config.guess' (if available).
+     * The exact error message you received.
+     * The contents of config.log.
+
+Reporting Bugs
+--------------
+
+   Report bugs to <chris@localhost>.
+
+   Please include the version number of the package, the system type,
+and a complete description of the problem in your bug report.

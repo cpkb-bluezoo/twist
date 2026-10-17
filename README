@@ -1,0 +1,80 @@
+Twist - A sample GNU-style program
+======================================
+
+Copyright (C) 2026 Chris
+
+* What is Twist?
+
+Twist is a program that...
+
+* License
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+* Important Note
+
+This program is NOT part of the GNU Project.
+
+While this program follows the conventions and licensing of the GNU
+Project, it has not been officially accepted as a GNU package.  The
+Free Software Foundation has not reviewed or endorsed this program,
+and it should not be referred to as "GNU Twist" or as part of the GNU
+Project until such time as it is officially accepted.
+
+For information about the GNU Project and its standards, see:
+<https://www.gnu.org/>
+<https://www.gnu.org/prep/standards/>
+
+* Documentation
+
+The manual for Twist is not yet available.  For now, see the
+information in this file and the man page (twist(1)).
+
+* Mailing Lists
+
+There are currently no mailing lists for Twist.  Please send bug
+reports and suggestions to <chris@localhost>.
+
+* Bug Reports
+
+Please report bugs to <chris@localhost>.  Include the following
+information in your bug report:
+
+  - The version of Twist you are using
+  - The operating system and version
+  - The hardware architecture
+  - A complete description of the problem
+  - The exact steps to reproduce the problem
+
+* Contributing
+
+See the HACKING file for information on how to contribute to Twist.
+
+* Building from Source
+
+See the INSTALL file for detailed build and installation instructions.
+
+In brief:
+
+  ./bootstrap
+  ./configure
+  make
+  make check
+  make install
+
+See Also
+--------
+
+The GNU Project home page: <https://www.gnu.org/>
+GNU Coding Standards: <https://www.gnu.org/prep/standards/>
