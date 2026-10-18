@@ -226,7 +226,8 @@ twist_qpack_encode_request (const char *method, const char *scheme,
     }
   for (h = extra; h != NULL; h = h->next)
     {
-      const char *colon = strchr (h->data, ':');
+      const char *colon = h->data[0] == ':' ? strchr (h->data + 1, ':')
+                                            : strchr (h->data, ':');
       char name[128];
       const char *val;
       size_t nl;

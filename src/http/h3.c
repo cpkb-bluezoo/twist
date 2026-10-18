@@ -155,8 +155,13 @@ twist_h3_receive (struct twist_h3 *h, const uint8_t *data, size_t len)
           if (h->type == 0x1)
             {
               if (twist_qpack_decode (h->payload, h->payload_len, &h->ev)
-                  != TWIST_OK && h->ev.failure != NULL)
-                h->ev.failure (h->ev.user, TWIST_ERR_PROTOCOL);
+                  != TWIST_OK)
+                {
+                  if (h->ev.failure != NULL)
+                    h->ev.failure (h->ev.user, TWIST_ERR_PROTOCOL);
+                }
+              else if (h->ev.switching != NULL)
+                h->ev.switching (h->ev.user);
             }
           else if (h->type == 0x0 && h->ev.body != NULL)
             h->ev.body (h->ev.user, h->payload, h->payload_len);
@@ -172,6 +177,27 @@ twist_h3_receive (struct twist_h3 *h, const uint8_t *data, size_t len)
         }
     }
   return off;
+}
+
+static size_t
+put_varint (uint8_t *buf, uint64_t v)
+{
+  if (v < 64)
+    {
+      buf[0] = (uint8_t) v;
+      return 1;
+    }
+  if (v < 16384)
+    {
+      buf[0] = (uint8_t) (0x40 | (v >> 8));
+      buf[1] = (uint8_t) v;
+      return 2;
+    }
+  buf[0] = (uint8_t) (0x80 | (v >> 24));
+  buf[1] = (uint8_t) (v >> 16);
+  buf[2] = (uint8_t) (v >> 8);
+  buf[3] = (uint8_t) v;
+  return 4;
 }
 
 int
@@ -191,20 +217,25 @@ twist_h3_request (struct twist_h3 *h, const char *method, const char *scheme,
                                    &block, &blen);
   if (rc != TWIST_OK)
     return rc;
-  buf = twist_xmalloc (8 + blen + 8 + body_len);
+  if (blen > 0x3fffffff || body_len > 0x3fffffff)
+    {
+      free (block);
+      return TWIST_ERR_PROTOCOL;
+    }
+  buf = twist_xmalloc (16 + blen + body_len);
   if (buf == NULL)
     {
       free (block);
       return TWIST_ERR_NOMEM;
     }
   buf[n++] = 0x01;
-  buf[n++] = (uint8_t) blen;
+  n += put_varint (buf + n, blen);
   memcpy (buf + n, block, blen);
   n += blen;
   if (body != NULL && body_len > 0)
     {
       buf[n++] = 0x00;
-      buf[n++] = (uint8_t) body_len;
+      n += put_varint (buf + n, body_len);
       memcpy (buf + n, body, body_len);
       n += body_len;
     }

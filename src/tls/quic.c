@@ -49,6 +49,7 @@ struct twist_quic
   int fd;
   uint64_t stream_id;
   int have_stream;
+  int hold_stream;
   gq_path path;
 };
 
@@ -307,6 +308,39 @@ quic_app_send (struct twist_endpoint *ep, const uint8_t *data, size_t len)
   n = gq_conn_stream_write (q->conn, q->stream_id, data, len);
   if (n < 0)
     return TWIST_ERR_TLS;
+  /* Extended CONNECT keeps the stream open for later WebSocket
+     frames.  A normal request finishes it with this write.  */
+  if (q->hold_stream)
+    {
+      if (n != (long) len)
+        return TWIST_ERR_TLS;
+    }
+  else if (gq_conn_stream_finish (q->conn, q->stream_id) != GQ_OK)
+    return TWIST_ERR_TLS;
+  now = twist_loop_now (q->loop) * 1000u;
+  return quic_flush (q, now);
+}
+
+void
+twist_quic_hold_stream (struct twist_connection *conn)
+{
+  struct twist_quic *q = twist_connection_tls (conn);
+
+  if (q != NULL)
+    q->hold_stream = 1;
+}
+
+int
+twist_quic_finish_stream (struct twist_connection *conn)
+{
+  struct twist_quic *q = twist_connection_tls (conn);
+  uint64_t now;
+
+  if (q == NULL || !q->hold_stream)
+    return TWIST_OK;
+  q->hold_stream = 0;
+  if (!q->have_stream || q->conn == NULL)
+    return TWIST_OK;
   if (gq_conn_stream_finish (q->conn, q->stream_id) != GQ_OK)
     return TWIST_ERR_TLS;
   now = twist_loop_now (q->loop) * 1000u;

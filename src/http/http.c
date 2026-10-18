@@ -71,6 +71,13 @@ struct twist_http
   int offered_h2c;
   int saw_upgrade_h2c;
   int preface_sent;
+  int ws;
+  int ws_open;
+  char ws_key[25];
+  char *ws_upgrade;
+  char *ws_connection;
+  char *ws_accept;
+  struct twist_ws *wsess;
   int watch_alt;
   int alt_h3;
   int peer_minor;
@@ -108,6 +115,13 @@ http_complete (struct twist_http *h, int err)
   if (h->finished)
     return;
   h->finished = 1;
+  if (h->ws && h->mode == HTTP_H3 && h->conn != NULL)
+    {
+      int fr = twist_quic_finish_stream (h->conn);
+
+      if (err == TWIST_OK && fr != TWIST_OK)
+        err = fr;
+    }
   if (h->timer != NULL)
     {
       twist_timer_cancel (h->timer);
@@ -149,12 +163,154 @@ on_version (void *user, int major, int minor)
 }
 
 static int
+http_ws_send (void *user, const uint8_t *data, size_t len)
+{
+  struct twist_http *h = user;
+  struct twist_endpoint *ep;
+
+  if (h->conn == NULL)
+    return 1;
+  ep = twist_connection_endpoint (h->conn);
+  if (h->mode == HTTP_H2)
+    {
+      uint8_t hdr[9];
+
+      if (len > 0xffffff)
+        return 1;
+      hdr[0] = (uint8_t) (len >> 16);
+      hdr[1] = (uint8_t) (len >> 8);
+      hdr[2] = (uint8_t) len;
+      hdr[3] = 0;
+      hdr[4] = 0;
+      hdr[5] = 0;
+      hdr[6] = 0;
+      hdr[7] = 0;
+      hdr[8] = 1;
+      if (twist_endpoint_send (ep, hdr, sizeof hdr) != TWIST_OK)
+        return 1;
+    }
+  else if (h->mode == HTTP_H3)
+    {
+      uint8_t hdr[8];
+      size_t n = 0;
+
+      hdr[n++] = 0x00;
+      if (len < 64)
+        hdr[n++] = (uint8_t) len;
+      else if (len < 16384)
+        {
+          hdr[n++] = (uint8_t) (0x40 | (len >> 8));
+          hdr[n++] = (uint8_t) len;
+        }
+      else
+        return 1;
+      if (twist_endpoint_send (ep, hdr, n) != TWIST_OK)
+        return 1;
+    }
+  return twist_endpoint_send (ep, data, len) == TWIST_OK ? 0 : 1;
+}
+
+static void
+http_ws_done (void *user, int err)
+{
+  http_complete (user, err);
+}
+
+static int
+ws_write_body (struct twist_http *h)
+{
+  struct twist_easy *easy = h->easy;
+
+  if (easy->postfields != NULL)
+    {
+      size_t n = easy->postfieldsize_set && easy->postfieldsize >= 0
+        ? (size_t) easy->postfieldsize : strlen (easy->postfields);
+
+      return twist_ws_send (h->wsess, 2, 1,
+                            (const uint8_t *) easy->postfields, n);
+    }
+  if (easy->read_cb == NULL)
+    return TWIST_OK;
+  {
+    uint8_t held[512];
+    size_t held_n = 0;
+    int started = 0;
+    int opcode = 2;
+
+    for (;;)
+      {
+        char buf[512];
+        size_t n = easy->read_cb (buf, 1, sizeof buf, easy->read_data);
+        int rc;
+
+        if (n == 0)
+          {
+            if (!started)
+              return TWIST_OK;
+            return twist_ws_send (h->wsess, opcode, 1, held, held_n);
+          }
+        if (n > sizeof buf)
+          return TWIST_ERR_PROTOCOL;
+        if (started)
+          {
+            rc = twist_ws_send (h->wsess, opcode, 0, held, held_n);
+            if (rc != TWIST_OK)
+              return rc;
+            opcode = 0;
+          }
+        memcpy (held, buf, n);
+        held_n = n;
+        started = 1;
+      }
+  }
+}
+
+static int
+open_websocket (struct twist_http *h)
+{
+  int rc;
+
+  if (h->ws_open)
+    return 1;
+  if (h->mode == HTTP_H2 || h->mode == HTTP_H3)
+    {
+      if (h->status != 200)
+        return 0;
+    }
+  else if (h->status != 101)
+    return 0;
+  else
+    {
+      rc = twist_ws_validate (h->ws_key, h->ws_upgrade, h->ws_connection,
+                              h->ws_accept);
+      if (rc != TWIST_OK)
+        {
+          http_complete (h, rc);
+          return 1;
+        }
+    }
+  h->wsess = twist_ws_new (h->easy, http_ws_send, h, http_ws_done, h);
+  if (h->wsess == NULL)
+    {
+      http_complete (h, TWIST_ERR_NOMEM);
+      return 1;
+    }
+  h->ws_open = 1;
+  rc = ws_write_body (h);
+  if (rc != TWIST_OK)
+    http_complete (h, rc);
+  return 1;
+}
+
+static int
 on_switch (void *user)
 {
   struct twist_http *h = user;
   uint8_t *pre = NULL;
   size_t n = 0;
 
+  if (h->ws)
+    return open_websocket (h);
   if (!h->offered_h2c || !h->saw_upgrade_h2c)
     return 0;
   if (twist_h2_preface (&pre, &n) != TWIST_OK)
@@ -199,7 +355,24 @@ on_header (void *user, const char *name, size_t name_len, const char *value,
   char *line;
   size_t n;
 
-  if (name_len == 8 && strncasecmp (name, "location", 8) == 0)
+  if (name_len == 7 && memcmp (name, ":status", 7) == 0)
+    {
+      int code = 0;
+      size_t i;
+
+      for (i = 0; i < value_len; i++)
+        {
+          if (value[i] < '0' || value[i] > '9')
+            break;
+          code = code * 10 + (value[i] - '0');
+        }
+      if (i == value_len && value_len > 0)
+        {
+          h->status = code;
+          h->easy->http_code = code;
+        }
+    }
+  else if (name_len == 8 && strncasecmp (name, "location", 8) == 0)
     {
       free (h->location);
       h->location = ncopy (value, value_len);
@@ -220,6 +393,22 @@ on_header (void *user, const char *name, size_t name_len, const char *value,
       for (i = 0; i + 3 <= value_len; i++)
         if (strncasecmp (value + i, "h2c", 3) == 0)
           h->saw_upgrade_h2c = 1;
+      if (h->ws)
+        {
+          free (h->ws_upgrade);
+          h->ws_upgrade = ncopy (value, value_len);
+        }
+    }
+  else if (h->ws && name_len == 10 && strncasecmp (name, "connection", 10) == 0)
+    {
+      free (h->ws_connection);
+      h->ws_connection = ncopy (value, value_len);
+    }
+  else if (h->ws && name_len == 20
+           && strncasecmp (name, "sec-websocket-accept", 20) == 0)
+    {
+      free (h->ws_accept);
+      h->ws_accept = ncopy (value, value_len);
     }
   else if (name_len == 7 && strncasecmp (name, "alt-svc", 7) == 0)
     {
@@ -272,6 +461,11 @@ on_body (void *user, const uint8_t *data, size_t len)
 {
   struct twist_http *h = user;
 
+  if (h->ws_open)
+    {
+      twist_ws_receive (h->wsess, data, len);
+      return;
+    }
   h->easy->size_download += len;
   if (h->easy->failonerror && h->status >= 400)
     return;
@@ -367,6 +561,25 @@ request_headers (struct twist_http *h)
       /* ENABLE_PUSH = 0, matching the connection preface SETTINGS.  */
       list = twist_slist_append (list, "HTTP2-Settings: AAIAAA");
     }
+  if (h->ws && (h->mode == HTTP_H2 || h->mode == HTTP_H3))
+    {
+      struct twist_slist *proto;
+
+      proto = twist_slist_append (NULL, ":protocol: websocket");
+      if (proto != NULL)
+        {
+          proto->next = list;
+          list = proto;
+        }
+    }
+  else if (h->ws)
+    {
+      list = twist_slist_append (list, "Upgrade: websocket");
+      list = twist_slist_append (list, "Connection: Upgrade");
+      list = twist_slist_append (list, "Sec-WebSocket-Version: 13");
+      snprintf (buf, sizeof buf, "Sec-WebSocket-Key: %s", h->ws_key);
+      list = twist_slist_append (list, buf);
+    }
   return list;
 }
 
@@ -384,6 +597,8 @@ send_request (struct twist_http *h)
   size_t body_len = 0;
   uint8_t *out = NULL;
   size_t out_len = 0;
+  const char *scheme;
+  int keep_open = 0;
   int rc;
   int http10;
 
@@ -409,7 +624,21 @@ send_request (struct twist_http *h)
     snprintf (authority, sizeof authority, "%s:%d", url->host, url->port);
   else
     snprintf (authority, sizeof authority, "%s", url->host != NULL ? url->host : "");
-  if (!h->suppress_body && easy->postfields != NULL)
+  scheme = url->scheme;
+  if (h->ws)
+    {
+      method = (h->mode == HTTP_H2 || h->mode == HTTP_H3) ? "CONNECT" : "GET";
+      if (h->ws_key[0] == 0 && (rc = twist_ws_key (h->ws_key)) != TWIST_OK)
+        return rc;
+      if (h->mode == HTTP_H2 || h->mode == HTTP_H3)
+        {
+          scheme = h->https ? "https" : "http";
+          keep_open = 1;
+          if (h->mode == HTTP_H3)
+            twist_quic_hold_stream (h->conn);
+        }
+    }
+  else if (!h->suppress_body && easy->postfields != NULL)
     {
       body = (const uint8_t *) easy->postfields;
       body_len = easy->postfieldsize_set && easy->postfieldsize >= 0
@@ -419,10 +648,10 @@ send_request (struct twist_http *h)
   http10 = h->req_http10
            || h->easy->http_version == TWIST_HTTP_VERSION_1_0;
   if (h->mode == HTTP_H2)
-    rc = twist_h2_request (h->h2, method, url->scheme, authority, target, extra,
-                           body, body_len, &out, &out_len);
+    rc = twist_h2_request (h->h2, method, scheme, authority, target, extra,
+                           body, body_len, keep_open, &out, &out_len);
   else if (h->mode == HTTP_H3)
-    rc = twist_h3_request (h->h3, method, url->scheme, authority, target, extra,
+    rc = twist_h3_request (h->h3, method, scheme, authority, target, extra,
                            body, body_len, &out, &out_len);
   else
     rc = twist_h1_write_request (method, target, authority, http10, extra, body,
@@ -481,6 +710,15 @@ http_restart (void *user)
   h->status = 0;
   h->tls_on = 0;
   h->finished = 0;
+  h->ws_open = 0;
+  twist_ws_free (h->wsess);
+  h->wsess = NULL;
+  free (h->ws_upgrade);
+  h->ws_upgrade = NULL;
+  free (h->ws_connection);
+  h->ws_connection = NULL;
+  free (h->ws_accept);
+  h->ws_accept = NULL;
   free (h->location);
   h->location = NULL;
   free (h->challenge);
@@ -514,6 +752,13 @@ http_message_done (void *user)
      stored for the next stream and does not change this one.  */
   if (host != NULL && h->watch_alt && !h->alt_h3)
     twist_origin_set_h3 (easy, host, 0, 0);
+  if (h->ws)
+    {
+      int opened = h->ws_open || (h->mode != HTTP_H1 && h->status == 200);
+
+      http_complete (h, opened ? TWIST_OK : TWIST_ERR_HTTP);
+      return;
+    }
   if (h->status == 401 && h->auth_tries < 2 && h->challenge != NULL
       && easy->username != NULL
       && (easy->auth & (TWISTAUTH_BASIC | TWISTAUTH_DIGEST)) != 0)
@@ -568,6 +813,14 @@ http_receive (struct twist_endpoint *ep, const uint8_t *data, size_t len)
 {
   struct twist_http *h = http_of (ep);
 
+  if (h->finished)
+    return len;
+  if (h->ws_open && h->mode == HTTP_H1)
+    {
+      size_t n = twist_ws_receive (h->wsess, data, len);
+
+      return h->finished ? len : n;
+    }
   if (h->mode == HTTP_H2)
     return twist_h2_receive (h->h2, data, len);
   if (h->mode == HTTP_H3)
@@ -941,6 +1194,18 @@ on_resolved (void *user, int err, const struct twist_dns_service *svc)
       http_complete (h, TWIST_ERR_UNSUPPORTED);
       return;
     }
+  if (h->ws && !h->https)
+    {
+      int v = h->easy->http_version;
+
+      /* Cleartext has no QUIC.  HTTP/2, when requested, is prior
+         knowledge so it does not share Upgrade with the handshake.  */
+      if (v == TWIST_HTTP_VERSION_2_0
+          || v == TWIST_HTTP_VERSION_2_PRIOR_KNOWLEDGE)
+        h->how = TWIST_DISC_H2_PRIOR;
+      else
+        h->how = TWIST_DISC_H1;
+    }
   if (h->how == TWIST_DISC_H3 && !rr_h3 && cached_port > 0 && h->https_port <= 0)
     h->https_port = cached_port;
   h->watch_alt = h->https && !svc->have_https && h->how != TWIST_DISC_H3
@@ -956,9 +1221,13 @@ http_begin (struct twist_http *h)
   struct twist_url *url = easy->url;
   const int *order = easy->dns_order_n > 0 ? easy->dns_order : NULL;
 
-  h->https = url->scheme != NULL && strcmp (url->scheme, "https") == 0;
+  h->ws = url->scheme != NULL
+          && (strcmp (url->scheme, "ws") == 0 || strcmp (url->scheme, "wss") == 0);
+  h->https = url->scheme != NULL
+             && (strcmp (url->scheme, "https") == 0
+                 || strcmp (url->scheme, "wss") == 0);
   h->peer_minor = -1;
-  if (easy->share != NULL && easy->share->hsts != NULL && !h->https
+  if (!h->ws && easy->share != NULL && easy->share->hsts != NULL && !h->https
       && twist_hsts_upgrade (easy->share->hsts, url->host,
                              twist_loop_now (easy->loop)))
     {
@@ -1003,6 +1272,10 @@ http_free (void *p)
   twist_connection_free (h->conn);
   twist_proxy_free (h->proxy);
   http_free_parsers (h);
+  twist_ws_free (h->wsess);
+  free (h->ws_upgrade);
+  free (h->ws_connection);
+  free (h->ws_accept);
   free (h->location);
   free (h->challenge);
   free (h->auth_line);

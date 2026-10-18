@@ -62,7 +62,7 @@ Each item is a new row in the scheme table. The loop does not change.
 - [x] FTP/FTPS (control reply lines, same-loop data connection)
 - [x] SMTP/SMTPS, IMAP/IMAPS, POP3/POP3S
 - [x] MQTT/MQTTS, LDAP/LDAPS
-- [ ] WebSocket upgrade (`ws` / `wss`) on the HTTP handler
+- [x] WebSocket (`ws` / `wss`): HTTP/1 upgrade, HTTP/2 and HTTP/3 extended CONNECT
 - [ ] DICT, GOPHER/GOPHERS, TELNET, RTSP
 - [ ] TFTP as a datagram handler
 - [ ] FILE through the storage pool

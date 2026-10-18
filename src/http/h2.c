@@ -167,6 +167,8 @@ on_frame (struct twist_h2 *h)
           h->block_len = 0;
           if ((h->flags & H2_END_STREAM) && h->ev.message_done != NULL)
             h->ev.message_done (h->ev.user);
+          else if (h->ev.switching != NULL)
+            h->ev.switching (h->ev.user);
         }
       return;
     }
@@ -279,7 +281,8 @@ int
 twist_h2_request (struct twist_h2 *h, const char *method, const char *scheme,
                   const char *authority, const char *path,
                   const struct twist_slist *extra, const uint8_t *body,
-                  size_t body_len, uint8_t **out, size_t *out_len)
+                  size_t body_len, int keep_open, uint8_t **out,
+                  size_t *out_len)
 {
   uint8_t *block = NULL;
   size_t blen = 0;
@@ -299,7 +302,8 @@ twist_h2_request (struct twist_h2 *h, const char *method, const char *scheme,
       return TWIST_ERR_NOMEM;
     }
   frame_hdr (buf, (uint32_t) blen, H2_HEADERS,
-             (uint8_t) (H2_END_HEADERS | (body == NULL ? H2_END_STREAM : 0)),
+             (uint8_t) (H2_END_HEADERS
+                        | (body == NULL && !keep_open ? H2_END_STREAM : 0)),
              1);
   memcpy (buf + 9, block, blen);
   if (body != NULL)

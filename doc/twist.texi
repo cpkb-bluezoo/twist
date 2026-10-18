@@ -117,7 +117,9 @@ SMTP envelope.  Repeat @option{--mail-rcpt} for each recipient.
 
 @code{mqtt://host/topic} subscribes to the topic, or publishes
 @option{--data} and disconnects.  @code{ldap://host/dn} binds, searches,
-and writes the result as LDIF.
+and writes the result as LDIF.  @code{ws://host/path} does the HTTP/1
+upgrade, or an extended CONNECT on HTTP/2 or HTTP/3, and writes payload
+bytes.  An HTTP/1 status other than 101 fails.
 
 Diagnostics are written to standard error and begin with @samp{twist:}.
 

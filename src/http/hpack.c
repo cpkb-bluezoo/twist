@@ -381,7 +381,8 @@ twist_hpack_encode_request (struct twist_hpack *hp, const char *method,
     }
   for (h = extra; h != NULL; h = h->next)
     {
-      const char *colon = strchr (h->data, ':');
+      const char *colon = h->data[0] == ':' ? strchr (h->data + 1, ':')
+                                            : strchr (h->data, ':');
       char name[128];
       const char *val;
       size_t nl;

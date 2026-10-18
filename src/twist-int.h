@@ -253,6 +253,8 @@ extern int (*twist_quic_connect_fn) (struct twist_easy *easy,
 
 int twist_tls_register (void);
 int twist_quic_register (void);
+void twist_quic_hold_stream (struct twist_connection *conn);
+int twist_quic_finish_stream (struct twist_connection *conn);
 
 /* ---- runtime and storage ---- */
 
@@ -485,8 +487,24 @@ int twist_h2_preface (uint8_t **out, size_t *out_len);
 int twist_h2_request (struct twist_h2 *h2, const char *method,
                       const char *scheme, const char *authority,
                       const char *path, const struct twist_slist *extra,
-                      const uint8_t *body, size_t body_len, uint8_t **out,
-                      size_t *out_len);
+                      const uint8_t *body, size_t body_len, int keep_open,
+                      uint8_t **out, size_t *out_len);
+
+struct twist_ws;
+int twist_ws_accept (const char *key, char **out);
+int twist_ws_key (char key[25]);
+int twist_ws_validate (const char *key, const char *upgrade,
+                       const char *connection, const char *accept);
+struct twist_ws *twist_ws_new (struct twist_easy *easy,
+                               int (*send) (void *user, const uint8_t *data,
+                                            size_t len),
+                               void *send_user,
+                               void (*done) (void *user, int err),
+                               void *done_user);
+void twist_ws_free (struct twist_ws *ws);
+size_t twist_ws_receive (struct twist_ws *ws, const uint8_t *data, size_t len);
+int twist_ws_send (struct twist_ws *ws, int opcode, int fin,
+                   const uint8_t *data, size_t len);
 
 struct twist_h3;
 struct twist_h3 *twist_h3_new (const struct twist_h1_events *ev);
