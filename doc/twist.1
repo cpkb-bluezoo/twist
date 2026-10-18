@@ -10,32 +10,236 @@
 twist \- transfer a URL
 .SH SYNOPSIS
 .B twist
-[\fIOPTION\fR]... \fIURL\fR
+[\fIOPTION\fR]... \fIURL\fR...
 .SH DESCRIPTION
 .B twist
-fetches \fIURL\fR.  HTTP is implemented.  Other libcurl schemes are
-recognised and reported as unsupported until a handler is added.
+transfers each \fIURL\fR.
+The body is written to standard output, or to the file named by
+.B \-o
+or
+.BR \-O .
+Diagnostics are written to standard error, or to
+.BR \-\-stderr .
+.B \-\-help
+and
+.B \-\-version
+are written to standard output and exit 0.
+A transfer error has the form
+.B twist: (\fIN\fP) \fImessage\fP
+and exits
+.IR N ,
+using curl's status numbers.
+A bad command line exits 2, with no number in parentheses, and a line
+that suggests
+.BR \-\-help .
+.B \-s
+hides a transfer diagnostic.
+.B \-S
+shows it again.
+Several URLs leave the status of the last transfer, unless
+.B \-\-fail\-early
+stops at the first failure.
+.PP
+HTTP, file, FTP, mail, MQTT, LDAP, WebSocket, Gopher, DICT, and TFTP
+are implemented.  A scheme that is recognised but not implemented
+exits 1.
 .SH OPTIONS
 .TP
-.B \-\-help
-Print a help message and exit.
+.B \-h, \-\-help
+Print a help message on standard output and exit successfully.
 .TP
 .B \-\-version
-Print version and license information and exit.
+Print version and license information on standard output and exit
+successfully.
 .TP
-.BI \-o " file"
+.BI \-o ", " \-\-output " file"
 Write the body to \fIfile\fR.
+.B \-
+is standard output.
 .TP
-.B \-L
+.B \-O, \-\-remote\-name
+Write the body to the last segment of the URL path.
+.TP
+.BI \-\-output\-dir " dir"
+Directory for a relative
+.B \-o
+or
+.B \-O
+name.  Reset by
+.BR \-\-next .
+.TP
+.B \-\-create\-dirs
+Create missing parent directories for
+.B \-o
+and
+.BR \-O .
+Reset by
+.BR \-\-next .
+.TP
+.BI \-X ", " \-\-request " method"
+Request method.
+.TP
+.BI \-H ", " \-\-header " line"
+Extra request header.  Repeat for each header.
+.TP
+.BI \-d ", " \-\-data " data"
+Request body.  A leading
+.B @
+reads a file, and
+.B @\-
+reads standard input.  Carriage returns and line feeds are removed.
+Repeated
+.B \-d
+values are joined with
+.BR & .
+.TP
+.BI \-\-data\-binary " data"
+Request body, kept as given, including a file read with
+.BR @ .
+.TP
+.BI \-\-data\-raw " data"
+Request body.
+.B @
+is not a file.
+.TP
+.BI \-\-data\-urlencode " data"
+Form field.  The value is percent-encoded.
+.B name=value
+encodes the value,
+.B name@file
+encodes the file, and
+.B @file
+encodes the file with no name.
+.TP
+.B \-G, \-\-get
+Append
+.B \-d
+to the query string instead of sending a request body.
+.TP
+.BI \-T ", " \-\-upload\-file " file"
+Upload \fIfile\fR with PUT.
+.B \-
+reads standard input.  The file is read before the transfer starts.
+.TP
+.B \-I, \-\-head
+Fetch headers only.
+.TP
+.B \-i, \-\-include
+Write response headers before the body.
+.TP
+.BI \-D ", " \-\-dump\-header " file"
+Write response headers to \fIfile\fR.
+.B \-
+is standard output.
+.TP
+.B \-L, \-\-location
 Follow redirections.
 .TP
-.B \-f
+.BI \-\-max\-redirs " n"
+Redirect limit.  The default is 50.
+.TP
+.B \-f, \-\-fail
 Fail the transfer when the HTTP status is 400 or above.  The body is
 not written.  Without this option a 404 is a successful transfer: the
 status is recorded and the body is written.
 .TP
-.B \-k
+.B \-\-fail\-early
+Stop at the first failed URL.  This applies to every URL on the
+command line.
+.TP
+.B \-k, \-\-insecure
 Accept the option.  The TLS engine still checks the trust store.
+.TP
+.BI \-x ", " \-\-proxy " url"
+Proxy.  Use
+.I http://
+or
+.IR socks5:// .
+.TP
+.BI \-A ", " \-\-user\-agent " name"
+User-Agent header.
+.TP
+.BI \-u ", " \-\-user " user[:password]"
+User and password.  Without a colon, the password is read from
+.I /dev/tty
+with echo disabled, so a piped standard input is left for
+.B \-d
+or
+.BR \-T .
+.TP
+.BI \-e ", " \-\-referer " url"
+Referer header.
+.TP
+.BI \-r ", " \-\-range " range"
+Byte range.
+.TP
+.BI \-b ", " \-\-cookie " data"
+Cookie request header.  This is not a cookie jar file.
+.TP
+.BI \-\-oauth2\-bearer " token"
+Bearer token.
+.TP
+.BI \-m ", " \-\-max\-time " seconds"
+Limit for the whole transfer.  Up to three decimal places are
+accepted.
+.TP
+.BI \-\-connect\-timeout " seconds"
+Limit for the connect, in seconds.
+.TP
+.B \-s, \-\-silent
+Hide the transfer diagnostic.  The exit status is unchanged.
+.TP
+.B \-S, \-\-show\-error
+Show the transfer diagnostic when
+.B \-s
+was also given.  The last of
+.B \-s
+and
+.B \-S
+wins.
+.TP
+.BI \-\-stderr " file"
+Write diagnostics to \fIfile\fR.
+.B \-
+keeps standard error.  This applies to every URL.
+.TP
+.BI \-w ", " \-\-write\-out " format"
+Print \fIformat\fR on standard output after the body.
+.BR %{http_code} ,
+.BR %{response_code} ,
+.BR %{size_download} ,
+.BR %{url_effective} ,
+.BR %{content_type} ,
+.BR %{exitcode} ,
+and
+.B %{errormsg}
+are replaced.
+.BR \en ,
+.BR \er ,
+.BR \et ,
+and
+.B %%
+are recognised.  An unknown
+.B %{name}
+is empty.
+.TP
+.B \-g, \-\-globoff
+Accepted.  URLs are never expanded.
+.TP
+.B \-q, \-\-disable
+Accepted.  No config file is read.
+.TP
+.B \-\-next
+Start a separate transfer for the following URL.  Options after it do
+not inherit the previous URL's method, body, headers, output, proxy,
+user, or timeouts.
+.BR \-s ,
+.BR \-S ,
+.BR \-\-stderr ,
+and
+.B \-\-fail\-early
+still apply.  A URL is required before
+.BR \-\-next .
 .TP
 .BI \-E ", " \-\-cert " file"
 Client certificate in PEM form, leaf first.  Further certificates in
@@ -92,8 +296,10 @@ the reply until the server closes.
 .B tftp
 reads the URL path.  With
 .B \-\-data
+or
+.B \-T
 it uploads that body instead.  Lost packets are retransmitted.  A
-proxy is not used.
+proxy is not used.  A server error packet exits 68 through 74.
 .TP
 .BI \-\-dns-order " list"
 Comma-separated DNS transports.  The default is
@@ -146,6 +352,98 @@ or
 .IR host ,
 with an optional port.  The default port is 853.  Discovery matches
 .BR \-\-doq-url .
+.PP
+There is no progress meter, config file, URL globbing,
+.BR \-\-fail\-with\-body ,
+verbose trace, cookie jar, or parallel transfer.
+.SH "EXIT STATUS"
+.TP
+.B 0
+The transfer finished.
+.TP
+.B 1
+The scheme is not implemented.
+.TP
+.B 2
+The command line is wrong, or twist could not initialise.
+.TP
+.B 3
+The URL is malformed.
+.TP
+.B 6
+The host name could not be resolved.
+.TP
+.B 7
+The connection failed.
+.TP
+.B 8
+The server's reply could not be used.
+.TP
+.B 22
+\fB\-\-fail\fP was set and the HTTP status is 400 or above.
+.TP
+.B 23
+The output could not be written.
+.TP
+.B 26
+A local file named by
+.BR \-d ,
+.BR \-\-data\-binary ,
+.BR \-\-data\-urlencode ,
+or
+.B \-T
+could not be read.
+.TP
+.B 27
+Out of memory.
+.TP
+.B 28
+The transfer timed out.
+.TP
+.B 35
+The TLS handshake failed.
+.TP
+.B 37
+A file URL could not be opened.
+.TP
+.B 42
+The transfer was aborted.
+.TP
+.B 43
+A bad argument was passed to the library.
+.TP
+.B 47
+Too many redirects.
+.TP
+.B 52
+The server closed before sending any data.
+.TP
+.B 67
+Authentication failed.
+.TP
+.B 68
+TFTP file not found.
+.TQ
+.B 69
+TFTP access violation.
+.TQ
+.B 70
+TFTP disk full.
+.TQ
+.B 71
+TFTP illegal operation.
+.TQ
+.B 72
+TFTP unknown transfer.
+.TQ
+.B 73
+TFTP file already exists.
+.TQ
+.B 74
+TFTP no such user.
+.TP
+.B 81
+The operation could not be started.
 .SH AUTHOR
 Chris Burdess.
 .SH SEE ALSO

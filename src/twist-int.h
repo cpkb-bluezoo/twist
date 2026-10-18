@@ -130,6 +130,7 @@ struct twist_easy
   int own_loop;
   int done;
   int result;
+  int proto_status;
   char *error;
   long http_code;
   char *effective_url;

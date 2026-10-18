@@ -586,6 +586,8 @@ twist_tftp_receive (struct twist_tftp *t, const uint8_t *data, size_t len)
   block = len >= 4 ? (((unsigned) data[2] << 8) | data[3]) : 0;
   if (opcode == OP_ERROR)
     {
+      if (t->easy != NULL && block >= 1 && block <= 7)
+        t->easy->proto_status = 67 + (int) block;
       tftp_finish (t, map_error (block));
       return len;
     }

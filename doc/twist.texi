@@ -77,30 +77,151 @@ is scheduled.
 @chapter Invocation
 
 @example
-twist [OPTION]... URL
+twist [OPTION]... URL...
 @end example
 
+The body is written to standard output, or to the file named by
+@option{-o} or @option{-O}.  Diagnostics are written to standard
+error, or to @option{--stderr}.  @option{--help} and @option{--version}
+are written to standard output and exit successfully.
+
+A transfer error has the form @samp{twist: (@var{n}) @var{message}} and
+exits @var{n}, using curl's status numbers.  A bad command line exits
+2, with no number in parentheses, and suggests @option{--help}.
+@option{-s} hides a transfer diagnostic.  @option{-S} shows it again.
+Several URLs leave the status of the last transfer, unless
+@option{--fail-early} stops at the first failure.
+
 @table @option
-@item --help
+@item -h
+@itemx --help
 Print a help message on standard output and exit successfully.
 @item --version
 Print version and licensing information on standard output and exit
 successfully.
 @item -o @var{file}
 @itemx --output @var{file}
-Write the response body to @var{file}.
+Write the response body to @var{file}.  @code{-} is standard output.
+@item -O
+@itemx --remote-name
+Write the body to the last segment of the URL path.
+@item --output-dir @var{dir}
+Directory for a relative @option{-o} or @option{-O} name.  Reset by
+@option{--next}.
+@item --create-dirs
+Create missing parent directories for @option{-o} and @option{-O}.
+Reset by @option{--next}.
+@item -X @var{method}
+@itemx --request @var{method}
+Request method.
+@item -H @var{line}
+@itemx --header @var{line}
+Extra request header.  Repeat for each header.
+@item -d @var{data}
+@itemx --data @var{data}
+Request body.  A leading @code{@@} reads a file, and @code{@@-} reads
+standard input.  Carriage returns and line feeds are removed.
+Repeated @option{-d} values are joined with @code{&}.
+@item --data-binary @var{data}
+Request body, kept as given, including a file read with @code{@@}.
+@item --data-raw @var{data}
+Request body.  @code{@@} is not a file.
+@item --data-urlencode @var{data}
+Form field.  The value is percent-encoded.  @code{name=value} encodes
+the value, @code{name@@file} encodes the file, and @code{@@file} encodes
+the file with no name.
+@item -G
+@itemx --get
+Append @option{-d} to the query string instead of sending a request
+body.
+@item -T @var{file}
+@itemx --upload-file @var{file}
+Upload @var{file} with PUT.  @code{-} reads standard input.  The file
+is read before the transfer starts.
+@item -I
+@itemx --head
+Fetch headers only.
+@item -i
+@itemx --include
+Write response headers before the body.
+@item -D @var{file}
+@itemx --dump-header @var{file}
+Write response headers to @var{file}.  @code{-} is standard output.
 @item -L
 @itemx --location
 Follow redirections.
+@item --max-redirs @var{n}
+Redirect limit.  The default is 50.
 @item -f
 @itemx --fail
 Fail the transfer when the HTTP status is 400 or above, and do not
 write the body.  Without this option a 404 is a successful transfer:
 the status is recorded and the body is written.
+@item --fail-early
+Stop at the first failed URL.  This applies to every URL on the
+command line.
 @item -k
 @itemx --insecure
 Accepted for compatibility with curl.  The TLS engine still checks the
 configured trust store.
+@item -x @var{url}
+@itemx --proxy @var{url}
+Proxy.  Use @code{http://} or @code{socks5://}.
+@item -A @var{name}
+@itemx --user-agent @var{name}
+User-Agent header.
+@item -u @var{user[:password]}
+@itemx --user @var{user[:password]}
+User and password.  Without a colon, the password is read from
+@file{/dev/tty} with echo disabled, so a piped standard input is left
+for @option{-d} or @option{-T}.
+@item -e @var{url}
+@itemx --referer @var{url}
+Referer header.
+@item -r @var{range}
+@itemx --range @var{range}
+Byte range.
+@item -b @var{data}
+@itemx --cookie @var{data}
+Cookie request header.  This is not a cookie jar file.
+@item --oauth2-bearer @var{token}
+Bearer token.
+@item -m @var{seconds}
+@itemx --max-time @var{seconds}
+Limit for the whole transfer.  Up to three decimal places are
+accepted.
+@item --connect-timeout @var{seconds}
+Limit for the connect, in seconds.
+@item -s
+@itemx --silent
+Hide the transfer diagnostic.  The exit status is unchanged.
+@item -S
+@itemx --show-error
+Show the transfer diagnostic when @option{-s} was also given.  The
+last of @option{-s} and @option{-S} wins.
+@item --stderr @var{file}
+Write diagnostics to @var{file}.  @code{-} keeps standard error.  This
+applies to every URL.
+@item -w @var{format}
+@itemx --write-out @var{format}
+Print @var{format} on standard output after the body.
+@code{@{http_code@}}, @code{@{response_code@}},
+@code{@{size_download@}}, @code{@{url_effective@}},
+@code{@{content_type@}}, @code{@{exitcode@}}, and @code{@{errormsg@}}
+are replaced.  @code{\n}, @code{\r}, @code{\t}, and @code{%%} are
+recognised.  An unknown @code{@{name@}} is empty.
+@item -g
+@itemx --globoff
+Accepted.  URLs are never expanded.
+@item -q
+@itemx --disable
+Accepted.  No config file is read.
+@item --next
+Start a separate transfer for the following URL.  Options after it do
+not inherit the previous URL's method, body, headers, output, proxy,
+user, or timeouts.  @option{-s}, @option{-S}, @option{--stderr}, and
+@option{--fail-early} still apply.  A URL is required before
+@option{--next}.
 @item -E @var{file}
 @itemx --cert @var{file}
 Client certificate in PEM form, leaf first.  Further certificates in
@@ -162,11 +283,73 @@ sends the selector and writes the reply until the server closes.
 @code{dict://host/m:word:database:strategy} matches one, and
 @code{dict://host/show:db} asks the server for its database list.  The
 reply is written until the server closes.
-@code{tftp://host/file} reads a file.  @option{--data} uploads one.
-The transfer offers block size 512 and retransmits a lost packet.
-A proxy is not used.
+@code{tftp://host/file} reads a file.  @option{--data} or @option{-T}
+uploads one.  The transfer offers block size 512 and retransmits a
+lost packet.  A proxy is not used.  A server error packet exits 68
+through 74.
 
-Diagnostics are written to standard error and begin with @samp{twist:}.
+There is no progress meter, config file, URL globbing,
+@option{--fail-with-body}, verbose trace, cookie jar, or parallel
+transfer.
+
+@heading Exit status
+@table @asis
+@item 0
+The transfer finished.
+@item 1
+The scheme is not implemented.
+@item 2
+The command line is wrong, or twist could not initialise.
+@item 3
+The URL is malformed.
+@item 6
+The host name could not be resolved.
+@item 7
+The connection failed.
+@item 8
+The server's reply could not be used.
+@item 22
+@option{--fail} and the HTTP status is 400 or above.
+@item 23
+The output could not be written.
+@item 26
+A local file named by @option{-d}, @option{--data-binary},
+@option{--data-urlencode}, or @option{-T} could not be read.
+@item 27
+Out of memory.
+@item 28
+The transfer timed out.
+@item 35
+The TLS handshake failed.
+@item 37
+A file URL could not be opened.
+@item 42
+The transfer was aborted.
+@item 43
+A bad argument was passed to the library.
+@item 47
+Too many redirects.
+@item 52
+The server closed before sending any data.
+@item 67
+Authentication failed.
+@item 68
+TFTP file not found.
+@item 69
+TFTP access violation.
+@item 70
+TFTP disk full.
+@item 71
+TFTP illegal operation.
+@item 72
+TFTP unknown transfer.
+@item 73
+TFTP file already exists.
+@item 74
+TFTP no such user.
+@item 81
+The operation could not be started.
+@end table
 
 @node GNU Free Documentation License
 @appendix GNU Free Documentation License

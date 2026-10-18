@@ -54,6 +54,8 @@ adding a special case to the loop.
 - [x] Redirects, cookies, Basic, Digest, Bearer
 - [x] CLI: GNU `--help` and `--version`, plus the curl options those
       transfers need
+- [x] CLI: curl exit status, standard streams, and the options the
+      library already implements
 
 ## Phase 5: Remaining schemes
 
