@@ -67,6 +67,18 @@ attach_pop3 (struct twist_easy *easy)
   return twist_pop3_attach (easy);
 }
 
+static int
+attach_mqtt (struct twist_easy *easy)
+{
+  return twist_mqtt_attach (easy);
+}
+
+static int
+attach_ldap (struct twist_easy *easy)
+{
+  return twist_ldap_attach (easy);
+}
+
 static const struct twist_scheme schemes[] = {
   { "http", 80, TWIST_SCHEME_PROXY_OK | TWIST_SCHEME_READY, attach_http },
   { "https", 443, TWIST_SCHEME_TLS | TWIST_SCHEME_PROXY_OK | TWIST_SCHEME_READY,
@@ -87,9 +99,12 @@ static const struct twist_scheme schemes[] = {
   { "pop3", 110, TWIST_SCHEME_PROXY_OK | TWIST_SCHEME_READY, attach_pop3 },
   { "pop3s", 995, TWIST_SCHEME_TLS | TWIST_SCHEME_PROXY_OK | TWIST_SCHEME_READY,
     attach_pop3 },
-  { "ldap", 389, TWIST_SCHEME_PROXY_OK, twist_scheme_unsupported },
-  { "ldaps", 636, TWIST_SCHEME_TLS | TWIST_SCHEME_PROXY_OK, twist_scheme_unsupported },
-  { "mqtt", 1883, TWIST_SCHEME_PROXY_OK, twist_scheme_unsupported },
+  { "ldap", 389, TWIST_SCHEME_PROXY_OK | TWIST_SCHEME_READY, attach_ldap },
+  { "ldaps", 636, TWIST_SCHEME_TLS | TWIST_SCHEME_PROXY_OK | TWIST_SCHEME_READY,
+    attach_ldap },
+  { "mqtt", 1883, TWIST_SCHEME_PROXY_OK | TWIST_SCHEME_READY, attach_mqtt },
+  { "mqtts", 8883, TWIST_SCHEME_TLS | TWIST_SCHEME_PROXY_OK | TWIST_SCHEME_READY,
+    attach_mqtt },
   { "dict", 2628, TWIST_SCHEME_PROXY_OK, twist_scheme_unsupported },
   { "gopher", 70, TWIST_SCHEME_PROXY_OK, twist_scheme_unsupported },
   { "gophers", 70, TWIST_SCHEME_TLS | TWIST_SCHEME_PROXY_OK, twist_scheme_unsupported },

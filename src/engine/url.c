@@ -283,6 +283,8 @@ twist_url_default_port (const char *scheme)
     return 636;
   if (strcmp (scheme, "mqtt") == 0)
     return 1883;
+  if (strcmp (scheme, "mqtts") == 0)
+    return 8883;
   if (strcmp (scheme, "tftp") == 0)
     return 69;
   if (strcmp (scheme, "dict") == 0)

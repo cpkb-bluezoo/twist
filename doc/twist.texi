@@ -115,6 +115,10 @@ HTTP/2 is an h2c upgrade, unless prior knowledge was requested.
 SMTP envelope.  Repeat @option{--mail-rcpt} for each recipient.
 @end table
 
+@code{mqtt://host/topic} subscribes to the topic, or publishes
+@option{--data} and disconnects.  @code{ldap://host/dn} binds, searches,
+and writes the result as LDIF.
+
 Diagnostics are written to standard error and begin with @samp{twist:}.
 
 @node GNU Free Documentation License

@@ -629,6 +629,15 @@ test_scheme (void)
   check (twist_scheme_by_name ("pop3s") != NULL
          && (twist_scheme_by_name ("pop3s")->flags & TWIST_SCHEME_READY) != 0,
          "pop3s");
+  check (twist_scheme_by_name ("mqtt") != NULL
+         && (twist_scheme_by_name ("mqtt")->flags & TWIST_SCHEME_READY) != 0,
+         "mqtt");
+  check (twist_scheme_by_name ("mqtts") != NULL
+         && (twist_scheme_by_name ("mqtts")->flags & TWIST_SCHEME_TLS) != 0,
+         "mqtts");
+  check (twist_scheme_by_name ("ldaps") != NULL
+         && (twist_scheme_by_name ("ldaps")->flags & TWIST_SCHEME_READY) != 0,
+         "ldaps");
   check (twist_scheme_by_name ("no-such") == NULL, "missing");
   check (twist_scheme_by_name ("file") != NULL, "file");
   check (twist_scheme_by_name ("wss") != NULL, "wss");
@@ -1205,6 +1214,47 @@ feed_n (size_t (*recv) (void *, const uint8_t *, size_t), void *obj,
     }
 }
 
+static void
+feed_bin (size_t (*recv) (void *, const uint8_t *, size_t), void *obj,
+          const uint8_t *data, size_t n, size_t split)
+{
+  uint8_t window[1024];
+  size_t held = 0;
+  size_t off = 0;
+
+  while (off < n)
+    {
+      size_t take = split;
+      size_t got;
+      size_t used;
+
+      if (take > n - off)
+        take = n - off;
+      memcpy (window + held, data + off, take);
+      off += take;
+      got = held + take;
+      used = recv (obj, window, got);
+      if (used > got)
+        used = got;
+      held = got - used;
+      if (held > 0)
+        memmove (window, window + used, held);
+    }
+}
+
+static int
+has_bytes (const uint8_t *hay, size_t n, const void *needle, size_t m)
+{
+  size_t i;
+
+  if (needle == NULL || m == 0 || m > n)
+    return 0;
+  for (i = 0; i + m <= n; i++)
+    if (memcmp (hay + i, needle, m) == 0)
+      return 1;
+  return 0;
+}
+
 static size_t
 smtp_recv (void *obj, const uint8_t *data, size_t len)
 {
@@ -1386,6 +1436,167 @@ test_mail (void)
   }
 }
 
+static size_t
+mqtt_recv (void *obj, const uint8_t *data, size_t len)
+{
+  return twist_mqtt_receive (obj, data, len);
+}
+
+static size_t
+ldap_recv (void *obj, const uint8_t *data, size_t len)
+{
+  return twist_ldap_receive (obj, data, len);
+}
+
+static void
+test_mqtt_ldap (void)
+{
+  static const uint8_t connect[] = {
+    0x10, 0x11, 0x00, 0x04, 'M', 'Q', 'T', 'T', 0x04, 0x02, 0x00, 0x3c,
+    0x00, 0x05, 't', 'w', 'i', 's', 't'
+  };
+  static const uint8_t connack[] = { 0x20, 0x02, 0x00, 0x00 };
+  static const uint8_t refused[] = { 0x20, 0x02, 0x00, 0x05 };
+  static const uint8_t suback[] = { 0x90, 0x03, 0x00, 0x01, 0x00 };
+  static const uint8_t publish[] = {
+    0x30, 19, 0x00, 12, 's', 'e', 'n', 's', 'o', 'r', 's', '/', 't', 'e',
+    'm', 'p', 'h', 'e', 'l', 'l', 'o'
+  };
+  static const uint8_t disc[] = { 0xe0, 0x00 };
+  static const uint8_t bind_ok[] = {
+    0x30, 0x0c, 0x02, 0x01, 0x01, 0x61, 0x07, 0x0a, 0x01, 0x00, 0x04, 0x00,
+    0x04, 0x00
+  };
+  static const uint8_t bind_no[] = {
+    0x30, 0x0c, 0x02, 0x01, 0x01, 0x61, 0x07, 0x0a, 0x01, 0x31, 0x04, 0x00,
+    0x04, 0x00
+  };
+  static const uint8_t entry[] = {
+    0x30, 0x27, 0x02, 0x01, 0x02, 0x64, 0x22, 0x04, 0x11, 'd', 'c', '=',
+    'e', 'x', 'a', 'm', 'p', 'l', 'e', ',', 'd', 'c', '=', 'c', 'o', 'm',
+    0x30, 0x0d, 0x30, 0x0b, 0x04, 0x02, 'c', 'n', 0x31, 0x05, 0x04, 0x03,
+    'b', 'o', 'b'
+  };
+  static const uint8_t search_done[] = {
+    0x30, 0x0c, 0x02, 0x01, 0x02, 0x65, 0x07, 0x0a, 0x01, 0x00, 0x04, 0x00,
+    0x04, 0x00
+  };
+  static const char ldif[] = "dn: dc=example,dc=com\ncn: bob\n\n";
+  twist_easy *easy = twist_easy_init ();
+  struct twist_mqtt *mqtt;
+  struct twist_ldap *ldap;
+  const uint8_t *cmd;
+  size_t n = 0;
+  char ping[] = "ping";
+
+  check (twist_url_parse_int ("mqtt://127.0.0.1/sensors/temp", &easy->url)
+         == TWIST_OK, "mqtt url");
+  mqtt = twist_mqtt_new (easy, 0);
+  cmd = twist_mqtt_command (mqtt, &n);
+  check (n == sizeof connect && memcmp (cmd, connect, n) == 0, "connect");
+  feed_bin (mqtt_recv, mqtt, connack, sizeof connack, 1);
+  cmd = twist_mqtt_command (mqtt, &n);
+  check (has_bytes (cmd, n, "sensors/temp", 12), "subscribe");
+  feed_bin (mqtt_recv, mqtt, suback, sizeof suback, 1);
+  mail_body_len = 0;
+  easy->write_cb = mail_write;
+  feed_bin (mqtt_recv, mqtt, publish, sizeof publish, 1);
+  check (mail_body_len == 5 && memcmp (mail_body, "hello", 5) == 0,
+         "mqtt payload");
+  feed_bin (mqtt_recv, mqtt, disc, sizeof disc, 1);
+  check (easy->done && easy->result == TWIST_OK, "mqtt done");
+  twist_easy_cleanup (easy);
+
+  easy = twist_easy_init ();
+  check (twist_url_parse_int ("mqtt://127.0.0.1/a", &easy->url) == TWIST_OK,
+         "pub url");
+  easy->postfields = ping;
+  mqtt = twist_mqtt_new (easy, 0);
+  feed_bin (mqtt_recv, mqtt, connack, sizeof connack, 1);
+  cmd = twist_mqtt_command (mqtt, &n);
+  check (easy->done && easy->result == TWIST_OK, "published");
+  check (has_bytes (cmd, n, "ping", 4)
+         && n >= 2 && cmd[n - 2] == 0xe0 && cmd[n - 1] == 0x00, "pub bytes");
+  twist_easy_cleanup (easy);
+
+  easy = twist_easy_init ();
+  check (twist_url_parse_int ("mqtt://127.0.0.1/a", &easy->url) == TWIST_OK,
+         "refuse url");
+  mqtt = twist_mqtt_new (easy, 0);
+  feed_bin (mqtt_recv, mqtt, refused, sizeof refused, 1);
+  check (easy->done && easy->result == TWIST_ERR_AUTH, "connack auth");
+  twist_easy_cleanup (easy);
+
+  easy = twist_easy_init ();
+  check (twist_url_parse_int ("mqtt://alice:secret@127.0.0.1/a", &easy->url)
+         == TWIST_OK, "mqtt user");
+  mqtt = twist_mqtt_new (easy, 0);
+  cmd = twist_mqtt_command (mqtt, &n);
+  check (has_bytes (cmd, n, "alice", 5) && has_bytes (cmd, n, "secret", 6),
+         "mqtt credentials");
+  twist_easy_cleanup (easy);
+
+  easy = twist_easy_init ();
+  check (twist_url_parse_int
+         ("ldap://cn=alice:secret@127.0.0.1/dc=example,dc=com?cn?sub?(uid=alice)",
+          &easy->url) == TWIST_OK, "ldap url");
+  ldap = twist_ldap_new (easy, 0);
+  cmd = twist_ldap_command (ldap, &n);
+  check (has_bytes (cmd, n, "cn=alice", 8) && has_bytes (cmd, n, "secret", 6),
+         "simple bind");
+  feed_bin (ldap_recv, ldap, bind_ok, sizeof bind_ok, 1);
+  cmd = twist_ldap_command (ldap, &n);
+  check (has_bytes (cmd, n, "dc=example,dc=com", 17)
+         && has_bytes (cmd, n, "uid", 3) && has_bytes (cmd, n, "alice", 5)
+         && has_bytes (cmd, n, "cn", 2), "search");
+  mail_body_len = 0;
+  easy->write_cb = mail_write;
+  feed_bin (ldap_recv, ldap, entry, sizeof entry, 1);
+  feed_bin (ldap_recv, ldap, search_done, sizeof search_done, 1);
+  check (easy->done && easy->result == TWIST_OK, "ldap done");
+  check (mail_body_len == sizeof ldif - 1
+         && memcmp (mail_body, ldif, mail_body_len) == 0, "ldif");
+  cmd = twist_ldap_command (ldap, &n);
+  check (has_bytes (cmd, n, "\x42", 1), "unbind");
+  twist_easy_cleanup (easy);
+
+  easy = twist_easy_init ();
+  check (twist_url_parse_int ("ldap://cn=alice:no@127.0.0.1/dc=x", &easy->url)
+         == TWIST_OK, "ldap bad url");
+  ldap = twist_ldap_new (easy, 0);
+  feed_bin (ldap_recv, ldap, bind_no, sizeof bind_no, 1);
+  check (easy->done && easy->result == TWIST_ERR_AUTH, "bind refused");
+  twist_easy_cleanup (easy);
+
+  {
+    static const uint8_t bind_long[] = {
+      0x30, 0x82, 0x00, 0x0e, 0x02, 0x01, 0x01, 0x61, 0x82, 0x00, 0x07,
+      0x0a, 0x01, 0x00, 0x04, 0x00, 0x04, 0x00
+    };
+
+    easy = twist_easy_init ();
+    check (twist_url_parse_int ("ldap://127.0.0.1/dc=example,dc=com",
+                                &easy->url) == TWIST_OK, "long url");
+    ldap = twist_ldap_new (easy, 0);
+    feed_bin (ldap_recv, ldap, bind_long, sizeof bind_long, 1);
+    cmd = twist_ldap_command (ldap, &n);
+    check (has_bytes (cmd, n, "dc=example,dc=com", 17)
+           && has_bytes (cmd, n, "objectClass", 11), "long bind");
+    twist_easy_cleanup (easy);
+  }
+
+  easy = twist_easy_init ();
+  check (twist_url_parse_int ("ldap://alice:x@127.0.0.1/dc=example,dc=com",
+                              &easy->url) == TWIST_OK, "sasl url");
+  easy->bearer = twist_strdup ("tok");
+  ldap = twist_ldap_new (easy, 0);
+  cmd = twist_ldap_command (ldap, &n);
+  check (has_bytes (cmd, n, "XOAUTH2", 7)
+         && has_bytes (cmd, n, "auth=Bearer tok", 15), "sasl bind");
+  twist_easy_cleanup (easy);
+  easy = NULL;
+}
+
 int
 main (void)
 {
@@ -1407,6 +1618,7 @@ main (void)
   test_inbound_ceiling ();
   test_errors ();
   test_mail ();
+  test_mqtt_ldap ();
   if (failed)
     {
       fprintf (stderr, "unit tests failed\n");

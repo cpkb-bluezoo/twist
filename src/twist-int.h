@@ -638,6 +638,22 @@ size_t twist_imap_receive (struct twist_imap *imap, const uint8_t *data,
                            size_t len);
 const char *twist_imap_command (const struct twist_imap *imap);
 
+struct twist_mqtt;
+struct twist_mqtt *twist_mqtt_new (struct twist_easy *easy, int live);
+void twist_mqtt_free (void *mqtt);
+size_t twist_mqtt_receive (struct twist_mqtt *mqtt, const uint8_t *data,
+                           size_t len);
+const uint8_t *twist_mqtt_command (const struct twist_mqtt *mqtt, size_t *len);
+int twist_mqtt_attach (struct twist_easy *easy);
+
+struct twist_ldap;
+struct twist_ldap *twist_ldap_new (struct twist_easy *easy, int live);
+void twist_ldap_free (void *ldap);
+size_t twist_ldap_receive (struct twist_ldap *ldap, const uint8_t *data,
+                           size_t len);
+const uint8_t *twist_ldap_command (const struct twist_ldap *ldap, size_t *len);
+int twist_ldap_attach (struct twist_easy *easy);
+
 struct twist_share
 {
   unsigned locks;

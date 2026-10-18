@@ -59,6 +59,13 @@ The HTTP/1 minor version is taken from the response status line.
 SMTP sender.  Repeat
 .B \-\-mail-rcpt
 for each recipient.
+.PP
+.B mqtt
+subscribes to the topic in the URL path, or publishes
+.B \-\-data
+and disconnects.
+.B ldap
+binds and writes the search as LDIF.  The path is the base DN.
 .TP
 .BI \-\-dns-order " list"
 Comma-separated DNS transports.  The default is
