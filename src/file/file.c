@@ -23,17 +23,33 @@
 #include "gettext.h"
 #include "twist-int.h"
 
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
 #include <sys/stat.h>
 
+/* One chunk is in flight.  The worker blocks until the loop has written
+   it, so a slow body callback holds the worker rather than the reactor
+   and rather than the rest of the file.  */
+
+#define FILE_CHUNK 16384
+
 struct twist_file
 {
   struct twist_easy *easy;
-  uint8_t *data;
+  pthread_mutex_t mu;
+  pthread_cond_t cv;
+  int live;
+  int acked;
+  int stop;
+  int final_note;
+  int note_err;
+  char *data;
   size_t len;
+  char *errmsg;
+  size_t total;
   int err;
 };
 
@@ -44,7 +60,14 @@ file_free (void *p)
 
   if (f == NULL)
     return;
+  pthread_mutex_lock (&f->mu);
+  while (f->live)
+    pthread_cond_wait (&f->cv, &f->mu);
+  pthread_mutex_unlock (&f->mu);
+  pthread_cond_destroy (&f->cv);
+  pthread_mutex_destroy (&f->mu);
   free (f->data);
+  free (f->errmsg);
   free (f);
 }
 
@@ -60,8 +83,8 @@ twist_file_check_url (const char *host, const char *path, int path_set)
   return TWIST_ERR_URL;
 }
 
-static int
-file_io_error (struct twist_file *f, const char *path, int reading)
+static char *
+file_errmsg (const char *path, int reading)
 {
   const char *fmt = reading ? _("could not read file %s")
                             : _("could not open file %s");
@@ -69,103 +92,199 @@ file_io_error (struct twist_file *f, const char *path, int reading)
   char *msg = twist_xmalloc (n);
 
   if (msg == NULL)
-    return TWIST_ERR_NOMEM;
+    return NULL;
   if (reading)
     snprintf (msg, n, _("could not read file %s"), path);
   else
     snprintf (msg, n, _("could not open file %s"), path);
-  twist_easy_set_error (f->easy, msg);
-  return TWIST_ERR_FILE;
+  return msg;
+}
+
+static void
+file_on_loop (void *user)
+{
+  struct twist_file *f = user;
+  struct twist_easy *easy = f->easy;
+  int err = f->note_err;
+
+  if (f->data != NULL && f->len > 0 && f->err == TWIST_OK && err == TWIST_OK
+      && easy->write_cb != NULL)
+    {
+      size_t got = easy->write_cb (f->data, 1, f->len, easy->write_data);
+
+      if (got < f->len)
+        err = TWIST_ERR_ABORTED;
+      else
+        f->total += f->len;
+    }
+  free (f->data);
+  f->data = NULL;
+  if (err != TWIST_OK && f->err == TWIST_OK)
+    f->err = err;
+  if (f->errmsg != NULL)
+    {
+      if (f->err != TWIST_OK)
+        twist_easy_set_error (easy, f->errmsg);
+      else
+        free (f->errmsg);
+      f->errmsg = NULL;
+    }
+  if (f->final_note)
+    {
+      if (f->err == TWIST_OK)
+        easy->size_download = f->total;
+      twist_easy_finish (easy, f->err);
+    }
+  pthread_mutex_lock (&f->mu);
+  f->acked = 1;
+  if (f->err != TWIST_OK)
+    f->stop = 1;
+  pthread_cond_signal (&f->cv);
+  pthread_mutex_unlock (&f->mu);
+}
+
+static int
+hand_off (struct twist_file *f, char *data, size_t len, int err, char *msg,
+          int final_note)
+{
+  int rc;
+
+  f->data = data;
+  f->len = len;
+  f->note_err = err;
+  f->errmsg = msg;
+  f->final_note = final_note;
+  f->acked = 0;
+  rc = twist_loop_post (f->easy->loop, file_on_loop, f);
+  if (rc != TWIST_OK)
+    {
+      free (data);
+      free (msg);
+      f->data = NULL;
+      f->errmsg = NULL;
+      return rc;
+    }
+  pthread_mutex_lock (&f->mu);
+  while (!f->acked)
+    pthread_cond_wait (&f->cv, &f->mu);
+  pthread_mutex_unlock (&f->mu);
+  return f->stop ? f->err : TWIST_OK;
+}
+
+static void
+file_retire (struct twist_file *f)
+{
+  pthread_mutex_lock (&f->mu);
+  f->live = 0;
+  pthread_cond_signal (&f->cv);
+  pthread_mutex_unlock (&f->mu);
 }
 
 static void
 file_work (void *arg)
 {
   struct twist_file *f = arg;
-  const char *host;
-  const char *path;
+  const char *path = f->easy->url->path;
   FILE *fp;
   struct stat st;
-  size_t sz;
+  int err = TWIST_OK;
+  char *msg = NULL;
 
-  host = f->easy->url != NULL ? f->easy->url->host : NULL;
-  path = f->easy->url != NULL ? f->easy->url->path : NULL;
-  f->err = twist_file_check_url (host, path,
-                                 f->easy->url != NULL && f->easy->url->path_set);
-  if (f->err != TWIST_OK)
-    return;
   fp = fopen (path, "rb");
   if (fp == NULL)
     {
-      f->err = file_io_error (f, path, 0);
-      return;
+      err = TWIST_ERR_FILE;
+      msg = file_errmsg (path, 0);
+      goto done;
     }
-  if (fstat (fileno (fp), &st) != 0 || !S_ISREG (st.st_mode) || st.st_size < 0)
+  if (fstat (fileno (fp), &st) != 0 || !S_ISREG (st.st_mode))
     {
-      fclose (fp);
-      f->err = file_io_error (f, path, 0);
-      return;
+      err = TWIST_ERR_FILE;
+      msg = file_errmsg (path, 0);
+      goto done;
     }
-  sz = (size_t) st.st_size;
-  if (sz == (size_t) -1)
+  for (;;)
     {
-      fclose (fp);
-      f->err = TWIST_ERR_NOMEM;
-      return;
-    }
-  f->data = twist_xmalloc (sz + 1);
-  if (f->data == NULL)
-    {
-      fclose (fp);
-      f->err = TWIST_ERR_NOMEM;
-      return;
-    }
-  if (sz > 0 && fread (f->data, 1, sz, fp) != sz)
-    {
-      fclose (fp);
-      f->err = file_io_error (f, path, 1);
-      return;
-    }
-  f->len = (size_t) sz;
-  fclose (fp);
-}
+      char buf[FILE_CHUNK];
+      size_t n = fread (buf, 1, sizeof buf, fp);
+      char *copy;
 
-static void
-file_done (void *user, int err)
-{
-  struct twist_file *f = user;
-  struct twist_easy *easy = f->easy;
-
-  if (f->err != TWIST_OK)
-    err = f->err;
-  if (err == TWIST_OK && f->data != NULL && easy->write_cb != NULL && f->len > 0)
-    {
-      size_t n = easy->write_cb ((char *) f->data, 1, f->len, easy->write_data);
-      if (n < f->len)
-        err = TWIST_ERR_ABORTED;
+      if (n > 0)
+        {
+          copy = twist_xmalloc (n);
+          if (copy == NULL)
+            {
+              err = TWIST_ERR_NOMEM;
+              break;
+            }
+          memcpy (copy, buf, n);
+          if (hand_off (f, copy, n, TWIST_OK, NULL, 0) != TWIST_OK)
+            {
+              err = f->err != TWIST_OK ? f->err : TWIST_ERR_ABORTED;
+              break;
+            }
+        }
+      if (n < sizeof buf)
+        {
+          if (ferror (fp))
+            {
+              err = TWIST_ERR_FILE;
+              msg = file_errmsg (path, 1);
+            }
+          break;
+        }
     }
-  if (err == TWIST_OK)
-    easy->size_download = f->len;
-  twist_easy_finish (easy, err);
+done:
+  if (fp != NULL)
+    fclose (fp);
+  if (hand_off (f, NULL, 0, err, msg, 1) != TWIST_OK && f->err == TWIST_OK)
+    twist_easy_finish (f->easy, err != TWIST_OK ? err : TWIST_ERR_NOMEM);
+  file_retire (f);
 }
 
 int
 twist_file_attach (struct twist_easy *easy)
 {
   struct twist_file *f;
-  struct twist_storage *st;
+  const char *host;
+  const char *path;
   int rc;
 
+  if (easy == NULL || easy->url == NULL || easy->loop == NULL
+      || easy->multi == NULL || easy->multi->storage == NULL)
+    return TWIST_ERR_INVAL;
+  host = easy->url->host;
+  path = easy->url->path;
+  rc = twist_file_check_url (host, path, easy->url->path_set);
+  if (rc != TWIST_OK)
+    return rc;
   f = calloc (1, sizeof *f);
   if (f == NULL)
     return TWIST_ERR_NOMEM;
+  if (pthread_mutex_init (&f->mu, NULL) != 0)
+    {
+      free (f);
+      return TWIST_ERR_NOMEM;
+    }
+  if (pthread_cond_init (&f->cv, NULL) != 0)
+    {
+      pthread_mutex_destroy (&f->mu);
+      free (f);
+      return TWIST_ERR_NOMEM;
+    }
   f->easy = easy;
+  f->live = 1;
   easy->xfer = f;
   easy->xfer_free = file_free;
-  st = twist_storage_new (0, 1);
-  if (st == NULL)
-    return TWIST_ERR_NOMEM;
-  rc = twist_storage_submit (st, file_work, f, file_done, f, NULL);
-  twist_storage_free (st);
-  return rc;
+  rc = twist_storage_submit (easy->multi->storage, file_work, f, NULL, NULL,
+                             NULL);
+  if (rc != TWIST_OK)
+    {
+      easy->xfer = NULL;
+      easy->xfer_free = NULL;
+      f->live = 0;
+      file_free (f);
+      return rc;
+    }
+  return TWIST_OK;
 }

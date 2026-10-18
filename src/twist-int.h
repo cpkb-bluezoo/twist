@@ -161,6 +161,7 @@ struct twist_multi
   size_t done_cap;
   size_t done_off;
   long last_timeout;
+  struct twist_storage *storage;
 };
 
 /* ---- loop ---- */

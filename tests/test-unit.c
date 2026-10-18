@@ -2180,6 +2180,65 @@ test_svcb (void)
   twist_easy_cleanup (easy);
 }
 
+static int file_body_calls;
+static int file_hopped;
+
+static size_t
+file_body (char *ptr, size_t size, size_t nmemb, void *userdata)
+{
+  (void) ptr;
+  (void) size;
+  (void) nmemb;
+  (void) userdata;
+  file_body_calls++;
+  return nmemb;
+}
+
+static void
+file_hop_done (void *user)
+{
+  int *flag = user;
+
+  *flag = 1;
+}
+
+static void
+file_hop_work (void *arg)
+{
+  struct twist_loop *loop = arg;
+
+  twist_loop_post (loop, file_hop_done, &file_hopped);
+}
+
+static void
+test_file_pool (void)
+{
+  struct twist_easy *easy;
+  struct twist_multi *multi;
+
+  easy = twist_easy_init ();
+  check (easy != NULL, "file easy");
+  check (twist_easy_setopt (easy, TWISTOPT_URL, "file://example.com/a")
+         == TWIST_OK, "file url");
+  easy->write_cb = file_body;
+  multi = twist_multi_init ();
+  check (multi != NULL && multi->storage != NULL, "file pool");
+  check (twist_multi_add_handle (multi, easy) == TWIST_ERR_URL, "file remote");
+  check (easy->done && easy->result == TWIST_ERR_URL && file_body_calls == 0,
+         "file remote done");
+  twist_multi_cleanup (multi);
+  twist_easy_cleanup (easy);
+
+  file_hopped = 0;
+  multi = twist_multi_init ();
+  check (multi != NULL, "file hop multi");
+  check (twist_storage_submit (multi->storage, file_hop_work, multi->loop,
+                               NULL, NULL, NULL) == TWIST_OK, "file hop submit");
+  check (twist_loop_run_once (multi->loop) == TWIST_OK && file_hopped == 1,
+         "file hop");
+  twist_multi_cleanup (multi);
+}
+
 int
 main (void)
 {
@@ -2196,6 +2255,7 @@ main (void)
   test_doh ();
   test_svcb ();
   test_client_auth ();
+  test_file_pool ();
   test_scheme ();
   test_connection ();
   test_proxy ();

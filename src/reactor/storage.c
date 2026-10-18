@@ -135,9 +135,16 @@ twist_storage_new (size_t threads, size_t bound)
           free (st);
           return NULL;
         }
-      st->nthreads = threads;
+      st->nthreads = 0;
       for (i = 0; i < threads; i++)
-        pthread_create (&st->threads[i], NULL, worker, st);
+        {
+          if (pthread_create (&st->threads[i], NULL, worker, st) != 0)
+            {
+              twist_storage_free (st);
+              return NULL;
+            }
+          st->nthreads = i + 1;
+        }
     }
   return st;
 }

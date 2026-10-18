@@ -60,6 +60,11 @@ twist_runtime_new (size_t nloops)
         }
     }
   rt->storage = twist_storage_new (1, 32);
+  if (rt->storage == NULL)
+    {
+      twist_runtime_free (rt);
+      return NULL;
+    }
   return rt;
 }
 

@@ -40,6 +40,13 @@ twist_multi_init (void)
     }
   multi->own_loop = 1;
   multi->last_timeout = -2;
+  multi->storage = twist_storage_new (1, 32);
+  if (multi->storage == NULL)
+    {
+      twist_loop_free (multi->loop);
+      free (multi);
+      return NULL;
+    }
   twist_loop_set_multi (multi->loop, multi);
   return multi;
 }
@@ -56,6 +63,7 @@ twist_multi_cleanup (twist_multi *multi)
       multi->easies[i]->multi = NULL;
       multi->easies[i]->loop = NULL;
     }
+  twist_storage_free (multi->storage);
   if (multi->own_loop)
     twist_loop_free (multi->loop);
   free (multi->easies);
