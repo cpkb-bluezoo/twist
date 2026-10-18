@@ -744,6 +744,15 @@ size_t twist_gopher_receive (struct twist_gopher *gopher, const uint8_t *data,
 void twist_gopher_closed (struct twist_gopher *gopher, int err);
 int twist_gopher_attach (struct twist_easy *easy);
 
+struct twist_dict;
+struct twist_dict *twist_dict_new (struct twist_easy *easy, int live);
+void twist_dict_free (void *dict);
+const uint8_t *twist_dict_request (const struct twist_dict *dict, size_t *len);
+size_t twist_dict_receive (struct twist_dict *dict, const uint8_t *data,
+                           size_t len);
+void twist_dict_closed (struct twist_dict *dict, int err);
+int twist_dict_attach (struct twist_easy *easy);
+
 struct twist_share
 {
   unsigned locks;

@@ -85,6 +85,12 @@ attach_gopher (struct twist_easy *easy)
   return twist_gopher_attach (easy);
 }
 
+static int
+attach_dict (struct twist_easy *easy)
+{
+  return twist_dict_attach (easy);
+}
+
 static const struct twist_scheme schemes[] = {
   { "http", 80, TWIST_SCHEME_PROXY_OK | TWIST_SCHEME_READY, attach_http },
   { "https", 443, TWIST_SCHEME_TLS | TWIST_SCHEME_PROXY_OK | TWIST_SCHEME_READY,
@@ -112,7 +118,7 @@ static const struct twist_scheme schemes[] = {
   { "mqtt", 1883, TWIST_SCHEME_PROXY_OK | TWIST_SCHEME_READY, attach_mqtt },
   { "mqtts", 8883, TWIST_SCHEME_TLS | TWIST_SCHEME_PROXY_OK | TWIST_SCHEME_READY,
     attach_mqtt },
-  { "dict", 2628, TWIST_SCHEME_PROXY_OK, twist_scheme_unsupported },
+  { "dict", 2628, TWIST_SCHEME_PROXY_OK | TWIST_SCHEME_READY, attach_dict },
   { "gopher", 70, TWIST_SCHEME_PROXY_OK | TWIST_SCHEME_READY, attach_gopher },
   { "gophers", 70, TWIST_SCHEME_TLS | TWIST_SCHEME_PROXY_OK | TWIST_SCHEME_READY,
     attach_gopher },
