@@ -128,3 +128,45 @@ twist_dns_transport_plan (const int *user, size_t nuser, int *out,
     }
   return *n > 0 ? TWIST_OK : TWIST_ERR_INVAL;
 }
+
+int
+twist_dns_plan_for (const int *user, size_t nuser, int have_doh, int *out,
+                    size_t cap, size_t *n)
+{
+  if (have_doh && (user == NULL || nuser == 0))
+    {
+      if (out == NULL || n == NULL || cap < 1)
+        return TWIST_ERR_INVAL;
+      out[0] = TWIST_DNS_DOH;
+      *n = 1;
+      return TWIST_OK;
+    }
+  return twist_dns_transport_plan (user, nuser, out, cap, n);
+}
+
+int
+twist_dns_bootstrap_plan (const int *user, size_t nuser, int *out, size_t cap,
+                          size_t *n)
+{
+  int full[4];
+  size_t nfull = 0;
+  size_t i;
+
+  if (twist_dns_transport_plan (user, nuser, full, 4, &nfull) != TWIST_OK)
+    return TWIST_ERR_INVAL;
+  if (out == NULL || n == NULL || cap == 0)
+    return TWIST_ERR_INVAL;
+  *n = 0;
+  for (i = 0; i < nfull && *n < cap; i++)
+    {
+      if (full[i] == TWIST_DNS_DOH)
+        continue;
+      out[(*n)++] = full[i];
+    }
+  if (*n == 0)
+    {
+      out[0] = TWIST_DNS_UDP;
+      *n = 1;
+    }
+  return TWIST_OK;
+}

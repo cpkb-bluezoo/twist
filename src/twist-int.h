@@ -24,6 +24,8 @@
 
 #include <twist.h>
 
+#include <quickstep/frame.h>
+
 #include <sys/types.h>
 
 #define TWIST_IN_CEILING (256u * 1024u)
@@ -94,6 +96,8 @@ struct twist_easy
   long redirs;
   int verifypeer;
   char *cainfo;
+  char *sslcert;
+  char *sslkey;
   long timeout_ms;
   long connect_timeout_ms;
   char *proxy;
@@ -107,6 +111,8 @@ struct twist_easy
   char *cookie;
   char *mail_from;
   struct twist_slist *mail_rcpt;
+  char *doh_url;
+  int doh_verifypeer;
   int nobody;
   int failonerror;
   twist_write_callback write_cb;
@@ -227,7 +233,8 @@ struct twist_loop *twist_endpoint_loop (struct twist_endpoint *ep);
 int twist_connection_start_tls (struct twist_connection *conn,
                                 const char *server_name, int verify,
                                 const char *const *alpn, size_t n_alpn,
-                                const char *cafile);
+                                const char *cafile, const char *certfile,
+                                const char *keyfile);
 const char *twist_connection_alpn (struct twist_connection *conn,
                                    size_t *len);
 void twist_connection_read_finished (struct twist_connection *conn);
@@ -240,7 +247,22 @@ struct twist_tls_want
   const char *const *alpn;
   size_t n_alpn;
   const char *cafile;
+  const char *certfile;
+  const char *keyfile;
 };
+
+struct gq_tls_config;
+struct gq_tls_info;
+struct twist_client_auth;
+
+int twist_pem_certificates (const char *text, size_t len, gq_slice *chain,
+                            size_t cap, size_t *nchain, uint8_t **storage);
+int twist_client_auth_load (struct twist_client_auth **out,
+                            const char *certfile, const char *keyfile);
+void twist_client_auth_free (struct twist_client_auth *auth);
+void twist_client_auth_apply (const struct twist_client_auth *auth,
+                              struct gq_tls_config *cfg);
+int twist_client_auth_missing (const struct gq_tls_info *info);
 
 extern int (*twist_tls_start_fn) (struct twist_connection *conn,
                                   const struct twist_tls_want *want);
@@ -386,6 +408,29 @@ int twist_dns_resolve_service (struct twist_loop *loop, const char *host,
                                void (*cb) (void *user, int err,
                                            const struct twist_dns_service *svc),
                                void *user);
+int twist_dns_resolve_easy (struct twist_easy *easy, const char *host,
+                            void (*cb) (void *user, int err,
+                                        const struct twist_dns_addr *addr),
+                            void *user);
+int twist_dns_resolve_service_easy (struct twist_easy *easy, const char *host,
+                                    void (*cb) (void *user, int err,
+                                                const struct twist_dns_service *svc),
+                                    void *user);
+int twist_dns_plan_for (const int *user, size_t nuser, int have_doh,
+                        int *out, size_t cap, size_t *n);
+int twist_dns_bootstrap_plan (const int *user, size_t nuser, int *out,
+                              size_t cap, size_t *n);
+
+struct twist_doh;
+
+struct twist_doh *twist_doh_new (void (*done) (void *user, int err,
+                                               const uint8_t *msg, size_t len),
+                                 void *user);
+void twist_doh_reset (struct twist_doh *d);
+void twist_doh_free (struct twist_doh *d);
+size_t twist_doh_receive (struct twist_doh *d, const uint8_t *data, size_t len);
+int twist_doh_encode_url (const char *url, const uint8_t *msg, size_t msg_len,
+                          uint8_t **out, size_t *out_len);
 
 enum
 {

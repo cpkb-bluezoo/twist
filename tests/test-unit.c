@@ -23,6 +23,8 @@
 #include "reactor/cmdq.h"
 #include "twist-int.h"
 
+#include <quickstep/tls.h>
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1800,6 +1802,256 @@ test_gopher (void)
   twist_easy_cleanup (easy);
 }
 
+struct doh_saw
+{
+  int calls;
+  int err;
+  char text[64];
+};
+
+static int
+bytes_have (const uint8_t *buf, size_t n, const char *lit)
+{
+  size_t ln = strlen (lit);
+  size_t i;
+
+  if (ln > n)
+    return 0;
+  for (i = 0; i + ln <= n; i++)
+    if (memcmp (buf + i, lit, ln) == 0)
+      return 1;
+  return 0;
+}
+
+static void
+on_literal (void *user, int err, const struct twist_dns_addr *addr)
+{
+  struct doh_saw *saw = user;
+
+  saw->calls++;
+  saw->err = err;
+  saw->text[0] = 0;
+  if (err == TWIST_OK && addr != NULL)
+    snprintf (saw->text, sizeof saw->text, "%s", addr->text);
+}
+
+static void
+on_doh_test (void *user, int err, const uint8_t *msg, size_t len)
+{
+  struct doh_saw *saw = user;
+  struct twist_dns_addr *addrs = NULL;
+  size_t n = 0;
+
+  saw->calls++;
+  saw->err = err;
+  saw->text[0] = 0;
+  if (err == TWIST_OK
+      && twist_dns_decode (msg, len, 1, &addrs, &n) == TWIST_OK && n == 1)
+    snprintf (saw->text, sizeof saw->text, "%s", addrs[0].text);
+  free (addrs);
+}
+
+static int
+feed_doh (struct twist_doh *d, const uint8_t *data, size_t len, size_t step)
+{
+  size_t off = 0;
+
+  while (off < len)
+    {
+      size_t n = len - off;
+      size_t got;
+
+      if (n > step)
+        n = step;
+      got = twist_doh_receive (d, data + off, n);
+      if (got == 0 || got > n)
+        return 0;
+      off += got;
+    }
+  return 1;
+}
+
+static void
+test_doh (void)
+{
+  uint8_t *q = NULL;
+  size_t qlen = 0;
+  uint8_t *msg;
+  uint8_t *http = NULL;
+  size_t hlen = 0;
+  uint8_t query[12];
+  char head[160];
+  uint8_t *resp = NULL;
+  size_t rlen;
+  struct doh_saw saw;
+  struct twist_doh *doh;
+  twist_easy *easy;
+  int plan[4];
+  int custom[2];
+  size_t np = 0;
+  int wr;
+  size_t step;
+  static const char not_found[] =
+    "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n";
+
+  memset (query, 0, sizeof query);
+  check (twist_doh_encode_url ("http://dns.example/dns-query", query,
+                               sizeof query, &http, &hlen) == TWIST_ERR_URL,
+         "doh http");
+  check (twist_doh_encode_url ("https://dns.example/dns-query?name=example.com",
+                               query, sizeof query, &http, &hlen) == TWIST_OK,
+         "doh post");
+  check (http != NULL
+         && bytes_have (http, hlen,
+                        "POST /dns-query?name=example.com HTTP/1.1\r\n")
+         && bytes_have (http, hlen, "Host: dns.example\r\n")
+         && bytes_have (http, hlen, "Accept: application/dns-message\r\n")
+         && bytes_have (http, hlen, "Content-Type: application/dns-message\r\n")
+         && hlen >= sizeof query
+         && memcmp (http + hlen - sizeof query, query, sizeof query) == 0,
+         "doh bytes");
+  free (http);
+  http = NULL;
+  check (twist_doh_encode_url ("https://dns.example:8443/dns-query", query,
+                               sizeof query, &http, &hlen) == TWIST_OK
+         && bytes_have (http, hlen, "Host: dns.example:8443\r\n"),
+         "doh port");
+  free (http);
+  custom[0] = TWIST_DNS_UDP;
+  custom[1] = TWIST_DNS_DOQ;
+  check (twist_dns_plan_for (NULL, 0, 1, plan, 4, &np) == TWIST_OK
+         && np == 1 && plan[0] == TWIST_DNS_DOH, "doh replaces");
+  check (twist_dns_plan_for (custom, 2, 1, plan, 4, &np) == TWIST_OK
+         && np == 2 && plan[0] == TWIST_DNS_UDP && plan[1] == TWIST_DNS_DOQ,
+         "doh keeps order");
+  check (twist_dns_bootstrap_plan (NULL, 0, plan, 4, &np) == TWIST_OK
+         && np == 3 && plan[0] == TWIST_DNS_DOQ && plan[1] == TWIST_DNS_DOT
+         && plan[2] == TWIST_DNS_UDP, "doh bootstrap");
+  custom[0] = TWIST_DNS_DOH;
+  check (twist_dns_bootstrap_plan (custom, 1, plan, 4, &np) == TWIST_OK
+         && np == 1 && plan[0] == TWIST_DNS_UDP, "doh bootstrap udp");
+  easy = twist_easy_init ();
+  check (easy != NULL && easy->doh_verifypeer == 1, "doh verify default");
+  twist_easy_setopt (easy, TWISTOPT_SSL_VERIFYPEER, 0L);
+  check (easy->doh_verifypeer == 1, "doh ignores insecure");
+  twist_easy_setopt (easy, TWISTOPT_DOH_SSL_VERIFYPEER, 0L);
+  check (easy->doh_verifypeer == 0, "doh insecure");
+  twist_easy_setopt (easy, TWISTOPT_DOH_URL, "https://dns.example/dns-query");
+  check (easy->doh_url != NULL
+         && strcmp (easy->doh_url, "https://dns.example/dns-query") == 0,
+         "doh url");
+  twist_easy_setopt (easy, TWISTOPT_DOH_URL, "");
+  check (easy->doh_url == NULL, "doh url clear");
+  twist_easy_setopt (easy, TWISTOPT_DOH_URL, "https://192.0.2.1/dns-query");
+  memset (&saw, 0, sizeof saw);
+  check (twist_dns_resolve_easy (easy, "192.0.2.10", on_literal, &saw) == TWIST_OK
+         && saw.calls == 1 && saw.err == TWIST_OK
+         && strcmp (saw.text, "192.0.2.10") == 0, "v4 needs no lookup");
+  memset (&saw, 0, sizeof saw);
+  check (twist_dns_resolve_easy (easy, "2001:db8::1", on_literal, &saw) == TWIST_OK
+         && saw.calls == 1 && saw.err == TWIST_OK
+         && strcmp (saw.text, "2001:db8::1") == 0, "v6 needs no lookup");
+  twist_easy_cleanup (easy);
+
+  check (twist_dns_encode_query ("example.com", 1, 0x1234, &q, &qlen) == TWIST_OK,
+         "doh q");
+  msg = realloc (q, qlen + 16);
+  check (msg != NULL, "doh grow");
+  if (msg == NULL)
+    return;
+  msg[2] = 0x81;
+  msg[3] = 0x80;
+  msg[6] = 0;
+  msg[7] = 1;
+  msg[qlen + 0] = 0xc0;
+  msg[qlen + 1] = 0x0c;
+  msg[qlen + 2] = 0;
+  msg[qlen + 3] = 1;
+  msg[qlen + 4] = 0;
+  msg[qlen + 5] = 1;
+  msg[qlen + 6] = 0;
+  msg[qlen + 7] = 0;
+  msg[qlen + 8] = 0;
+  msg[qlen + 9] = 0;
+  msg[qlen + 10] = 0;
+  msg[qlen + 11] = 4;
+  msg[qlen + 12] = 93;
+  msg[qlen + 13] = 184;
+  msg[qlen + 14] = 216;
+  msg[qlen + 15] = 34;
+  wr = snprintf (head, sizeof head,
+                 "HTTP/1.1 200 OK\r\n"
+                 "Content-Type: application/dns-message\r\n"
+                 "Content-Length: %zu\r\n\r\n",
+                 qlen + 16);
+  check (wr > 0, "doh head");
+  rlen = (size_t) wr + qlen + 16;
+  resp = malloc (rlen);
+  check (resp != NULL, "doh resp");
+  if (resp == NULL)
+    {
+      free (msg);
+      return;
+    }
+  memcpy (resp, head, (size_t) wr);
+  memcpy (resp + wr, msg, qlen + 16);
+  free (msg);
+  memset (&saw, 0, sizeof saw);
+  doh = twist_doh_new (on_doh_test, &saw);
+  check (doh != NULL, "doh new");
+  for (step = 1; step <= rlen; step++)
+    {
+      saw.calls = 0;
+      saw.err = -1;
+      saw.text[0] = 0;
+      check (feed_doh (doh, resp, rlen, step), "doh feed");
+      check (saw.calls == 1 && saw.err == TWIST_OK
+             && strcmp (saw.text, "93.184.216.34") == 0, "doh answer");
+    }
+  saw.calls = 0;
+  check (feed_doh (doh, (const uint8_t *) not_found, sizeof not_found - 1, 1),
+         "doh 404 feed");
+  check (saw.calls == 1 && saw.err == TWIST_ERR_RESOLVE, "doh 404");
+  twist_doh_free (doh);
+  free (resp);
+}
+
+static void
+test_client_auth (void)
+{
+  static const char pem[] =
+    "-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n"
+    "-----BEGIN CERTIFICATE-----\nAQIDBA==\n-----END CERTIFICATE-----\n"
+    "-----BEGIN CERTIFICATE-----\nBQYH\n-----END CERTIFICATE-----\n";
+  gq_slice chain[4];
+  size_t n = 0;
+  uint8_t *storage = NULL;
+  struct twist_client_auth *auth = NULL;
+  struct gq_tls_info info;
+
+  check (twist_pem_certificates (pem, sizeof pem - 1, chain, 4, &n, &storage)
+         == TWIST_OK && n == 2, "pem certs");
+  check (storage != NULL && chain[0].len == 4 && chain[0].data[0] == 1
+         && chain[0].data[1] == 2 && chain[0].data[2] == 3
+         && chain[0].data[3] == 4 && chain[1].len == 3
+         && chain[1].data[0] == 5 && chain[1].data[1] == 6
+         && chain[1].data[2] == 7, "pem der");
+  free (storage);
+  storage = NULL;
+  check (twist_pem_certificates ("nope", 4, chain, 4, &n, &storage)
+         == TWIST_ERR_TLS && storage == NULL, "pem none");
+  check (twist_client_auth_load (&auth, NULL, NULL) == TWIST_OK
+         && auth == NULL, "client auth absent");
+  check (twist_client_auth_load (&auth, "cert.pem", NULL) == TWIST_ERR_INVAL,
+         "client auth half");
+  memset (&info, 0, sizeof info);
+  check (!twist_client_auth_missing (&info), "mtls quiet");
+  info.client_auth_requested = 1;
+  check (twist_client_auth_missing (&info), "mtls required");
+  info.client_auth_sent = 1;
+  check (!twist_client_auth_missing (&info), "mtls sent");
+}
+
 int
 main (void)
 {
@@ -1813,6 +2065,8 @@ main (void)
   test_sasl ();
   test_cookie ();
   test_dns ();
+  test_doh ();
+  test_client_auth ();
   test_scheme ();
   test_connection ();
   test_proxy ();

@@ -147,11 +147,12 @@ twist_mail_link_open (struct twist_mail_link *link, struct twist_easy *easy,
     twist_loop_schedule (easy->loop,
                          twist_loop_now (easy->loop) + (uint64_t) easy->timeout_ms,
                          on_timeout, link, &link->timer);
-  if (twist_dns_resolve (easy->loop, link->dial_host,
-                         easy->dns_order_n > 0 ? easy->dns_order : NULL,
-                         (size_t) easy->dns_order_n, on_resolved, link)
-      != TWIST_OK)
-    return TWIST_ERR_RESOLVE;
+  {
+    int rc = twist_dns_resolve_easy (easy, link->dial_host, on_resolved, link);
+
+    if (rc != TWIST_OK)
+      return rc;
+  }
   return TWIST_OK;
 }
 

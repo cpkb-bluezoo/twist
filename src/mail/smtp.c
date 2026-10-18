@@ -437,7 +437,8 @@ smtp_connected (struct twist_endpoint *ep)
     return;
   rc = twist_connection_start_tls (ep->conn, s->easy->url->host,
                                    s->easy->verifypeer, NULL, 0,
-                                   s->easy->cainfo);
+                                   s->easy->cainfo, s->easy->sslcert,
+                                   s->easy->sslkey);
   if (rc != TWIST_OK)
     smtp_complete (s, rc);
 }

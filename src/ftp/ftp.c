@@ -717,7 +717,8 @@ ftp_connected (struct twist_endpoint *ep)
     return;
   rc = twist_connection_start_tls (ep->conn, f->easy->url->host,
                                    f->easy->verifypeer, NULL, 0,
-                                   f->easy->cainfo);
+                                   f->easy->cainfo, f->easy->sslcert,
+                                   f->easy->sslkey);
   if (rc != TWIST_OK)
     ftp_complete (f, rc);
 }
@@ -949,10 +950,12 @@ ftp_begin (struct twist_ftp *f)
     twist_loop_schedule (easy->loop,
                          twist_loop_now (easy->loop) + (uint64_t) easy->timeout_ms,
                          on_timeout, f, &f->timer);
-  if (twist_dns_resolve (easy->loop, f->dial_host,
-                         easy->dns_order_n > 0 ? easy->dns_order : NULL,
-                         (size_t) easy->dns_order_n, on_resolved, f) != TWIST_OK)
-    ftp_complete (f, TWIST_ERR_RESOLVE);
+  {
+    int rc = twist_dns_resolve_easy (easy, f->dial_host, on_resolved, f);
+
+    if (rc != TWIST_OK)
+      ftp_complete (f, rc);
+  }
 }
 
 void

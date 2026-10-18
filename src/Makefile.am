@@ -69,6 +69,7 @@ libtwist_la_SOURCES = \
   engine/scheme.c \
   engine/share.c \
   engine/url.c \
+  dns/doh.c \
   dns/policy.c \
   dns/resolve.c \
   dns/wire.c \
@@ -95,6 +96,7 @@ libtwist_la_SOURCES = \
   ldap/ldap.c \
   ws/ws.c \
   gopher/gopher.c \
+  tls/identity.c \
   tls/quic.c \
   tls/tls.c
 

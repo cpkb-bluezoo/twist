@@ -51,6 +51,7 @@ twist_easy_init (void)
     return NULL;
   easy->maxredirs = 50;
   easy->verifypeer = 1;
+  easy->doh_verifypeer = 1;
   easy->http_version = TWIST_HTTP_VERSION_NONE;
   easy->auth = TWISTAUTH_BASIC;
   return easy;
@@ -75,7 +76,10 @@ easy_clear (struct twist_easy *easy)
   free (easy->referer);
   free (easy->cookie);
   free (easy->mail_from);
+  free (easy->doh_url);
   free (easy->cainfo);
+  free (easy->sslcert);
+  free (easy->sslkey);
   free (easy->effective_url);
   free (easy->content_type);
   free (easy->error);
@@ -182,6 +186,24 @@ twist_easy_setopt (twist_easy *easy, int opt, ...)
     case TWISTOPT_CAINFO:
       replace (&easy->cainfo, va_arg (ap, const char *));
       break;
+    case TWISTOPT_SSLCERT:
+      {
+        const char *s = va_arg (ap, const char *);
+
+        if (s != NULL && s[0] == 0)
+          s = NULL;
+        replace (&easy->sslcert, s);
+      }
+      break;
+    case TWISTOPT_SSLKEY:
+      {
+        const char *s = va_arg (ap, const char *);
+
+        if (s != NULL && s[0] == 0)
+          s = NULL;
+        replace (&easy->sslkey, s);
+      }
+      break;
     case TWISTOPT_TIMEOUT_MS:
       easy->timeout_ms = va_arg (ap, long);
       break;
@@ -249,6 +271,18 @@ twist_easy_setopt (twist_easy *easy, int opt, ...)
       break;
     case TWISTOPT_MAIL_RCPT:
       easy->mail_rcpt = va_arg (ap, struct twist_slist *);
+      break;
+    case TWISTOPT_DOH_URL:
+      {
+        const char *s = va_arg (ap, const char *);
+
+        if (s != NULL && s[0] == 0)
+          s = NULL;
+        replace (&easy->doh_url, s);
+      }
+      break;
+    case TWISTOPT_DOH_SSL_VERIFYPEER:
+      easy->doh_verifypeer = va_arg (ap, long) != 0;
       break;
     default:
       rc = TWIST_ERR_UNSUPPORTED;

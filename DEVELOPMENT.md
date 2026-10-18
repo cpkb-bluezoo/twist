@@ -68,7 +68,7 @@ Each item is a new row in the scheme table. The loop does not change.
 - [ ] TFTP as a datagram handler
 - [ ] FILE through the storage pool
 - [ ] SCP/SFTP, SMB/SMBS, RTMP/RTMPS
-- [ ] DoH as an HTTP transfer used by the resolver
+- [x] DoH as an HTTP transfer used by the resolver
 - [ ] NTLM and Negotiate, only after an explicit dependency decision
 
 ## Tests and release

@@ -34,6 +34,7 @@ struct twist_tls
 {
   gq_tlsauto *tls;
   gq_trust *trust;
+  struct twist_client_auth *auth;
   gq_slice alpn[2];
   uint8_t alpn_mem[2][16];
   size_t n_alpn;
@@ -61,6 +62,8 @@ tls_connected (void *user, const gq_tls_info *info)
   const char *alpn = "";
   size_t n = 0;
 
+  if (twist_client_auth_missing (info))
+    return -1;
   if (info != NULL && info->alpn_len > 0)
     {
       alpn = (const char *) info->alpn;
@@ -110,6 +113,7 @@ tls_free (void *p)
     return;
   gq_tlsauto_free (t->tls);
   gq_trust_free (t->trust);
+  twist_client_auth_free (t->auth);
   free (t->server_name);
   free (t);
 }
@@ -159,11 +163,18 @@ tls_start (struct twist_connection *conn, const struct twist_tls_want *want)
       t->alpn[i].len = n;
       t->n_alpn++;
     }
+  rc = twist_client_auth_load (&t->auth, want->certfile, want->keyfile);
+  if (rc != TWIST_OK)
+    {
+      tls_free (t);
+      return rc;
+    }
   memset (&cfg, 0, sizeof cfg);
   cfg.server_name = t->server_name;
   cfg.alpn = t->n_alpn > 0 ? t->alpn : NULL;
   cfg.n_alpn = t->n_alpn;
   cfg.trust = t->trust;
+  twist_client_auth_apply (t->auth, &cfg);
   memset (&ev, 0, sizeof ev);
   ev.user = conn;
   ev.write = tls_write;

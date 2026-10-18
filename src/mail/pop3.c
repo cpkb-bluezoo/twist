@@ -395,7 +395,8 @@ pop3_connected (struct twist_endpoint *ep)
     return;
   rc = twist_connection_start_tls (ep->conn, p->easy->url->host,
                                    p->easy->verifypeer, NULL, 0,
-                                   p->easy->cainfo);
+                                   p->easy->cainfo, p->easy->sslcert,
+                                   p->easy->sslkey);
   if (rc != TWIST_OK)
     pop3_complete (p, rc);
 }

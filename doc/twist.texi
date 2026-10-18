@@ -101,6 +101,17 @@ the status is recorded and the body is written.
 @itemx --insecure
 Accepted for compatibility with curl.  The TLS engine still checks the
 configured trust store.
+@item -E @var{file}
+@itemx --cert @var{file}
+Client certificate in PEM form, leaf first.  Further certificates in
+the file are sent after the leaf.  The matching private key is
+@option{--key}, an unencrypted PEM file.  When a server asks for a
+client certificate and none was given, the handshake fails.  When one
+was given, it is presented.
+@item --key @var{file}
+Private key for @option{--cert}.
+@item --cacert @var{file}
+PEM trust bundle used to verify the peer.
 @item --http1.0
 @itemx --http1.1
 @itemx --http2
@@ -110,6 +121,21 @@ configured trust store.
 Select the HTTP version.  HTTP/3 is used when discovered from an HTTPS
 record or a cached Alt-Svc entry.  HTTP/2 on HTTPS is ALPN.  Cleartext
 HTTP/2 is an h2c upgrade, unless prior knowledge was requested.
+@item --dns-order @var{list}
+Comma-separated DNS transports.  The default is @code{doq,dot,doh,udp}.
+UDP retries over TCP when the answer is truncated.  A host that is an
+IPv4 or IPv6 address is used as that address.
+@item --doh-url @var{url}
+Resolve host names through this DNS-over-HTTPS server instead of
+@option{--dns-order}.  The URL must use HTTPS.  The server's name is
+resolved with DoQ, DoT, or UDP, and not with DoH.  Each query is then an
+HTTP POST whose body is one DNS message
+(@code{application/dns-message}).  An empty URL
+restores the normal resolver.  When @option{--dns-order} is also set,
+that list is used and this URL supplies the @code{doh} step.
+@item --doh-insecure
+Do not verify the DoH server certificate.  This is independent of
+@option{-k}.  Curl's @option{--doh-cert-status} is not supported.
 @item --mail-from @var{address}
 @itemx --mail-rcpt @var{address}
 SMTP envelope.  Repeat @option{--mail-rcpt} for each recipient.

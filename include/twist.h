@@ -141,7 +141,16 @@ enum twist_opt
   /* Comma-separated DNS transports.  Default is doq,dot,doh,udp.  */
   TWISTOPT_DNS_ORDER = 35,
   TWISTOPT_MAIL_FROM = 36,
-  TWISTOPT_MAIL_RCPT = 37
+  TWISTOPT_MAIL_RCPT = 37,
+  /* HTTPS URL of a DNS-over-HTTPS server.  Empty clears it.  */
+  TWISTOPT_DOH_URL = 38,
+  /* Non-zero verifies the DoH certificate.  Independent of
+     TWISTOPT_SSL_VERIFYPEER.  */
+  TWISTOPT_DOH_SSL_VERIFYPEER = 39,
+  /* PEM client certificate, leaf first.  Empty clears it.  */
+  TWISTOPT_SSLCERT = 40,
+  /* PEM private key for TWISTOPT_SSLCERT.  Empty clears it.  */
+  TWISTOPT_SSLKEY = 41
 };
 
 enum twist_dns_transport

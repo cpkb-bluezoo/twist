@@ -54,6 +54,9 @@ usage (void)
   fputs (_("  -L, --location          follow redirects\n"), stdout);
   fputs (_("  -k, --insecure          accepted; certificates are still checked\n"),
          stdout);
+  fputs (_("  -E, --cert FILE         client certificate (PEM)\n"), stdout);
+  fputs (_("      --key FILE          private key for --cert (PEM)\n"), stdout);
+  fputs (_("      --cacert FILE       CA trust bundle (PEM)\n"), stdout);
   fputs (_("  -x, --proxy URL         proxy (http:// or socks5://)\n"), stdout);
   fputs (_("  -A, --user-agent NAME   User-Agent\n"), stdout);
   fputs (_("  -u, --user USER:PASS    user and password\n"), stdout);
@@ -73,6 +76,10 @@ usage (void)
   fputs (_("      --http3-only        fail unless HTTP/3 can be used\n"),
          stdout);
   fputs (_("      --dns-order LIST    DNS transports (default doq,dot,doh,udp)\n"),
+         stdout);
+  fputs (_("      --doh-url URL       resolve names with this HTTPS server\n"),
+         stdout);
+  fputs (_("      --doh-insecure      do not verify the DoH certificate\n"),
          stdout);
   fputs (_("      --mail-from ADDR    SMTP sender\n"), stdout);
   fputs (_("      --mail-rcpt ADDR    SMTP recipient\n"), stdout);
@@ -116,6 +123,9 @@ main (int argc, char **argv)
     { "data", required_argument, NULL, 'd' },
     { "location", no_argument, NULL, 'L' },
     { "insecure", no_argument, NULL, 'k' },
+    { "cert", required_argument, NULL, 'E' },
+    { "key", required_argument, NULL, 15 },
+    { "cacert", required_argument, NULL, 16 },
     { "proxy", required_argument, NULL, 'x' },
     { "user-agent", required_argument, NULL, 'A' },
     { "user", required_argument, NULL, 'u' },
@@ -130,6 +140,8 @@ main (int argc, char **argv)
     { "http3", no_argument, NULL, 5 },
     { "http3-only", no_argument, NULL, 10 },
     { "dns-order", required_argument, NULL, 8 },
+    { "doh-url", required_argument, NULL, 13 },
+    { "doh-insecure", no_argument, NULL, 14 },
     { "mail-from", required_argument, NULL, 11 },
     { "mail-rcpt", required_argument, NULL, 12 },
     { "help", no_argument, NULL, 6 },
@@ -156,7 +168,7 @@ main (int argc, char **argv)
       die (twist_strerror (TWIST_ERR_NOMEM));
       return 1;
     }
-  while ((c = getopt_long (argc, argv, "o:X:H:d:Lkx:A:u:Iw:f", longs, NULL))
+  while ((c = getopt_long (argc, argv, "o:X:H:d:Lkx:A:u:Iw:fE:", longs, NULL))
          != -1)
     {
       switch (c)
@@ -183,6 +195,15 @@ main (int argc, char **argv)
           break;
         case 'k':
           twist_easy_setopt (easy, TWISTOPT_SSL_VERIFYPEER, 0L);
+          break;
+        case 'E':
+          twist_easy_setopt (easy, TWISTOPT_SSLCERT, optarg);
+          break;
+        case 15:
+          twist_easy_setopt (easy, TWISTOPT_SSLKEY, optarg);
+          break;
+        case 16:
+          twist_easy_setopt (easy, TWISTOPT_CAINFO, optarg);
           break;
         case 'x':
           twist_easy_setopt (easy, TWISTOPT_PROXY, optarg);
@@ -243,6 +264,16 @@ main (int argc, char **argv)
           break;
         case 12:
           rcpts = twist_slist_append (rcpts, optarg);
+          break;
+        case 13:
+          if (twist_easy_setopt (easy, TWISTOPT_DOH_URL, optarg) != TWIST_OK)
+            {
+              die (_("could not set the DoH server"));
+              return 1;
+            }
+          break;
+        case 14:
+          twist_easy_setopt (easy, TWISTOPT_DOH_SSL_VERIFYPEER, 0L);
           break;
         case 8:
           if (twist_easy_setopt (easy, TWISTOPT_DNS_ORDER, optarg) != TWIST_OK)

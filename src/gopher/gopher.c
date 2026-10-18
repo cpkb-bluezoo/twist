@@ -239,7 +239,8 @@ gopher_connected (struct twist_endpoint *ep)
     {
       rc = twist_connection_start_tls (ep->conn, g->easy->url->host,
                                        g->easy->verifypeer, NULL, 0,
-                                       g->easy->cainfo);
+                                       g->easy->cainfo, g->easy->sslcert,
+                                       g->easy->sslkey);
       if (rc != TWIST_OK)
         gopher_complete (g, rc);
       return;

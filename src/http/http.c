@@ -912,7 +912,8 @@ http_connected (struct twist_endpoint *ep)
       rc = twist_connection_start_tls (h->conn, h->easy->url->host,
                                        h->easy->verifypeer,
                                        n > 0 ? alpn : NULL, n,
-                                       h->easy->cainfo);
+                                       h->easy->cainfo, h->easy->sslcert,
+                                       h->easy->sslkey);
       if (rc != TWIST_OK)
         {
           http_fail (h, rc);
@@ -1115,7 +1116,6 @@ start_quic (struct twist_http *h, const struct twist_dns_addr *addr)
 static void
 start_attempt (struct twist_http *h)
 {
-  const int *order = h->easy->dns_order_n > 0 ? h->easy->dns_order : NULL;
   int rc;
 
   rc = prepare_dial (h);
@@ -1127,10 +1127,9 @@ start_attempt (struct twist_http *h)
   if (h->mode != HTTP_H3 && h->easy->url->host != NULL
       && strcmp (h->dial_host, h->easy->url->host) != 0)
     {
-      if (twist_dns_resolve (h->easy->loop, h->dial_host, order,
-                             (size_t) h->easy->dns_order_n,
-                             on_proxy_resolved, h) != TWIST_OK)
-        http_fail (h, TWIST_ERR_RESOLVE);
+      rc = twist_dns_resolve_easy (h->easy, h->dial_host, on_proxy_resolved, h);
+      if (rc != TWIST_OK)
+        http_fail (h, rc);
       return;
     }
   if (h->mode == HTTP_H3)
@@ -1219,7 +1218,6 @@ http_begin (struct twist_http *h)
 {
   struct twist_easy *easy = h->easy;
   struct twist_url *url = easy->url;
-  const int *order = easy->dns_order_n > 0 ? easy->dns_order : NULL;
 
   h->ws = url->scheme != NULL
           && (strcmp (url->scheme, "ws") == 0 || strcmp (url->scheme, "wss") == 0);
@@ -1243,10 +1241,12 @@ http_begin (struct twist_http *h)
     twist_loop_schedule (easy->loop,
                          twist_loop_now (easy->loop) + (uint64_t) easy->timeout_ms,
                          on_timeout, h, &h->timer);
-  if (twist_dns_resolve_service (easy->loop, url->host, order,
-                                 (size_t) easy->dns_order_n,
-                                 on_resolved, h) != TWIST_OK)
-    http_complete (h, TWIST_ERR_RESOLVE);
+  {
+    int rc = twist_dns_resolve_service_easy (easy, url->host, on_resolved, h);
+
+    if (rc != TWIST_OK)
+      http_complete (h, rc);
+  }
 }
 
 static void

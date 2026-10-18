@@ -37,6 +37,21 @@ status is recorded and the body is written.
 .B \-k
 Accept the option.  The TLS engine still checks the trust store.
 .TP
+.BI \-E ", " \-\-cert " file"
+Client certificate in PEM form, leaf first.  Further certificates in
+the file are sent after the leaf.  The matching private key is
+.BR \-\-key .
+The key is an unencrypted PEM file.  When a server asks for a client
+certificate and none was given, the handshake fails.  When one was
+given, it is presented.
+.TP
+.BI \-\-key " file"
+Private key for
+.BR \-\-cert .
+.TP
+.BI \-\-cacert " file"
+PEM trust bundle used to verify the peer.
+.TP
 .B \-\-http1.0
 .TQ
 .B \-\-http1.1
@@ -76,6 +91,28 @@ sends the URL selector and writes the reply until the server closes.
 Comma-separated DNS transports.  The default is
 .BR doq,dot,doh,udp .
 UDP retries over TCP when the answer is truncated.
+A host that is an IPv4 or IPv6 address is used as that address.
+.TP
+.BI \-\-doh-url " URL"
+Resolve host names through this DNS-over-HTTPS server instead of the
+transports in
+.BR \-\-dns-order .
+The URL must use HTTPS.  The server's name is resolved with DoQ, DoT,
+or UDP, and not with DoH.  Each query is then an HTTP POST
+whose body is one DNS message of type
+.BR application/dns-message .
+An empty URL restores the normal resolver.  When
+.B \-\-dns-order
+is also set, that list is used and this URL supplies the
+.B doh
+step.
+.TP
+.B \-\-doh-insecure
+Do not verify the DoH server certificate.  This is independent of
+.BR \-k .
+Curl's
+.B \-\-doh-cert-status
+is not supported.
 .SH AUTHOR
 Chris Burdess.
 .SH SEE ALSO

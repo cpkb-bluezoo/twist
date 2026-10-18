@@ -42,6 +42,7 @@ struct twist_quic
   gq_endpoint *ep;
   gq_conn *conn;
   gq_trust *trust;
+  struct twist_client_auth *auth;
   gq_tls_config tls;
   gq_slice alpn;
   uint8_t alpn_mem[2];
@@ -77,6 +78,12 @@ ev_connected (void *user, const gq_tls_info *info)
   struct twist_quic *q = user;
   uint64_t id = 0;
 
+  if (twist_client_auth_missing (info))
+    {
+      gq_conn_close (q->conn, twist_loop_now (q->loop) * 1000u, 1, 1, NULL);
+      twist_connection_fail (q->twist, TWIST_ERR_TLS);
+      return;
+    }
   if (gq_conn_stream_open (q->conn, 1, &id) == GQ_OK)
     {
       q->stream_id = id;
@@ -356,6 +363,7 @@ quic_free (void *p)
     return;
   gq_endpoint_free (q->ep);
   gq_trust_free (q->trust);
+  twist_client_auth_free (q->auth);
   free (q->server_name);
   free (q);
 }
@@ -430,6 +438,13 @@ quic_connect (struct twist_easy *easy, struct twist_connection **out)
   q->tls.n_alpn = 1;
   q->tls.trust = q->trust;
   q->tls.quic = 1;
+  rc = twist_client_auth_load (&q->auth, easy->sslcert, easy->sslkey);
+  if (rc != TWIST_OK)
+    {
+      quic_free (q);
+      return rc;
+    }
+  twist_client_auth_apply (q->auth, &q->tls);
   memset (&addr, 0, sizeof addr);
   if (inet_pton (AF_INET, easy->url->host, addr.addr) == 1)
     family = AF_INET;
