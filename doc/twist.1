@@ -69,6 +69,8 @@ binds and writes the search as LDIF.  The path is the base DN.
 .B ws
 does the HTTP/1 upgrade, or an extended CONNECT on HTTP/2 or HTTP/3,
 and writes payload bytes.  An HTTP/1 status other than 101 fails.
+.B gopher
+sends the URL selector and writes the reply until the server closes.
 .TP
 .BI \-\-dns-order " list"
 Comma-separated DNS transports.  The default is

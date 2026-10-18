@@ -289,7 +289,7 @@ twist_url_default_port (const char *scheme)
     return 69;
   if (strcmp (scheme, "dict") == 0)
     return 2628;
-  if (strcmp (scheme, "gopher") == 0)
+  if (strcmp (scheme, "gopher") == 0 || strcmp (scheme, "gophers") == 0)
     return 70;
   if (strcmp (scheme, "telnet") == 0)
     return 23;

@@ -672,6 +672,16 @@ size_t twist_ldap_receive (struct twist_ldap *ldap, const uint8_t *data,
 const uint8_t *twist_ldap_command (const struct twist_ldap *ldap, size_t *len);
 int twist_ldap_attach (struct twist_easy *easy);
 
+struct twist_gopher;
+struct twist_gopher *twist_gopher_new (struct twist_easy *easy, int live);
+void twist_gopher_free (void *gopher);
+const uint8_t *twist_gopher_request (const struct twist_gopher *gopher,
+                                     size_t *len);
+size_t twist_gopher_receive (struct twist_gopher *gopher, const uint8_t *data,
+                             size_t len);
+void twist_gopher_closed (struct twist_gopher *gopher, int err);
+int twist_gopher_attach (struct twist_easy *easy);
+
 struct twist_share
 {
   unsigned locks;
