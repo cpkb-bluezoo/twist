@@ -27,7 +27,8 @@ internal header, init, i18n, and the twist command).  The rest is
 split by layer, and a new scheme is a new directory:
 
   src/reactor/   loop, connection, poll, timers, runtime, storage
-  src/engine/    URL, easy/multi/share, DNS, proxy, scheme table
+  src/engine/    URL, easy/multi/share, proxy, scheme table
+  src/dns/       DNS client: messages, DoQ/DoT/DoH/UDP order, resolver
   src/auth/      SASL clients, HTTP Basic and Digest, MD5, SHA-256
   src/http/      HTTP/1, HTTP/2, HTTP/3, cookies
   src/ftp/       FTP and FTPS

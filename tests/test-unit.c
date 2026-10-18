@@ -391,6 +391,87 @@ test_cookie (void)
   twist_jar_free (jar);
 }
 
+struct dns_saw
+{
+  int addrs;
+  int tc;
+  int nalpn;
+  char alpn[4][16];
+  int port;
+  int err;
+};
+
+static void
+saw_addr (void *user, const struct twist_dns_addr *addr)
+{
+  (void) addr;
+  ((struct dns_saw *) user)->addrs++;
+}
+
+static void
+saw_alpn (void *user, const char *id, size_t len)
+{
+  struct dns_saw *s = user;
+
+  if (s->nalpn >= 4 || len >= 16)
+    return;
+  memcpy (s->alpn[s->nalpn], id, len);
+  s->alpn[s->nalpn][len] = 0;
+  s->nalpn++;
+}
+
+static void
+saw_port (void *user, int port)
+{
+  ((struct dns_saw *) user)->port = port;
+}
+
+static void
+saw_tc (void *user)
+{
+  ((struct dns_saw *) user)->tc = 1;
+}
+
+static void
+saw_fail (void *user, int err)
+{
+  ((struct dns_saw *) user)->err = err;
+}
+
+static void
+feed_stream (const uint8_t *msg, size_t n, size_t step, struct dns_saw *saw)
+{
+  uint8_t window[512];
+  size_t have = 0;
+  size_t off = 0;
+  struct twist_dns_events ev;
+
+  memset (&ev, 0, sizeof ev);
+  ev.user = saw;
+  ev.address = saw_addr;
+  ev.https_alpn = saw_alpn;
+  ev.https_port = saw_port;
+  ev.truncated = saw_tc;
+  ev.failure = saw_fail;
+  while (off < n)
+    {
+      size_t chunk = step;
+      size_t i;
+      if (chunk > n - off)
+        chunk = n - off;
+      for (i = 0; i < chunk; i++)
+        window[have++] = msg[off++];
+      for (;;)
+        {
+          size_t c = twist_dns_stream_receive (window, have, &ev);
+          if (c == 0)
+            break;
+          memmove (window, window + c, have - c);
+          have -= c;
+        }
+    }
+}
+
 static void
 test_dns (void)
 {
@@ -428,6 +509,105 @@ test_dns (void)
   check (twist_dns_decode (msg, qlen + 16, 1, &addrs, &n) == TWIST_OK, "dec");
   check (n == 1 && strcmp (addrs[0].text, "93.184.216.34") == 0, "addr");
   free (addrs);
+  {
+    uint8_t *framed = NULL;
+    struct dns_saw saw;
+    struct twist_dns_events ev;
+    size_t flen = qlen + 16;
+    size_t step;
+    static const uint8_t https[] = {
+      0x00, 0x01, 0x81, 0x80, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00,
+      0x07, 'e', 'x', 'a', 'm', 'p', 'l', 'e', 0x03, 'c', 'o', 'm', 0x00,
+      0x00, 0x41, 0x00, 0x01,
+      0xc0, 0x0c, 0x00, 0x41, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0d,
+      0x00, 0x01, 0x00, 0x00, 0x01, 0x00, 0x06, 0x02, 'h', '3', 0x02, 'h', '2'
+    };
+    int plan[4];
+    int order[4];
+    int custom[2];
+    size_t np = 0;
+    const char *ids[2];
+
+    framed = malloc (flen + 2 > sizeof https + 2 ? flen + 2
+                     : sizeof https + 2);
+    check (framed != NULL, "frame");
+    if (framed == NULL)
+      {
+        free (msg);
+        return;
+      }
+    framed[0] = (uint8_t) (flen >> 8);
+    framed[1] = (uint8_t) flen;
+    memcpy (framed + 2, msg, flen);
+    for (step = 1; step <= flen + 2; step++)
+      {
+        memset (&saw, 0, sizeof saw);
+        feed_stream (framed, flen + 2, step, &saw);
+        check (saw.addrs == 1 && saw.err == 0, "stream split");
+      }
+    msg[2] = (uint8_t) (msg[2] | 0x02);
+    memset (&saw, 0, sizeof saw);
+    memset (&ev, 0, sizeof ev);
+    ev.user = &saw;
+    ev.address = saw_addr;
+    ev.truncated = saw_tc;
+    ev.failure = saw_fail;
+    check (twist_dns_datagram_receive (msg, flen, &ev) == flen, "dgram");
+    check (saw.tc == 1 && saw.addrs == 1, "tc");
+    memset (&saw, 0, sizeof saw);
+    framed[0] = 0;
+    framed[1] = (uint8_t) sizeof https;
+    memcpy (framed + 2, https, sizeof https);
+    for (step = 1; step <= sizeof https + 2; step++)
+      {
+        memset (&saw, 0, sizeof saw);
+        feed_stream (framed, sizeof https + 2, step, &saw);
+        check (saw.nalpn == 2 && strcmp (saw.alpn[0], "h3") == 0
+               && strcmp (saw.alpn[1], "h2") == 0, "https alpn");
+      }
+    check (twist_dns_transport_plan (NULL, 0, order, 4, &np) == TWIST_OK
+           && np == 4 && order[0] == TWIST_DNS_DOQ && order[1] == TWIST_DNS_DOT
+           && order[2] == TWIST_DNS_DOH && order[3] == TWIST_DNS_UDP,
+           "dns default");
+    custom[0] = TWIST_DNS_UDP;
+    custom[1] = TWIST_DNS_DOQ;
+    check (twist_dns_transport_plan (custom, 2, order, 4, &np) == TWIST_OK
+           && np == 2 && order[0] == TWIST_DNS_UDP && order[1] == TWIST_DNS_DOQ,
+           "dns override");
+    check (twist_dns_parse_order ("gssapi", order, 4, &np) != TWIST_OK,
+           "dns bad");
+    ids[0] = "h2";
+    (void) ids;
+    (void) plan;
+    check (twist_http_discover (TWIST_HTTP_VERSION_NONE, 1, 1, 1, 0, &plan[0])
+           == TWIST_OK && plan[0] == TWIST_DISC_H3, "h3 from https rr");
+    check (twist_http_discover (TWIST_HTTP_VERSION_NONE, 1, 0, 0, 0, &plan[0])
+           == TWIST_OK && plan[0] == TWIST_DISC_ALPN, "no rr is alpn");
+    check (twist_http_discover (TWIST_HTTP_VERSION_NONE, 1, 0, 0, 1, &plan[0])
+           == TWIST_OK && plan[0] == TWIST_DISC_H3, "cached alt-svc h3");
+    check (twist_http_discover (TWIST_HTTP_VERSION_NONE, 1, 0, 0, -1, &plan[0])
+           == TWIST_OK && plan[0] == TWIST_DISC_ALPN, "h3 given up");
+    check (twist_http_discover (TWIST_HTTP_VERSION_NONE, 1, 1, 0, 1, &plan[0])
+           == TWIST_OK && plan[0] == TWIST_DISC_ALPN, "rr without h3");
+    check (twist_http_discover (TWIST_HTTP_VERSION_NONE, 0, 0, 0, 0, &plan[0])
+           == TWIST_OK && plan[0] == TWIST_DISC_H2C, "cleartext h2c");
+    check (twist_http_discover (TWIST_HTTP_VERSION_2_PRIOR_KNOWLEDGE, 0, 0, 0,
+                                0, &plan[0]) == TWIST_OK
+           && plan[0] == TWIST_DISC_H2_PRIOR, "prior knowledge");
+    check (twist_http_discover (TWIST_HTTP_VERSION_2_0, 1, 1, 1, 0, &plan[0])
+           == TWIST_OK && plan[0] == TWIST_DISC_ALPN, "http2 stays alpn");
+    check (twist_http_discover (TWIST_HTTP_VERSION_1_0, 1, 1, 1, 0, &plan[0])
+           == TWIST_OK && plan[0] == TWIST_DISC_H1, "pin 1.0");
+    check (twist_http_discover (TWIST_HTTP_VERSION_3ONLY, 0, 0, 0, 0, &plan[0])
+           == TWIST_OK && plan[0] == TWIST_DISC_H3, "pin h3");
+    check (twist_alt_svc_h3 ("h3=\":443\"; ma=60", 16, &plan[1], &plan[2]) == 1
+           && plan[1] == 443 && plan[2] == 0, "alt-svc h3");
+    check (twist_alt_svc_h3 ("clear", 5, &plan[1], &plan[2]) == 0
+           && plan[2] == 1, "alt-svc clear");
+    check (twist_alt_svc_h3 ("h2=\":443\"", 9, &plan[1], &plan[2]) == 0
+           && plan[2] == 0, "alt-svc no h3");
+    free (framed);
+  }
   free (msg);
 }
 

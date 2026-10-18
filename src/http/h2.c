@@ -260,6 +260,22 @@ frame_hdr (uint8_t *p, uint32_t len, uint8_t type, uint8_t flags,
 }
 
 int
+twist_h2_preface (uint8_t **out, size_t *out_len)
+{
+  static const uint8_t settings[6] = { 0x00, 0x02, 0x00, 0x00, 0x00, 0x00 };
+  uint8_t *buf = twist_xmalloc (24 + 9 + sizeof settings);
+
+  if (buf == NULL)
+    return TWIST_ERR_NOMEM;
+  memcpy (buf, preface, 24);
+  frame_hdr (buf + 24, (uint32_t) sizeof settings, H2_SETTINGS, 0, 0);
+  memcpy (buf + 33, settings, sizeof settings);
+  *out = buf;
+  *out_len = 24 + 9 + sizeof settings;
+  return TWIST_OK;
+}
+
+int
 twist_h2_request (struct twist_h2 *h, const char *method, const char *scheme,
                   const char *authority, const char *path,
                   const struct twist_slist *extra, const uint8_t *body,

@@ -30,7 +30,8 @@ libtwist_la_LIBADD = $(QUICKSTEP_LIBS) $(LTLIBINTL)
 ## directory, not another file in a flat list.
 ##
 ##   reactor/  loop, connection, poll, timers, runtime, storage
-##   engine/   url, easy/multi/share, dns, proxy, scheme table
+##   engine/   url, easy/multi/share, proxy, scheme table
+##   dns/      DNS client: message parser, transport order, resolver
 ##   auth/     SASL clients, HTTP Basic and Digest, MD5, SHA-256
 ##   http/     HTTP/1, HTTP/2, HTTP/3 and cookies
 ##   ftp/ file/  scheme handlers
@@ -60,7 +61,6 @@ libtwist_la_SOURCES = \
   reactor/storage.c \
   reactor/timer.c \
   reactor/timer.h \
-  engine/dns.c \
   engine/easy.c \
   engine/multi.c \
   engine/pool.c \
@@ -68,6 +68,9 @@ libtwist_la_SOURCES = \
   engine/scheme.c \
   engine/share.c \
   engine/url.c \
+  dns/policy.c \
+  dns/resolve.c \
+  dns/wire.c \
   http/cookie.c \
   http/h1.c \
   http/h2.c \
@@ -77,6 +80,7 @@ libtwist_la_SOURCES = \
   http/http.c \
   http/qpack.c \
   http/qpack_tab.h \
+  http/version.c \
   ftp/ftp.c \
   file/file.c \
   tls/quic.c \

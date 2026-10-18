@@ -96,10 +96,15 @@ Follow redirections.
 @itemx --insecure
 Accepted for compatibility with curl.  The TLS engine still checks the
 configured trust store.
-@item --http1.1
+@item --http1.0
+@itemx --http1.1
 @itemx --http2
+@itemx --http2-prior-knowledge
 @itemx --http3
-Select the HTTP version.
+@itemx --http3-only
+Select the HTTP version.  HTTP/3 is used when discovered from an HTTPS
+record or a cached Alt-Svc entry.  HTTP/2 on HTTPS is ALPN.  Cleartext
+HTTP/2 is an h2c upgrade, unless prior knowledge was requested.
 @end table
 
 Diagnostics are written to standard error and begin with @samp{twist:}.

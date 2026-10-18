@@ -32,12 +32,28 @@ Follow redirections.
 .B \-k
 Accept the option.  The TLS engine still checks the trust store.
 .TP
+.B \-\-http1.0
+.TQ
 .B \-\-http1.1
 .TQ
 .B \-\-http2
 .TQ
+.B \-\-http2-prior-knowledge
+.TQ
 .B \-\-http3
-Select the HTTP version to offer.
+.TQ
+.B \-\-http3-only
+Select the HTTP version.  With no version selected, HTTP/3 is used
+when an HTTPS record or a cached Alt-Svc entry advertises it.
+Otherwise HTTPS negotiates HTTP/2 with ALPN, and cleartext offers an
+h2c upgrade.  Prior knowledge is only
+.BR \-\-http2-prior-knowledge .
+The HTTP/1 minor version is taken from the response status line.
+.TP
+.BI \-\-dns-order " list"
+Comma-separated DNS transports.  The default is
+.BR doq,dot,doh,udp .
+UDP retries over TCP when the answer is truncated.
 .SH AUTHOR
 Chris Burdess.
 .SH SEE ALSO

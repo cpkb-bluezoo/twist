@@ -97,6 +97,9 @@ struct twist_easy
   long connect_timeout_ms;
   char *proxy;
   int http_version;
+  int dns_order[4];
+  int dns_order_n;
+  struct twist_origin_hint *origins;
   unsigned auth;
   char *range;
   char *referer;
@@ -328,14 +331,73 @@ struct twist_dns_addr
   char text[64];
 };
 
+struct twist_dns_events
+{
+  void *user;
+  void (*address) (void *user, const struct twist_dns_addr *addr);
+  void (*https_alpn) (void *user, const char *id, size_t len);
+  void (*https_port) (void *user, int port);
+  void (*https_rr) (void *user);
+  void (*truncated) (void *user);
+  void (*failure) (void *user, int err);
+};
+
+/* TCP, DoT, and DoQ framing: a 16-bit length then one message.
+   A short return means the length or the message is not here yet.  */
+size_t twist_dns_stream_receive (const uint8_t *data, size_t len,
+                                 const struct twist_dns_events *ev);
+/* UDP and a DoH body: one message, no length prefix.  */
+size_t twist_dns_datagram_receive (const uint8_t *data, size_t len,
+                                   const struct twist_dns_events *ev);
 int twist_dns_encode_query (const char *name, int qtype, uint16_t id,
                             uint8_t **out, size_t *len);
 int twist_dns_decode (const uint8_t *msg, size_t len, int qtype,
                       struct twist_dns_addr **out, size_t *n);
+int twist_dns_parse_order (const char *text, int *out, size_t cap, size_t *n);
+int twist_dns_transport_plan (const int *user, size_t nuser, int *out,
+                              size_t cap, size_t *n);
+
+struct twist_dns_service
+{
+  struct twist_dns_addr addr;
+  int nalpn;
+  char alpn[4][16];
+  int port;
+  int have_https;
+};
+
 int twist_dns_resolve (struct twist_loop *loop, const char *host,
+                       const int *order, size_t norder,
                        void (*cb) (void *user, int err,
                                    const struct twist_dns_addr *addr),
                        void *user);
+int twist_dns_resolve_service (struct twist_loop *loop, const char *host,
+                               const int *order, size_t norder,
+                               void (*cb) (void *user, int err,
+                                           const struct twist_dns_service *svc),
+                               void *user);
+
+enum
+{
+  TWIST_DISC_H3 = 1,
+  TWIST_DISC_ALPN,
+  TWIST_DISC_H2_PRIOR,
+  TWIST_DISC_H2C,
+  TWIST_DISC_H1
+};
+
+struct twist_origin_hint;
+
+int twist_http_discover (int pinned, int https, int rr, int rr_h3, int cached,
+                         int *how);
+int twist_alt_svc_h3 (const char *value, size_t len, int *port, int *clear);
+void twist_origin_clear (struct twist_easy *easy);
+int twist_origin_h3 (struct twist_easy *easy, const char *host, int *port);
+void twist_origin_set_h3 (struct twist_easy *easy, const char *host, int yes,
+                          int port);
+int twist_origin_http_minor (struct twist_easy *easy, const char *host);
+void twist_origin_set_http_minor (struct twist_easy *easy, const char *host,
+                                  int minor);
 
 struct twist_pool;
 struct twist_pool *twist_pool_new (void);
@@ -377,6 +439,10 @@ struct twist_h1_events
   void (*body) (void *user, const uint8_t *data, size_t len);
   void (*message_done) (void *user);
   void (*failure) (void *user, int err);
+  void (*version) (void *user, int major, int minor);
+  /* Return 1 to stop parsing: the rest of the connection is no longer
+     HTTP/1 (h2c 101).  */
+  int (*switching) (void *user);
 };
 
 struct twist_h1 *twist_h1_new (const struct twist_h1_events *ev);
@@ -407,6 +473,7 @@ struct twist_h2 *twist_h2_new (const struct twist_h1_events *ev);
 void twist_h2_free (struct twist_h2 *h2);
 int twist_h2_client_preface (uint8_t **out, size_t *len);
 size_t twist_h2_receive (struct twist_h2 *h2, const uint8_t *data, size_t len);
+int twist_h2_preface (uint8_t **out, size_t *out_len);
 int twist_h2_request (struct twist_h2 *h2, const char *method,
                       const char *scheme, const char *authority,
                       const char *path, const struct twist_slist *extra,

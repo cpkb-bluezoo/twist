@@ -91,7 +91,8 @@ enum twist_http_version
   TWIST_HTTP_VERSION_2_0 = 3,
   TWIST_HTTP_VERSION_2TLS = 4,
   TWIST_HTTP_VERSION_3 = 5,
-  TWIST_HTTP_VERSION_3ONLY = 6
+  TWIST_HTTP_VERSION_3ONLY = 6,
+  TWIST_HTTP_VERSION_2_PRIOR_KNOWLEDGE = 7
 };
 
 #define TWISTAUTH_NONE 0u
@@ -134,7 +135,17 @@ enum twist_opt
   TWISTOPT_MAX_RECV_SPEED_LARGE = 31,
   TWISTOPT_MAX_SEND_SPEED_LARGE = 32,
   TWISTOPT_COOKIE = 33,
-  TWISTOPT_ABSTRACT_UNIX_SOCKET = 34
+  TWISTOPT_ABSTRACT_UNIX_SOCKET = 34,
+  /* Comma-separated DNS transports.  Default is doq,dot,doh,udp.  */
+  TWISTOPT_DNS_ORDER = 35
+};
+
+enum twist_dns_transport
+{
+  TWIST_DNS_DOQ = 1,
+  TWIST_DNS_DOT = 2,
+  TWIST_DNS_DOH = 3,
+  TWIST_DNS_UDP = 4
 };
 
 enum twist_info

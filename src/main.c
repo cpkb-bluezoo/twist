@@ -62,7 +62,10 @@ usage (void)
   printf (_("      --http1.0           use HTTP/1.0\n"));
   printf (_("      --http1.1           use HTTP/1.1\n"));
   printf (_("      --http2             use HTTP/2\n"));
-  printf (_("      --http3             use HTTP/3\n"));
+  printf (_("      --http2-prior-knowledge  HTTP/2 without upgrade\n"));
+  printf (_("      --http3             use HTTP/3 when it is discovered\n"));
+  printf (_("      --http3-only        fail unless HTTP/3 can be used\n"));
+  printf (_("      --dns-order LIST    DNS transports (default doq,dot,doh,udp)\n"));
   printf (_("      --help              display this help and exit\n"));
   printf (_("      --version           output version information and exit\n"));
   printf (_("\nReport bugs to %s.\n"), PACKAGE_BUGREPORT);
@@ -104,7 +107,10 @@ main (int argc, char **argv)
     { "http1.0", no_argument, NULL, 2 },
     { "http1.1", no_argument, NULL, 3 },
     { "http2", no_argument, NULL, 4 },
+    { "http2-prior-knowledge", no_argument, NULL, 9 },
     { "http3", no_argument, NULL, 5 },
+    { "http3-only", no_argument, NULL, 10 },
+    { "dns-order", required_argument, NULL, 8 },
     { "help", no_argument, NULL, 6 },
     { "version", no_argument, NULL, 7 },
     { NULL, 0, NULL, 0 }
@@ -198,6 +204,21 @@ main (int argc, char **argv)
         case 5:
           twist_easy_setopt (easy, TWISTOPT_HTTP_VERSION,
                              (long) TWIST_HTTP_VERSION_3);
+          break;
+        case 9:
+          twist_easy_setopt (easy, TWISTOPT_HTTP_VERSION,
+                             (long) TWIST_HTTP_VERSION_2_PRIOR_KNOWLEDGE);
+          break;
+        case 10:
+          twist_easy_setopt (easy, TWISTOPT_HTTP_VERSION,
+                             (long) TWIST_HTTP_VERSION_3ONLY);
+          break;
+        case 8:
+          if (twist_easy_setopt (easy, TWISTOPT_DNS_ORDER, optarg) != TWIST_OK)
+            {
+              die (_("unrecognised DNS transport order"));
+              return 1;
+            }
           break;
         case 6:
           usage ();

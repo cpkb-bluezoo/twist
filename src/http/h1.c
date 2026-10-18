@@ -130,6 +130,10 @@ parse_status (struct twist_h1 *p)
   p->code = (int) code;
   while (*end == ' ')
     end++;
+  if (strncmp (p->line, "HTTP/", 5) == 0 && p->line[5] >= '0'
+      && p->line[5] <= '9' && p->line[6] == '.' && p->line[7] >= '0'
+      && p->line[7] <= '9' && p->ev.version != NULL)
+    p->ev.version (p->ev.user, p->line[5] - '0', p->line[7] - '0');
   if (p->ev.status_line != NULL)
     p->ev.status_line (p->ev.user, p->code, end, strlen (end));
   p->state = H1_HEADER;
@@ -142,6 +146,11 @@ parse_status (struct twist_h1 *p)
 static void
 header_done (struct twist_h1 *p)
 {
+  if (p->code == 101 && p->ev.switching != NULL && p->ev.switching (p->ev.user))
+    {
+      p->state = H1_DONE;
+      return;
+    }
   if (p->code >= 100 && p->code < 200)
     {
       p->state = H1_STATUS;

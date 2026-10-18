@@ -77,6 +77,7 @@ easy_clear (struct twist_easy *easy)
   free (easy->cainfo);
   free (easy->effective_url);
   free (easy->content_type);
+  twist_origin_clear (easy);
 }
 
 void
@@ -167,6 +168,26 @@ twist_easy_setopt (twist_easy *easy, int opt, ...)
       break;
     case TWISTOPT_HTTP_VERSION:
       easy->http_version = (int) va_arg (ap, long);
+      break;
+    case TWISTOPT_DNS_ORDER:
+      {
+        const char *s = va_arg (ap, const char *);
+        int tmp[4];
+        size_t n = 0;
+
+        if (s == NULL || s[0] == 0)
+          {
+            easy->dns_order_n = 0;
+            break;
+          }
+        if (twist_dns_parse_order (s, tmp, 4, &n) != TWIST_OK)
+          rc = TWIST_ERR_INVAL;
+        else
+          {
+            memcpy (easy->dns_order, tmp, n * sizeof tmp[0]);
+            easy->dns_order_n = (int) n;
+          }
+      }
       break;
     case TWISTOPT_XOAUTH2_BEARER:
       replace (&easy->bearer, va_arg (ap, const char *));
