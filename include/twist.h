@@ -139,7 +139,9 @@ enum twist_opt
   TWISTOPT_COOKIE = 33,
   TWISTOPT_ABSTRACT_UNIX_SOCKET = 34,
   /* Comma-separated DNS transports.  Default is doq,dot,doh,udp.  */
-  TWISTOPT_DNS_ORDER = 35
+  TWISTOPT_DNS_ORDER = 35,
+  TWISTOPT_MAIL_FROM = 36,
+  TWISTOPT_MAIL_RCPT = 37
 };
 
 enum twist_dns_transport

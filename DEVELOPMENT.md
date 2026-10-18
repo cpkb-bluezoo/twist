@@ -60,7 +60,8 @@ adding a special case to the loop.
 Each item is a new row in the scheme table. The loop does not change.
 
 - [x] FTP/FTPS (control reply lines, same-loop data connection)
-- [ ] SMTP/SMTPS, IMAP/IMAPS, POP3/POP3S, MQTT, LDAP/LDAPS
+- [x] SMTP/SMTPS, IMAP/IMAPS, POP3/POP3S
+- [ ] MQTT, LDAP/LDAPS
 - [ ] WebSocket upgrade (`ws` / `wss`) on the HTTP handler
 - [ ] DICT, GOPHER/GOPHERS, TELNET, RTSP
 - [ ] TFTP as a datagram handler

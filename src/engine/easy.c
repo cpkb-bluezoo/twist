@@ -74,6 +74,7 @@ easy_clear (struct twist_easy *easy)
   free (easy->range);
   free (easy->referer);
   free (easy->cookie);
+  free (easy->mail_from);
   free (easy->cainfo);
   free (easy->effective_url);
   free (easy->content_type);
@@ -242,6 +243,12 @@ twist_easy_setopt (twist_easy *easy, int opt, ...)
       break;
     case TWISTOPT_COOKIE:
       replace (&easy->cookie, va_arg (ap, const char *));
+      break;
+    case TWISTOPT_MAIL_FROM:
+      replace (&easy->mail_from, va_arg (ap, const char *));
+      break;
+    case TWISTOPT_MAIL_RCPT:
+      easy->mail_rcpt = va_arg (ap, struct twist_slist *);
       break;
     default:
       rc = TWIST_ERR_UNSUPPORTED;

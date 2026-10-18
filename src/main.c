@@ -74,6 +74,8 @@ usage (void)
          stdout);
   fputs (_("      --dns-order LIST    DNS transports (default doq,dot,doh,udp)\n"),
          stdout);
+  fputs (_("      --mail-from ADDR    SMTP sender\n"), stdout);
+  fputs (_("      --mail-rcpt ADDR    SMTP recipient\n"), stdout);
   fputs (_("      --help              display this help and exit\n"), stdout);
   fputs (_("      --version           output version information and exit\n"),
          stdout);
@@ -128,12 +130,15 @@ main (int argc, char **argv)
     { "http3", no_argument, NULL, 5 },
     { "http3-only", no_argument, NULL, 10 },
     { "dns-order", required_argument, NULL, 8 },
+    { "mail-from", required_argument, NULL, 11 },
+    { "mail-rcpt", required_argument, NULL, 12 },
     { "help", no_argument, NULL, 6 },
     { "version", no_argument, NULL, 7 },
     { NULL, 0, NULL, 0 }
   };
   twist_easy *easy;
   struct twist_slist *headers = NULL;
+  struct twist_slist *rcpts = NULL;
   const char *url = NULL;
   const char *writeout = NULL;
   int c;
@@ -233,6 +238,12 @@ main (int argc, char **argv)
           twist_easy_setopt (easy, TWISTOPT_HTTP_VERSION,
                              (long) TWIST_HTTP_VERSION_3ONLY);
           break;
+        case 11:
+          twist_easy_setopt (easy, TWISTOPT_MAIL_FROM, optarg);
+          break;
+        case 12:
+          rcpts = twist_slist_append (rcpts, optarg);
+          break;
         case 8:
           if (twist_easy_setopt (easy, TWISTOPT_DNS_ORDER, optarg) != TWIST_OK)
             {
@@ -263,6 +274,7 @@ main (int argc, char **argv)
       suggest_help ();
       twist_easy_cleanup (easy);
       twist_slist_free_all (headers);
+      twist_slist_free_all (rcpts);
       return 1;
     }
   twist_easy_setopt (easy, TWISTOPT_URL, url);
@@ -270,6 +282,8 @@ main (int argc, char **argv)
   twist_easy_setopt (easy, TWISTOPT_WRITEDATA, out_file != NULL ? out_file : stdout);
   if (headers != NULL)
     twist_easy_setopt (easy, TWISTOPT_HTTPHEADER, headers);
+  if (rcpts != NULL)
+    twist_easy_setopt (easy, TWISTOPT_MAIL_RCPT, rcpts);
   rc = twist_easy_perform (easy);
   if (rc != TWIST_OK)
     {
@@ -292,6 +306,7 @@ main (int argc, char **argv)
     }
   twist_easy_cleanup (easy);
   twist_slist_free_all (headers);
+  twist_slist_free_all (rcpts);
   if (out_file != NULL && out_file != stdout)
     fclose (out_file);
   twist_global_cleanup ();

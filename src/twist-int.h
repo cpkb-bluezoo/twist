@@ -105,6 +105,8 @@ struct twist_easy
   char *range;
   char *referer;
   char *cookie;
+  char *mail_from;
+  struct twist_slist *mail_rcpt;
   int nobody;
   int failonerror;
   twist_write_callback write_cb;
@@ -296,6 +298,9 @@ int twist_http_attach (struct twist_easy *easy);
 int twist_file_attach (struct twist_easy *easy);
 int twist_file_check_url (const char *host, const char *path, int path_set);
 int twist_ftp_attach (struct twist_easy *easy);
+int twist_smtp_attach (struct twist_easy *easy);
+int twist_pop3_attach (struct twist_easy *easy);
+int twist_imap_attach (struct twist_easy *easy);
 
 struct twist_ftp;
 struct twist_ftp *twist_ftp_new (struct twist_easy *easy, int live);
@@ -533,6 +538,105 @@ int twist_sasl_has_initial (const struct twist_sasl_client *client);
 int twist_sasl_step (struct twist_sasl_client *client,
                      const uint8_t *challenge, size_t len, uint8_t **out,
                      size_t *out_len, int *done);
+
+/* Streaming MIME writer.  Events and body chunks are written to the
+   sink as they arrive.  The writer keeps one fixed buffer.  */
+struct twist_mime;
+struct twist_mime *twist_mime_new (int (*sink) (void *user, const uint8_t *data,
+                                                size_t len),
+                                   void *user);
+void twist_mime_free (struct twist_mime *mime);
+int twist_mime_begin (struct twist_mime *mime, const char *subtype);
+int twist_mime_part (struct twist_mime *mime);
+int twist_mime_header (struct twist_mime *mime, const char *name,
+                       const char *value);
+int twist_mime_body (struct twist_mime *mime, const uint8_t *data, size_t len);
+int twist_mime_body_b64 (struct twist_mime *mime, const uint8_t *data,
+                         size_t len);
+int twist_mime_finish (struct twist_mime *mime);
+
+#define TWIST_MAIL_LINE_MAX 4096
+
+size_t twist_mail_line (const uint8_t *data, size_t len, const uint8_t **line,
+                        size_t *line_len, int *err);
+
+struct twist_dotout
+{
+  int bol;
+};
+
+struct twist_dotin
+{
+  int state;
+};
+
+void twist_dotout_init (struct twist_dotout *dot);
+int twist_dotout_write (struct twist_dotout *dot, const uint8_t *data,
+                        size_t len,
+                        int (*sink) (void *user, const uint8_t *data, size_t len),
+                        void *user);
+int twist_dotout_finish (struct twist_dotout *dot,
+                         int (*sink) (void *user, const uint8_t *data, size_t len),
+                         void *user);
+void twist_dotin_init (struct twist_dotin *dot);
+size_t twist_dotin_pull (struct twist_dotin *dot, const uint8_t *data,
+                         size_t len,
+                         int (*sink) (void *user, const uint8_t *data, size_t len),
+                         void *user, int *done, int *err);
+
+struct twist_mail_sasl
+{
+  struct twist_sasl_client *client;
+  int mech;
+  int done;
+};
+
+void twist_mail_sasl_init (struct twist_mail_sasl *sasl);
+void twist_mail_sasl_close (struct twist_mail_sasl *sasl);
+int twist_mail_sasl_start (struct twist_mail_sasl *sasl, struct twist_easy *easy,
+                           const char *advertised, char **b64, int *initial);
+int twist_mail_sasl_continue (struct twist_mail_sasl *sasl, char **b64);
+const char *twist_mail_user (const struct twist_easy *easy);
+const char *twist_mail_pass (const struct twist_easy *easy);
+
+struct twist_mail_link
+{
+  struct twist_easy *easy;
+  struct twist_connection *conn;
+  struct twist_proxy *proxy;
+  struct twist_timer *timer;
+  char *dial_host;
+  int dial_port;
+  const struct twist_protocol_handler *handler;
+  void *user;
+  void (*fail) (void *user, int err);
+};
+
+int twist_mail_link_open (struct twist_mail_link *link, struct twist_easy *easy,
+                          const struct twist_protocol_handler *handler,
+                          void *user, void (*fail) (void *user, int err));
+void twist_mail_link_close (struct twist_mail_link *link);
+
+struct twist_smtp;
+struct twist_smtp *twist_smtp_new (struct twist_easy *easy, int live);
+void twist_smtp_free (void *smtp);
+size_t twist_smtp_receive (struct twist_smtp *smtp, const uint8_t *data,
+                           size_t len);
+const char *twist_smtp_command (const struct twist_smtp *smtp);
+
+struct twist_pop3;
+struct twist_pop3 *twist_pop3_new (struct twist_easy *easy, int live);
+void twist_pop3_free (void *pop3);
+size_t twist_pop3_receive (struct twist_pop3 *pop3, const uint8_t *data,
+                           size_t len);
+const char *twist_pop3_command (const struct twist_pop3 *pop3);
+
+struct twist_imap;
+struct twist_imap *twist_imap_new (struct twist_easy *easy, int live);
+void twist_imap_free (void *imap);
+size_t twist_imap_receive (struct twist_imap *imap, const uint8_t *data,
+                           size_t len);
+const char *twist_imap_command (const struct twist_imap *imap);
 
 struct twist_share
 {

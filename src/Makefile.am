@@ -34,7 +34,8 @@ libtwist_la_LIBADD = $(QUICKSTEP_LIBS) $(LTLIBINTL)
 ##   dns/      DNS client: message parser, transport order, resolver
 ##   auth/     SASL clients, HTTP Basic and Digest, MD5, SHA-256
 ##   http/     HTTP/1, HTTP/2, HTTP/3 and cookies
-##   ftp/ file/  scheme handlers
+##   ftp/ file/ mail/  scheme handlers
+##   mime/     streaming MIME writer
 ##   tls/      quickstep TLS and QUIC under the connection
 
 libtwist_la_SOURCES = \
@@ -83,6 +84,13 @@ libtwist_la_SOURCES = \
   http/version.c \
   ftp/ftp.c \
   file/file.c \
+  mail/auth.c \
+  mail/dial.c \
+  mail/imap.c \
+  mail/pop3.c \
+  mail/smtp.c \
+  mail/wire.c \
+  mime/writer.c \
   tls/quic.c \
   tls/tls.c
 

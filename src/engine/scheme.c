@@ -49,6 +49,24 @@ attach_ftp (struct twist_easy *easy)
   return twist_ftp_attach (easy);
 }
 
+static int
+attach_smtp (struct twist_easy *easy)
+{
+  return twist_smtp_attach (easy);
+}
+
+static int
+attach_imap (struct twist_easy *easy)
+{
+  return twist_imap_attach (easy);
+}
+
+static int
+attach_pop3 (struct twist_easy *easy)
+{
+  return twist_pop3_attach (easy);
+}
+
 static const struct twist_scheme schemes[] = {
   { "http", 80, TWIST_SCHEME_PROXY_OK | TWIST_SCHEME_READY, attach_http },
   { "https", 443, TWIST_SCHEME_TLS | TWIST_SCHEME_PROXY_OK | TWIST_SCHEME_READY,
@@ -60,12 +78,15 @@ static const struct twist_scheme schemes[] = {
   { "ftps", 990,
     TWIST_SCHEME_TLS | TWIST_SCHEME_MULTI | TWIST_SCHEME_PROXY_OK | TWIST_SCHEME_READY,
     attach_ftp },
-  { "smtp", 25, TWIST_SCHEME_PROXY_OK, twist_scheme_unsupported },
-  { "smtps", 465, TWIST_SCHEME_TLS | TWIST_SCHEME_PROXY_OK, twist_scheme_unsupported },
-  { "imap", 143, TWIST_SCHEME_PROXY_OK, twist_scheme_unsupported },
-  { "imaps", 993, TWIST_SCHEME_TLS | TWIST_SCHEME_PROXY_OK, twist_scheme_unsupported },
-  { "pop3", 110, TWIST_SCHEME_PROXY_OK, twist_scheme_unsupported },
-  { "pop3s", 995, TWIST_SCHEME_TLS | TWIST_SCHEME_PROXY_OK, twist_scheme_unsupported },
+  { "smtp", 25, TWIST_SCHEME_PROXY_OK | TWIST_SCHEME_READY, attach_smtp },
+  { "smtps", 465, TWIST_SCHEME_TLS | TWIST_SCHEME_PROXY_OK | TWIST_SCHEME_READY,
+    attach_smtp },
+  { "imap", 143, TWIST_SCHEME_PROXY_OK | TWIST_SCHEME_READY, attach_imap },
+  { "imaps", 993, TWIST_SCHEME_TLS | TWIST_SCHEME_PROXY_OK | TWIST_SCHEME_READY,
+    attach_imap },
+  { "pop3", 110, TWIST_SCHEME_PROXY_OK | TWIST_SCHEME_READY, attach_pop3 },
+  { "pop3s", 995, TWIST_SCHEME_TLS | TWIST_SCHEME_PROXY_OK | TWIST_SCHEME_READY,
+    attach_pop3 },
   { "ldap", 389, TWIST_SCHEME_PROXY_OK, twist_scheme_unsupported },
   { "ldaps", 636, TWIST_SCHEME_TLS | TWIST_SCHEME_PROXY_OK, twist_scheme_unsupported },
   { "mqtt", 1883, TWIST_SCHEME_PROXY_OK, twist_scheme_unsupported },
