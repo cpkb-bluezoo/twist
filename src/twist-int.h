@@ -35,6 +35,7 @@ struct twist_connection;
 struct twist_timer;
 struct twist_runtime;
 struct twist_storage;
+struct twist_dns_addr;
 
 #define TWIST_INTEREST_READ 1
 #define TWIST_INTEREST_WRITE 2
@@ -112,6 +113,8 @@ struct twist_easy
   char *mail_from;
   struct twist_slist *mail_rcpt;
   char *doh_url;
+  char *doq_url;
+  char *dot_url;
   int doh_verifypeer;
   int nobody;
   int failonerror;
@@ -272,6 +275,11 @@ extern int (*twist_tls_send_plain_fn) (struct twist_connection *conn,
                                        const uint8_t *data, size_t len);
 extern int (*twist_quic_connect_fn) (struct twist_easy *easy,
                                      struct twist_connection **out);
+int twist_quic_dial (struct twist_loop *loop, const char *server_name,
+                     const char *alpn, const struct twist_dns_addr *addr,
+                     int port, const char *cafile, const char *certfile,
+                     const char *keyfile, struct twist_connection **out);
+int twist_quic_open_stream (struct twist_connection *conn);
 
 int twist_tls_register (void);
 int twist_quic_register (void);
@@ -370,6 +378,11 @@ struct twist_dns_events
   void (*https_alpn) (void *user, const char *id, size_t len);
   void (*https_port) (void *user, int port);
   void (*https_rr) (void *user);
+  /* One call per ALPN id.  port 0 means the transport default.  hint is
+     the first address hint, or NULL when the record has none.  */
+  void (*svcb) (void *user, const char *target, const char *alpn,
+                size_t alpn_len, int port, int hint_family,
+                const uint8_t *hint);
   void (*truncated) (void *user);
   void (*failure) (void *user, int err);
 };
@@ -383,6 +396,9 @@ size_t twist_dns_datagram_receive (const uint8_t *data, size_t len,
                                    const struct twist_dns_events *ev);
 int twist_dns_encode_query (const char *name, int qtype, uint16_t id,
                             uint8_t **out, size_t *len);
+/* Two-byte length prefix.  zero_id clears the DNS id (DoQ).  */
+int twist_dns_frame_stream (const uint8_t *msg, size_t len, int zero_id,
+                            uint8_t **out, size_t *outlen);
 int twist_dns_decode (const uint8_t *msg, size_t len, int qtype,
                       struct twist_dns_addr **out, size_t *n);
 int twist_dns_parse_order (const char *text, int *out, size_t cap, size_t *n);

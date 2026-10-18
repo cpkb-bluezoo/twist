@@ -69,6 +69,7 @@ Each item is a new row in the scheme table. The loop does not change.
 - [ ] FILE through the storage pool
 - [ ] SCP/SFTP, SMB/SMBS, RTMP/RTMPS
 - [x] DoH as an HTTP transfer used by the resolver
+- [x] DoQ and DoT, discovered with DDR when no resolver URL is set
 - [ ] NTLM and Negotiate, only after an explicit dependency decision
 
 ## Tests and release

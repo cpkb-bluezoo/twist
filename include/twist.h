@@ -150,7 +150,11 @@ enum twist_opt
   /* PEM client certificate, leaf first.  Empty clears it.  */
   TWISTOPT_SSLCERT = 40,
   /* PEM private key for TWISTOPT_SSLCERT.  Empty clears it.  */
-  TWISTOPT_SSLKEY = 41
+  TWISTOPT_SSLKEY = 41,
+  /* quic://host[:port] DNS-over-QUIC resolver.  Empty clears it.  */
+  TWISTOPT_DOQ_URL = 42,
+  /* tls://host[:port] DNS-over-TLS resolver.  Empty clears it.  */
+  TWISTOPT_DOT_URL = 43
 };
 
 enum twist_dns_transport

@@ -77,6 +77,8 @@ easy_clear (struct twist_easy *easy)
   free (easy->cookie);
   free (easy->mail_from);
   free (easy->doh_url);
+  free (easy->doq_url);
+  free (easy->dot_url);
   free (easy->cainfo);
   free (easy->sslcert);
   free (easy->sslkey);
@@ -279,6 +281,24 @@ twist_easy_setopt (twist_easy *easy, int opt, ...)
         if (s != NULL && s[0] == 0)
           s = NULL;
         replace (&easy->doh_url, s);
+      }
+      break;
+    case TWISTOPT_DOQ_URL:
+      {
+        const char *s = va_arg (ap, const char *);
+
+        if (s != NULL && s[0] == 0)
+          s = NULL;
+        replace (&easy->doq_url, s);
+      }
+      break;
+    case TWISTOPT_DOT_URL:
+      {
+        const char *s = va_arg (ap, const char *);
+
+        if (s != NULL && s[0] == 0)
+          s = NULL;
+        replace (&easy->dot_url, s);
       }
       break;
     case TWISTOPT_DOH_SSL_VERIFYPEER:

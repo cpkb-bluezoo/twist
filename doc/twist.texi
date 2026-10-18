@@ -123,8 +123,10 @@ record or a cached Alt-Svc entry.  HTTP/2 on HTTPS is ALPN.  Cleartext
 HTTP/2 is an h2c upgrade, unless prior knowledge was requested.
 @item --dns-order @var{list}
 Comma-separated DNS transports.  The default is @code{doq,dot,doh,udp}.
-UDP retries over TCP when the answer is truncated.  A host that is an
-IPv4 or IPv6 address is used as that address.
+DoQ and DoT are used when the system resolver advertises them, or when
+@option{--doq-url} or @option{--dot-url} names a server.  UDP retries
+over TCP when the answer is truncated.  A host that is an IPv4 or IPv6
+address is used as that address.
 @item --doh-url @var{url}
 Resolve host names through this DNS-over-HTTPS server instead of
 @option{--dns-order}.  The URL must use HTTPS.  The server's name is
@@ -136,6 +138,15 @@ that list is used and this URL supplies the @code{doh} step.
 @item --doh-insecure
 Do not verify the DoH server certificate.  This is independent of
 @option{-k}.  Curl's @option{--doh-cert-status} is not supported.
+@item --doq-url @var{url}
+DNS-over-QUIC server.  @code{quic://host} or @code{host}, with an
+optional port (default 853).  The certificate is checked against that
+host.  The host name is resolved with UDP.  An empty URL clears it.
+Without this option, DoQ uses the address and name from a
+@code{_dns.resolver.arpa} SVCB record (DDR).
+@item --dot-url @var{url}
+DNS-over-TLS server.  @code{tls://host} or @code{host}, with an optional
+port (default 853).  Same discovery rules as @option{--doq-url}.
 @item --mail-from @var{address}
 @itemx --mail-rcpt @var{address}
 SMTP envelope.  Repeat @option{--mail-rcpt} for each recipient.

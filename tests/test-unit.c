@@ -2052,6 +2052,134 @@ test_client_auth (void)
   check (!twist_client_auth_missing (&info), "mtls sent");
 }
 
+struct svcb_saw
+{
+  int n;
+  char target[64];
+  char alpn[4][8];
+  int nalpn;
+  int port;
+  int family;
+  unsigned char addr[4];
+};
+
+static void
+saw_svcb (void *user, const char *target, const char *alpn, size_t alpn_len,
+          int port, int family, const uint8_t *hint)
+{
+  struct svcb_saw *s = user;
+
+  if (s->n == 0 && target != NULL)
+    {
+      snprintf (s->target, sizeof s->target, "%s", target);
+      s->port = port;
+      s->family = family;
+      if (family == 4 && hint != NULL)
+        memcpy (s->addr, hint, 4);
+    }
+  if (s->nalpn < 4 && alpn_len < 8)
+    {
+      memcpy (s->alpn[s->nalpn], alpn, alpn_len);
+      s->alpn[s->nalpn][alpn_len] = 0;
+      s->nalpn++;
+    }
+  s->n++;
+}
+
+static void
+test_svcb (void)
+{
+  static const uint8_t msg[] = {
+    0x00, 0x03, 0x81, 0x80, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00,
+    0x04, '_', 'd', 'n', 's', 0x08, 'r', 'e', 's', 'o', 'l', 'v', 'e', 'r',
+    0x04, 'a', 'r', 'p', 'a', 0x00, 0x00, 0x40, 0x00, 0x01,
+    0xc0, 0x0c, 0x00, 0x40, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x28,
+    0x00, 0x01,
+    0x03, 'd', 'n', 's', 0x06, 'g', 'o', 'o', 'g', 'l', 'e', 0x00,
+    0x00, 0x01, 0x00, 0x08, 0x03, 'd', 'o', 'q', 0x03, 'd', 'o', 't',
+    0x00, 0x03, 0x00, 0x02, 0x03, 0x55,
+    0x00, 0x04, 0x00, 0x04, 8, 8, 8, 8
+  };
+  static const uint8_t alias[] = {
+    0x00, 0x03, 0x81, 0x80, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00,
+    0x04, '_', 'd', 'n', 's', 0x08, 'r', 'e', 's', 'o', 'l', 'v', 'e', 'r',
+    0x04, 'a', 'r', 'p', 'a', 0x00, 0x00, 0x40, 0x00, 0x01,
+    0xc0, 0x0c, 0x00, 0x40, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03,
+    0x00, 0x00, 0x00
+  };
+  uint8_t framed[sizeof msg + 2];
+  uint8_t window[sizeof msg + 2];
+  struct svcb_saw saw;
+  struct twist_dns_events ev;
+  struct twist_easy *easy;
+  uint8_t raw[12];
+  uint8_t *out = NULL;
+  size_t outlen = 0;
+  size_t step;
+
+  memset (raw, 0, sizeof raw);
+  raw[0] = 0x12;
+  raw[1] = 0x34;
+  check (twist_dns_frame_stream (raw, sizeof raw, 1, &out, &outlen) == TWIST_OK
+         && outlen == 14 && out[0] == 0 && out[1] == 12 && out[2] == 0
+         && out[3] == 0, "doq id");
+  free (out);
+  memset (&saw, 0, sizeof saw);
+  memset (&ev, 0, sizeof ev);
+  ev.user = &saw;
+  ev.svcb = saw_svcb;
+  check (twist_dns_datagram_receive (msg, sizeof msg, &ev) == sizeof msg,
+         "svcb dgram");
+  check (saw.n == 2 && strcmp (saw.target, "dns.google") == 0
+         && strcmp (saw.alpn[0], "doq") == 0 && strcmp (saw.alpn[1], "dot") == 0
+         && saw.port == 853 && saw.family == 4 && saw.addr[0] == 8
+         && saw.addr[3] == 8, "svcb fields");
+  framed[0] = 0;
+  framed[1] = (uint8_t) sizeof msg;
+  memcpy (framed + 2, msg, sizeof msg);
+  for (step = 1; step <= sizeof framed; step++)
+    {
+      size_t have = 0;
+      size_t off = 0;
+
+      memset (&saw, 0, sizeof saw);
+      while (off < sizeof framed)
+        {
+          size_t chunk = step;
+          size_t i;
+          if (chunk > sizeof framed - off)
+            chunk = sizeof framed - off;
+          for (i = 0; i < chunk; i++)
+            window[have++] = framed[off++];
+          for (;;)
+            {
+              size_t c = twist_dns_stream_receive (window, have, &ev);
+              if (c == 0)
+                break;
+              memmove (window, window + c, have - c);
+              have -= c;
+            }
+        }
+      check (saw.n == 2 && strcmp (saw.alpn[0], "doq") == 0
+             && strcmp (saw.alpn[1], "dot") == 0, "svcb split");
+    }
+  memset (&saw, 0, sizeof saw);
+  check (twist_dns_datagram_receive (alias, sizeof alias, &ev) == sizeof alias
+         && saw.n == 0, "svcb alias");
+  easy = twist_easy_init ();
+  check (easy != NULL, "resolver easy");
+  check (twist_easy_setopt (easy, TWISTOPT_DOQ_URL, "quic://dns.example:8853")
+         == TWIST_OK && easy->doq_url != NULL
+         && strcmp (easy->doq_url, "quic://dns.example:8853") == 0, "doq url");
+  check (twist_easy_setopt (easy, TWISTOPT_DOT_URL, "dns.example") == TWIST_OK
+         && strcmp (easy->dot_url, "dns.example") == 0, "dot url");
+  check (twist_easy_setopt (easy, TWISTOPT_DOQ_URL, "") == TWIST_OK
+         && easy->doq_url == NULL, "doq clear");
+  check (twist_easy_setopt (easy, TWISTOPT_DOT_URL, "") == TWIST_OK
+         && easy->dot_url == NULL, "dot clear");
+  twist_easy_cleanup (easy);
+}
+
 int
 main (void)
 {
@@ -2066,6 +2194,7 @@ main (void)
   test_cookie ();
   test_dns ();
   test_doh ();
+  test_svcb ();
   test_client_auth ();
   test_scheme ();
   test_connection ();

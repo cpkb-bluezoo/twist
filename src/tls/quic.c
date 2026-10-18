@@ -22,6 +22,7 @@
 
 #include "twist-int.h"
 
+#include <quickstep/crypto.h>
 #include <quickstep/endpoint.h>
 #include <quickstep/status.h>
 #include <quickstep/trust.h>
@@ -45,7 +46,7 @@ struct twist_quic
   struct twist_client_auth *auth;
   gq_tls_config tls;
   gq_slice alpn;
-  uint8_t alpn_mem[2];
+  uint8_t alpn_mem[16];
   char *server_name;
   int fd;
   uint64_t stream_id;
@@ -395,8 +396,29 @@ fill_events (gq_conn_events *ev, struct twist_quic *q)
   ev->ticket = ev_ticket;
 }
 
-static int
-quic_connect (struct twist_easy *easy, struct twist_connection **out)
+int
+twist_quic_open_stream (struct twist_connection *conn)
+{
+  struct twist_quic *q;
+  uint64_t id = 0;
+
+  if (conn == NULL)
+    return TWIST_ERR_INVAL;
+  q = twist_connection_tls (conn);
+  if (q == NULL || q->conn == NULL)
+    return TWIST_ERR_TLS;
+  if (gq_conn_stream_open (q->conn, 1, &id) != GQ_OK)
+    return TWIST_ERR_TLS;
+  q->stream_id = id;
+  q->have_stream = 1;
+  return TWIST_OK;
+}
+
+int
+twist_quic_dial (struct twist_loop *loop, const char *server_name,
+                 const char *alpn, const struct twist_dns_addr *addr,
+                 int port, const char *cafile, const char *certfile,
+                 const char *keyfile, struct twist_connection **out)
 {
   struct twist_quic *q;
   gq_endpoint_config ecfg;
@@ -404,32 +426,37 @@ quic_connect (struct twist_easy *easy, struct twist_connection **out)
   gq_conn_events cev;
   struct sockaddr_storage ss;
   socklen_t slen = sizeof ss;
-  struct twist_dns_addr addr;
+  size_t alpn_len;
   int family;
   int fd = -1;
   int rc;
   uint64_t now;
 
-  if (easy == NULL || easy->url == NULL || easy->loop == NULL || out == NULL)
+  if (loop == NULL || server_name == NULL || server_name[0] == 0
+      || alpn == NULL || addr == NULL       || out == NULL || port < 0 || port > 65535)
+    return TWIST_ERR_INVAL;
+  alpn_len = strlen (alpn);
+  if (alpn_len == 0 || alpn_len > 16)
     return TWIST_ERR_INVAL;
   *out = NULL;
+  if (gq_crypto_init () != GQ_OK)
+    return TWIST_ERR_TLS;
   q = calloc (1, sizeof *q);
   if (q == NULL)
     return TWIST_ERR_NOMEM;
-  q->loop = easy->loop;
+  q->loop = loop;
   q->fd = -1;
-  q->server_name = twist_strdup (easy->url->host);
-  q->alpn_mem[0] = 'h';
-  q->alpn_mem[1] = '3';
+  q->server_name = twist_strdup (server_name);
+  memcpy (q->alpn_mem, alpn, alpn_len);
   q->alpn.data = q->alpn_mem;
-  q->alpn.len = 2;
+  q->alpn.len = alpn_len;
   if (gq_trust_new (&q->trust) != GQ_OK)
     {
       quic_free (q);
       return TWIST_ERR_TLS;
     }
-  if (easy->cainfo != NULL)
-    gq_trust_add_pem_file (q->trust, easy->cainfo);
+  if (cafile != NULL)
+    gq_trust_add_pem_file (q->trust, cafile);
   else
     gq_trust_add_system (q->trust, NULL);
   memset (&q->tls, 0, sizeof q->tls);
@@ -438,17 +465,16 @@ quic_connect (struct twist_easy *easy, struct twist_connection **out)
   q->tls.n_alpn = 1;
   q->tls.trust = q->trust;
   q->tls.quic = 1;
-  rc = twist_client_auth_load (&q->auth, easy->sslcert, easy->sslkey);
+  rc = twist_client_auth_load (&q->auth, certfile, keyfile);
   if (rc != TWIST_OK)
     {
       quic_free (q);
       return rc;
     }
   twist_client_auth_apply (q->auth, &q->tls);
-  memset (&addr, 0, sizeof addr);
-  if (inet_pton (AF_INET, easy->url->host, addr.addr) == 1)
+  if (addr->family == 4)
     family = AF_INET;
-  else if (inet_pton (AF_INET6, easy->url->host, addr.addr) == 1)
+  else if (addr->family == 6)
     family = AF_INET6;
   else
     {
@@ -460,16 +486,16 @@ quic_connect (struct twist_easy *easy, struct twist_connection **out)
     {
       struct sockaddr_in *sin = (struct sockaddr_in *) &ss;
       sin->sin_family = AF_INET;
-      memcpy (&sin->sin_addr, addr.addr, 4);
-      sin->sin_port = htons ((uint16_t) easy->url->port);
+      memcpy (&sin->sin_addr, addr->addr, 4);
+      sin->sin_port = htons ((uint16_t) port);
       slen = sizeof *sin;
     }
   else
     {
       struct sockaddr_in6 *sin6 = (struct sockaddr_in6 *) &ss;
       sin6->sin6_family = AF_INET6;
-      memcpy (&sin6->sin6_addr, addr.addr, 16);
-      sin6->sin6_port = htons ((uint16_t) easy->url->port);
+      memcpy (&sin6->sin6_addr, addr->addr, 16);
+      sin6->sin6_port = htons ((uint16_t) port);
       slen = sizeof *sin6;
     }
   fd = socket (family, SOCK_DGRAM, 0);
@@ -485,7 +511,7 @@ quic_connect (struct twist_easy *easy, struct twist_connection **out)
   q->fd = fd;
   q->path.remote.len = slen > 31 ? 31 : (uint8_t) slen;
   memcpy (q->path.remote.data, &ss, q->path.remote.len);
-  q->twist = twist_connection_new (easy->loop);
+  q->twist = twist_connection_new (loop);
   if (q->twist == NULL)
     {
       close (fd);
@@ -520,6 +546,25 @@ quic_connect (struct twist_easy *easy, struct twist_connection **out)
   twist_loop_set_aux_fire (q->loop, quic_fire);
   *out = q->twist;
   return TWIST_OK;
+}
+
+static int
+quic_connect (struct twist_easy *easy, struct twist_connection **out)
+{
+  struct twist_dns_addr addr;
+
+  if (easy == NULL || easy->url == NULL || easy->url->host == NULL)
+    return TWIST_ERR_INVAL;
+  memset (&addr, 0, sizeof addr);
+  if (inet_pton (AF_INET, easy->url->host, addr.addr) == 1)
+    addr.family = 4;
+  else if (inet_pton (AF_INET6, easy->url->host, addr.addr) == 1)
+    addr.family = 6;
+  else
+    return TWIST_ERR_RESOLVE;
+  return twist_quic_dial (easy->loop, easy->url->host, "h3", &addr,
+                          easy->url->port, easy->cainfo, easy->sslcert,
+                          easy->sslkey, out);
 }
 
 int

@@ -81,6 +81,10 @@ usage (void)
          stdout);
   fputs (_("      --doh-insecure      do not verify the DoH certificate\n"),
          stdout);
+  fputs (_("      --doq-url URL       DNS-over-QUIC server (quic://host)\n"),
+         stdout);
+  fputs (_("      --dot-url URL       DNS-over-TLS server (tls://host)\n"),
+         stdout);
   fputs (_("      --mail-from ADDR    SMTP sender\n"), stdout);
   fputs (_("      --mail-rcpt ADDR    SMTP recipient\n"), stdout);
   fputs (_("      --help              display this help and exit\n"), stdout);
@@ -142,6 +146,8 @@ main (int argc, char **argv)
     { "dns-order", required_argument, NULL, 8 },
     { "doh-url", required_argument, NULL, 13 },
     { "doh-insecure", no_argument, NULL, 14 },
+    { "doq-url", required_argument, NULL, 17 },
+    { "dot-url", required_argument, NULL, 18 },
     { "mail-from", required_argument, NULL, 11 },
     { "mail-rcpt", required_argument, NULL, 12 },
     { "help", no_argument, NULL, 6 },
@@ -274,6 +280,20 @@ main (int argc, char **argv)
           break;
         case 14:
           twist_easy_setopt (easy, TWISTOPT_DOH_SSL_VERIFYPEER, 0L);
+          break;
+        case 17:
+          if (twist_easy_setopt (easy, TWISTOPT_DOQ_URL, optarg) != TWIST_OK)
+            {
+              die (_("could not set the DoQ server"));
+              return 1;
+            }
+          break;
+        case 18:
+          if (twist_easy_setopt (easy, TWISTOPT_DOT_URL, optarg) != TWIST_OK)
+            {
+              die (_("could not set the DoT server"));
+              return 1;
+            }
           break;
         case 8:
           if (twist_easy_setopt (easy, TWISTOPT_DNS_ORDER, optarg) != TWIST_OK)

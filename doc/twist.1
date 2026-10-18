@@ -90,6 +90,11 @@ sends the URL selector and writes the reply until the server closes.
 .BI \-\-dns-order " list"
 Comma-separated DNS transports.  The default is
 .BR doq,dot,doh,udp .
+DoQ and DoT are used when the system resolver advertises them, or when
+.B \-\-doq-url
+or
+.B \-\-dot-url
+names a server.
 UDP retries over TCP when the answer is truncated.
 A host that is an IPv4 or IPv6 address is used as that address.
 .TP
@@ -113,6 +118,26 @@ Do not verify the DoH server certificate.  This is independent of
 Curl's
 .B \-\-doh-cert-status
 is not supported.
+.TP
+.BI \-\-doq-url " URL"
+DNS-over-QUIC server.
+.I quic://host
+or
+.IR host ,
+with an optional port.  The default port is 853.  The certificate is
+checked against that host.  The host name is resolved with UDP.  An
+empty URL clears it.  Without this option, DoQ uses the address and
+name from a
+.B _dns.resolver.arpa
+SVCB record.
+.TP
+.BI \-\-dot-url " URL"
+DNS-over-TLS server.
+.I tls://host
+or
+.IR host ,
+with an optional port.  The default port is 853.  Discovery matches
+.BR \-\-doq-url .
 .SH AUTHOR
 Chris Burdess.
 .SH SEE ALSO

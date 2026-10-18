@@ -106,6 +106,59 @@ twist_dns_encode_query (const char *name, int qtype, uint16_t id,
 }
 
 static int
+copy_name (const uint8_t *msg, size_t len, size_t *off, char *out, size_t cap)
+{
+  size_t pos = *off;
+  size_t o = 0;
+  size_t jumps = 0;
+  int advanced = 0;
+
+  if (out == NULL || cap == 0)
+    return TWIST_ERR_PROTOCOL;
+  while (pos < len && jumps <= 64)
+    {
+      uint8_t lab = msg[pos];
+
+      if (lab == 0)
+        {
+          if (!advanced)
+            *off = pos + 1;
+          out[o] = 0;
+          return TWIST_OK;
+        }
+      if ((lab & 0xc0) == 0xc0)
+        {
+          if (pos + 1 >= len)
+            return TWIST_ERR_PROTOCOL;
+          if (!advanced)
+            {
+              *off = pos + 2;
+              advanced = 1;
+            }
+          pos = (size_t) (((lab & 0x3f) << 8) | msg[pos + 1]);
+          jumps++;
+          continue;
+        }
+      if ((lab & 0xc0) != 0 || pos + 1 + lab > len)
+        return TWIST_ERR_PROTOCOL;
+      if (o > 0)
+        {
+          if (o + 1 >= cap)
+            return TWIST_ERR_PROTOCOL;
+          out[o++] = '.';
+        }
+      if (o + lab >= cap)
+        return TWIST_ERR_PROTOCOL;
+      memcpy (out + o, msg + pos + 1, lab);
+      o += lab;
+      pos += 1u + lab;
+      if (!advanced)
+        *off = pos;
+    }
+  return TWIST_ERR_PROTOCOL;
+}
+
+static int
 skip_name (const uint8_t *msg, size_t len, size_t *off)
 {
   size_t jumps = 0;
@@ -160,16 +213,25 @@ parse_https (const uint8_t *msg, size_t len, size_t off, size_t rdlen,
 {
   size_t end;
   uint16_t prio;
+  char target[256];
+  char alpn[4][16];
+  size_t alpn_len[4];
+  size_t nalpn = 0;
+  int port = 0;
+  int family = 0;
+  uint8_t hint[16];
 
   if (rdlen < 3 || off + rdlen > len)
     return;
   end = off + rdlen;
   prio = rd16 (msg + off);
   off += 2;
-  if (skip_name (msg, len, &off) != TWIST_OK || off > end)
+  if (copy_name (msg, len, &off, target, sizeof target) != TWIST_OK
+      || off > end)
     return;
   if (prio == 0)
     return;
+  memset (hint, 0, sizeof hint);
   while (off + 4 <= end)
     {
       uint16_t key = rd16 (msg + off);
@@ -182,7 +244,7 @@ parse_https (const uint8_t *msg, size_t len, size_t off, size_t rdlen,
         return;
       val = msg + off;
       off += vl;
-      if (key == 1 && ev->https_alpn != NULL)
+      if (key == 1)
         {
           i = 0;
           while (i < vl)
@@ -190,13 +252,40 @@ parse_https (const uint8_t *msg, size_t len, size_t off, size_t rdlen,
               size_t n = val[i++];
               if (i + n > vl)
                 return;
-              ev->https_alpn (ev->user, (const char *) (val + i), n);
+              if (ev->https_alpn != NULL)
+                ev->https_alpn (ev->user, (const char *) (val + i), n);
+              if (nalpn < 4 && n > 0 && n < 16)
+                {
+                  memcpy (alpn[nalpn], val + i, n);
+                  alpn[nalpn][n] = 0;
+                  alpn_len[nalpn] = n;
+                  nalpn++;
+                }
               i += n;
             }
         }
-      else if (key == 3 && vl == 2 && ev->https_port != NULL)
-        ev->https_port (ev->user, rd16 (val));
+      else if (key == 3 && vl == 2)
+        {
+          port = rd16 (val);
+          if (ev->https_port != NULL)
+            ev->https_port (ev->user, port);
+        }
+      else if (key == 4 && vl >= 4 && (vl % 4) == 0 && family == 0)
+        {
+          family = 4;
+          memcpy (hint, val, 4);
+        }
+      else if (key == 6 && vl >= 16 && (vl % 16) == 0 && family == 0)
+        {
+          family = 6;
+          memcpy (hint, val, 16);
+        }
     }
+  if (ev->svcb == NULL || nalpn == 0)
+    return;
+  for (end = 0; end < nalpn; end++)
+    ev->svcb (ev->user, target, alpn[end], alpn_len[end], port, family,
+              family != 0 ? hint : NULL);
 }
 
 static int
@@ -294,6 +383,30 @@ twist_dns_datagram_receive (const uint8_t *data, size_t len,
     }
   parse_message (data, len, ev);
   return len;
+}
+
+int
+twist_dns_frame_stream (const uint8_t *msg, size_t len, int zero_id,
+                        uint8_t **out, size_t *outlen)
+{
+  uint8_t *frame;
+
+  if (msg == NULL || out == NULL || outlen == NULL || len > 65535)
+    return TWIST_ERR_INVAL;
+  frame = twist_xmalloc (len + 2);
+  if (frame == NULL)
+    return TWIST_ERR_NOMEM;
+  frame[0] = (uint8_t) (len >> 8);
+  frame[1] = (uint8_t) len;
+  memcpy (frame + 2, msg, len);
+  if (zero_id && len >= 2)
+    {
+      frame[2] = 0;
+      frame[3] = 0;
+    }
+  *out = frame;
+  *outlen = len + 2;
+  return TWIST_OK;
 }
 
 struct decode_box
