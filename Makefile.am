@@ -1,64 +1,34 @@
-# Makefile for Twist
-#
-# Copyright (C) 2026 Chris Burdess
-#
-# This file is part of Twist.
-#
-# Twist is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
-#
-# Twist is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Twist.  If not, see <https://www.gnu.org/licenses/>.
+## Process this file with automake to produce Makefile.in
+##
+## Copyright (C) 2026 Chris Burdess <dog@gnu.org>
+##
+## This file is part of twist.
+##
+## twist is free software: you can redistribute it and/or modify it
+## under the terms of the GNU General Public License as published
+## by the Free Software Foundation, either version 3 of the License, or
+## (at your option) any later version.
+##
+## twist is distributed in the hope that it will be useful, but
+## WITHOUT ANY WARRANTY; without even the implied warranty of
+## MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+## General Public License for more details.
+##
+## You should have received a copy of the GNU General Public
+## License along with this program.  If not, see
+## <https://www.gnu.org/licenses/>.
 
-# Subdirectories (none for skeleton)
-SUBDIRS =
+ACLOCAL_AMFLAGS = -I m4
+SUBDIRS = po src doc tests
+DIST_SUBDIRS = $(SUBDIRS) integration
 
-# The program to build
-bin_PROGRAMS = twist
+include_HEADERS = include/twist.h
 
-# Source files
-twist_SOURCES = src/twist.c src/twist.h
+pkgconfigdir = $(libdir)/pkgconfig
+pkgconfig_DATA = twist.pc
 
-# Compilation flags
-twist_CPPFLAGS = -I$(top_srcdir)/src
-AM_CFLAGS = -Wall -Wextra -Werror -pedantic -std=c11 $(twist_CPPFLAGS)
+EXTRA_DIST = HACKING ARCHITECTURE.md DEVELOPMENT.md build-aux/config.rpath
 
-# Version info
-twist_VERSION = 0.1
-
-# Define package name and version
-AM_CPPFLAGS = \
-	-DPACKAGE_NAME="\"twist\"" \
-	-DPACKAGE_VERSION="\"0.1\"" \
-	-DPACKAGE_BUGREPORT="\"dog@gnu.org\""
-
-# Installation directories
-bindir = @bindir@
-
-# Files to distribute
-EXTRA_DIST = \
-	README \
-	AUTHORS \
-	NEWS \
-	ChangeLog \
-	INSTALL \
-	HACKING \
-	THANKS \
-	TODO \
-	COPYING \
-	bootstrap \
-	config.h.in
-
-# Clean files
-DISTCLEANFILES = \
-	config.status \
-	config.cache \
-	config.log \
-	configure.lineno
+.PHONY: check-integration
+check-integration:
+	cd integration && $(MAKE) $(AM_MAKEFLAGS) check

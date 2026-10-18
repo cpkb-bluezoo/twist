@@ -1,19 +1,27 @@
 Twist TODO List
 ================
 
-Skeleton phase (current)
------------------------
+Done in the current tree
+------------------------
 
-  [x] Basic project structure
-  [x] quickstep integration (QUIC/TLS)
-  [x] GNU readline integration
-  [x] configure.ac and Makefile.am
+  [x] GNU package shape (automake gnu, Libtool, gettext, Texinfo)
+  [x] Loop, epoll/kqueue, connection, external driver
+  [x] Runtime, storage pool, timers, waker
+  [x] quickstep TLS and QUIC under Endpoint
+  [x] Transfer engine: URL, scheme table, easy/multi/share, DNS, cache, proxy
+  [x] HTTP/1.1, HTTP/2, HTTP/3 push parsers
+  [x] Redirects, cookies, Basic, Digest, Bearer
+  [x] CLI --help, --version, and the HTTP curl options
 
-Next steps
-----------
+Still to do
+-----------
 
-  [ ] Implement curl-compatible CLI argument parsing
-  [ ] HTTP/1.x protocol support
-  [ ] HTTP/2 protocol support (via quickstep)
-  [ ] HTTP/3 protocol support (via quickstep)
-  [ ] Full curl option compatibility
+  [x] FTP/FTPS (control replies, EPSV/PASV, RETR/LIST, implicit TLS)
+  [ ] SMTP, IMAP, POP3, MQTT, LDAP
+  [ ] DICT, GOPHER, TELNET, RTSP, TFTP, FILE completion against the cache
+  [ ] WebSocket (ws/wss) upgrade handler
+  [ ] SCP/SFTP, SMB, RTMP
+  [ ] DoH resolver
+  [ ] kqueue and Windows poll backends on those hosts
+  [ ] io_uring backend
+  [ ] Full curl option checklist as each scheme lands

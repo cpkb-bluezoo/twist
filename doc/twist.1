@@ -1,0 +1,44 @@
+.\" Copyright (C) 2026 Chris Burdess <dog@gnu.org>
+.\"
+.\" This file is part of twist.
+.\"
+.\" Copying and distribution of this file, with or without modification,
+.\" are permitted in any medium without royalty provided the copyright
+.\" notice and this notice are preserved.
+.TH TWIST 1 "2026" "twist 0.1" "User Commands"
+.SH NAME
+twist \- transfer a URL
+.SH SYNOPSIS
+.B twist
+[\fIOPTION\fR]... \fIURL\fR
+.SH DESCRIPTION
+.B twist
+fetches \fIURL\fR.  HTTP is implemented.  Other libcurl schemes are
+recognised and reported as unsupported until a handler is added.
+.SH OPTIONS
+.TP
+.B \-\-help
+Print a help message and exit.
+.TP
+.B \-\-version
+Print version and license information and exit.
+.TP
+.BI \-o " file"
+Write the body to \fIfile\fR.
+.TP
+.B \-L
+Follow redirections.
+.TP
+.B \-k
+Accept the option.  The TLS engine still checks the trust store.
+.TP
+.B \-\-http1.1
+.TQ
+.B \-\-http2
+.TQ
+.B \-\-http3
+Select the HTTP version to offer.
+.SH AUTHOR
+Chris Burdess.
+.SH SEE ALSO
+The Texinfo manual \fBtwist\fR.

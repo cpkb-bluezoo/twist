@@ -28,10 +28,9 @@ fills with `TcpEndpoint` plus `QuicEngine`.
 +----------------------------------------------+
 | libtwist - Public API                       |
 | - twist_global_init()                       |
-| - twist_endpoint_create()                   |
-| - twist_connection_dial()                   |
-| - twist_connection_send()                   |
-| - twist_connection_recv()                   |
+| - twist_easy_* / twist_multi_*              |
+| - twist_share_* / twist_url_*               |
+| - scheme table (not only HTTP)              |
 +----------------------------------------------+
 | Runtime                                      |
 | - N loops on N threads                      |
@@ -305,6 +304,67 @@ under that face, so a handler never sees ciphertext.
 Listen and dial are the same operation: register a stream on a reactor and
 keep it there. A curl-shaped library wants that symmetry even more than a
 server does.
+
+## Transfer engine
+
+The loop and the endpoint do not know which protocol they carry. A transfer
+(one easy handle) is the curl-shaped unit of work:
+
+- It parses a URL and looks the scheme up in a table.
+- It may own several endpoints, all pinned to the same loop (an HTTP
+  request is one connection; FTP is a control connection plus a data
+  connection; HTTP/2 and HTTP/3 are many streams on one session).
+- `twist_easy_setopt` writes a transfer configuration. Each scheme reads
+  the fields it understands. An option the scheme does not implement
+  fails for that transfer.
+- Redirects, the connection cache, the proxy wrapper, cookies, HSTS and
+  alt-svc live here, so a later scheme reuses them instead of growing a
+  second I/O stack.
+
+The proxy wrapper is a protocol handler that runs before the scheme
+handler. When the tunnel is up it calls the inner handler's `connected`.
+HTTP CONNECT and SOCKS4/4a/5/5h are that wrapper. SOCKS is not copied
+into every protocol.
+
+The connection cache is keyed by scheme, authority, proxy, TLS identity
+and loop. Idle endpoints are never migrated.
+
+`FILE` is not a socket. It is a job on the storage pool, and the result
+comes back through `execute`. TFTP and DNS are datagram handlers on the
+loop. QUIC is one UDP registration on the loop; each stream is then an
+endpoint. DoH is the HTTP scheme used as a resolver, not a special case
+in the poll backend.
+
+## Scheme table
+
+Every libcurl scheme has a row. HTTP is the first row with a real
+handler. The others stay in the table so the URL parser, the multi
+interface and the CLI accept them and so the implementation that lands
+later is a new `attach` function, not a new reactor.
+
+| Scheme | Kind of handler | Where the state machine already exists |
+| --- | --- | --- |
+| http, https | TCP endpoint, TLS under it, H1/H2/H3 | hopf-http, gumdrop HttpClient |
+| ws, wss | HTTP upgrade on that endpoint | hopf-websocket |
+| ftp, ftps | control plus a same-loop data endpoint | hopf-ftp, gumdrop FtpClient |
+| smtp, smtps, imap, imaps, pop3, pop3s | TCP, STARTTLS via `start_client_tls` | hopf and gumdrop clients |
+| mqtt | TCP endpoint | hopf-mqtt, gumdrop MqttClient |
+| ldap, ldaps | TCP endpoint | hopf-ldap, gumdrop LdapClient |
+| dict, gopher, gophers, telnet, rtsp | TCP endpoint | new, small |
+| tftp | datagram handler | new |
+| file | storage pool | new |
+| scp, sftp | SSH under the same endpoint | new, large |
+| smb, smbs, rtmp, rtmps | TCP endpoint | new, large |
+
+DNS is not a URL scheme the easy handle dials for its own sake. It is
+the resolver the dialer uses, implemented as a datagram handler, with
+DoH as a later HTTP transfer.
+
+## GNU package
+
+Twist is a GNU package. Automake `gnu` strictness, Libtool, gettext,
+a Texinfo manual, GPLv3+ headers, ISO C99, and the GNU coding style are
+part of the build, not a later pass. See HACKING.
 
 ## Why Not Other Approaches
 

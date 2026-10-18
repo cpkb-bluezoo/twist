@@ -3,14 +3,127 @@ Twist Hacking Guide
 
 Copyright (C) 2026 Chris Burdess
 
-Development
------------
 
-Twist uses:
-  - quickstep library (../quickstep) for QUIC and TLS
-  - GNU readline for interactive input
+Coding style
+------------
 
-No other dependencies may be added without explicit approval.
+ISO C99, enforced with -std=c99 -pedantic.  Do not use C11 features
+(_Static_assert, <stdatomic.h>, _Alignas, anonymous unions, _Generic).
+The reactor's cancel flags and command queue use the __atomic builtins
+through src/reactor/atomic.h, which is valid in C99.  Follow the GNU Coding
+Standards: GNU indentation, a space before the opening parenthesis of
+calls and declarations, return type on its own line in definitions, and
+no tabs.  Every public symbol starts with twist_ (types and functions)
+or TWIST_ (macros).  The library exports nothing else.
+
+Every source file carries the GPLv3+ notice used in the existing files.
+Every translation unit includes config.h first.
+
+Source layout
+-------------
+
+libtwist is one library.  src/ holds the public-facing pieces (the
+internal header, init, i18n, and the twist command).  The rest is
+split by layer, and a new scheme is a new directory:
+
+  src/reactor/   loop, connection, poll, timers, runtime, storage
+  src/engine/    URL, easy/multi/share, DNS, proxy, scheme table
+  src/auth/      SASL clients, HTTP Basic and Digest, MD5, SHA-256
+  src/http/      HTTP/1, HTTP/2, HTTP/3, cookies
+  src/ftp/       FTP and FTPS
+  src/file/      file://
+  src/tls/       quickstep TLS and QUIC under the connection
+
+Private headers stay next to the sources that use them.  Everything
+else includes twist-int.h.
+
+Push parsing
+------------
+
+Protocol handlers are state machines fed by Endpoint.receive.  The
+handler returns how many bytes it consumed.  The connection keeps the
+unconsumed tail in one inbound buffer and presents that tail again in
+front of the next read.  That buffer is capped at 256 KiB
+(TWIST_IN_CEILING).  A socket read asks only for the room left under
+the cap, so one readable event cannot allocate past it.
+
+Returning 0 means the tail is an incomplete token and more bytes are
+required.  The connection keeps reading until the cap.  If the cap is
+full and the handler has not paused, the token does not fit: the
+connection fails and the buffer is released.  A missing delimiter
+therefore cannot grow memory and cannot pin the cap for the life of
+the process.
+
+Backpressure is pause_read and resume_read.  Pause drops read interest,
+leaves the buffered tail in place, and lets the TCP window close.
+resume_read presents that tail again.  A zero return is not
+backpressure.
+
+Parsers do not copy the tail.  A field that must be remembered across
+calls is a fixed-size scratch with its own hard maximum (the HTTP/1
+line buffer is one).  Bytes copied into that scratch are counted as
+consumed so they are not stored twice.  Nothing in the parser allocates
+in proportion to the peer's input.  Parsers never block and never read
+a socket themselves.  One forward pass.  Bodies are delivered as they
+parse; do not buffer a whole message.  Unit tests feed the same input
+whole and in small chunks, including 1-byte splits, and retain whatever
+the parser did not consume.
+
+What not to put in the loop
+---------------------------
+
+The loop, the poll backend and the connection do not mention HTTP.
+A new libcurl scheme is a twist_scheme row and a ProtocolHandler (or a
+datagram handler, or a storage-pool job).  Listen and dial both pin
+the endpoint to one loop for life.  Secondary connections of one
+transfer (an FTP data socket, another HTTP/3 stream) stay on that loop.
+
+quickstep
+---------
+
+TLS and QUIC state machines come from quickstep.  Twist owns the
+socket, the monotonic clock and the poll timeout.  gq_tlsauto sits
+under the connection so the handler sees plaintext.  A QUIC socket is
+one UDP fd on that same loop: recvmmsg, gq_endpoint_recv, gq_endpoint_send
+until it yields nothing, sendmmsg.  Each stream is an Endpoint.
+
+Warnings
+--------
+
+The tree must build with zero compiler warnings.  Fix the cause; if a
+warning is genuinely unavoidable, add a narrow, commented suppression.
+
+Testing
+-------
+
+  make check              # unit tests
+  make check-integration  # peers on the network
+  make distcheck          # before every release
+
+make check runs unit tests only.  They are deterministic and in-process:
+no sockets, no files, no wall clock (pass a virtual clock into the
+loop).  Anything that dials a peer goes in integration/ and skips with
+exit 77 when the peer is absent.
+
+Copyright
+---------
+
+The project intends to become part of the GNU system with copyright
+assigned to the Free Software Foundation.  Until then, keep the notice
+"Copyright (C) YEAR Name" in each file, and do not incorporate code
+whose licence is not compatible with GPLv3+.
+
+Documentation and translation
+-----------------------------
+
+The manual is Texinfo (doc/twist.texi); update it when the public API
+or user-visible behaviour changes.  Build it with "make info".
+doc/twist.1 is the short man page.
+
+Every string a person might read (twist_strerror, the CLI, diagnostics)
+is wrapped in _() and its source file is listed in po/POTFILES.in.  Do
+not translate RFC header names or scheme tokens.  Diagnostics on the
+CLI use the form "twist: message" on stderr.
 
 Building
 --------
@@ -18,10 +131,7 @@ Building
   ./bootstrap
   ./configure --with-quickstep=../quickstep
   make
+  make check
 
-Contributing
-------------
-
-See INSTALL for build requirements.
-
-All contributions must follow GPLv3+ licensing.
+No dependency other than quickstep and GNU readline is added without
+explicit approval.  Readline links into the twist program only.
