@@ -66,7 +66,7 @@ Each item is a new row in the scheme table. The loop does not change.
 - [x] GOPHER/GOPHERS
 - [x] DICT
 - [ ] TELNET, RTSP
-- [ ] TFTP as a datagram handler
+- [x] TFTP as a datagram handler
 - [x] FILE through the storage pool
 - [ ] SCP/SFTP, SMB/SMBS, RTMP/RTMPS
 - [x] DoH as an HTTP transfer used by the resolver

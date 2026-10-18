@@ -753,6 +753,15 @@ size_t twist_dict_receive (struct twist_dict *dict, const uint8_t *data,
 void twist_dict_closed (struct twist_dict *dict, int err);
 int twist_dict_attach (struct twist_easy *easy);
 
+struct twist_tftp;
+struct twist_tftp *twist_tftp_new (struct twist_easy *easy, int live);
+void twist_tftp_free (void *tftp);
+const uint8_t *twist_tftp_packet (const struct twist_tftp *tftp, size_t *len);
+size_t twist_tftp_receive (struct twist_tftp *tftp, const uint8_t *data,
+                           size_t len);
+void twist_tftp_timeout (struct twist_tftp *tftp);
+int twist_tftp_attach (struct twist_easy *easy);
+
 struct twist_share
 {
   unsigned locks;

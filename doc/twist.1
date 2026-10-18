@@ -89,6 +89,11 @@ sends the URL selector and writes the reply until the server closes.
 .B dict
 sends one DEFINE, MATCH, or SHOW command from the URL path and writes
 the reply until the server closes.
+.B tftp
+reads the URL path.  With
+.B \-\-data
+it uploads that body instead.  Lost packets are retransmitted.  A
+proxy is not used.
 .TP
 .BI \-\-dns-order " list"
 Comma-separated DNS transports.  The default is

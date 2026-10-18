@@ -91,6 +91,12 @@ attach_dict (struct twist_easy *easy)
   return twist_dict_attach (easy);
 }
 
+static int
+attach_tftp (struct twist_easy *easy)
+{
+  return twist_tftp_attach (easy);
+}
+
 static const struct twist_scheme schemes[] = {
   { "http", 80, TWIST_SCHEME_PROXY_OK | TWIST_SCHEME_READY, attach_http },
   { "https", 443, TWIST_SCHEME_TLS | TWIST_SCHEME_PROXY_OK | TWIST_SCHEME_READY,
@@ -124,7 +130,7 @@ static const struct twist_scheme schemes[] = {
     attach_gopher },
   { "telnet", 23, TWIST_SCHEME_PROXY_OK, twist_scheme_unsupported },
   { "rtsp", 554, TWIST_SCHEME_PROXY_OK, twist_scheme_unsupported },
-  { "tftp", 69, TWIST_SCHEME_DATAGRAM, twist_scheme_unsupported },
+  { "tftp", 69, TWIST_SCHEME_DATAGRAM | TWIST_SCHEME_READY, attach_tftp },
   { "file", 0, TWIST_SCHEME_READY, attach_file },
   { "scp", 22, TWIST_SCHEME_PROXY_OK, twist_scheme_unsupported },
   { "sftp", 22, TWIST_SCHEME_PROXY_OK, twist_scheme_unsupported },

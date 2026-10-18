@@ -162,6 +162,9 @@ sends the selector and writes the reply until the server closes.
 @code{dict://host/m:word:database:strategy} matches one, and
 @code{dict://host/show:db} asks the server for its database list.  The
 reply is written until the server closes.
+@code{tftp://host/file} reads a file.  @option{--data} uploads one.
+The transfer offers block size 512 and retransmits a lost packet.
+A proxy is not used.
 
 Diagnostics are written to standard error and begin with @samp{twist:}.
 
