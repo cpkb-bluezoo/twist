@@ -77,7 +77,28 @@ easy_clear (struct twist_easy *easy)
   free (easy->cainfo);
   free (easy->effective_url);
   free (easy->content_type);
+  free (easy->error);
   twist_origin_clear (easy);
+}
+
+void
+twist_easy_set_error (struct twist_easy *easy, char *msg)
+{
+  if (easy == NULL)
+    {
+      free (msg);
+      return;
+    }
+  free (easy->error);
+  easy->error = msg;
+}
+
+const char *
+twist_easy_error (const twist_easy *easy)
+{
+  if (easy == NULL)
+    return NULL;
+  return easy->error;
 }
 
 void
@@ -304,6 +325,7 @@ twist_transfer_start (struct twist_easy *easy)
   const struct twist_scheme *scheme;
   int rc;
 
+  twist_easy_set_error (easy, NULL);
   if (easy->url_string == NULL && easy->url == NULL)
     {
       twist_easy_finish (easy, TWIST_ERR_URL);

@@ -58,6 +58,10 @@ twist_strerror (int err)
       return _("malformed URL");
     case TWIST_ERR_ABORTED:
       return _("transfer aborted");
+    case TWIST_ERR_FILE:
+      return _("could not open file");
+    case TWIST_ERR_HTTP:
+      return _("server returned an error");
     default:
       return _("unknown error");
     }

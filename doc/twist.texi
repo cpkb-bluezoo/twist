@@ -92,6 +92,11 @@ Write the response body to @var{file}.
 @item -L
 @itemx --location
 Follow redirections.
+@item -f
+@itemx --fail
+Fail the transfer when the HTTP status is 400 or above, and do not
+write the body.  Without this option a 404 is a successful transfer:
+the status is recorded and the body is written.
 @item -k
 @itemx --insecure
 Accepted for compatibility with curl.  The TLS engine still checks the

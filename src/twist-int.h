@@ -73,6 +73,7 @@ struct twist_url
   char *fragment;
   int port;
   int port_set;
+  int path_set;
 };
 
 struct twist_easy
@@ -118,6 +119,7 @@ struct twist_easy
   int own_loop;
   int done;
   int result;
+  char *error;
   long http_code;
   char *effective_url;
   char *content_type;
@@ -292,6 +294,7 @@ const struct twist_scheme *twist_scheme_by_name (const char *name);
 int twist_scheme_unsupported (struct twist_easy *easy);
 int twist_http_attach (struct twist_easy *easy);
 int twist_file_attach (struct twist_easy *easy);
+int twist_file_check_url (const char *host, const char *path, int path_set);
 int twist_ftp_attach (struct twist_easy *easy);
 
 struct twist_ftp;
@@ -492,6 +495,7 @@ int twist_h3_request (struct twist_h3 *h3, const char *method,
 
 int twist_http_should_redirect (int status, const char *method, int follow,
                                 long redirs, long maxredirs, int *use_get);
+int twist_http_status_result (int failonerror, int status);
 
 /* ---- cookies, auth, share ---- */
 
@@ -555,6 +559,7 @@ void *twist_xmalloc (size_t n);
 
 void twist_i18n_init (void);
 
+void twist_easy_set_error (struct twist_easy *easy, char *msg);
 int twist_easy_finish (struct twist_easy *easy, int result);
 int twist_transfer_start (struct twist_easy *easy);
 

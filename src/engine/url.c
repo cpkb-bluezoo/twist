@@ -217,6 +217,7 @@ twist_url_parse_int (const char *input, struct twist_url **out)
         }
       memcpy (u->path, p, (size_t) (stop - p));
       u->path[stop - p] = 0;
+      u->path_set = 1;
       if (*stop == '?')
         {
           const char *qs = stop + 1;

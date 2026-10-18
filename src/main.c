@@ -45,47 +45,63 @@ write_out (char *ptr, size_t size, size_t nmemb, void *userdata)
 static void
 usage (void)
 {
-  printf (_("Usage: twist [OPTION]... URL\n"));
-  printf (_("Transfer a URL.\n\n"));
-  printf (_("  -o, --output FILE       write the body to FILE\n"));
-  printf (_("  -X, --request METHOD    request method\n"));
-  printf (_("  -H, --header LINE       extra header\n"));
-  printf (_("  -d, --data DATA         request body (implies POST)\n"));
-  printf (_("  -L, --location          follow redirects\n"));
-  printf (_("  -k, --insecure          accepted; certificates are still checked\n"));
-  printf (_("  -x, --proxy URL         proxy (http:// or socks5://)\n"));
-  printf (_("  -A, --user-agent NAME   User-Agent\n"));
-  printf (_("  -u, --user USER:PASS    user and password\n"));
-  printf (_("  -I, --head              fetch headers only\n"));
-  printf (_("  -w, --write-out FORMAT  print %{http_code} or %{size_download}\n"));
-  printf (_("      --max-redirs N      redirect limit (default 50)\n"));
-  printf (_("      --http1.0           use HTTP/1.0\n"));
-  printf (_("      --http1.1           use HTTP/1.1\n"));
-  printf (_("      --http2             use HTTP/2\n"));
-  printf (_("      --http2-prior-knowledge  HTTP/2 without upgrade\n"));
-  printf (_("      --http3             use HTTP/3 when it is discovered\n"));
-  printf (_("      --http3-only        fail unless HTTP/3 can be used\n"));
-  printf (_("      --dns-order LIST    DNS transports (default doq,dot,doh,udp)\n"));
-  printf (_("      --help              display this help and exit\n"));
-  printf (_("      --version           output version information and exit\n"));
+  printf (_("Usage: %s [OPTION]... URL\n"), PACKAGE);
+  fputs (_("Transfer a URL.\n\n"), stdout);
+  fputs (_("  -o, --output FILE       write the body to FILE\n"), stdout);
+  fputs (_("  -X, --request METHOD    request method\n"), stdout);
+  fputs (_("  -H, --header LINE       extra header\n"), stdout);
+  fputs (_("  -d, --data DATA         request body (implies POST)\n"), stdout);
+  fputs (_("  -L, --location          follow redirects\n"), stdout);
+  fputs (_("  -k, --insecure          accepted; certificates are still checked\n"),
+         stdout);
+  fputs (_("  -x, --proxy URL         proxy (http:// or socks5://)\n"), stdout);
+  fputs (_("  -A, --user-agent NAME   User-Agent\n"), stdout);
+  fputs (_("  -u, --user USER:PASS    user and password\n"), stdout);
+  fputs (_("  -I, --head              fetch headers only\n"), stdout);
+  fputs (_("  -f, --fail              fail on HTTP errors (400 and above)\n"),
+         stdout);
+  /* TRANSLATORS: %{http_code} and %{size_download} are literal tokens.
+     Keep the doubled percent signs.  */
+  printf (_("  -w, --write-out FORMAT  print %%{http_code} or %%{size_download}\n"));
+  fputs (_("      --max-redirs N      redirect limit (default 50)\n"), stdout);
+  fputs (_("      --http1.0           use HTTP/1.0\n"), stdout);
+  fputs (_("      --http1.1           use HTTP/1.1\n"), stdout);
+  fputs (_("      --http2             use HTTP/2\n"), stdout);
+  fputs (_("      --http2-prior-knowledge  HTTP/2 without upgrade\n"), stdout);
+  fputs (_("      --http3             use HTTP/3 when it is discovered\n"),
+         stdout);
+  fputs (_("      --http3-only        fail unless HTTP/3 can be used\n"),
+         stdout);
+  fputs (_("      --dns-order LIST    DNS transports (default doq,dot,doh,udp)\n"),
+         stdout);
+  fputs (_("      --help              display this help and exit\n"), stdout);
+  fputs (_("      --version           output version information and exit\n"),
+         stdout);
   printf (_("\nReport bugs to %s.\n"), PACKAGE_BUGREPORT);
 }
 
 static void
 version (void)
 {
-  printf ("twist %s\n", twist_version ());
-  printf ("Copyright (C) 2026 Chris Burdess <dog@gnu.org>\n");
+  printf ("%s %s\n", PACKAGE, twist_version ());
+  printf (_("Copyright (C) %s %s\n"), "2026", "Chris Burdess <dog@gnu.org>");
   printf (_("License GPLv3+: GNU GPL version 3 or later <%s>\n"),
           "https://www.gnu.org/licenses/gpl.html");
-  printf (_("This is free software: you are free to change and redistribute it.\n"));
-  printf (_("There is NO WARRANTY, to the extent permitted by law.\n"));
+  fputs (_("This is free software: you are free to change and redistribute it.\n"),
+         stdout);
+  fputs (_("There is NO WARRANTY, to the extent permitted by law.\n"), stdout);
 }
 
 static void
 die (const char *msg)
 {
-  fprintf (stderr, "twist: %s\n", msg);
+  fprintf (stderr, _("%s: %s\n"), PACKAGE, msg);
+}
+
+static void
+suggest_help (void)
+{
+  fprintf (stderr, _("Try '%s --help' for more information.\n"), PACKAGE);
 }
 
 int
@@ -102,6 +118,7 @@ main (int argc, char **argv)
     { "user-agent", required_argument, NULL, 'A' },
     { "user", required_argument, NULL, 'u' },
     { "head", no_argument, NULL, 'I' },
+    { "fail", no_argument, NULL, 'f' },
     { "write-out", required_argument, NULL, 'w' },
     { "max-redirs", required_argument, NULL, 1 },
     { "http1.0", no_argument, NULL, 2 },
@@ -134,7 +151,7 @@ main (int argc, char **argv)
       die (twist_strerror (TWIST_ERR_NOMEM));
       return 1;
     }
-  while ((c = getopt_long (argc, argv, "o:X:H:d:Lkx:A:u:Iw:", longs, NULL))
+  while ((c = getopt_long (argc, argv, "o:X:H:d:Lkx:A:u:Iw:f", longs, NULL))
          != -1)
     {
       switch (c)
@@ -183,6 +200,9 @@ main (int argc, char **argv)
         case 'I':
           twist_easy_setopt (easy, TWISTOPT_NOBODY, 1L);
           break;
+        case 'f':
+          twist_easy_setopt (easy, TWISTOPT_FAILONERROR, 1L);
+          break;
         case 'w':
           writeout = optarg;
           break;
@@ -230,7 +250,7 @@ main (int argc, char **argv)
           return 0;
         default:
           die (_("unrecognised option"));
-          fprintf (stderr, _("Try 'twist --help' for more information.\n"));
+          suggest_help ();
           twist_easy_cleanup (easy);
           return 1;
         }
@@ -240,7 +260,7 @@ main (int argc, char **argv)
   if (url == NULL)
     {
       die (_("no URL given"));
-      fprintf (stderr, _("Try 'twist --help' for more information.\n"));
+      suggest_help ();
       twist_easy_cleanup (easy);
       twist_slist_free_all (headers);
       return 1;
@@ -252,7 +272,11 @@ main (int argc, char **argv)
     twist_easy_setopt (easy, TWISTOPT_HTTPHEADER, headers);
   rc = twist_easy_perform (easy);
   if (rc != TWIST_OK)
-    die (twist_strerror (rc));
+    {
+      const char *detail = twist_easy_error (easy);
+
+      die (detail != NULL ? detail : twist_strerror (rc));
+    }
   if (writeout != NULL)
     {
       long code = 0;

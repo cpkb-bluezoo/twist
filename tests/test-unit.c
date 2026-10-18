@@ -1088,6 +1088,52 @@ test_sasl (void)
   twist_sasl_client_free (c);
 }
 
+static void
+test_errors (void)
+{
+  struct twist_easy *easy;
+
+  check (strcmp (twist_strerror (TWIST_ERR_FILE),
+                 twist_strerror (TWIST_ERR_URL)) != 0, "file distinct");
+  check (strcmp (twist_strerror (TWIST_ERR_HTTP),
+                 twist_strerror (TWIST_ERR_PROTOCOL)) != 0, "http distinct");
+  check (twist_file_check_url (NULL, "/etc/hostname", 1) == TWIST_OK, "file path");
+  check (twist_file_check_url ("localhost", "/a", 1) == TWIST_OK, "localhost");
+  check (twist_file_check_url ("127.0.0.1", "/a", 1) == TWIST_OK, "loopback");
+  check (twist_file_check_url ("example.com", "/a", 1) == TWIST_ERR_URL,
+         "remote file");
+  check (twist_file_check_url ("localhost", "/", 0) == TWIST_ERR_URL,
+         "no path");
+  check (twist_file_check_url (NULL, NULL, 0) == TWIST_ERR_URL, "empty path");
+  check (twist_file_check_url (NULL, "relative", 1) == TWIST_ERR_URL, "relative");
+  {
+    struct twist_url *url = NULL;
+
+    check (twist_url_parse_int ("file://localhost", &url) == TWIST_OK,
+           "parse host");
+    check (url != NULL && !url->path_set, "host has no path");
+    twist_url_free_int (url);
+    url = NULL;
+    check (twist_url_parse_int ("file:///etc/hostname", &url) == TWIST_OK,
+           "parse path");
+    check (url != NULL && url->path_set
+           && strcmp (url->path, "/etc/hostname") == 0, "path set");
+    twist_url_free_int (url);
+  }
+  check (twist_http_status_result (0, 404) == TWIST_OK, "404 ok");
+  check (twist_http_status_result (1, 404) == TWIST_ERR_HTTP, "404 fail");
+  check (twist_http_status_result (1, 200) == TWIST_OK, "200 ok");
+  check (twist_http_status_result (1, 399) == TWIST_OK, "399 ok");
+  check (twist_http_status_result (1, 400) == TWIST_ERR_HTTP, "400 fail");
+  easy = twist_easy_init ();
+  check (easy != NULL && twist_easy_error (easy) == NULL, "no detail");
+  twist_easy_set_error (easy, twist_strdup ("could not open file /no/such"));
+  check (twist_easy_error (easy) != NULL
+         && strcmp (twist_easy_error (easy),
+                    "could not open file /no/such") == 0, "detail");
+  twist_easy_cleanup (easy);
+}
+
 int
 main (void)
 {
@@ -1107,6 +1153,7 @@ main (void)
   test_ftp_parser ();
   test_ftp_session ();
   test_inbound_ceiling ();
+  test_errors ();
   if (failed)
     {
       fprintf (stderr, "unit tests failed\n");

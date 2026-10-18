@@ -20,6 +20,7 @@
 # include <config.h>
 #endif
 
+#include "gettext.h"
 #include "twist-int.h"
 
 #include <arpa/inet.h>
@@ -112,9 +113,30 @@ http_complete (struct twist_http *h, int err)
       twist_timer_cancel (h->timer);
       h->timer = NULL;
     }
-  if (err == TWIST_OK && h->easy->failonerror && h->status >= 400)
-    err = TWIST_ERR_PROTOCOL;
+  if (err == TWIST_OK
+      && twist_http_status_result (h->easy->failonerror, h->status) != TWIST_OK)
+    {
+      const char *fmt = _("server returned an error: %d");
+      size_t n = strlen (fmt) + 16;
+      char *msg = twist_xmalloc (n);
+
+      if (msg != NULL
+          && snprintf (msg, n, _("server returned an error: %d"),
+                       h->status) > 0)
+        twist_easy_set_error (h->easy, msg);
+      else
+        free (msg);
+      err = TWIST_ERR_HTTP;
+    }
   twist_easy_finish (h->easy, err);
+}
+
+int
+twist_http_status_result (int failonerror, int status)
+{
+  if (failonerror && status >= 400)
+    return TWIST_ERR_HTTP;
+  return TWIST_OK;
 }
 
 static void
@@ -251,6 +273,8 @@ on_body (void *user, const uint8_t *data, size_t len)
   struct twist_http *h = user;
 
   h->easy->size_download += len;
+  if (h->easy->failonerror && h->status >= 400)
+    return;
   if (h->easy->write_cb != NULL && len > 0)
     h->easy->write_cb ((char *) data, 1, len, h->easy->write_data);
 }

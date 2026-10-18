@@ -20,11 +20,14 @@
 # include <config.h>
 #endif
 
+#include "gettext.h"
 #include "twist-int.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
+#include <sys/stat.h>
 
 struct twist_file
 {
@@ -45,50 +48,82 @@ file_free (void *p)
   free (f);
 }
 
+int
+twist_file_check_url (const char *host, const char *path, int path_set)
+{
+  if (!path_set || path == NULL || path[0] != '/')
+    return TWIST_ERR_URL;
+  if (host == NULL || host[0] == 0)
+    return TWIST_OK;
+  if (strcasecmp (host, "localhost") == 0 || strcmp (host, "127.0.0.1") == 0)
+    return TWIST_OK;
+  return TWIST_ERR_URL;
+}
+
+static int
+file_io_error (struct twist_file *f, const char *path, int reading)
+{
+  const char *fmt = reading ? _("could not read file %s")
+                            : _("could not open file %s");
+  size_t n = strlen (fmt) + strlen (path) + 1;
+  char *msg = twist_xmalloc (n);
+
+  if (msg == NULL)
+    return TWIST_ERR_NOMEM;
+  if (reading)
+    snprintf (msg, n, _("could not read file %s"), path);
+  else
+    snprintf (msg, n, _("could not open file %s"), path);
+  twist_easy_set_error (f->easy, msg);
+  return TWIST_ERR_FILE;
+}
+
 static void
 file_work (void *arg)
 {
   struct twist_file *f = arg;
+  const char *host;
   const char *path;
   FILE *fp;
-  long sz;
+  struct stat st;
+  size_t sz;
 
+  host = f->easy->url != NULL ? f->easy->url->host : NULL;
   path = f->easy->url != NULL ? f->easy->url->path : NULL;
-  if (path == NULL || path[0] == 0)
-    {
-      f->err = TWIST_ERR_URL;
-      return;
-    }
+  f->err = twist_file_check_url (host, path,
+                                 f->easy->url != NULL && f->easy->url->path_set);
+  if (f->err != TWIST_OK)
+    return;
   fp = fopen (path, "rb");
   if (fp == NULL)
     {
-      f->err = TWIST_ERR_URL;
+      f->err = file_io_error (f, path, 0);
       return;
     }
-  if (fseek (fp, 0, SEEK_END) != 0)
+  if (fstat (fileno (fp), &st) != 0 || !S_ISREG (st.st_mode) || st.st_size < 0)
     {
       fclose (fp);
-      f->err = TWIST_ERR_URL;
+      f->err = file_io_error (f, path, 0);
       return;
     }
-  sz = ftell (fp);
-  if (sz < 0 || fseek (fp, 0, SEEK_SET) != 0)
+  sz = (size_t) st.st_size;
+  if (sz == (size_t) -1)
     {
       fclose (fp);
-      f->err = TWIST_ERR_URL;
+      f->err = TWIST_ERR_NOMEM;
       return;
     }
-  f->data = twist_xmalloc ((size_t) sz + 1);
+  f->data = twist_xmalloc (sz + 1);
   if (f->data == NULL)
     {
       fclose (fp);
       f->err = TWIST_ERR_NOMEM;
       return;
     }
-  if (sz > 0 && fread (f->data, 1, (size_t) sz, fp) != (size_t) sz)
+  if (sz > 0 && fread (f->data, 1, sz, fp) != sz)
     {
       fclose (fp);
-      f->err = TWIST_ERR_URL;
+      f->err = file_io_error (f, path, 1);
       return;
     }
   f->len = (size_t) sz;

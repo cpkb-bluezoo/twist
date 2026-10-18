@@ -54,7 +54,9 @@ enum twist_error
   TWIST_ERR_AUTH = 11,
   TWIST_ERR_REDIRECT = 12,
   TWIST_ERR_URL = 13,
-  TWIST_ERR_ABORTED = 14
+  TWIST_ERR_ABORTED = 14,
+  TWIST_ERR_FILE = 15,
+  TWIST_ERR_HTTP = 16
 };
 
 const char *twist_strerror (int err);
@@ -162,6 +164,8 @@ void twist_easy_cleanup (twist_easy *easy);
 int twist_easy_setopt (twist_easy *easy, int opt, ...);
 int twist_easy_perform (twist_easy *easy);
 int twist_easy_getinfo (twist_easy *easy, int info, ...);
+/* Detail for the last transfer, or NULL when only twist_strerror applies.  */
+const char *twist_easy_error (const twist_easy *easy);
 
 #define TWIST_SOCKET_TIMEOUT (-1)
 #define TWIST_POLL_NONE 0
