@@ -25,6 +25,8 @@
 #include <stdarg.h>
 #include <stdlib.h>
 
+static void multi_watch (void *user, int fd, int interest);
+
 twist_multi *
 twist_multi_init (void)
 {
@@ -40,15 +42,47 @@ twist_multi_init (void)
     }
   multi->own_loop = 1;
   multi->last_timeout = -2;
-  multi->storage = twist_storage_new (1, 32);
+  multi->storage = twist_storage_new (2, 32);
   if (multi->storage == NULL)
     {
       twist_loop_free (multi->loop);
       free (multi);
       return NULL;
     }
+  multi->pool = twist_pool_new ();
+  multi->dns = twist_dns_cache_new ();
+  if (multi->pool == NULL || multi->dns == NULL)
+    {
+      twist_dns_cache_free (multi->dns);
+      twist_pool_free (multi->pool);
+      twist_storage_free (multi->storage);
+      twist_loop_free (multi->loop);
+      free (multi);
+      return NULL;
+    }
   twist_loop_set_multi (multi->loop, multi);
+  twist_loop_set_watch (multi->loop, multi_watch, multi);
   return multi;
+}
+
+static void
+multi_watch (void *user, int fd, int interest)
+{
+  struct twist_multi *multi = user;
+  int what = TWIST_POLL_NONE;
+
+  if (multi->socket_cb == NULL)
+    return;
+  if (interest == TWIST_POLL_REMOVE)
+    what = TWIST_POLL_REMOVE;
+  else
+    {
+      if (interest & TWIST_INTEREST_READ)
+        what |= TWIST_POLL_IN;
+      if (interest & TWIST_INTEREST_WRITE)
+        what |= TWIST_POLL_OUT;
+    }
+  multi->socket_cb (NULL, fd, what, multi->socket_user, NULL);
 }
 
 void
@@ -63,6 +97,9 @@ twist_multi_cleanup (twist_multi *multi)
       multi->easies[i]->multi = NULL;
       multi->easies[i]->loop = NULL;
     }
+  twist_pool_free (multi->pool);
+  twist_dns_cache_free (multi->dns);
+  twist_session_free_all (multi);
   twist_storage_free (multi->storage);
   if (multi->own_loop)
     twist_loop_free (multi->loop);
@@ -133,7 +170,7 @@ twist_multi_perform (twist_multi *multi, int *running)
 
   if (multi == NULL)
     return TWIST_ERR_INVAL;
-  rc = twist_loop_run_once (multi->loop);
+  rc = twist_loop_run_once_ms (multi->loop, 0);
   if (running != NULL)
     *running = count_running (multi);
   return rc;
@@ -182,6 +219,10 @@ twist_multi_setopt (twist_multi *multi, int opt, ...)
     {
     case TWISTMOPT_SOCKETFUNCTION:
       multi->socket_cb = va_arg (ap, twist_socket_callback);
+      if (multi->socket_cb != NULL && multi->loop != NULL
+          && twist_loop_waker (multi->loop) >= 0)
+        multi_watch (multi, twist_loop_waker (multi->loop),
+                     TWIST_INTEREST_READ);
       break;
     case TWISTMOPT_SOCKETDATA:
       multi->socket_user = va_arg (ap, void *);

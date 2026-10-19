@@ -303,5 +303,19 @@ twist_doh_encode_url (const char *url_text, const uint8_t *msg, size_t msg_len,
                                out, out_len);
   twist_slist_free_all (extra);
   twist_url_free_int (url);
+  if (rc == TWIST_OK && msg_len > 0)
+    {
+      uint8_t *grown = realloc (*out, *out_len + msg_len);
+
+      if (grown == NULL)
+        {
+          free (*out);
+          *out = NULL;
+          return TWIST_ERR_NOMEM;
+        }
+      memcpy (grown + *out_len, msg, msg_len);
+      *out = grown;
+      *out_len += msg_len;
+    }
   return rc;
 }

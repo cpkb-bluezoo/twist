@@ -71,6 +71,7 @@ libtwist_la_SOURCES = \
   engine/url.c \
   dns/doh.c \
   dns/policy.c \
+  dns/cache.c \
   dns/resolve.c \
   dns/wire.c \
   http/cookie.c \

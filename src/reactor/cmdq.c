@@ -40,7 +40,42 @@ struct twist_cmdq
   struct twist_cmd *stub;
   struct twist_cmd *head;
   struct twist_cmd *tail;
+  struct twist_cmd *spare;
 };
+
+static struct twist_cmd *
+cmd_take (struct twist_cmdq *q)
+{
+  struct twist_cmd *n = __atomic_load_n (&q->spare, __ATOMIC_ACQUIRE);
+
+  while (n != NULL)
+    {
+      struct twist_cmd *next = __atomic_load_n (&n->next, __ATOMIC_ACQUIRE);
+
+      if (__atomic_compare_exchange_n (&q->spare, &n, next, 0,
+                                       __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+        {
+          n->next = NULL;
+          n->fn = NULL;
+          n->user = NULL;
+          return n;
+        }
+    }
+  return calloc (1, sizeof *n);
+}
+
+static void
+cmd_give (struct twist_cmdq *q, struct twist_cmd *n)
+{
+  struct twist_cmd *head = __atomic_load_n (&q->spare, __ATOMIC_ACQUIRE);
+
+  n->fn = NULL;
+  n->user = NULL;
+  do
+    n->next = head;
+  while (!__atomic_compare_exchange_n (&q->spare, &head, n, 0,
+                                       __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE));
+}
 
 struct twist_cmdq *
 twist_cmdq_new (void)
@@ -76,6 +111,13 @@ twist_cmdq_free (struct twist_cmdq *q)
       free (c);
       c = next;
     }
+  c = q->spare;
+  while (c != NULL)
+    {
+      struct twist_cmd *next = c->next;
+      free (c);
+      c = next;
+    }
   free (q);
 }
 
@@ -85,7 +127,7 @@ twist_cmdq_push (struct twist_cmdq *q, void (*fn) (void *), void *user)
   struct twist_cmd *node;
   struct twist_cmd *prev;
 
-  node = calloc (1, sizeof *node);
+  node = cmd_take (q);
   if (node == NULL)
     return TWIST_ERR_NOMEM;
   node->fn = fn;
@@ -113,7 +155,7 @@ twist_cmdq_drain (struct twist_cmdq *q)
       void *user = next->user;
 
       q->head = next;
-      free (head);
+      cmd_give (q, head);
       head = next;
       if (fn != NULL)
         fn (user);

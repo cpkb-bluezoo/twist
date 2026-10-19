@@ -25,6 +25,14 @@
 #include <stdlib.h>
 #include <string.h>
 
+#define H3_DATA 0x00
+#define H3_HEADERS 0x01
+#define H3_SETTINGS 0x04
+#define H3_GOAWAY 0x07
+#define H3_FRAME 16384u
+#define H3_MAX_LEN 65536u
+#define H3_MAX_STREAMS 100u
+
 int twist_qpack_decode (const uint8_t *data, size_t len,
                         struct twist_h1_events *ev);
 int twist_qpack_encode_request (const char *method, const char *scheme,
@@ -32,25 +40,86 @@ int twist_qpack_encode_request (const char *method, const char *scheme,
                                 const struct twist_slist *extra,
                                 uint8_t **out, size_t *out_len);
 
+struct twist_h3_stream
+{
+  int live;
+  struct twist_h3_stream *next;
+};
+
 struct twist_h3
 {
   struct twist_h1_events ev;
-  int phase;
-  uint64_t type;
-  uint64_t length;
-  uint64_t got;
-  int type_shift;
-  int len_shift;
-  int saw_type;
-  uint8_t *payload;
-  size_t payload_len;
   int failed;
+  struct twist_h3_stream *active;
+  struct twist_h3_stream *free_list;
+  size_t n_alloc;
 };
+
+static int
+peek_varint (const uint8_t *p, size_t len, size_t *used, uint64_t *out)
+{
+  unsigned prefix;
+  uint64_t v;
+  size_t i;
+
+  if (len == 0)
+    return 0;
+  prefix = 1u << (p[0] >> 6);
+  if (len < prefix)
+    return 0;
+  v = p[0] & 0x3fu;
+  for (i = 1; i < prefix; i++)
+    v = (v << 8) | p[i];
+  *used = prefix;
+  *out = v;
+  return 1;
+}
+
+static struct twist_h3_stream *
+take_stream (struct twist_h3 *h)
+{
+  struct twist_h3_stream *s;
+
+  if (h->active != NULL)
+    return h->active;
+  if (h->free_list != NULL)
+    {
+      s = h->free_list;
+      h->free_list = s->next;
+    }
+  else
+    {
+      if (h->n_alloc >= H3_MAX_STREAMS)
+        return NULL;
+      s = calloc (1, sizeof *s);
+      if (s == NULL)
+        return NULL;
+      h->n_alloc++;
+    }
+  s->live = 1;
+  s->next = NULL;
+  h->active = s;
+  return s;
+}
+
+static void
+release_stream (struct twist_h3 *h)
+{
+  struct twist_h3_stream *s = h->active;
+
+  if (s == NULL)
+    return;
+  h->active = NULL;
+  s->live = 0;
+  s->next = h->free_list;
+  h->free_list = s;
+}
 
 struct twist_h3 *
 twist_h3_new (const struct twist_h1_events *ev)
 {
   struct twist_h3 *h = calloc (1, sizeof *h);
+
   if (h == NULL)
     return NULL;
   if (ev != NULL)
@@ -61,43 +130,72 @@ twist_h3_new (const struct twist_h1_events *ev)
 void
 twist_h3_free (struct twist_h3 *h)
 {
+  struct twist_h3_stream *s;
+
   if (h == NULL)
     return;
-  free (h->payload);
+  s = h->active;
+  if (s == NULL)
+    s = h->free_list;
+  else
+    s->next = h->free_list;
+  while (s != NULL)
+    {
+      struct twist_h3_stream *next = s->next;
+
+      free (s);
+      s = next;
+    }
   free (h);
 }
 
-static int
-take_varint (struct twist_h3 *h, const uint8_t *data, size_t len, size_t *off,
-             uint64_t *acc, int *shift, int *done)
+static void
+h3_fail (struct twist_h3 *h, int err)
 {
-  while (*off < len && !*done)
+  h->failed = 1;
+  if (h->ev.failure != NULL)
+    h->ev.failure (h->ev.user, err);
+}
+
+static void
+on_frame (struct twist_h3 *h, uint64_t type, const uint8_t *p, size_t len)
+{
+  if (type == H3_HEADERS)
     {
-      uint8_t b = data[(*off)++];
-      if (*shift == 0)
+      if (take_stream (h) == NULL)
         {
-          unsigned prefix = 1u << (b >> 6);
-          *acc = b & 0x3fu;
-          if (prefix == 1)
-            {
-              *done = 1;
-              return 1;
-            }
-          *shift = 6;
-          h->got = 1;
-          h->length = prefix;
-          continue;
+          h3_fail (h, TWIST_ERR_NOMEM);
+          return;
         }
-      *acc = (*acc << 8) | b;
-      h->got++;
-      if (h->got == h->length)
-        {
-          *done = 1;
-          *shift = 0;
-          return 1;
-        }
+      if (twist_qpack_decode (p, len, &h->ev) != TWIST_OK)
+        h3_fail (h, TWIST_ERR_PROTOCOL);
+      else if (h->ev.switching != NULL)
+        h->ev.switching (h->ev.user);
+      return;
     }
-  return 0;
+  if (type == H3_DATA)
+    {
+      if (take_stream (h) == NULL)
+        {
+          h3_fail (h, TWIST_ERR_NOMEM);
+          return;
+        }
+      if (h->ev.body != NULL && len > 0)
+        h->ev.body (h->ev.user, p, len);
+      return;
+    }
+  if (type == H3_SETTINGS)
+    {
+      if (h->ev.message_done != NULL)
+        h->ev.message_done (h->ev.user);
+      release_stream (h);
+      return;
+    }
+  if (type == H3_GOAWAY)
+    {
+      release_stream (h);
+      h3_fail (h, TWIST_ERR_PROTOCOL);
+    }
 }
 
 size_t
@@ -105,76 +203,28 @@ twist_h3_receive (struct twist_h3 *h, const uint8_t *data, size_t len)
 {
   size_t off = 0;
 
-  if (h->failed)
+  if (h == NULL || h->failed)
     return 0;
   while (off < len && !h->failed)
     {
-      if (h->phase == 0)
+      size_t tn = 0;
+      size_t ln = 0;
+      uint64_t type = 0;
+      uint64_t length = 0;
+
+      if (!peek_varint (data + off, len - off, &tn, &type))
+        break;
+      if (!peek_varint (data + off + tn, len - off - tn, &ln, &length))
+        break;
+      if (length > H3_MAX_LEN)
         {
-          int done = 0;
-          if (!take_varint (h, data, len, &off, &h->type, &h->type_shift, &done))
-            break;
-          h->phase = 1;
-          h->len_shift = 0;
-          h->got = 0;
+          h3_fail (h, TWIST_ERR_PROTOCOL);
+          break;
         }
-      if (h->phase == 1)
-        {
-          int done = 0;
-          if (!take_varint (h, data, len, &off, &h->length, &h->len_shift,
-                            &done))
-            break;
-          if (h->length > 65536)
-            {
-              h->failed = 1;
-              if (h->ev.failure != NULL)
-                h->ev.failure (h->ev.user, TWIST_ERR_PROTOCOL);
-              break;
-            }
-          free (h->payload);
-          h->payload = h->length ? twist_xmalloc ((size_t) h->length) : NULL;
-          h->payload_len = 0;
-          h->phase = 2;
-          if (h->length > 0 && h->payload == NULL)
-            {
-              h->failed = 1;
-              break;
-            }
-        }
-      if (h->phase == 2)
-        {
-          size_t n = (size_t) h->length - h->payload_len;
-          if (n > len - off)
-            n = len - off;
-          if (n > 0)
-            memcpy (h->payload + h->payload_len, data + off, n);
-          h->payload_len += n;
-          off += n;
-          if (h->payload_len < h->length)
-            break;
-          if (h->type == 0x1)
-            {
-              if (twist_qpack_decode (h->payload, h->payload_len, &h->ev)
-                  != TWIST_OK)
-                {
-                  if (h->ev.failure != NULL)
-                    h->ev.failure (h->ev.user, TWIST_ERR_PROTOCOL);
-                }
-              else if (h->ev.switching != NULL)
-                h->ev.switching (h->ev.user);
-            }
-          else if (h->type == 0x0 && h->ev.body != NULL)
-            h->ev.body (h->ev.user, h->payload, h->payload_len);
-          else if (h->type == 0x4 && h->ev.message_done != NULL)
-            h->ev.message_done (h->ev.user);
-          if (h->type == 0x0)
-            {
-              /* A DATA frame does not by itself end the message.  */
-            }
-          h->phase = 0;
-          h->type_shift = 0;
-          h->got = 0;
-        }
+      if (len - off - tn - ln < length)
+        break;
+      on_frame (h, type, data + off + tn + ln, (size_t) length);
+      off += tn + ln + (size_t) length;
     }
   return off;
 }
@@ -210,34 +260,48 @@ twist_h3_request (struct twist_h3 *h, const char *method, const char *scheme,
   size_t blen = 0;
   uint8_t *buf;
   size_t n = 0;
+  size_t cap;
+  size_t frames;
   int rc;
-  (void) h;
 
+  (void) h;
   rc = twist_qpack_encode_request (method, scheme, authority, path, extra,
                                    &block, &blen);
   if (rc != TWIST_OK)
     return rc;
-  if (blen > 0x3fffffff || body_len > 0x3fffffff)
+  if (blen > 0x3fffffff)
     {
       free (block);
       return TWIST_ERR_PROTOCOL;
     }
-  buf = twist_xmalloc (16 + blen + body_len);
+  frames = body_len == 0 ? 0 : (body_len / H3_FRAME) + 1;
+  cap = 16 + blen + frames * 16 + body_len;
+  buf = twist_xmalloc (cap);
   if (buf == NULL)
     {
       free (block);
       return TWIST_ERR_NOMEM;
     }
-  buf[n++] = 0x01;
+  buf[n++] = H3_HEADERS;
   n += put_varint (buf + n, blen);
   memcpy (buf + n, block, blen);
   n += blen;
   if (body != NULL && body_len > 0)
     {
-      buf[n++] = 0x00;
-      n += put_varint (buf + n, body_len);
-      memcpy (buf + n, body, body_len);
-      n += body_len;
+      size_t off = 0;
+
+      while (off < body_len)
+        {
+          size_t chunk = body_len - off;
+
+          if (chunk > H3_FRAME)
+            chunk = H3_FRAME;
+          buf[n++] = H3_DATA;
+          n += put_varint (buf + n, chunk);
+          memcpy (buf + n, body + off, chunk);
+          n += chunk;
+          off += chunk;
+        }
     }
   free (block);
   *out = buf;

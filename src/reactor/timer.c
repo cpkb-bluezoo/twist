@@ -24,6 +24,7 @@
 #include "twist-int.h"
 
 #include <stdlib.h>
+#include <string.h>
 
 struct twist_timer
 {
@@ -33,6 +34,7 @@ struct twist_timer
   void *user;
   size_t index;
   struct twist_timer_heap *heap;
+  struct twist_timer *free_next;
 };
 
 struct twist_timer_heap
@@ -41,6 +43,7 @@ struct twist_timer_heap
   size_t n;
   size_t cap;
   size_t cancelled;
+  struct twist_timer *free_list;
 };
 
 static void
@@ -103,8 +106,39 @@ twist_timer_heap_free (struct twist_timer_heap *h)
     return;
   for (i = 0; i < h->n; i++)
     free (h->tab[i]);
+  while (h->free_list != NULL)
+    {
+      struct twist_timer *t = h->free_list;
+
+      h->free_list = t->free_next;
+      free (t);
+    }
   free (h->tab);
   free (h);
+}
+
+static struct twist_timer *
+take_timer (struct twist_timer_heap *h)
+{
+  struct twist_timer *t = h->free_list;
+
+  if (t != NULL)
+    {
+      h->free_list = t->free_next;
+      memset (t, 0, sizeof *t);
+      return t;
+    }
+  return calloc (1, sizeof *t);
+}
+
+static void
+give_timer (struct twist_timer_heap *h, struct twist_timer *t)
+{
+  t->cb = NULL;
+  t->user = NULL;
+  t->heap = NULL;
+  t->free_next = h->free_list;
+  h->free_list = t;
 }
 
 int
@@ -124,7 +158,7 @@ twist_timer_heap_push (struct twist_timer_heap *h, uint64_t deadline,
       h->tab = tab;
       h->cap = cap;
     }
-  t = calloc (1, sizeof *t);
+  t = take_timer (h);
   if (t == NULL)
     return TWIST_ERR_NOMEM;
   t->deadline = deadline;
@@ -152,10 +186,63 @@ twist_timer_cancel (struct twist_timer *timer)
     }
 }
 
+static void
+drop_root (struct twist_timer_heap *h)
+{
+  struct twist_timer *t = h->tab[0];
+  struct twist_timer *last;
+
+  h->n--;
+  if (h->n > 0)
+    {
+      last = h->tab[h->n];
+      h->tab[0] = last;
+      last->index = 0;
+      sift_down (h, 0);
+    }
+  if (twist_atomic_load (&t->cancelled) && h->cancelled > 0)
+    h->cancelled--;
+  give_timer (h, t);
+}
+
+static void
+rebuild_heap (struct twist_timer_heap *h)
+{
+  size_t i;
+  size_t w = 0;
+
+  for (i = 0; i < h->n; i++)
+    {
+      struct twist_timer *t = h->tab[i];
+
+      if (twist_atomic_load (&t->cancelled))
+        give_timer (h, t);
+      else
+        {
+          t->index = w;
+          h->tab[w++] = t;
+        }
+    }
+  h->n = w;
+  h->cancelled = 0;
+  i = h->n / 2;
+  while (i > 0)
+    {
+      i--;
+      sift_down (h, i);
+    }
+}
+
 uint64_t
-twist_timer_heap_deadline (const struct twist_timer_heap *h)
+twist_timer_heap_deadline (struct twist_timer_heap *h)
 {
   if (h == NULL || h->n == 0)
+    return 0;
+  if (h->cancelled > h->n / 2)
+    rebuild_heap (h);
+  while (h->n > 0 && twist_atomic_load (&h->tab[0]->cancelled))
+    drop_root (h);
+  if (h->n == 0)
     return 0;
   return h->tab[0]->deadline;
 }
@@ -181,6 +268,6 @@ twist_timer_heap_fire (struct twist_timer_heap *h, uint64_t now)
         }
       else if (t->cb != NULL)
         t->cb (t->user);
-      free (t);
+      give_timer (h, t);
     }
 }

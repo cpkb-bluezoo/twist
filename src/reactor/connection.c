@@ -28,6 +28,8 @@
 #include <string.h>
 #include <unistd.h>
 
+#include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 
@@ -41,17 +43,23 @@ struct twist_connection
   int connecting;
   int closing;
   int failed;
+  int hold_read;
+  int force_write;
+  int in_pool;
   struct twist_protocol_handler handler;
   ssize_t (*read_fn) (void *, uint8_t *, size_t);
   ssize_t (*write_fn) (void *, const uint8_t *, size_t);
   void *io_user;
   uint8_t *inbuf;
+  size_t in_off;
   size_t in_len;
   size_t in_cap;
   uint8_t *outbuf;
+  size_t out_off;
   size_t out_len;
   size_t out_cap;
   uint8_t *app;
+  size_t app_off;
   size_t app_len;
   size_t app_cap;
   void *tls;
@@ -97,10 +105,10 @@ refresh_interest (struct twist_connection *c)
 {
   int want = 0;
 
-  if (!c->paused && !c->closing && pending_in (c) < TWIST_IN_CEILING
-      && c->fd >= 0)
+  if (!c->paused && !c->closing && !c->hold_read
+      && pending_in (c) < TWIST_IN_CEILING && c->fd >= 0)
     want |= TWIST_INTEREST_READ;
-  if ((c->out_len > 0 || c->connecting) && c->fd >= 0)
+  if ((c->out_len > 0 || c->connecting || c->force_write) && c->fd >= 0)
     want |= TWIST_INTEREST_WRITE;
   if (want != c->interest)
     {
@@ -109,16 +117,44 @@ refresh_interest (struct twist_connection *c)
     }
 }
 
-static int
-append_buf (uint8_t **buf, size_t *len, size_t *cap, const uint8_t *data,
-            size_t n)
+void
+twist_connection_hold_read (struct twist_connection *c, int hold)
 {
-  if (*len + n > *cap)
+  if (c == NULL || c->hold_read == hold)
+    return;
+  c->hold_read = hold;
+  refresh_interest (c);
+}
+
+void
+twist_connection_force_write (struct twist_connection *c, int force)
+{
+  if (c == NULL || c->force_write == force)
+    return;
+  c->force_write = force;
+  refresh_interest (c);
+}
+
+static void
+compact_buf (uint8_t *buf, size_t *off, size_t len)
+{
+  if (buf != NULL && *off > 0 && len > 0)
+    memmove (buf, buf + *off, len);
+  *off = 0;
+}
+
+static int
+ensure_buf (uint8_t **buf, size_t *off, size_t len, size_t *cap, size_t extra)
+{
+  if (*off > 0
+      && ((*cap > 0 && *off >= *cap / 2) || *off + len + extra > *cap))
+    compact_buf (*buf, off, len);
+  if (*off + len + extra > *cap)
     {
       size_t ncap = *cap == 0 ? 4096 : *cap;
       uint8_t *p;
 
-      while (ncap < *len + n)
+      while (ncap < *off + len + extra)
         ncap *= 2;
       p = realloc (*buf, ncap);
       if (p == NULL)
@@ -126,24 +162,40 @@ append_buf (uint8_t **buf, size_t *len, size_t *cap, const uint8_t *data,
       *buf = p;
       *cap = ncap;
     }
-  memcpy (*buf + *len, data, n);
+  return TWIST_OK;
+}
+
+static int
+append_buf (uint8_t **buf, size_t *off, size_t *len, size_t *cap,
+            const uint8_t *data, size_t n)
+{
+  if (ensure_buf (buf, off, *len, cap, n) != TWIST_OK)
+    return TWIST_ERR_NOMEM;
+  if (n > 0 && data != NULL)
+    memcpy (*buf + *off + *len, data, n);
   *len += n;
   return TWIST_OK;
 }
 
 static void
-deliver (struct twist_connection *c, uint8_t **buf, size_t *len)
+deliver (struct twist_connection *c, uint8_t **buf, size_t *off, size_t *len,
+         size_t *cap)
 {
   while (*len > 0 && c->handler.receive != NULL && !c->paused)
     {
-      size_t n = c->handler.receive (&c->ep, *buf, *len);
+      size_t n = c->handler.receive (&c->ep, *buf + *off, *len);
+
       if (n == 0)
         break;
       if (n > *len)
         n = *len;
-      memmove (*buf, *buf + n, *len - n);
+      *off += n;
       *len -= n;
     }
+  if (*len == 0)
+    *off = 0;
+  else if (*off > 0 && *cap > 0 && *off >= *cap / 2)
+    compact_buf (*buf, off, *len);
 }
 
 /* Append and parse, never holding more than TWIST_IN_CEILING unconsumed
@@ -151,8 +203,8 @@ deliver (struct twist_connection *c, uint8_t **buf, size_t *len)
    A handler that cannot take more calls pause.  A full buffer that the
    handler did not pause on cannot make progress: fail it.  */
 static void
-feed_buf (struct twist_connection *c, uint8_t **buf, size_t *len, size_t *cap,
-          const uint8_t *data, size_t n)
+feed_buf (struct twist_connection *c, uint8_t **buf, size_t *boff, size_t *len,
+          size_t *cap, const uint8_t *data, size_t n)
 {
   size_t off = 0;
 
@@ -172,13 +224,13 @@ feed_buf (struct twist_connection *c, uint8_t **buf, size_t *len, size_t *cap,
       if (take > room)
         take = room;
       before = *len;
-      if (append_buf (buf, len, cap, data + off, take) != TWIST_OK)
+      if (append_buf (buf, boff, len, cap, data + off, take) != TWIST_OK)
         {
           twist_connection_fail (c, TWIST_ERR_NOMEM);
           return;
         }
       off += take;
-      deliver (c, buf, len);
+      deliver (c, buf, boff, len, cap);
       if (c->failed || c->paused)
         return;
       if (*len > before && *len >= TWIST_IN_CEILING)
@@ -237,9 +289,11 @@ tcp_resume (struct twist_endpoint *ep)
 {
   ep->conn->paused = 0;
   refresh_interest (ep->conn);
-  deliver (ep->conn, &ep->conn->inbuf, &ep->conn->in_len);
+  deliver (ep->conn, &ep->conn->inbuf, &ep->conn->in_off, &ep->conn->in_len,
+           &ep->conn->in_cap);
   if (ep->conn->app_len > 0)
-    deliver (ep->conn, &ep->conn->app, &ep->conn->app_len);
+    deliver (ep->conn, &ep->conn->app, &ep->conn->app_off, &ep->conn->app_len,
+             &ep->conn->app_cap);
 }
 
 struct twist_connection *
@@ -277,7 +331,10 @@ twist_connection_free (struct twist_connection *c)
     twist_timer_cancel (c->connect_timer);
   if (c->free_tls != NULL && c->tls != NULL)
     c->free_tls (c->tls);
-  free (c->inbuf);
+  if (c->in_pool && c->inbuf != NULL && c->in_cap == 16384)
+    twist_loop_give_rbuf (c->loop, c->inbuf);
+  else
+    free (c->inbuf);
   free (c->outbuf);
   free (c->app);
   free (c);
@@ -361,10 +418,38 @@ twist_connection_read_finished (struct twist_connection *c)
 }
 
 int
+twist_connection_send_parts (struct twist_connection *c, const uint8_t *a,
+                             size_t an, const uint8_t *b, size_t bn)
+{
+  if (c == NULL)
+    return TWIST_ERR_INVAL;
+  if (c->tls != NULL)
+    {
+      if (an > 0 && tcp_send (&c->ep, a, an) != TWIST_OK)
+        return TWIST_ERR_NOMEM;
+      if (bn > 0 && tcp_send (&c->ep, b, bn) != TWIST_OK)
+        return TWIST_ERR_NOMEM;
+      return TWIST_OK;
+    }
+  if (an > 0
+      && append_buf (&c->outbuf, &c->out_off, &c->out_len, &c->out_cap, a, an)
+         != TWIST_OK)
+    return TWIST_ERR_NOMEM;
+  if (bn > 0
+      && append_buf (&c->outbuf, &c->out_off, &c->out_len, &c->out_cap, b, bn)
+         != TWIST_OK)
+    return TWIST_ERR_NOMEM;
+  refresh_interest (c);
+  twist_connection_on_writable (c);
+  return TWIST_OK;
+}
+
+int
 twist_connection_queue_out (struct twist_connection *c, const uint8_t *data,
                             size_t len)
 {
-  int rc = append_buf (&c->outbuf, &c->out_len, &c->out_cap, data, len);
+  int rc = append_buf (&c->outbuf, &c->out_off, &c->out_len, &c->out_cap,
+                       data, len);
   if (rc == TWIST_OK)
     refresh_interest (c);
   return rc;
@@ -374,7 +459,7 @@ void
 twist_connection_deliver_app (struct twist_connection *c, const uint8_t *data,
                               size_t len)
 {
-  feed_buf (c, &c->app, &c->app_len, &c->app_cap, data, len);
+  feed_buf (c, &c->app, &c->app_off, &c->app_len, &c->app_cap, data, len);
   refresh_interest (c);
 }
 
@@ -388,7 +473,7 @@ twist_connection_ingest (struct twist_connection *c, const uint8_t *data,
         twist_connection_fail (c, TWIST_ERR_TLS);
       return;
     }
-  feed_buf (c, &c->inbuf, &c->in_len, &c->in_cap, data, len);
+  feed_buf (c, &c->inbuf, &c->in_off, &c->in_len, &c->in_cap, data, len);
   refresh_interest (c);
 }
 
@@ -435,11 +520,15 @@ twist_connection_connect (struct twist_connection *c, const void *addr,
   int rc;
   const struct sockaddr *sa = addr;
 
-  fd = socket (sa->sa_family, SOCK_STREAM, 0);
+  fd = socket (sa->sa_family,
+               SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
   if (fd < 0)
     return TWIST_ERR_CONNECT;
-  fcntl (fd, F_SETFL, O_NONBLOCK);
-  fcntl (fd, F_SETFD, FD_CLOEXEC);
+  {
+    int one = 1;
+
+    setsockopt (fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
+  }
   rc = connect (fd, sa, (socklen_t) addrlen);
   c->fd = fd;
   if (rc == 0)
@@ -464,7 +553,7 @@ twist_connection_connect (struct twist_connection *c, const void *addr,
 void
 twist_connection_on_readable (struct twist_connection *c)
 {
-  uint8_t buf[16384];
+  uint8_t tlsbuf[16384];
 
   if (c->connecting)
     return;
@@ -472,17 +561,45 @@ twist_connection_on_readable (struct twist_connection *c)
     {
       size_t room;
       ssize_t n;
+      uint8_t *dst;
 
       if (c->paused || c->closing || c->failed)
         break;
       if (pending_in (c) >= TWIST_IN_CEILING)
         break;
       room = TWIST_IN_CEILING - pending_in (c);
-      if (room > sizeof buf)
-        room = sizeof buf;
-      n = c->read_fn (c->io_user, buf, room);
-      if (n > 0)
-        twist_connection_ingest (c, buf, (size_t) n);
+      if (room > 16384)
+        room = 16384;
+      if (c->tls != NULL)
+        dst = tlsbuf;
+      else
+        {
+          if (c->inbuf == NULL)
+            {
+              c->inbuf = twist_loop_take_rbuf (c->loop);
+              if (c->inbuf != NULL)
+                {
+                  c->in_cap = 16384;
+                  c->in_pool = 1;
+                }
+            }
+          if (ensure_buf (&c->inbuf, &c->in_off, c->in_len, &c->in_cap, room)
+              != TWIST_OK)
+            {
+              twist_connection_fail (c, TWIST_ERR_NOMEM);
+              break;
+            }
+          dst = c->inbuf + c->in_off + c->in_len;
+        }
+      n = c->read_fn (c->io_user, dst, room);
+      if (n > 0 && c->tls == NULL)
+        {
+          c->in_len += (size_t) n;
+          deliver (c, &c->inbuf, &c->in_off, &c->in_len, &c->in_cap);
+          refresh_interest (c);
+        }
+      else if (n > 0)
+        twist_connection_ingest (c, tlsbuf, (size_t) n);
       else if (n == 0)
         {
           twist_connection_fail (c, TWIST_ERR_CLOSED);
@@ -516,11 +633,15 @@ twist_connection_on_writable (struct twist_connection *c)
     }
   while (c->out_len > 0)
     {
-      ssize_t n = c->write_fn (c->io_user, c->outbuf, c->out_len);
+      ssize_t n = c->write_fn (c->io_user, c->outbuf + c->out_off, c->out_len);
       if (n > 0)
         {
-          memmove (c->outbuf, c->outbuf + n, c->out_len - (size_t) n);
+          c->out_off += (size_t) n;
           c->out_len -= (size_t) n;
+          if (c->out_len == 0)
+            c->out_off = 0;
+          else if (c->out_cap > 0 && c->out_off >= c->out_cap / 2)
+            compact_buf (c->outbuf, &c->out_off, c->out_len);
         }
       else if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
         break;

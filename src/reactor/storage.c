@@ -39,6 +39,14 @@ struct twist_storage
   size_t nthreads;
 };
 
+struct twist_done
+{
+  void (*done) (void *, int);
+  void *user;
+  int err;
+  struct twist_job *job;
+};
+
 struct twist_job
 {
   void (*work) (void *);
@@ -47,42 +55,39 @@ struct twist_job
   void *user;
   struct twist_loop *loop;
   struct twist_job *next;
-};
-
-struct twist_done
-{
-  void (*done) (void *, int);
-  void *user;
-  int err;
+  struct twist_done cell;
 };
 
 static void
 done_on_loop (void *user)
 {
   struct twist_done *d = user;
+  struct twist_job *job = d->job;
+
   d->done (d->user, d->err);
-  free (d);
+  free (job);
 }
 
-static void
+static int
 finish_job (struct twist_job *job, int err)
 {
-  struct twist_done *d;
-
   if (job->done == NULL)
-    return;
+    return 1;
   if (job->loop == NULL)
     {
       job->done (job->user, err);
-      return;
+      return 1;
     }
-  d = calloc (1, sizeof *d);
-  if (d == NULL)
-    return;
-  d->done = job->done;
-  d->user = job->user;
-  d->err = err;
-  twist_loop_post (job->loop, done_on_loop, d);
+  job->cell.done = job->done;
+  job->cell.user = job->user;
+  job->cell.err = err;
+  job->cell.job = job;
+  if (twist_loop_post (job->loop, done_on_loop, &job->cell) != TWIST_OK)
+    {
+      job->done (job->user, TWIST_ERR_NOMEM);
+      return 1;
+    }
+  return 0;
 }
 
 static void *
@@ -109,8 +114,8 @@ worker (void *arg)
       st->len--;
       pthread_mutex_unlock (&st->mu);
       job->work (job->arg);
-      finish_job (job, TWIST_OK);
-      free (job);
+      if (finish_job (job, TWIST_OK))
+        free (job);
     }
   return NULL;
 }

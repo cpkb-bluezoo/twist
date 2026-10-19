@@ -27,218 +27,65 @@
 
 #define H2_DATA 0
 #define H2_HEADERS 1
+#define H2_PRIORITY 2
 #define H2_RST 3
 #define H2_SETTINGS 4
+#define H2_PUSH 5
 #define H2_PING 6
 #define H2_GOAWAY 7
 #define H2_WINDOW 8
 #define H2_CONTINUATION 9
 #define H2_END_STREAM 0x1
 #define H2_END_HEADERS 0x4
+#define H2_PADDED 0x8
+#define H2_PRIORITY_FLAG 0x20
 #define H2_ACK 0x1
+#define H2_FRAME 16384u
+#define H2_HEADER_CAP 8192u
+#define H2_MAX_STREAMS 100u
+#define H2_CONN_TARGET (1 << 20)
+#define H2_STREAM_TARGET (256 << 10)
+
+static const char preface[] = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
+
+struct twist_h2_stream
+{
+  uint32_t id;
+  int live;
+  uint8_t *block;
+  size_t block_len;
+  size_t block_cap;
+  int32_t recv_left;
+  int32_t send_left;
+  struct twist_h1_events ev;
+  int have_ev;
+  struct twist_h2_stream *next;
+};
 
 struct twist_h2
 {
   struct twist_h1_events ev;
   struct twist_hpack *hp;
-  int phase;                    /* 0 header, 1 payload */
-  uint8_t hdr[9];
-  size_t hdr_got;
-  uint32_t length;
-  uint8_t type;
-  uint8_t flags;
-  uint32_t stream;
-  uint8_t *payload;
-  size_t payload_got;
-  uint8_t *block;
-  size_t block_len;
-  size_t block_cap;
-  int32_t conn_window;
+  int (*emit) (void *, const uint8_t *, size_t);
+  void *emit_user;
+  int32_t conn_recv;
+  int32_t conn_send;
+  int32_t peer_init;
+  uint32_t max_frame;
+  uint32_t cont_stream;
+  uint32_t next_id;
+  uint32_t peer_max;
   int failed;
+  struct twist_h2_stream *active;
+  struct twist_h2_stream *free_list;
+  size_t n_alloc;
+  const uint8_t *pending;
+  size_t pending_len;
+  uint32_t pending_id;
+  int pending_end;
+  struct twist_h1_events next_ev;
+  int have_next;
 };
-
-static const char preface[] = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
-
-struct twist_h2 *
-twist_h2_new (const struct twist_h1_events *ev)
-{
-  struct twist_h2 *h = calloc (1, sizeof *h);
-  if (h == NULL)
-    return NULL;
-  if (ev != NULL)
-    h->ev = *ev;
-  h->hp = twist_hpack_new ();
-  h->conn_window = 65535;
-  if (h->hp == NULL)
-    {
-      free (h);
-      return NULL;
-    }
-  return h;
-}
-
-void
-twist_h2_free (struct twist_h2 *h)
-{
-  if (h == NULL)
-    return;
-  twist_hpack_free (h->hp);
-  free (h->payload);
-  free (h->block);
-  free (h);
-}
-
-int
-twist_h2_client_preface (uint8_t **out, size_t *len)
-{
-  uint8_t *buf = twist_xmalloc (sizeof preface - 1 + 9);
-  if (buf == NULL)
-    return TWIST_ERR_NOMEM;
-  memcpy (buf, preface, sizeof preface - 1);
-  memset (buf + sizeof preface - 1, 0, 9);
-  buf[sizeof preface - 1 + 3] = H2_SETTINGS;
-  *out = buf;
-  *len = sizeof preface - 1 + 9;
-  return TWIST_OK;
-}
-
-static void
-h2_fail (struct twist_h2 *h, int err)
-{
-  h->failed = 1;
-  if (h->ev.failure != NULL)
-    h->ev.failure (h->ev.user, err);
-}
-
-static void
-on_frame (struct twist_h2 *h)
-{
-  if (h->type == H2_SETTINGS && (h->flags & H2_ACK) == 0)
-    return;
-  if (h->type == H2_PING)
-    return;
-  if (h->type == H2_WINDOW && h->length == 4)
-    {
-      uint32_t inc = ((uint32_t) h->payload[0] << 24)
-        | ((uint32_t) h->payload[1] << 16)
-        | ((uint32_t) h->payload[2] << 8)
-        | h->payload[3];
-      inc &= 0x7fffffffu;
-      if (h->stream == 0)
-        h->conn_window += (int32_t) inc;
-      return;
-    }
-  if (h->type == H2_DATA)
-    {
-      if (h->ev.body != NULL && h->length > 0)
-        h->ev.body (h->ev.user, h->payload, h->length);
-      if ((h->flags & H2_END_STREAM) && h->ev.message_done != NULL)
-        h->ev.message_done (h->ev.user);
-      return;
-    }
-  if (h->type == H2_HEADERS || h->type == H2_CONTINUATION)
-    {
-      if (h->block_len + h->length > h->block_cap)
-        {
-          size_t cap = h->block_cap == 0 ? 256 : h->block_cap;
-          uint8_t *p;
-          while (cap < h->block_len + h->length)
-            cap *= 2;
-          p = realloc (h->block, cap);
-          if (p == NULL)
-            {
-              h2_fail (h, TWIST_ERR_NOMEM);
-              return;
-            }
-          h->block = p;
-          h->block_cap = cap;
-        }
-      if (h->length > 0)
-        memcpy (h->block + h->block_len, h->payload, h->length);
-      h->block_len += h->length;
-      if (h->flags & H2_END_HEADERS)
-        {
-          if (twist_hpack_decode (h->hp, h->block, h->block_len, &h->ev)
-              != TWIST_OK)
-            {
-              h2_fail (h, TWIST_ERR_PROTOCOL);
-              return;
-            }
-          h->block_len = 0;
-          if ((h->flags & H2_END_STREAM) && h->ev.message_done != NULL)
-            h->ev.message_done (h->ev.user);
-          else if (h->ev.switching != NULL)
-            h->ev.switching (h->ev.user);
-        }
-      return;
-    }
-  if (h->type == H2_GOAWAY || h->type == H2_RST)
-    h2_fail (h, TWIST_ERR_PROTOCOL);
-}
-
-size_t
-twist_h2_receive (struct twist_h2 *h, const uint8_t *data, size_t len)
-{
-  size_t off = 0;
-
-  if (h->failed)
-    return 0;
-  while (off < len && !h->failed)
-    {
-      if (h->phase == 0)
-        {
-          size_t n = 9 - h->hdr_got;
-          if (n > len - off)
-            n = len - off;
-          memcpy (h->hdr + h->hdr_got, data + off, n);
-          h->hdr_got += n;
-          off += n;
-          if (h->hdr_got < 9)
-            break;
-          h->length = ((uint32_t) h->hdr[0] << 16) | ((uint32_t) h->hdr[1] << 8)
-            | h->hdr[2];
-          h->type = h->hdr[3];
-          h->flags = h->hdr[4];
-          h->stream = ((uint32_t) h->hdr[5] << 24) | ((uint32_t) h->hdr[6] << 16)
-            | ((uint32_t) h->hdr[7] << 8) | h->hdr[8];
-          h->stream &= 0x7fffffffu;
-          if (h->length > 16384)
-            {
-              h2_fail (h, TWIST_ERR_PROTOCOL);
-              break;
-            }
-          free (h->payload);
-          h->payload = NULL;
-          h->payload_got = 0;
-          if (h->length > 0)
-            {
-              h->payload = twist_xmalloc (h->length);
-              if (h->payload == NULL)
-                {
-                  h2_fail (h, TWIST_ERR_NOMEM);
-                  break;
-                }
-            }
-          h->phase = 1;
-          h->hdr_got = 0;
-        }
-      if (h->phase == 1)
-        {
-          size_t n = h->length - h->payload_got;
-          if (n > len - off)
-            n = len - off;
-          if (n > 0 && h->payload != NULL)
-            memcpy (h->payload + h->payload_got, data + off, n);
-          h->payload_got += n;
-          off += n;
-          if (h->payload_got < h->length)
-            break;
-          on_frame (h);
-          h->phase = 0;
-        }
-    }
-  return off;
-}
 
 static void
 put24 (uint8_t *p, uint32_t v)
@@ -261,19 +108,682 @@ frame_hdr (uint8_t *p, uint32_t len, uint8_t type, uint8_t flags,
   p[8] = (uint8_t) stream;
 }
 
+static void
+h2_fail (struct twist_h2 *h, int err)
+{
+  struct twist_h2_stream *s;
+
+  h->failed = 1;
+  if (h->ev.failure != NULL && h->ev.user != NULL)
+    h->ev.failure (h->ev.user, err);
+  for (s = h->active; s != NULL; s = s->next)
+    if (s->have_ev && s->ev.failure != NULL && s->ev.user != NULL
+        && s->ev.user != h->ev.user)
+      s->ev.failure (s->ev.user, err);
+}
+
+static int
+emit_bytes (struct twist_h2 *h, const uint8_t *p, size_t n)
+{
+  if (h->emit == NULL || n == 0)
+    return TWIST_OK;
+  return h->emit (h->emit_user, p, n);
+}
+
+static void
+emit_window (struct twist_h2 *h, uint32_t stream, uint32_t inc)
+{
+  uint8_t buf[13];
+
+  if (inc == 0 || h->failed)
+    return;
+  frame_hdr (buf, 4, H2_WINDOW, 0, stream);
+  buf[9] = (uint8_t) (inc >> 24);
+  buf[10] = (uint8_t) (inc >> 16);
+  buf[11] = (uint8_t) (inc >> 8);
+  buf[12] = (uint8_t) inc;
+  if (emit_bytes (h, buf, sizeof buf) != TWIST_OK)
+    h2_fail (h, TWIST_ERR_CONNECT);
+}
+
+static void
+emit_settings_ack (struct twist_h2 *h)
+{
+  uint8_t buf[9];
+
+  frame_hdr (buf, 0, H2_SETTINGS, H2_ACK, 0);
+  if (emit_bytes (h, buf, sizeof buf) != TWIST_OK)
+    h2_fail (h, TWIST_ERR_CONNECT);
+}
+
+static void
+emit_ping_ack (struct twist_h2 *h, const uint8_t *payload)
+{
+  uint8_t buf[17];
+
+  frame_hdr (buf, 8, H2_PING, H2_ACK, 0);
+  memcpy (buf + 9, payload, 8);
+  if (emit_bytes (h, buf, sizeof buf) != TWIST_OK)
+    h2_fail (h, TWIST_ERR_CONNECT);
+}
+
+static struct twist_h1_events *
+stream_ev (struct twist_h2 *h, struct twist_h2_stream *s)
+{
+  if (s != NULL && s->have_ev)
+    return &s->ev;
+  return &h->ev;
+}
+
+static struct twist_h2_stream *
+find_stream (struct twist_h2 *h, uint32_t id)
+{
+  struct twist_h2_stream *s;
+
+  for (s = h->active; s != NULL; s = s->next)
+    if (s->id == id && s->live)
+      return s;
+  return NULL;
+}
+
+static struct twist_h2_stream *
+take_stream (struct twist_h2 *h, uint32_t id)
+{
+  struct twist_h2_stream *s;
+  size_t live = 0;
+
+  s = find_stream (h, id);
+  if (s != NULL)
+    return s;
+  for (s = h->active; s != NULL; s = s->next)
+    if (s->live)
+      live++;
+  if (h->peer_max != 0 && live >= h->peer_max)
+    return NULL;
+  if (h->free_list != NULL)
+    {
+      s = h->free_list;
+      h->free_list = s->next;
+      s->block_len = 0;
+    }
+  else
+    {
+      if (h->n_alloc >= H2_MAX_STREAMS)
+        return NULL;
+      s = calloc (1, sizeof *s);
+      if (s == NULL)
+        return NULL;
+      h->n_alloc++;
+    }
+  s->id = id;
+  s->live = 1;
+  s->recv_left = H2_STREAM_TARGET;
+  s->send_left = h->peer_init;
+  if (h->have_next)
+    {
+      s->ev = h->next_ev;
+      s->have_ev = 1;
+      h->have_next = 0;
+    }
+  else
+    s->have_ev = 0;
+  s->next = h->active;
+  h->active = s;
+  return s;
+}
+
+static void
+release_stream (struct twist_h2 *h, struct twist_h2_stream *s)
+{
+  struct twist_h2_stream **pp;
+
+  if (s == NULL || !s->live)
+    return;
+  for (pp = &h->active; *pp != NULL; pp = &(*pp)->next)
+    if (*pp == s)
+      {
+        *pp = s->next;
+        break;
+      }
+  s->live = 0;
+  s->id = 0;
+  s->block_len = 0;
+  s->next = h->free_list;
+  h->free_list = s;
+}
+
+static void
+free_stream_list (struct twist_h2_stream *s)
+{
+  while (s != NULL)
+    {
+      struct twist_h2_stream *next = s->next;
+
+      free (s->block);
+      free (s);
+      s = next;
+    }
+}
+
+struct twist_h2 *
+twist_h2_new (const struct twist_h1_events *ev)
+{
+  struct twist_h2 *h = calloc (1, sizeof *h);
+
+  if (h == NULL)
+    return NULL;
+  if (ev != NULL)
+    h->ev = *ev;
+  h->hp = twist_hpack_new ();
+  h->conn_recv = H2_CONN_TARGET;
+  h->conn_send = 65535;
+  h->peer_init = 65535;
+  h->max_frame = H2_FRAME;
+  h->next_id = 1;
+  if (h->hp == NULL)
+    {
+      free (h);
+      return NULL;
+    }
+  return h;
+}
+
+void
+twist_h2_free (struct twist_h2 *h)
+{
+  if (h == NULL)
+    return;
+  twist_hpack_free (h->hp);
+  free_stream_list (h->active);
+  free_stream_list (h->free_list);
+  free (h);
+}
+
+void
+twist_h2_set_emit (struct twist_h2 *h,
+                   int (*emit) (void *, const uint8_t *, size_t), void *user)
+{
+  if (h == NULL)
+    return;
+  h->emit = emit;
+  h->emit_user = user;
+}
+
+int
+twist_h2_can_open (const struct twist_h2 *h)
+{
+  const struct twist_h2_stream *s;
+  size_t live = 0;
+
+  if (h == NULL || h->failed || h->pending != NULL)
+    return 0;
+  for (s = h->active; s != NULL; s = s->next)
+    if (s->live)
+      live++;
+  if (h->peer_max != 0 && live >= h->peer_max)
+    return 0;
+  if (h->free_list == NULL && h->n_alloc >= H2_MAX_STREAMS)
+    return 0;
+  return 1;
+}
+
+void
+twist_h2_set_next_owner (struct twist_h2 *h, const struct twist_h1_events *ev)
+{
+  if (h == NULL)
+    return;
+  if (ev == NULL)
+    {
+      h->have_next = 0;
+      return;
+    }
+  h->next_ev = *ev;
+  h->have_next = 1;
+}
+
+void
+twist_h2_drop_user (struct twist_h2 *h, void *user)
+{
+  struct twist_h2_stream *s;
+
+  if (h == NULL || user == NULL)
+    return;
+  if (h->ev.user == user)
+    {
+      h->ev.user = NULL;
+      h->ev.failure = NULL;
+      h->ev.body = NULL;
+      h->ev.header = NULL;
+      h->ev.message_done = NULL;
+      h->ev.switching = NULL;
+    }
+  for (s = h->active; s != NULL; s = s->next)
+    if (s->have_ev && s->ev.user == user)
+      s->have_ev = 0;
+}
+
+int
+twist_h2_client_preface (uint8_t **out, size_t *len)
+{
+  uint8_t *buf = twist_xmalloc (sizeof preface - 1 + 9);
+
+  if (buf == NULL)
+    return TWIST_ERR_NOMEM;
+  memcpy (buf, preface, sizeof preface - 1);
+  memset (buf + sizeof preface - 1, 0, 9);
+  buf[sizeof preface - 1 + 3] = H2_SETTINGS;
+  *out = buf;
+  *len = sizeof preface - 1 + 9;
+  return TWIST_OK;
+}
+
 int
 twist_h2_preface (uint8_t **out, size_t *out_len)
 {
-  static const uint8_t settings[6] = { 0x00, 0x02, 0x00, 0x00, 0x00, 0x00 };
-  uint8_t *buf = twist_xmalloc (24 + 9 + sizeof settings);
+  static const uint8_t settings[] = {
+    0x00, 0x02, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x04, 0x00, 0x04, 0x00, 0x00
+  };
+  uint32_t inc = H2_CONN_TARGET - 65535u;
+  uint8_t *buf = twist_xmalloc (24 + 9 + sizeof settings + 13);
 
   if (buf == NULL)
     return TWIST_ERR_NOMEM;
   memcpy (buf, preface, 24);
   frame_hdr (buf + 24, (uint32_t) sizeof settings, H2_SETTINGS, 0, 0);
   memcpy (buf + 33, settings, sizeof settings);
+  frame_hdr (buf + 33 + sizeof settings, 4, H2_WINDOW, 0, 0);
+  buf[33 + sizeof settings + 9] = (uint8_t) (inc >> 24);
+  buf[33 + sizeof settings + 10] = (uint8_t) (inc >> 16);
+  buf[33 + sizeof settings + 11] = (uint8_t) (inc >> 8);
+  buf[33 + sizeof settings + 12] = (uint8_t) inc;
   *out = buf;
-  *out_len = 24 + 9 + sizeof settings;
+  *out_len = 24 + 9 + sizeof settings + 13;
+  return TWIST_OK;
+}
+
+static int
+append_block (struct twist_h2_stream *s, const uint8_t *p, size_t n)
+{
+  if (n == 0)
+    return TWIST_OK;
+  if (s->block_len + n > H2_HEADER_CAP)
+    return TWIST_ERR_PROTOCOL;
+  if (s->block_len + n > s->block_cap)
+    {
+      size_t cap = s->block_cap == 0 ? 256 : s->block_cap;
+      uint8_t *grown;
+
+      while (cap < s->block_len + n)
+        cap *= 2;
+      if (cap > H2_HEADER_CAP)
+        cap = H2_HEADER_CAP;
+      grown = realloc (s->block, cap);
+      if (grown == NULL)
+        return TWIST_ERR_NOMEM;
+      s->block = grown;
+      s->block_cap = cap;
+    }
+  memcpy (s->block + s->block_len, p, n);
+  s->block_len += n;
+  return TWIST_OK;
+}
+
+static const uint8_t *
+frame_body (uint8_t type, uint8_t flags, const uint8_t *p, size_t len,
+            size_t *out)
+{
+  size_t off = 0;
+  size_t pad = 0;
+
+  if ((flags & H2_PADDED) != 0
+      && (type == H2_DATA || type == H2_HEADERS || type == H2_PUSH
+          || type == H2_CONTINUATION))
+    {
+      if (len < 1)
+        return NULL;
+      pad = p[0];
+      off = 1;
+    }
+  if (type == H2_HEADERS && (flags & H2_PRIORITY_FLAG) != 0)
+    {
+      if (len < off + 5)
+        return NULL;
+      off += 5;
+    }
+  if (off + pad > len)
+    return NULL;
+  *out = len - off - pad;
+  return p + off;
+}
+
+static void
+note_recv (struct twist_h2 *h, struct twist_h2_stream *s, size_t n)
+{
+  int32_t half_c = H2_CONN_TARGET / 2;
+  int32_t half_s = H2_STREAM_TARGET / 2;
+
+  if (n == 0)
+    return;
+  if ((int32_t) n > h->conn_recv || (s != NULL && (int32_t) n > s->recv_left))
+    {
+      h2_fail (h, TWIST_ERR_PROTOCOL);
+      return;
+    }
+  h->conn_recv -= (int32_t) n;
+  if (h->conn_recv <= half_c)
+    {
+      uint32_t inc = (uint32_t) (H2_CONN_TARGET - h->conn_recv);
+
+      h->conn_recv = H2_CONN_TARGET;
+      emit_window (h, 0, inc);
+    }
+  if (s == NULL)
+    return;
+  s->recv_left -= (int32_t) n;
+  if (s->recv_left <= half_s)
+    {
+      uint32_t inc = (uint32_t) (H2_STREAM_TARGET - s->recv_left);
+
+      s->recv_left = H2_STREAM_TARGET;
+      emit_window (h, s->id, inc);
+    }
+}
+
+static void
+flush_pending (struct twist_h2 *h)
+{
+  struct twist_h2_stream *s;
+
+  if (h->pending == NULL || h->failed)
+    return;
+  s = find_stream (h, h->pending_id);
+  if (s == NULL)
+    return;
+  while (h->pending_len > 0 && h->conn_send > 0 && s->send_left > 0)
+    {
+      size_t n = h->pending_len;
+      uint8_t hdr[9];
+      int end;
+
+      if (n > h->max_frame)
+        n = h->max_frame;
+      if (n > (size_t) h->conn_send)
+        n = (size_t) h->conn_send;
+      if (n > (size_t) s->send_left)
+        n = (size_t) s->send_left;
+      end = h->pending_end && n == h->pending_len;
+      frame_hdr (hdr, (uint32_t) n, H2_DATA, end ? H2_END_STREAM : 0,
+                 h->pending_id);
+      if (emit_bytes (h, hdr, sizeof hdr) != TWIST_OK
+          || emit_bytes (h, h->pending, n) != TWIST_OK)
+        {
+          h2_fail (h, TWIST_ERR_CONNECT);
+          return;
+        }
+      h->conn_send -= (int32_t) n;
+      s->send_left -= (int32_t) n;
+      h->pending += n;
+      h->pending_len -= n;
+    }
+  if (h->pending_len == 0)
+    h->pending = NULL;
+}
+
+static void
+on_settings (struct twist_h2 *h, const uint8_t *p, size_t len)
+{
+  size_t off = 0;
+
+  if ((len % 6) != 0)
+    {
+      h2_fail (h, TWIST_ERR_PROTOCOL);
+      return;
+    }
+  while (off + 6 <= len)
+    {
+      uint16_t id = (uint16_t) ((p[off] << 8) | p[off + 1]);
+      uint32_t val = ((uint32_t) p[off + 2] << 24)
+        | ((uint32_t) p[off + 3] << 16)
+        | ((uint32_t) p[off + 4] << 8) | p[off + 5];
+
+      off += 6;
+      if (id == 3)
+        h->peer_max = val;
+      else if (id == 4)
+        {
+          int32_t delta = (int32_t) val - h->peer_init;
+          struct twist_h2_stream *s;
+
+          h->peer_init = (int32_t) val;
+          for (s = h->active; s != NULL; s = s->next)
+            if (s->live)
+              s->send_left += delta;
+        }
+      else if (id == 5)
+        {
+          if (val < 16384 || val > 16777215)
+            {
+              h2_fail (h, TWIST_ERR_PROTOCOL);
+              return;
+            }
+          h->max_frame = val;
+        }
+    }
+  emit_settings_ack (h);
+}
+
+static void
+on_headers (struct twist_h2 *h, uint32_t stream, uint8_t flags,
+            const uint8_t *p, size_t len)
+{
+  struct twist_h2_stream *s;
+  size_t n = 0;
+  const uint8_t *body;
+  int rc;
+
+  if (h->cont_stream != 0 && h->cont_stream != stream)
+    {
+      h2_fail (h, TWIST_ERR_PROTOCOL);
+      return;
+    }
+  s = take_stream (h, stream);
+  if (s == NULL)
+    {
+      h2_fail (h, TWIST_ERR_NOMEM);
+      return;
+    }
+  body = frame_body (H2_HEADERS, flags, p, len, &n);
+  if (body == NULL)
+    {
+      h2_fail (h, TWIST_ERR_PROTOCOL);
+      return;
+    }
+  rc = append_block (s, body, n);
+  if (rc != TWIST_OK)
+    {
+      h2_fail (h, rc);
+      return;
+    }
+  if ((flags & H2_END_HEADERS) == 0)
+    {
+      h->cont_stream = stream;
+      return;
+    }
+  h->cont_stream = 0;
+  {
+    struct twist_h1_events *ev = stream_ev (h, s);
+
+    if (twist_hpack_decode (h->hp, s->block, s->block_len, ev) != TWIST_OK)
+      {
+        h2_fail (h, TWIST_ERR_PROTOCOL);
+        return;
+      }
+    s->block_len = 0;
+    if ((flags & H2_END_STREAM) != 0)
+      {
+        if (ev->message_done != NULL)
+          ev->message_done (ev->user);
+        release_stream (h, s);
+      }
+    else if (ev->switching != NULL)
+      ev->switching (ev->user);
+  }
+}
+
+static void
+dispatch_frame (struct twist_h2 *h, uint8_t type, uint8_t flags,
+                uint32_t stream, const uint8_t *p, size_t len)
+{
+  if (h->cont_stream != 0
+      && !(type == H2_CONTINUATION && stream == h->cont_stream))
+    {
+      h2_fail (h, TWIST_ERR_PROTOCOL);
+      return;
+    }
+  if (type == H2_SETTINGS)
+    {
+      if (stream != 0)
+        {
+          h2_fail (h, TWIST_ERR_PROTOCOL);
+          return;
+        }
+      if ((flags & H2_ACK) == 0)
+        on_settings (h, p, len);
+      else if (len != 0)
+        h2_fail (h, TWIST_ERR_PROTOCOL);
+      return;
+    }
+  if (type == H2_PING)
+    {
+      if (len != 8 || stream != 0)
+        {
+          h2_fail (h, TWIST_ERR_PROTOCOL);
+          return;
+        }
+      if ((flags & H2_ACK) == 0)
+        emit_ping_ack (h, p);
+      return;
+    }
+  if (type == H2_WINDOW && len == 4)
+    {
+      uint32_t inc = ((uint32_t) p[0] << 24) | ((uint32_t) p[1] << 16)
+        | ((uint32_t) p[2] << 8) | p[3];
+      struct twist_h2_stream *s;
+
+      inc &= 0x7fffffffu;
+      if (stream == 0)
+        {
+          if (inc > (uint32_t) (0x7fffffff - h->conn_send))
+            {
+              h2_fail (h, TWIST_ERR_PROTOCOL);
+              return;
+            }
+          h->conn_send += (int32_t) inc;
+        }
+      else
+        {
+          s = find_stream (h, stream);
+          if (s != NULL)
+            {
+              if (inc > (uint32_t) (0x7fffffff - s->send_left))
+                {
+                  h2_fail (h, TWIST_ERR_PROTOCOL);
+                  return;
+                }
+              s->send_left += (int32_t) inc;
+            }
+        }
+      flush_pending (h);
+      return;
+    }
+  if (type == H2_DATA)
+    {
+      struct twist_h2_stream *s = take_stream (h, stream);
+      size_t n = 0;
+      const uint8_t *body;
+
+      if (s == NULL)
+        {
+          h2_fail (h, TWIST_ERR_NOMEM);
+          return;
+        }
+      body = frame_body (H2_DATA, flags, p, len, &n);
+      if (body == NULL)
+        {
+          h2_fail (h, TWIST_ERR_PROTOCOL);
+          return;
+        }
+      note_recv (h, s, n);
+      if (h->failed)
+        return;
+      {
+        struct twist_h1_events *ev = stream_ev (h, s);
+
+        if (ev->body != NULL && n > 0)
+          ev->body (ev->user, body, n);
+        if ((flags & H2_END_STREAM) != 0)
+          {
+            if (ev->message_done != NULL)
+              ev->message_done (ev->user);
+            release_stream (h, s);
+          }
+      }
+      return;
+    }
+  if (type == H2_HEADERS || type == H2_CONTINUATION)
+    {
+      on_headers (h, stream, flags, p, len);
+      return;
+    }
+  if (type == H2_GOAWAY || type == H2_RST)
+    {
+      if (type == H2_RST)
+        release_stream (h, find_stream (h, stream));
+      h2_fail (h, TWIST_ERR_PROTOCOL);
+      return;
+    }
+}
+
+size_t
+twist_h2_receive (struct twist_h2 *h, const uint8_t *data, size_t len)
+{
+  size_t off = 0;
+
+  if (h == NULL || h->failed)
+    return 0;
+  while (off + 9 <= len && !h->failed)
+    {
+      uint32_t flen = ((uint32_t) data[off] << 16)
+        | ((uint32_t) data[off + 1] << 8) | data[off + 2];
+      uint8_t type = data[off + 3];
+      uint8_t flags = data[off + 4];
+      uint32_t stream = ((uint32_t) data[off + 5] << 24)
+        | ((uint32_t) data[off + 6] << 16)
+        | ((uint32_t) data[off + 7] << 8) | data[off + 8];
+
+      stream &= 0x7fffffffu;
+      if (flen > h->max_frame)
+        {
+          h2_fail (h, TWIST_ERR_PROTOCOL);
+          break;
+        }
+      if (off + 9 + flen > len)
+        break;
+      dispatch_frame (h, type, flags, stream, data + off + 9, flen);
+      off += 9 + flen;
+    }
+  return off;
+}
+
+static int
+queue_data (uint8_t **buf, size_t *n, size_t *cap, const uint8_t *p, size_t len)
+{
+  if (*n + len > *cap)
+    return TWIST_ERR_NOMEM;
+  if (len > 0)
+    memcpy (*buf + *n, p, len);
+  *n += len;
   return TWIST_OK;
 }
 
@@ -287,31 +797,104 @@ twist_h2_request (struct twist_h2 *h, const char *method, const char *scheme,
   uint8_t *block = NULL;
   size_t blen = 0;
   uint8_t *buf;
-  size_t n;
+  size_t n = 0;
+  size_t cap;
+  size_t sent = 0;
+  uint32_t id;
+  struct twist_h2_stream *s;
   int rc;
+  int headers_end;
 
+  if (h == NULL)
+    return TWIST_ERR_INVAL;
+  if (h->pending != NULL)
+    return TWIST_ERR_AGAIN;
   rc = twist_hpack_encode_request (h->hp, method, scheme, authority, path,
                                    extra, &block, &blen);
   if (rc != TWIST_OK)
     return rc;
-  n = 9 + blen + (body != NULL ? 9 + body_len : 0);
-  buf = twist_xmalloc (n);
-  if (buf == NULL)
+  id = h->next_id;
+  s = take_stream (h, id);
+  if (s == NULL)
     {
       free (block);
       return TWIST_ERR_NOMEM;
     }
-  frame_hdr (buf, (uint32_t) blen, H2_HEADERS,
-             (uint8_t) (H2_END_HEADERS
-                        | (body == NULL && !keep_open ? H2_END_STREAM : 0)),
-             1);
-  memcpy (buf + 9, block, blen);
+  h->next_id += 2;
+  headers_end = (body == NULL || body_len == 0) && !keep_open;
+  cap = 9 + blen;
   if (body != NULL)
     {
-      frame_hdr (buf + 9 + blen, (uint32_t) body_len, H2_DATA, H2_END_STREAM, 1);
-      memcpy (buf + 18 + blen, body, body_len);
+      size_t room = body_len;
+      size_t win = 0;
+
+      if (h->conn_send > 0)
+        win = (size_t) h->conn_send;
+      if ((size_t) s->send_left < win)
+        win = (size_t) s->send_left;
+      if (room > win)
+        room = win;
+      cap += ((room / h->max_frame) + 1) * (9 + h->max_frame);
     }
+  buf = twist_xmalloc (cap > 0 ? cap : 1);
+  if (buf == NULL)
+    {
+      free (block);
+      release_stream (h, s);
+      return TWIST_ERR_NOMEM;
+    }
+  {
+    uint8_t hdr[9];
+
+    frame_hdr (hdr, (uint32_t) blen, H2_HEADERS,
+               (uint8_t) (H2_END_HEADERS | (headers_end ? H2_END_STREAM : 0)),
+               id);
+    rc = queue_data (&buf, &n, &cap, hdr, 9);
+    if (rc == TWIST_OK)
+      rc = queue_data (&buf, &n, &cap, block, blen);
+  }
   free (block);
+  if (rc != TWIST_OK)
+    {
+      free (buf);
+      return rc;
+    }
+  if (headers_end)
+    release_stream (h, s);
+  while (body != NULL && sent < body_len && h->conn_send > 0 && s->send_left > 0
+         && s->live)
+    {
+      size_t chunk = body_len - sent;
+      uint8_t hdr[9];
+      int end;
+
+      if (chunk > h->max_frame)
+        chunk = h->max_frame;
+      if (chunk > (size_t) h->conn_send)
+        chunk = (size_t) h->conn_send;
+      if (chunk > (size_t) s->send_left)
+        chunk = (size_t) s->send_left;
+      end = !keep_open && sent + chunk == body_len;
+      frame_hdr (hdr, (uint32_t) chunk, H2_DATA, end ? H2_END_STREAM : 0, id);
+      if (queue_data (&buf, &n, &cap, hdr, 9) != TWIST_OK
+          || queue_data (&buf, &n, &cap, body + sent, chunk) != TWIST_OK)
+        {
+          free (buf);
+          return TWIST_ERR_NOMEM;
+        }
+      h->conn_send -= (int32_t) chunk;
+      s->send_left -= (int32_t) chunk;
+      sent += chunk;
+      if (end)
+        release_stream (h, s);
+    }
+  if (body != NULL && sent < body_len)
+    {
+      h->pending = body + sent;
+      h->pending_len = body_len - sent;
+      h->pending_id = id;
+      h->pending_end = !keep_open;
+    }
   *out = buf;
   *out_len = n;
   return TWIST_OK;

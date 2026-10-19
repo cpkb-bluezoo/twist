@@ -139,6 +139,8 @@ parse_status (struct twist_h1 *p)
   p->state = H1_HEADER;
   p->chunked = 0;
   p->need = 0;
+  if (strncmp (p->line, "HTTP/", 5) == 0 && p->line[6] == '.')
+    p->keep = (p->line[5] == '1' && p->line[7] == '1');
   if (code == 204 || code == 304 || (code >= 100 && code < 200))
     p->need = 0;
 }
@@ -203,6 +205,19 @@ parse_header (struct twist_h1 *p)
       p->chunked = 1;
       p->need = 0;
     }
+  else if (strcasecmp (p->line, "connection") == 0)
+    {
+      if (strstr (value, "close") != NULL)
+        p->keep = 0;
+      else if (strstr (value, "keep-alive") != NULL)
+        p->keep = 1;
+    }
+}
+
+int
+twist_h1_keep (const struct twist_h1 *p)
+{
+  return p != NULL && p->keep;
 }
 
 static void
@@ -321,7 +336,7 @@ twist_h1_write_request (const char *method, const char *target,
                         const uint8_t *body, size_t body_len, uint8_t **out,
                         size_t *out_len)
 {
-  size_t cap = 512 + body_len;
+  size_t cap = 512;
   const struct twist_slist *h;
   uint8_t *buf;
   size_t n = 0;
@@ -362,18 +377,14 @@ twist_h1_write_request (const char *method, const char *target,
         }
       n += (size_t) wr;
     }
-  if (n + 2 + body_len > cap)
+  if (n + 2 > cap)
     {
       free (buf);
       return TWIST_ERR_NOMEM;
     }
   buf[n++] = '\r';
   buf[n++] = '\n';
-  if (body != NULL && body_len > 0)
-    {
-      memcpy (buf + n, body, body_len);
-      n += body_len;
-    }
+  (void) body;
   *out = buf;
   *out_len = n;
   return TWIST_OK;

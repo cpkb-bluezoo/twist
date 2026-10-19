@@ -30,11 +30,23 @@
 #include <strings.h>
 #include <sys/stat.h>
 
-/* One chunk is in flight.  The worker blocks until the loop has written
-   it, so a slow body callback holds the worker rather than the reactor
-   and rather than the rest of the file.  */
+/* Four chunks may be in flight.  The worker waits only when that
+   pipeline is full, and it stops when the easy aborts.  The worker
+   owns the file until the last ack, so the loop cannot free it early.  */
 
 #define FILE_CHUNK 16384
+#define FILE_PIPELINE 4
+
+struct file_chunk
+{
+  struct twist_file *file;
+  char *data;
+  size_t len;
+  int err;
+  char *errmsg;
+  int final_note;
+  int busy;
+};
 
 struct twist_file
 {
@@ -42,15 +54,11 @@ struct twist_file
   pthread_mutex_t mu;
   pthread_cond_t cv;
   int live;
-  int acked;
   int stop;
-  int final_note;
-  int note_err;
-  char *data;
-  size_t len;
-  char *errmsg;
+  int inflight;
   size_t total;
   int err;
+  struct file_chunk slot[FILE_PIPELINE];
 };
 
 static void
@@ -66,8 +74,6 @@ file_free (void *p)
   pthread_mutex_unlock (&f->mu);
   pthread_cond_destroy (&f->cv);
   pthread_mutex_destroy (&f->mu);
-  free (f->data);
-  free (f->errmsg);
   free (f);
 }
 
@@ -103,40 +109,43 @@ file_errmsg (const char *path, int reading)
 static void
 file_on_loop (void *user)
 {
-  struct twist_file *f = user;
+  struct file_chunk *c = user;
+  struct twist_file *f = c->file;
   struct twist_easy *easy = f->easy;
-  int err = f->note_err;
+  int err = c->err;
 
-  if (f->data != NULL && f->len > 0 && f->err == TWIST_OK && err == TWIST_OK
+  if (c->data != NULL && c->len > 0 && f->err == TWIST_OK && err == TWIST_OK
       && easy->write_cb != NULL)
     {
-      size_t got = easy->write_cb (f->data, 1, f->len, easy->write_data);
+      size_t got = easy->write_cb (c->data, 1, c->len, easy->write_data);
 
-      if (got < f->len)
+      if (got < c->len)
         err = TWIST_ERR_ABORTED;
       else
-        f->total += f->len;
+        f->total += c->len;
     }
-  free (f->data);
-  f->data = NULL;
+  free (c->data);
+  c->data = NULL;
   if (err != TWIST_OK && f->err == TWIST_OK)
     f->err = err;
-  if (f->errmsg != NULL)
+  if (c->errmsg != NULL)
     {
       if (f->err != TWIST_OK)
-        twist_easy_set_error (easy, f->errmsg);
+        twist_easy_set_error (easy, c->errmsg);
       else
-        free (f->errmsg);
-      f->errmsg = NULL;
+        free (c->errmsg);
+      c->errmsg = NULL;
     }
-  if (f->final_note)
+  if (c->final_note)
     {
       if (f->err == TWIST_OK)
         easy->size_download = f->total;
       twist_easy_finish (easy, f->err);
     }
   pthread_mutex_lock (&f->mu);
-  f->acked = 1;
+  c->busy = 0;
+  if (f->inflight > 0)
+    f->inflight--;
   if (f->err != TWIST_OK)
     f->stop = 1;
   pthread_cond_signal (&f->cv);
@@ -147,28 +156,67 @@ static int
 hand_off (struct twist_file *f, char *data, size_t len, int err, char *msg,
           int final_note)
 {
+  struct file_chunk *c = NULL;
+  int i;
   int rc;
 
-  f->data = data;
-  f->len = len;
-  f->note_err = err;
-  f->errmsg = msg;
-  f->final_note = final_note;
-  f->acked = 0;
-  rc = twist_loop_post (f->easy->loop, file_on_loop, f);
+  pthread_mutex_lock (&f->mu);
+  while (f->inflight >= FILE_PIPELINE)
+    pthread_cond_wait (&f->cv, &f->mu);
+  if (f->stop && !final_note)
+    {
+      pthread_mutex_unlock (&f->mu);
+      free (data);
+      free (msg);
+      return f->err != TWIST_OK ? f->err : TWIST_ERR_ABORTED;
+    }
+  for (i = 0; i < FILE_PIPELINE; i++)
+    if (!f->slot[i].busy)
+      {
+        c = &f->slot[i];
+        c->busy = 1;
+        break;
+      }
+  if (c == NULL)
+    {
+      pthread_mutex_unlock (&f->mu);
+      free (data);
+      free (msg);
+      return TWIST_ERR_NOMEM;
+    }
+  f->inflight++;
+  pthread_mutex_unlock (&f->mu);
+  c->file = f;
+  c->data = data;
+  c->len = len;
+  c->err = err;
+  c->errmsg = msg;
+  c->final_note = final_note;
+  rc = twist_loop_post (f->easy->loop, file_on_loop, c);
   if (rc != TWIST_OK)
     {
       free (data);
       free (msg);
-      f->data = NULL;
-      f->errmsg = NULL;
+      c->data = NULL;
+      c->errmsg = NULL;
+      pthread_mutex_lock (&f->mu);
+      c->busy = 0;
+      if (f->inflight > 0)
+        f->inflight--;
+      pthread_cond_signal (&f->cv);
+      pthread_mutex_unlock (&f->mu);
       return rc;
     }
+  return TWIST_OK;
+}
+
+static void
+file_drain (struct twist_file *f)
+{
   pthread_mutex_lock (&f->mu);
-  while (!f->acked)
+  while (f->inflight > 0)
     pthread_cond_wait (&f->cv, &f->mu);
   pthread_mutex_unlock (&f->mu);
-  return f->stop ? f->err : TWIST_OK;
 }
 
 static void
@@ -209,6 +257,13 @@ file_work (void *arg)
       size_t n = fread (buf, 1, sizeof buf, fp);
       char *copy;
 
+      pthread_mutex_lock (&f->mu);
+      if (f->stop)
+        {
+          pthread_mutex_unlock (&f->mu);
+          break;
+        }
+      pthread_mutex_unlock (&f->mu);
       if (n > 0)
         {
           copy = twist_xmalloc (n);
@@ -239,6 +294,7 @@ done:
     fclose (fp);
   if (hand_off (f, NULL, 0, err, msg, 1) != TWIST_OK && f->err == TWIST_OK)
     twist_easy_finish (f->easy, err != TWIST_OK ? err : TWIST_ERR_NOMEM);
+  file_drain (f);
   file_retire (f);
 }
 

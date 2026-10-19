@@ -55,6 +55,8 @@ struct twist_loop
   struct twist_slot *slots;
   size_t nslots;
   size_t slots_cap;
+  int *fd_of;
+  size_t fd_of_cap;
   uint64_t (*now_ms_fn) (void *);
   void *now_user;
   uint64_t (*aux_deadline_us) (void *, uint64_t now_us);
@@ -63,6 +65,12 @@ struct twist_loop
   void (*watch_cb) (void *, int fd, int interest);
   void *watch_user;
   struct twist_multi *multi;
+  struct twist_rbuf *rbufs;
+};
+
+struct twist_rbuf
+{
+  struct twist_rbuf *next;
 };
 
 static int
@@ -136,7 +144,7 @@ twist_loop_new (int external)
       return NULL;
     }
   if (loop->poll != NULL && loop->waker_r >= 0)
-    twist_poll_set (loop->poll, loop->waker_r, TWIST_INTEREST_READ);
+    twist_poll_set (loop->poll, loop->waker_r, TWIST_INTEREST_READ, loop);
   return loop;
 }
 
@@ -153,6 +161,14 @@ twist_loop_free (struct twist_loop *loop)
   if (loop->waker_w >= 0 && loop->waker_w != loop->waker_r)
     close (loop->waker_w);
   free (loop->slots);
+  free (loop->fd_of);
+  while (loop->rbufs != NULL)
+    {
+      struct twist_rbuf *n = loop->rbufs;
+
+      loop->rbufs = n->next;
+      free (n);
+    }
   free (loop);
 }
 
@@ -215,21 +231,75 @@ twist_loop_set_multi (struct twist_loop *loop, struct twist_multi *multi)
   loop->multi = multi;
 }
 
+uint8_t *
+twist_loop_take_rbuf (struct twist_loop *loop)
+{
+  struct twist_rbuf *n;
+
+  if (loop != NULL && loop->rbufs != NULL)
+    {
+      n = loop->rbufs;
+      loop->rbufs = n->next;
+      return (uint8_t *) n;
+    }
+  return malloc (16384);
+}
+
+void
+twist_loop_give_rbuf (struct twist_loop *loop, uint8_t *buf)
+{
+  struct twist_rbuf *n;
+
+  if (buf == NULL)
+    return;
+  if (loop == NULL)
+    {
+      free (buf);
+      return;
+    }
+  n = (struct twist_rbuf *) buf;
+  n->next = loop->rbufs;
+  loop->rbufs = n;
+}
+
 int
 twist_loop_waker (struct twist_loop *loop)
 {
   return loop->waker_r;
 }
 
+static int
+index_fd (struct twist_loop *loop, int fd, int slot_plus)
+{
+  if (fd < 0)
+    return -1;
+  if ((size_t) fd >= loop->fd_of_cap)
+    {
+      size_t ncap = (size_t) fd + 1;
+      int *p = realloc (loop->fd_of, ncap * sizeof *p);
+
+      if (p == NULL)
+        return -1;
+      memset (p + loop->fd_of_cap, 0,
+              (ncap - loop->fd_of_cap) * sizeof *p);
+      loop->fd_of = p;
+      loop->fd_of_cap = ncap;
+    }
+  loop->fd_of[fd] = slot_plus;
+  return 0;
+}
+
 static struct twist_slot *
 find_slot (struct twist_loop *loop, int fd)
 {
-  size_t i;
+  int ix;
 
-  for (i = 0; i < loop->nslots; i++)
-    if (loop->slots[i].fd == fd)
-      return &loop->slots[i];
-  return NULL;
+  if (fd < 0 || (size_t) fd >= loop->fd_of_cap)
+    return NULL;
+  ix = loop->fd_of[fd];
+  if (ix <= 0 || (size_t) ix > loop->nslots)
+    return NULL;
+  return &loop->slots[ix - 1];
 }
 
 void
@@ -255,11 +325,12 @@ twist_loop_watch_fd (struct twist_loop *loop, int fd, int interest,
       slot->fd = fd;
       slot->conn = conn;
       slot->interest = 0;
+      index_fd (loop, fd, (int) loop->nslots);
     }
   slot->conn = conn;
   slot->interest = interest;
   if (loop->poll != NULL)
-    twist_poll_set (loop->poll, fd, interest);
+    twist_poll_set (loop->poll, fd, interest, conn);
   if (loop->watch_cb != NULL)
     loop->watch_cb (loop->watch_user, fd, interest);
 }
@@ -267,19 +338,23 @@ twist_loop_watch_fd (struct twist_loop *loop, int fd, int interest,
 void
 twist_loop_unwatch_fd (struct twist_loop *loop, int fd)
 {
+  struct twist_slot *slot = find_slot (loop, fd);
   size_t i;
 
-  for (i = 0; i < loop->nslots; i++)
-    if (loop->slots[i].fd == fd)
-      {
-        if (loop->poll != NULL)
-          twist_poll_set (loop->poll, fd, 0);
-        if (loop->watch_cb != NULL)
-          loop->watch_cb (loop->watch_user, fd, TWIST_POLL_REMOVE);
-        loop->slots[i] = loop->slots[loop->nslots - 1];
-        loop->nslots--;
-        return;
-      }
+  if (slot == NULL)
+    return;
+  i = (size_t) (slot - loop->slots);
+  if (loop->poll != NULL)
+    twist_poll_set (loop->poll, fd, 0, NULL);
+  if (loop->watch_cb != NULL)
+    loop->watch_cb (loop->watch_user, fd, TWIST_POLL_REMOVE);
+  if ((size_t) fd < loop->fd_of_cap)
+    loop->fd_of[fd] = 0;
+  loop->slots[i] = loop->slots[loop->nslots - 1];
+  loop->nslots--;
+  if (loop->nslots > i && loop->slots[i].fd >= 0
+      && (size_t) loop->slots[i].fd < loop->fd_of_cap)
+    loop->fd_of[loop->slots[i].fd] = (int) i + 1;
 }
 
 int
@@ -380,9 +455,9 @@ twist_loop_on_timer (struct twist_loop *loop, uint64_t now_ms)
 }
 
 int
-twist_loop_run_once (struct twist_loop *loop)
+twist_loop_run_once_ms (struct twist_loop *loop, int wait_ms)
 {
-  struct twist_poll_event ev[32];
+  struct twist_poll_event ev[TWIST_POLL_BATCH];
   uint64_t now;
   long timeout;
   int n;
@@ -401,13 +476,38 @@ twist_loop_run_once (struct twist_loop *loop)
       loop->multi->last_timeout = timeout;
       loop->multi->timer_cb (loop->multi, timeout, loop->multi->timer_user);
     }
-  n = twist_poll_wait (loop->poll, ev, 32, (int) timeout);
+  if (wait_ms >= 0)
+    timeout = wait_ms;
+  n = twist_poll_wait (loop->poll, ev, TWIST_POLL_BATCH, (int) timeout);
   if (n < 0)
     return TWIST_ERR_CONNECT;
   for (i = 0; i < n; i++)
-    dispatch_fd (loop, ev[i].fd, ev[i].readable, ev[i].writable);
+    {
+      if (ev[i].ptr == loop)
+        {
+          waker_drain (loop->waker_r);
+          twist_cmdq_drain (loop->cmds);
+        }
+      else if (ev[i].ptr != NULL)
+        {
+          struct twist_connection *conn = ev[i].ptr;
+
+          if (ev[i].readable)
+            twist_connection_on_readable (conn);
+          if (ev[i].writable)
+            twist_connection_on_writable (conn);
+        }
+      else
+        dispatch_fd (loop, ev[i].fd, ev[i].readable, ev[i].writable);
+    }
   now = twist_loop_now (loop);
   twist_timer_heap_fire (loop->timers, now);
   fire_aux (loop, now);
   return TWIST_OK;
+}
+
+int
+twist_loop_run_once (struct twist_loop *loop)
+{
+  return twist_loop_run_once_ms (loop, -1);
 }

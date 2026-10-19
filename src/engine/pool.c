@@ -22,43 +22,213 @@
 
 #include "twist-int.h"
 
+#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
+
+#define TWIST_POOL_PER_KEY 8u
+#define TWIST_POOL_TOTAL 32u
+#define TWIST_POOL_AGE_MS 118000u
 
 struct twist_pool_slot
 {
   char *key;
   struct twist_connection *conn;
+  struct twist_loop *loop;
+  struct twist_timer *timer;
+  uint64_t idle_at;
+  int queued;
+  int discarded;
+  struct twist_pool *pool;
   struct twist_pool_slot *next;
 };
 
 struct twist_pool
 {
   struct twist_pool_slot *head;
+  size_t n;
+  int locked;
+  pthread_mutex_t mu;
 };
+
+static void slot_discard (struct twist_pool *pool, struct twist_pool_slot *s);
+
+static void
+pool_lock (struct twist_pool *pool)
+{
+  if (pool->locked)
+    pthread_mutex_lock (&pool->mu);
+}
+
+static void
+pool_unlock (struct twist_pool *pool)
+{
+  if (pool->locked)
+    pthread_mutex_unlock (&pool->mu);
+}
+
+static void
+unlink_slot (struct twist_pool *pool, struct twist_pool_slot *s)
+{
+  struct twist_pool_slot **pp;
+
+  for (pp = &pool->head; *pp != NULL; pp = &(*pp)->next)
+    if (*pp == s)
+      {
+        *pp = s->next;
+        if (pool->n > 0)
+          pool->n--;
+        s->next = NULL;
+        return;
+      }
+}
+
+static void
+discard_posted (void *user)
+{
+  struct twist_pool_slot *s = user;
+
+  if (s != NULL)
+    slot_discard (s->pool, s);
+}
+
+static size_t
+idle_receive (struct twist_endpoint *ep, const uint8_t *data, size_t len)
+{
+  struct twist_pool_slot *s = ep->user_data;
+
+  (void) data;
+  if (s != NULL && !s->queued && !s->discarded)
+    {
+      s->queued = 1;
+      if (s->timer != NULL)
+        {
+          twist_timer_cancel (s->timer);
+          s->timer = NULL;
+        }
+      twist_loop_post (s->loop, discard_posted, s);
+    }
+  return len;
+}
+
+static void
+idle_closed (struct twist_endpoint *ep, int error)
+{
+  (void) error;
+  idle_receive (ep, NULL, 0);
+}
+
+static const struct twist_protocol_handler idle_handler = {
+  NULL,
+  idle_receive,
+  idle_closed,
+  NULL,
+  idle_closed,
+  NULL,
+  NULL
+};
+
+static void
+slot_discard (struct twist_pool *pool, struct twist_pool_slot *s)
+{
+  struct twist_connection *conn;
+
+  if (s == NULL || s->discarded)
+    return;
+  s->discarded = 1;
+  if (pool != NULL)
+    {
+      pool_lock (pool);
+      unlink_slot (pool, s);
+      pool_unlock (pool);
+    }
+  if (s->timer != NULL)
+    {
+      twist_timer_cancel (s->timer);
+      s->timer = NULL;
+    }
+  conn = s->conn;
+  s->conn = NULL;
+  if (conn != NULL)
+    {
+      struct twist_endpoint *ep = twist_connection_endpoint (conn);
+
+      if (ep != NULL)
+        ep->user_data = NULL;
+      twist_connection_set_handler (conn, NULL);
+      twist_connection_free (conn);
+    }
+  free (s->key);
+  free (s);
+}
+
+static void
+idle_timeout (void *user)
+{
+  struct twist_pool_slot *s = user;
+
+  s->timer = NULL;
+  if (!s->queued)
+    slot_discard (s->pool, s);
+}
+
+static size_t
+count_key (struct twist_pool *pool, const char *key)
+{
+  struct twist_pool_slot *s;
+  size_t n = 0;
+
+  for (s = pool->head; s != NULL; s = s->next)
+    if (!s->discarded && s->key != NULL && strcmp (s->key, key) == 0)
+      n++;
+  return n;
+}
+
+static struct twist_pool_slot *
+oldest (struct twist_pool *pool, const char *key)
+{
+  struct twist_pool_slot *s;
+  struct twist_pool_slot *best = NULL;
+
+  for (s = pool->head; s != NULL; s = s->next)
+    {
+      if (s->discarded || s->queued)
+        continue;
+      if (key != NULL && (s->key == NULL || strcmp (s->key, key) != 0))
+        continue;
+      if (best == NULL || s->idle_at <= best->idle_at)
+        best = s;
+    }
+  return best;
+}
 
 struct twist_pool *
 twist_pool_new (void)
 {
-  return calloc (1, sizeof (struct twist_pool));
+  struct twist_pool *pool = calloc (1, sizeof *pool);
+
+  if (pool == NULL)
+    return NULL;
+  pthread_mutex_init (&pool->mu, NULL);
+  return pool;
 }
 
 void
 twist_pool_free (struct twist_pool *pool)
 {
-  struct twist_pool_slot *s;
-
   if (pool == NULL)
     return;
-  s = pool->head;
-  while (s != NULL)
-    {
-      struct twist_pool_slot *next = s->next;
-      free (s->key);
-      free (s);
-      s = next;
-    }
+  while (pool->head != NULL)
+    slot_discard (pool, pool->head);
+  pthread_mutex_destroy (&pool->mu);
   free (pool);
+}
+
+void
+twist_pool_set_lock (struct twist_pool *pool, int enabled)
+{
+  if (pool != NULL)
+    pool->locked = enabled ? 1 : 0;
 }
 
 int
@@ -71,25 +241,40 @@ twist_pool_take (struct twist_pool *pool, const char *key,
     *out = NULL;
   if (pool == NULL || key == NULL)
     return TWIST_ERR_INVAL;
+  pool_lock (pool);
   for (pp = &pool->head; *pp != NULL; pp = &(*pp)->next)
-    if (strcmp ((*pp)->key, key) == 0)
+    if (!(*pp)->queued && !(*pp)->discarded && strcmp ((*pp)->key, key) == 0)
       {
         struct twist_pool_slot *s = *pp;
+
         *pp = s->next;
+        if (pool->n > 0)
+          pool->n--;
+        pool_unlock (pool);
+        if (s->timer != NULL)
+          {
+            twist_timer_cancel (s->timer);
+            s->timer = NULL;
+          }
         if (out != NULL)
           *out = s->conn;
+        s->conn = NULL;
+        s->discarded = 1;
         free (s->key);
         free (s);
         return TWIST_OK;
       }
+  pool_unlock (pool);
   return TWIST_ERR_AGAIN;
 }
 
 int
-twist_pool_put (struct twist_pool *pool, const char *key,
-                struct twist_connection *conn)
+twist_pool_put_idle (struct twist_pool *pool, const char *key,
+                     struct twist_connection *conn, uint64_t now_ms)
 {
   struct twist_pool_slot *s;
+  struct twist_endpoint *ep;
+  struct twist_pool_slot *drop;
 
   if (pool == NULL || key == NULL || conn == NULL)
     return TWIST_ERR_INVAL;
@@ -103,7 +288,65 @@ twist_pool_put (struct twist_pool *pool, const char *key,
       return TWIST_ERR_NOMEM;
     }
   s->conn = conn;
+  s->loop = twist_endpoint_loop (twist_connection_endpoint (conn));
+  s->idle_at = now_ms;
+  s->pool = pool;
+  ep = twist_connection_endpoint (conn);
+  ep->user_data = s;
+  twist_connection_set_handler (conn, &idle_handler);
+  if (s->loop != NULL)
+    twist_loop_schedule (s->loop, now_ms + TWIST_POOL_AGE_MS, idle_timeout, s,
+                         &s->timer);
+  pool_lock (pool);
+  while (count_key (pool, key) >= TWIST_POOL_PER_KEY
+         || pool->n >= TWIST_POOL_TOTAL)
+    {
+      drop = oldest (pool, count_key (pool, key) >= TWIST_POOL_PER_KEY
+                     ? key : NULL);
+      if (drop == NULL)
+        break;
+      pool_unlock (pool);
+      slot_discard (pool, drop);
+      pool_lock (pool);
+    }
   s->next = pool->head;
   pool->head = s;
+  pool->n++;
+  pool_unlock (pool);
   return TWIST_OK;
+}
+
+int
+twist_pool_put (struct twist_pool *pool, const char *key,
+                struct twist_connection *conn)
+{
+  struct twist_loop *loop = NULL;
+  uint64_t now = 0;
+
+  if (conn != NULL)
+    loop = twist_endpoint_loop (twist_connection_endpoint (conn));
+  if (loop != NULL)
+    now = twist_loop_now (loop);
+  return twist_pool_put_idle (pool, key, conn, now);
+}
+
+void
+twist_pool_expire (struct twist_pool *pool, uint64_t now_ms)
+{
+  struct twist_pool_slot *s;
+  struct twist_pool_slot *next;
+
+  if (pool == NULL)
+    return;
+  pool_lock (pool);
+  s = pool->head;
+  pool_unlock (pool);
+  while (s != NULL)
+    {
+      next = s->next;
+      if (!s->discarded && !s->queued
+          && now_ms >= s->idle_at + TWIST_POOL_AGE_MS)
+        slot_discard (pool, s);
+      s = next;
+    }
 }

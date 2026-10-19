@@ -77,7 +77,7 @@ twist_poll_close (struct twist_poll *p)
 }
 
 int
-twist_poll_set (struct twist_poll *p, int fd, int interest)
+twist_poll_set (struct twist_poll *p, int fd, int interest, void *ptr)
 {
 #if defined TWIST_POLL_EPOLL
   struct epoll_event ev;
@@ -85,7 +85,7 @@ twist_poll_set (struct twist_poll *p, int fd, int interest)
   int rc;
 
   memset (&ev, 0, sizeof ev);
-  ev.data.fd = fd;
+  ev.data.ptr = ptr;
   if (interest & TWIST_INTEREST_READ)
     ev.events |= EPOLLIN;
   if (interest & TWIST_INTEREST_WRITE)
@@ -112,9 +112,9 @@ twist_poll_set (struct twist_poll *p, int fd, int interest)
 
   rflags = (interest & TWIST_INTEREST_READ) ? EV_ADD : EV_DELETE;
   wflags = (interest & TWIST_INTEREST_WRITE) ? EV_ADD : EV_DELETE;
-  EV_SET (&ev[n], fd, EVFILT_READ, rflags, 0, 0, NULL);
+  EV_SET (&ev[n], fd, EVFILT_READ, rflags, 0, 0, ptr);
   n++;
-  EV_SET (&ev[n], fd, EVFILT_WRITE, wflags, 0, 0, NULL);
+  EV_SET (&ev[n], fd, EVFILT_WRITE, wflags, 0, 0, ptr);
   n++;
   if (kevent (p->fd, ev, n, NULL, 0, NULL) < 0)
     return TWIST_ERR_CONNECT;
@@ -123,6 +123,7 @@ twist_poll_set (struct twist_poll *p, int fd, int interest)
   (void) p;
   (void) fd;
   (void) interest;
+  (void) ptr;
   return TWIST_ERR_UNSUPPORTED;
 #endif
 }
@@ -132,15 +133,15 @@ twist_poll_wait (struct twist_poll *p, struct twist_poll_event *ev, int max,
                  int timeout_ms)
 {
 #if defined TWIST_POLL_EPOLL
-  struct epoll_event buf[32];
+  struct epoll_event buf[TWIST_POLL_BATCH];
   int n;
   int i;
-  int cap;
+  int cap = max;
 
-  if (max > 32)
-    cap = 32;
-  else
-    cap = max;
+  if (cap > TWIST_POLL_BATCH)
+    cap = TWIST_POLL_BATCH;
+  if (cap < 1)
+    cap = 1;
   n = epoll_wait (p->fd, buf, cap, timeout_ms);
   if (n < 0)
     {
@@ -151,23 +152,24 @@ twist_poll_wait (struct twist_poll *p, struct twist_poll_event *ev, int max,
   for (i = 0; i < n; i++)
     {
       ev[i].fd = buf[i].data.fd;
+      ev[i].ptr = buf[i].data.ptr;
       ev[i].readable = (buf[i].events & (EPOLLIN | EPOLLERR | EPOLLHUP)) != 0;
       ev[i].writable = (buf[i].events & EPOLLOUT) != 0;
       ev[i].error = (buf[i].events & (EPOLLERR | EPOLLHUP)) != 0;
     }
   return n;
 #elif defined TWIST_POLL_KQUEUE
-  struct kevent buf[32];
+  struct kevent buf[TWIST_POLL_BATCH];
   struct timespec ts;
   struct timespec *tsp;
   int n;
   int i;
-  int cap;
+  int cap = max;
 
-  if (max > 32)
-    cap = 32;
-  else
-    cap = max;
+  if (cap > TWIST_POLL_BATCH)
+    cap = TWIST_POLL_BATCH;
+  if (cap < 1)
+    cap = 1;
   if (timeout_ms < 0)
     tsp = NULL;
   else
@@ -186,6 +188,7 @@ twist_poll_wait (struct twist_poll *p, struct twist_poll_event *ev, int max,
   for (i = 0; i < n; i++)
     {
       ev[i].fd = (int) buf[i].ident;
+      ev[i].ptr = buf[i].udata;
       ev[i].readable = buf[i].filter == EVFILT_READ;
       ev[i].writable = buf[i].filter == EVFILT_WRITE;
       ev[i].error = (buf[i].flags & EV_ERROR) != 0;

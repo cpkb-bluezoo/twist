@@ -21,17 +21,20 @@
 
 struct twist_poll;
 
+#define TWIST_POLL_BATCH 256
+
 struct twist_poll_event
 {
   int fd;
   int readable;
   int writable;
   int error;
+  void *ptr;
 };
 
 struct twist_poll *twist_poll_open (void);
 void twist_poll_close (struct twist_poll *poll);
-int twist_poll_set (struct twist_poll *poll, int fd, int interest);
+int twist_poll_set (struct twist_poll *poll, int fd, int interest, void *ptr);
 int twist_poll_wait (struct twist_poll *poll, struct twist_poll_event *ev,
                      int max, int timeout_ms);
 

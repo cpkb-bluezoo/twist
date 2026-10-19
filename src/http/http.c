@@ -71,6 +71,8 @@ struct twist_http
   int offered_h2c;
   int saw_upgrade_h2c;
   int preface_sent;
+  struct twist_session *sess;
+  struct twist_h1_events codec;
   int ws;
   int ws_open;
   char ws_key[25];
@@ -83,9 +85,13 @@ struct twist_http
   int peer_minor;
   int req_http10;
   struct twist_dns_addr peer;
+  char *hdr_line;
+  size_t hdr_cap;
 };
 
 static void http_begin (struct twist_http *h);
+static void http_connected (struct twist_endpoint *ep);
+static void http_fail (struct twist_http *h, int err);
 static void http_free_parsers (struct twist_http *h);
 static void on_version (void *user, int major, int minor);
 static int on_switch (void *user);
@@ -107,6 +113,137 @@ ncopy (const char *s, size_t n)
     memcpy (p, s, n);
   p[n] = 0;
   return p;
+}
+
+struct twist_session *
+twist_session_add (struct twist_multi *multi, const char *key,
+                   struct twist_loop *loop, struct twist_connection *conn,
+                   struct twist_h2 *h2)
+{
+  struct twist_session *s;
+
+  if (multi == NULL || key == NULL)
+    return NULL;
+  s = calloc (1, sizeof *s);
+  if (s == NULL)
+    return NULL;
+  s->key = twist_strdup (key);
+  if (s->key == NULL)
+    {
+      free (s);
+      return NULL;
+    }
+  s->loop = loop;
+  s->conn = conn;
+  s->h2 = h2;
+  s->users = 1;
+  s->next = multi->sessions;
+  multi->sessions = s;
+  return s;
+}
+
+struct twist_session *
+twist_session_find (struct twist_multi *multi, const char *key,
+                    struct twist_loop *loop)
+{
+  struct twist_session *s;
+
+  if (multi == NULL || key == NULL)
+    return NULL;
+  for (s = multi->sessions; s != NULL; s = s->next)
+    {
+      if (s->loop != loop || strcmp (s->key, key) != 0)
+        continue;
+      if (s->h2 != NULL)
+        {
+          if (twist_h2_can_open (s->h2))
+            return s;
+        }
+      else if (s->conn != NULL && twist_quic_can_open (s->conn))
+        return s;
+    }
+  return NULL;
+}
+
+void
+twist_session_release (struct twist_session *session)
+{
+  if (session != NULL && session->users > 0)
+    session->users--;
+}
+
+void
+twist_session_free_all (struct twist_multi *multi)
+{
+  struct twist_session *s;
+
+  if (multi == NULL)
+    return;
+  s = multi->sessions;
+  while (s != NULL)
+    {
+      struct twist_session *next = s->next;
+
+      twist_connection_free (s->conn);
+      twist_h2_free (s->h2);
+      free (s->key);
+      free (s);
+      s = next;
+    }
+  multi->sessions = NULL;
+}
+
+static struct twist_pool *
+http_pool (struct twist_http *h)
+{
+  if (h->easy != NULL && h->easy->share != NULL && h->easy->share->pool != NULL)
+    return h->easy->share->pool;
+  if (h->easy != NULL && h->easy->multi != NULL)
+    return h->easy->multi->pool;
+  return NULL;
+}
+
+static int
+http_pool_key (struct twist_http *h, char *buf, size_t cap)
+{
+  struct twist_url *url;
+  int port;
+  const char *proxy;
+  int n;
+
+  if (h->easy == NULL || h->easy->url == NULL || h->easy->loop == NULL)
+    return TWIST_ERR_INVAL;
+  url = h->easy->url;
+  port = url->port > 0 ? url->port : twist_url_default_port (url->scheme);
+  proxy = h->easy->proxy != NULL ? h->easy->proxy : "-";
+  n = snprintf (buf, cap, "%p|%s|%s|%d|%s", (void *) h->easy->loop,
+                url->scheme != NULL ? url->scheme : "",
+                url->host != NULL ? url->host : "", port, proxy);
+  if (n < 0 || (size_t) n >= cap)
+    return TWIST_ERR_NOMEM;
+  return TWIST_OK;
+}
+
+static void
+http_park (struct twist_http *h)
+{
+  struct twist_pool *pool;
+  struct twist_connection *c;
+  char key[1024];
+
+  if (h->mode != HTTP_H1 || h->ws || h->conn == NULL || h->h1 == NULL)
+    return;
+  if (!twist_h1_keep (h->h1))
+    return;
+  if (h->proxy != NULL && h->tunnel)
+    return;
+  pool = http_pool (h);
+  if (pool == NULL || http_pool_key (h, key, sizeof key) != TWIST_OK)
+    return;
+  c = h->conn;
+  h->conn = NULL;
+  if (twist_pool_put (pool, key, c) != TWIST_OK)
+    h->conn = c;
 }
 
 static void
@@ -142,6 +279,8 @@ http_complete (struct twist_http *h, int err)
         free (msg);
       err = TWIST_ERR_HTTP;
     }
+  if (err == TWIST_OK)
+    http_park (h);
   twist_easy_finish (h->easy, err);
 }
 
@@ -440,9 +579,17 @@ on_header (void *user, const char *name, size_t name_len, const char *value,
     }
   if (h->easy->header_cb == NULL)
     return;
-  line = twist_xmalloc (name_len + value_len + 5);
-  if (line == NULL)
-    return;
+  if (name_len + value_len + 5 > h->hdr_cap)
+    {
+      size_t cap = name_len + value_len + 5;
+      char *grown = realloc (h->hdr_line, cap);
+
+      if (grown == NULL)
+        return;
+      h->hdr_line = grown;
+      h->hdr_cap = cap;
+    }
+  line = h->hdr_line;
   memcpy (line, name, name_len);
   n = name_len;
   line[n++] = ':';
@@ -453,7 +600,6 @@ on_header (void *user, const char *name, size_t name_len, const char *value,
   line[n++] = '\n';
   line[n] = 0;
   h->easy->header_cb (line, 1, n, h->easy->header_data);
-  free (line);
 }
 
 static void
@@ -476,6 +622,16 @@ on_body (void *user, const uint8_t *data, size_t len)
 static void http_message_done (void *user);
 
 static int
+http_h2_emit (void *user, const uint8_t *data, size_t len)
+{
+  struct twist_http *h = user;
+
+  if (h->conn == NULL)
+    return TWIST_ERR_CONNECT;
+  return twist_endpoint_send (twist_connection_endpoint (h->conn), data, len);
+}
+
+static int
 arm_parsers (struct twist_http *h)
 {
   struct twist_h1_events ev;
@@ -488,10 +644,13 @@ arm_parsers (struct twist_http *h)
   ev.message_done = http_message_done;
   ev.version = on_version;
   ev.switching = on_switch;
+  h->codec = ev;
   http_free_parsers (h);
   h->h1 = twist_h1_new (&ev);
   h->h2 = twist_h2_new (&ev);
   h->h3 = twist_h3_new (&ev);
+  if (h->h2 != NULL)
+    twist_h2_set_emit (h->h2, http_h2_emit, h);
   if (h->h1 == NULL || h->h2 == NULL || h->h3 == NULL)
     return TWIST_ERR_NOMEM;
   return TWIST_OK;
@@ -559,7 +718,7 @@ request_headers (struct twist_http *h)
       list = twist_slist_append (list, "Connection: Upgrade, HTTP2-Settings");
       list = twist_slist_append (list, "Upgrade: h2c");
       /* ENABLE_PUSH = 0, matching the connection preface SETTINGS.  */
-      list = twist_slist_append (list, "HTTP2-Settings: AAIAAA");
+      list = twist_slist_append (list, "HTTP2-Settings: AAIAAAAAAAQABAAA");
     }
   if (h->ws && (h->mode == HTTP_H2 || h->mode == HTTP_H3))
     {
@@ -648,8 +807,11 @@ send_request (struct twist_http *h)
   http10 = h->req_http10
            || h->easy->http_version == TWIST_HTTP_VERSION_1_0;
   if (h->mode == HTTP_H2)
-    rc = twist_h2_request (h->h2, method, scheme, authority, target, extra,
-                           body, body_len, keep_open, &out, &out_len);
+    {
+      twist_h2_set_next_owner (h->h2, &h->codec);
+      rc = twist_h2_request (h->h2, method, scheme, authority, target, extra,
+                             body, body_len, keep_open, &out, &out_len);
+    }
   else if (h->mode == HTTP_H3)
     rc = twist_h3_request (h->h3, method, scheme, authority, target, extra,
                            body, body_len, &out, &out_len);
@@ -663,24 +825,39 @@ send_request (struct twist_http *h)
     {
       uint8_t *pre = NULL;
       size_t pn = 0;
+
       if (twist_h2_preface (&pre, &pn) != TWIST_OK)
         {
           free (out);
           return TWIST_ERR_NOMEM;
         }
-      rc = twist_endpoint_send (twist_connection_endpoint (h->conn), pre, pn);
+      rc = twist_connection_send_parts (h->conn, pre, pn, out, out_len);
       free (pre);
-      if (rc != TWIST_OK)
-        {
-          free (out);
-          return rc;
-        }
       h->preface_sent = 1;
     }
-  rc = twist_endpoint_send (twist_connection_endpoint (h->conn), out, out_len);
+  else if (h->mode == HTTP_H1)
+    rc = twist_connection_send_parts (h->conn, out, out_len, body, body_len);
+  else
+    rc = twist_connection_send_parts (h->conn, out, out_len, NULL, 0);
   free (out);
   if (rc == TWIST_OK)
-    h->sent = 1;
+    {
+      h->sent = 1;
+      if (h->sess == NULL && h->easy != NULL && h->easy->multi != NULL
+          && (h->mode == HTTP_H2 || h->mode == HTTP_H3) && h->conn != NULL)
+        {
+          char key[1024];
+
+          if (http_pool_key (h, key, sizeof key) == TWIST_OK)
+            {
+              h->sess = twist_session_add (h->easy->multi, key, h->easy->loop,
+                                           h->conn,
+                                           h->mode == HTTP_H2 ? h->h2 : NULL);
+              if (h->sess != NULL)
+                h->sess->preface = h->preface_sent;
+            }
+        }
+    }
   return rc;
 }
 
@@ -704,11 +881,23 @@ http_restart (void *user)
 {
   struct twist_http *h = user;
   struct twist_connection *c = h->conn;
+  int same = 0;
+  int port = 0;
 
+  if (h->easy->url != NULL && h->dial_host != NULL
+      && h->easy->url->host != NULL
+      && strcmp (h->dial_host, h->easy->url->host) == 0 && h->mode == HTTP_H1)
+    {
+      port = h->easy->url->port > 0
+        ? h->easy->url->port : twist_url_default_port (h->easy->url->scheme);
+      if (port == h->dial_port)
+        same = 1;
+    }
   h->conn = NULL;
   h->sent = 0;
   h->status = 0;
-  h->tls_on = 0;
+  if (!same)
+    h->tls_on = 0;
   h->finished = 0;
   h->ws_open = 0;
   twist_ws_free (h->wsess);
@@ -723,6 +912,20 @@ http_restart (void *user)
   h->location = NULL;
   free (h->challenge);
   h->challenge = NULL;
+  if (same && c != NULL)
+    {
+      h->conn = c;
+      if (twist_connection_tls (c) != NULL)
+        h->tls_on = 1;
+      if (arm_parsers (h) != TWIST_OK)
+        {
+          http_complete (h, TWIST_ERR_NOMEM);
+          return;
+        }
+      if (send_request (h) != TWIST_OK)
+        http_fail (h, TWIST_ERR_PROTOCOL);
+      return;
+    }
   if (c != NULL)
     twist_connection_free (c);
   twist_proxy_free (h->proxy);
@@ -828,7 +1031,36 @@ http_receive (struct twist_endpoint *ep, const uint8_t *data, size_t len)
   return twist_h1_receive (h->h1, data, len);
 }
 
-static void http_fail (struct twist_http *h, int err);
+static size_t
+session_receive (struct twist_endpoint *ep, const uint8_t *data, size_t len)
+{
+  struct twist_session *s = ep->user_data;
+
+  if (s == NULL || s->h2 == NULL)
+    return len;
+  return twist_h2_receive (s->h2, data, len);
+}
+
+static void
+session_disc (struct twist_endpoint *ep, int error)
+{
+  struct twist_session *s = ep->user_data;
+
+  (void) error;
+  if (s != NULL && s->h2 != NULL)
+    twist_h2_drop_user (s->h2, s->h2);
+}
+
+static struct twist_protocol_handler session_ops = {
+  NULL,
+  session_receive,
+  session_disc,
+  NULL,
+  NULL,
+  NULL,
+  NULL
+};
+
 static void start_attempt (struct twist_http *h);
 
 static void
@@ -1007,6 +1239,99 @@ prepare_dial (struct twist_http *h)
   return h->dial_host != NULL ? TWIST_OK : TWIST_ERR_NOMEM;
 }
 
+static size_t
+h3_stream_data (void *user, const uint8_t *data, size_t len, int fin)
+{
+  struct twist_http *h = user;
+
+  (void) fin;
+  if (h == NULL || h->h3 == NULL)
+    return len;
+  return twist_h3_receive (h->h3, data, len);
+}
+
+static int
+http_borrow (struct twist_http *h)
+{
+  struct twist_session *s;
+  struct twist_multi *multi;
+  char key[1024];
+
+  if ((h->mode != HTTP_H2 && h->mode != HTTP_H3) || h->ws)
+    return 0;
+  if (h->proxy != NULL && h->tunnel)
+    return 0;
+  multi = h->easy != NULL ? h->easy->multi : NULL;
+  if (multi == NULL || http_pool_key (h, key, sizeof key) != TWIST_OK)
+    return 0;
+  s = twist_session_find (multi, key, h->easy->loop);
+  if (s == NULL || s->conn == NULL)
+    return 0;
+  if (arm_parsers (h) != TWIST_OK)
+    return 0;
+  if (h->mode == HTTP_H2)
+    {
+      if (s->h2 == NULL)
+        {
+          http_free_parsers (h);
+          return 0;
+        }
+      twist_h2_free (h->h2);
+      h->h2 = s->h2;
+    }
+  else
+    {
+      if (twist_quic_open_stream (s->conn) != TWIST_OK)
+        {
+          http_free_parsers (h);
+          return 0;
+        }
+      twist_quic_bind (s->conn, h3_stream_data, h);
+    }
+  h->conn = s->conn;
+  h->sess = s;
+  s->users++;
+  h->preface_sent = 1;
+  if (twist_connection_tls (s->conn) != NULL)
+    h->tls_on = 1;
+  if (send_request (h) != TWIST_OK)
+    {
+      twist_h2_drop_user (s->h2, h);
+      twist_session_release (s);
+      h->sess = NULL;
+      if (h->h2 == s->h2)
+        h->h2 = NULL;
+      h->conn = NULL;
+      http_complete (h, TWIST_ERR_CONNECT);
+    }
+  return 1;
+}
+
+static int
+http_reuse (struct twist_http *h)
+{
+  struct twist_pool *pool;
+  struct twist_connection *c = NULL;
+  struct twist_endpoint *ep;
+  char key[1024];
+
+  if (h->mode != HTTP_H1 || (h->proxy != NULL && h->tunnel))
+    return 0;
+  pool = http_pool (h);
+  if (pool == NULL || http_pool_key (h, key, sizeof key) != TWIST_OK)
+    return 0;
+  if (twist_pool_take (pool, key, &c) != TWIST_OK || c == NULL)
+    return 0;
+  h->conn = c;
+  ep = twist_connection_endpoint (c);
+  ep->user_data = h;
+  twist_connection_set_handler (c, &h->handler);
+  if (twist_connection_tls (c) != NULL)
+    h->tls_on = 1;
+  http_connected (ep);
+  return 1;
+}
+
 static void
 dial (struct twist_http *h, const struct twist_dns_addr *addr)
 {
@@ -1017,6 +1342,8 @@ dial (struct twist_http *h, const struct twist_dns_addr *addr)
   size_t salen;
   int rc;
 
+  if (http_borrow (h) || http_reuse (h))
+    return;
   h->conn = twist_connection_new (h->easy->loop);
   if (h->conn == NULL)
     {
@@ -1079,6 +1406,8 @@ on_proxy_resolved (void *user, int err, const struct twist_dns_addr *addr)
 static void
 start_quic (struct twist_http *h, const struct twist_dns_addr *addr)
 {
+  if (http_borrow (h))
+    return;
   struct twist_easy *easy = h->easy;
   char *saved = easy->url->host;
   int saved_port = easy->url->port;
@@ -1269,6 +1598,25 @@ http_free (void *p)
     return;
   if (h->timer != NULL)
     twist_timer_cancel (h->timer);
+  if (h->sess != NULL)
+    {
+      if (h->conn != NULL)
+        {
+          struct twist_endpoint *ep = twist_connection_endpoint (h->conn);
+
+          if (ep->user_data == h)
+            {
+              ep->user_data = h->sess;
+              twist_connection_set_handler (h->conn, &session_ops);
+            }
+        }
+      twist_h2_drop_user (h->sess->h2, h);
+      if (h->h2 == h->sess->h2)
+        h->h2 = NULL;
+      h->conn = NULL;
+      twist_session_release (h->sess);
+      h->sess = NULL;
+    }
   twist_connection_free (h->conn);
   twist_proxy_free (h->proxy);
   http_free_parsers (h);
@@ -1280,6 +1628,7 @@ http_free (void *p)
   free (h->challenge);
   free (h->auth_line);
   free (h->dial_host);
+  free (h->hdr_line);
   free (h);
 }
 

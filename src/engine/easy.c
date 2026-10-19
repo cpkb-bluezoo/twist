@@ -439,6 +439,8 @@ twist_easy_perform (twist_easy *easy)
   while (!easy->done)
     {
       rc = twist_multi_perform (multi, &running);
+      if (rc == TWIST_OK && !easy->done && running > 0)
+        rc = twist_loop_run_once (multi->loop);
       if (rc != TWIST_OK)
         {
           twist_easy_finish (easy, rc);

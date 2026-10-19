@@ -109,6 +109,14 @@ test_timer (void)
   clock_ms = 9000;
   twist_loop_on_timer (loop, clock_ms);
   check (hits == 0, "cancelled");
+  clock_ms = 1000;
+  twist_loop_set_aux_timeout (loop, NULL, NULL);
+  check (twist_loop_schedule (loop, 4000, timer_cb, &hits, &timer) == TWIST_OK,
+         "schedule early");
+  check (twist_loop_schedule (loop, 7000, timer_cb, &hits, NULL) == TWIST_OK,
+         "schedule late");
+  twist_timer_cancel (timer);
+  check (twist_loop_next_timeout (loop, clock_ms) == 6000, "skip cancelled");
   twist_loop_free (loop);
 }
 
@@ -143,10 +151,27 @@ test_cmdq (void)
   twist_cmdq_free (q);
 }
 
+static uint8_t h2_emitted[64];
+static size_t h2_emitted_n;
+
+static int
+h2_capture (void *user, const uint8_t *data, size_t len)
+{
+  (void) user;
+  if (h2_emitted_n + len <= sizeof h2_emitted)
+    memcpy (h2_emitted + h2_emitted_n, data, len);
+  h2_emitted_n += len;
+  return 0;
+}
+
 static int saw_status;
 static int saw_done;
 static char body[64];
 static size_t body_len;
+static size_t body_total;
+static int slice_ok;
+static const uint8_t *slice_lo;
+static const uint8_t *slice_hi;
 static char hdr_name[64];
 static char hdr_value[64];
 
@@ -178,6 +203,10 @@ static void
 ev_body (void *user, const uint8_t *data, size_t len)
 {
   (void) user;
+  body_total += len;
+  if (slice_lo != NULL
+      && (data < slice_lo || data + len > slice_hi))
+    slice_ok = 0;
   if (body_len + len < sizeof body)
     {
       memcpy (body + body_len, data, len);
@@ -199,6 +228,8 @@ reset_ev (void)
   saw_status = 0;
   saw_done = 0;
   body_len = 0;
+  body_total = 0;
+  slice_ok = 1;
   body[0] = 0;
   hdr_name[0] = 0;
   hdr_value[0] = 0;
@@ -238,6 +269,60 @@ feed_all (size_t (*recv) (void *, const uint8_t *, size_t), void *obj,
         }
       off += got;
     }
+}
+
+/* Connection-buffer contract: a parser may leave an incomplete frame
+   unconsumed.  The next push is that tail plus the following bytes.  */
+static void
+feed_remain (size_t (*recv) (void *, const uint8_t *, size_t), void *obj,
+             const uint8_t *data, size_t len, size_t chunk)
+{
+  uint8_t *buf;
+  size_t have = 0;
+  size_t off = 0;
+
+  buf = malloc (len + 1);
+  if (buf == NULL)
+    {
+      failed = 1;
+      fprintf (stderr, "FAIL feed buffer\n");
+      return;
+    }
+  while (off < len || have > 0)
+    {
+      size_t n = chunk;
+      size_t got;
+
+      if (off < len)
+        {
+          if (n > len - off)
+            n = len - off;
+          memcpy (buf + have, data + off, n);
+          have += n;
+          off += n;
+        }
+      slice_lo = buf;
+      slice_hi = buf + have;
+      got = recv (obj, buf, have);
+      if (got == 0)
+        {
+          if (off < len)
+            continue;
+          if (have > 0)
+            {
+              failed = 1;
+              fprintf (stderr, "FAIL parser left %zu bytes\n", have);
+            }
+          break;
+        }
+      if (got > have)
+        got = have;
+      memmove (buf, buf + got, have - got);
+      have -= got;
+    }
+  free (buf);
+  slice_lo = NULL;
+  slice_hi = NULL;
 }
 
 static size_t
@@ -299,12 +384,76 @@ test_h2 (void)
   free (preface);
   h = twist_h2_new (&ev);
   reset_ev ();
-  feed_all (h2_recv, h, frames, sizeof frames, 1);
+  feed_remain (h2_recv, h, frames, sizeof frames, 1);
   check (strcmp (hdr_name, ":status") == 0 && strcmp (hdr_value, "200") == 0,
          "h2 status");
   check (body_len == 5 && memcmp (body, "hello", 5) == 0, "h2 body");
+  check (slice_ok, "h2 body is a slice");
   check (saw_done == 1, "h2 done");
   twist_h2_free (h);
+  {
+    uint8_t *out = NULL;
+    size_t n = 0;
+    uint8_t big[20000];
+    size_t data_frames = 0;
+    size_t i = 0;
+
+    memset (big, 'a', sizeof big);
+    h = twist_h2_new (&ev);
+    check (twist_h2_request (h, "POST", "https", "example", "/", NULL, big,
+                             sizeof big, 0, &out, &n) == TWIST_OK,
+           "h2 request");
+    while (i + 9 <= n)
+      {
+        uint32_t flen = ((uint32_t) out[i] << 16) | ((uint32_t) out[i + 1] << 8)
+          | out[i + 2];
+        if (out[i + 3] == 0)
+          {
+            data_frames++;
+            check (flen <= 16384, "h2 data frame size");
+          }
+        i += 9 + flen;
+      }
+    check (data_frames >= 2, "h2 data is framed");
+    free (out);
+    twist_h2_free (h);
+  }
+  {
+    enum { N = 32 };
+    uint8_t *frames_b;
+    size_t flen = (size_t) N * (9 + 16384);
+    size_t i;
+
+    frames_b = malloc (flen);
+    check (frames_b != NULL, "h2 window buf");
+    if (frames_b != NULL)
+      {
+        for (i = 0; i < N; i++)
+          {
+            uint8_t *p = frames_b + i * (9 + 16384);
+            p[0] = 0;
+            p[1] = 0x40;
+            p[2] = 0;
+            p[3] = 0;
+            p[4] = (i + 1 == N) ? 0x1 : 0;
+            p[5] = 0;
+            p[6] = 0;
+            p[7] = 0;
+            p[8] = 1;
+            memset (p + 9, 'b', 16384);
+          }
+        h = twist_h2_new (&ev);
+        h2_emitted_n = 0;
+        twist_h2_set_emit (h, h2_capture, NULL);
+        reset_ev ();
+        feed_remain (h2_recv, h, frames_b, flen, 1000);
+        check (body_total == (size_t) N * 16384, "h2 past 64KiB");
+        check (slice_ok, "h2 large slice");
+        check (h2_emitted_n >= 13 && h2_emitted[3] == 8, "h2 window update");
+        twist_h2_free (h);
+        free (frames_b);
+      }
+  }
 }
 
 static void
@@ -318,7 +467,7 @@ test_h3 (void)
   };
 
   reset_ev ();
-  feed_all (h3_recv, h, msg, sizeof msg, 1);
+  feed_remain (h3_recv, h, msg, sizeof msg, 1);
   check (strcmp (hdr_name, ":status") == 0 && strcmp (hdr_value, "200") == 0,
          "h3 status");
   check (saw_done == 1, "h3 done");
@@ -1728,7 +1877,7 @@ test_ws (void)
     ev.user = &opened;
     h3 = twist_h3_new (&ev);
     reset_ev ();
-    feed_all (h3_recv, h3, resp, sizeof resp, 1);
+    feed_remain (h3_recv, h3, resp, sizeof resp, 1);
     check (opened == 1, "h3 opened");
     check (body_len == 7 && memcmp (body, "\x81\x05Hello", 7) == 0,
            "h3 ws data");
@@ -2601,10 +2750,263 @@ test_file_pool (void)
   twist_multi_cleanup (multi);
 }
 
+static void
+test_conn_pool (void)
+{
+  struct twist_loop *loop = twist_loop_new (1);
+  struct twist_pool *pool = twist_pool_new ();
+  struct twist_connection *got = NULL;
+  int i;
+  int n = 0;
+  char key[16];
+
+  check (loop != NULL && pool != NULL, "pool alloc");
+  for (i = 0; i < 9; i++)
+    {
+      struct twist_connection *c = twist_connection_new (loop);
+
+      check (c != NULL
+             && twist_pool_put_idle (pool, "h", c, 1000) == TWIST_OK,
+             "pool put");
+    }
+  while (twist_pool_take (pool, "h", &got) == TWIST_OK)
+    {
+      n++;
+      twist_connection_free (got);
+    }
+  check (n == 8, "pool per-host cap");
+  for (i = 0; i < 33; i++)
+    {
+      struct twist_connection *c = twist_connection_new (loop);
+
+      snprintf (key, sizeof key, "k%d", i);
+      check (c != NULL
+             && twist_pool_put_idle (pool, key, c, 5000) == TWIST_OK,
+             "pool many");
+    }
+  n = 0;
+  for (i = 0; i < 33; i++)
+    {
+      snprintf (key, sizeof key, "k%d", i);
+      if (twist_pool_take (pool, key, &got) == TWIST_OK)
+        {
+          n++;
+          twist_connection_free (got);
+        }
+    }
+  check (n == 32, "pool total cap");
+  {
+    struct twist_connection *c = twist_connection_new (loop);
+
+    check (twist_pool_put_idle (pool, "old", c, 0) == TWIST_OK, "pool age put");
+    twist_pool_expire (pool, 117999);
+    check (twist_pool_take (pool, "old", &got) == TWIST_OK, "pool not expired");
+    twist_connection_free (got);
+    c = twist_connection_new (loop);
+    check (twist_pool_put_idle (pool, "old", c, 0) == TWIST_OK, "pool age put 2");
+    twist_pool_expire (pool, 118000);
+    check (twist_pool_take (pool, "old", &got) == TWIST_ERR_AGAIN, "pool expired");
+  }
+  twist_pool_free (pool);
+  twist_loop_free (loop);
+}
+
+static int dns_wait_n;
+static int dns_wait_err;
+static char dns_wait_text[64];
+
+static void
+on_dns_wait (void *user, int err, const struct twist_dns_addr *addr)
+{
+  (void) user;
+  dns_wait_n++;
+  dns_wait_err = err;
+  dns_wait_text[0] = 0;
+  if (addr != NULL)
+    snprintf (dns_wait_text, sizeof dns_wait_text, "%s", addr->text);
+}
+
+static int
+dns_a_msg (const char *name, uint32_t ttl, uint8_t *out, size_t cap,
+           size_t *len)
+{
+  uint8_t *q = NULL;
+  size_t qlen = 0;
+  size_t n;
+
+  if (twist_dns_encode_query (name, 1, 1, &q, &qlen) != TWIST_OK)
+    return -1;
+  if (qlen + 16 > cap)
+    {
+      free (q);
+      return -1;
+    }
+  memcpy (out, q, qlen);
+  free (q);
+  out[6] = 0;
+  out[7] = 1;
+  n = qlen;
+  out[n++] = 0xc0;
+  out[n++] = 0x0c;
+  out[n++] = 0x00;
+  out[n++] = 0x01;
+  out[n++] = 0x00;
+  out[n++] = 0x01;
+  out[n++] = (uint8_t) (ttl >> 24);
+  out[n++] = (uint8_t) (ttl >> 16);
+  out[n++] = (uint8_t) (ttl >> 8);
+  out[n++] = (uint8_t) ttl;
+  out[n++] = 0x00;
+  out[n++] = 0x04;
+  out[n++] = 192;
+  out[n++] = 0;
+  out[n++] = 2;
+  out[n++] = 1;
+  *len = n;
+  return 0;
+}
+
+static void
+test_dns_cache (void)
+{
+  struct twist_dns_cache *cache = twist_dns_cache_new ();
+  uint8_t msg[128];
+  size_t len = 0;
+  struct twist_dns_addr hit;
+  struct twist_dns_addr again;
+  int st;
+  int i;
+
+  check (cache != NULL, "dns cache");
+  check (dns_a_msg ("example.com", 60, msg, sizeof msg, &len) == 0, "dns msg");
+  check (twist_dns_cache_put_msg (cache, "example.com", 1, msg, len, 1000)
+         == TWIST_OK, "dns store");
+  memset (&hit, 0, sizeof hit);
+  check (twist_dns_cache_get (cache, "example.com", 1, &hit, 1000) == 1
+         && strcmp (hit.text, "192.0.2.1") == 0, "dns hit");
+  check (twist_dns_cache_get (cache, "example.com", 1, &hit, 1000 + 60000)
+         == 0, "dns expired");
+  check (dns_a_msg ("example.com", 30, msg, sizeof msg, &len) == 0, "dns msg 2");
+  check (twist_dns_cache_put_msg (cache, "Example.COM", 1, msg, len, 5000)
+         == TWIST_OK, "dns store fold");
+  dns_wait_n = 0;
+  st = twist_dns_cache_begin (cache, NULL, "other.test", 1, on_dns_wait, NULL,
+                              5000, &again);
+  check (st == 0, "dns lead");
+  st = twist_dns_cache_begin (cache, NULL, "other.test", 1, on_dns_wait, NULL,
+                              5000, &again);
+  check (st == 1 && dns_wait_n == 0, "dns singleflight");
+  memset (&hit, 0, sizeof hit);
+  hit.family = 4;
+  hit.addr[0] = 192;
+  hit.addr[3] = 9;
+  snprintf (hit.text, sizeof hit.text, "192.0.0.9");
+  twist_dns_cache_end (cache, NULL, "other.test", 1, TWIST_OK, &hit, 10, 8000);
+  check (dns_wait_n == 1 && dns_wait_err == TWIST_OK
+         && strcmp (dns_wait_text, "192.0.0.9") == 0, "dns waiter");
+  check (twist_dns_cache_get (cache, "other.test", 1, &again, 8000) == 1,
+         "dns after end");
+  for (i = 0; i < 257; i++)
+    {
+      char name[32];
+      uint8_t one[128];
+      size_t n = 0;
+
+      snprintf (name, sizeof name, "n%d.example", i);
+      check (dns_a_msg (name, (uint32_t) (i + 1), one, sizeof one, &n) == 0
+             && twist_dns_cache_put_msg (cache, name, 1, one, n, 0) == TWIST_OK,
+             "dns fill");
+    }
+  check (twist_dns_cache_get (cache, "n0.example", 1, &hit, 0) == 0,
+         "dns evict soonest");
+  check (twist_dns_cache_get (cache, "n256.example", 1, &hit, 0) == 1,
+         "dns keep newest");
+  twist_dns_cache_free (cache);
+}
+
+static int
+on_multi_socket (twist_easy *easy, int fd, int what, void *user, void *socketp)
+{
+  int *saw = user;
+
+  (void) easy;
+  (void) fd;
+  (void) what;
+  (void) socketp;
+  if (saw != NULL)
+    *saw = 1;
+  return 0;
+}
+
+static void
+test_multi_perform (void)
+{
+  struct twist_multi *multi = twist_multi_init ();
+  int running = -1;
+  int saw = 0;
+
+  check (multi != NULL, "multi");
+  check (twist_multi_perform (multi, &running) == TWIST_OK && running == 0,
+         "multi perform");
+  twist_multi_setopt (multi, TWISTMOPT_SOCKETDATA, &saw);
+  twist_multi_setopt (multi, TWISTMOPT_SOCKETFUNCTION, on_multi_socket);
+  check (saw == 1, "multi waker");
+  twist_multi_cleanup (multi);
+}
+
+static void
+test_h2_share (void)
+{
+  struct twist_h1_events ev;
+  struct twist_h2 *h2;
+  struct twist_multi *multi;
+  struct twist_session *sess;
+  uint8_t *a = NULL;
+  uint8_t *b = NULL;
+  size_t an = 0;
+  size_t bn = 0;
+  uint8_t settings[] = {
+    0, 0, 6, 4, 0, 0, 0, 0, 0,
+    0, 3, 0, 0, 0, 1
+  };
+  uint8_t end[] = { 0, 0, 0, 0, 1, 0, 0, 0, 1 };
+
+  memset (&ev, 0, sizeof ev);
+  h2 = twist_h2_new (&ev);
+  multi = twist_multi_init ();
+  check (h2 != NULL && multi != NULL && twist_h2_can_open (h2), "h2 room");
+  sess = twist_session_add (multi, "k", multi->loop, NULL, h2);
+  check (sess != NULL && twist_session_find (multi, "k", multi->loop) == sess,
+         "h2 find");
+  check (twist_h2_request (h2, "GET", "https", "ex", "/", NULL, NULL, 0, 1,
+                           &a, &an) == TWIST_OK
+         && an >= 9 && a[8] == 1, "h2 stream 1");
+  check (twist_h2_receive (h2, settings, sizeof settings) == sizeof settings,
+         "h2 limit");
+  check (!twist_h2_can_open (h2), "h2 full");
+  check (twist_h2_request (h2, "GET", "https", "ex", "/", NULL, NULL, 0, 0,
+                           &b, &bn) != TWIST_OK, "h2 blocked");
+  check (twist_h2_receive (h2, end, sizeof end) == sizeof end, "h2 end");
+  check (twist_h2_can_open (h2), "h2 room again");
+  free (b);
+  b = NULL;
+  check (twist_h2_request (h2, "GET", "https", "ex", "/", NULL, NULL, 0, 1,
+                           &b, &bn) == TWIST_OK
+         && bn >= 9 && b[8] == 3, "h2 stream 3");
+  check (twist_session_find (multi, "k", multi->loop) == NULL, "h2 no room");
+  free (a);
+  free (b);
+  twist_multi_cleanup (multi);
+}
+
 int
 main (void)
 {
   test_timer ();
+  test_conn_pool ();
+  test_dns_cache ();
+  test_h2_share ();
+  test_multi_perform ();
   test_cmdq ();
   test_h1 ();
   test_h2 ();

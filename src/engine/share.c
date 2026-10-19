@@ -197,7 +197,9 @@ twist_share_init (void)
   s->pool = twist_pool_new ();
   s->hsts = twist_hsts_new ();
   s->altsvc = twist_altsvc_new ();
-  if (s->jar == NULL || s->pool == NULL || s->hsts == NULL || s->altsvc == NULL)
+  s->dns = twist_dns_cache_new ();
+  if (s->jar == NULL || s->pool == NULL || s->hsts == NULL || s->altsvc == NULL
+      || s->dns == NULL)
     {
       twist_share_cleanup (s);
       return NULL;
@@ -214,6 +216,7 @@ twist_share_cleanup (twist_share *share)
   twist_pool_free (share->pool);
   twist_hsts_free (share->hsts);
   twist_altsvc_free (share->altsvc);
+  twist_dns_cache_free (share->dns);
   free (share);
 }
 
@@ -223,5 +226,9 @@ twist_share_setopt (twist_share *share, unsigned lock_data)
   if (share == NULL)
     return TWIST_ERR_INVAL;
   share->locks |= lock_data;
+  if ((lock_data & TWIST_LOCK_DATA_CONNECT) != 0)
+    twist_pool_set_lock (share->pool, 1);
+  if ((lock_data & TWIST_LOCK_DATA_DNS) != 0)
+    twist_dns_cache_set_lock (share->dns, 1);
   return TWIST_OK;
 }

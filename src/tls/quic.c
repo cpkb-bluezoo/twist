@@ -49,13 +49,64 @@ struct twist_quic
   uint8_t alpn_mem[16];
   char *server_name;
   int fd;
-  uint64_t stream_id;
-  int have_stream;
   int hold_stream;
   gq_path path;
+  uint8_t *dg;
+  size_t dg_len[16];
+  int dg_n;
+  int dg_i;
+  struct quic_stream
+  {
+    uint64_t id;
+    int live;
+    size_t (*on_data) (void *, const uint8_t *, size_t, int);
+    void *on_user;
+    uint8_t *pend;
+    size_t pend_len;
+    size_t pend_off;
+    int pend_finish;
+  } st[16];
+  int nst;
+  int cur;
 };
 
+#define QUIC_STREAMS 16
+
+#define QUIC_DG 2048
+#define QUIC_BATCH 16
+
 static int quic_flush (struct twist_quic *q, uint64_t now_us);
+
+static struct quic_stream *
+qs_cur (struct twist_quic *q)
+{
+  if (q == NULL || q->nst <= 0 || q->cur < 0 || q->cur >= q->nst)
+    return NULL;
+  return &q->st[q->cur];
+}
+
+static struct quic_stream *
+qs_find (struct twist_quic *q, uint64_t id)
+{
+  int i;
+
+  for (i = 0; i < q->nst; i++)
+    if (q->st[i].live && q->st[i].id == id)
+      return &q->st[i];
+  return NULL;
+}
+
+static int
+qs_add (struct twist_quic *q, uint64_t id)
+{
+  if (q->nst >= QUIC_STREAMS)
+    return -1;
+  q->st[q->nst].id = id;
+  q->st[q->nst].live = 1;
+  q->cur = q->nst;
+  q->nst++;
+  return 0;
+}
 
 static int
 ep_accept (void *user, const gq_path *from, gq_conn_events *events)
@@ -86,10 +137,7 @@ ev_connected (void *user, const gq_tls_info *info)
       return;
     }
   if (gq_conn_stream_open (q->conn, 1, &id) == GQ_OK)
-    {
-      q->stream_id = id;
-      q->have_stream = 1;
-    }
+    qs_add (q, id);
   if (info != NULL)
     twist_connection_set_alpn (q->twist, (const char *) info->alpn,
                                info->alpn_len);
@@ -107,8 +155,13 @@ ev_stream_data (void *user, uint64_t id, const uint8_t *data, size_t len,
                 int fin)
 {
   struct twist_quic *q = user;
+  struct quic_stream *s = qs_find (q, id);
 
-  (void) id;
+  if (s != NULL && s->on_data != NULL)
+    {
+      s->on_data (s->on_user, data, len, fin);
+      return 0;
+    }
   if (len > 0)
     twist_connection_deliver_app (q->twist, data, len);
   if (fin)
@@ -132,11 +185,22 @@ ev_stream_stopped (void *user, uint64_t id, uint64_t error)
   (void) error;
 }
 
+static int pump_stream (struct twist_quic *q, struct quic_stream *s);
+static int quic_flush (struct twist_quic *q, uint64_t now_us);
+
 static void
 ev_stream_writable (void *user, uint64_t id)
 {
-  (void) user;
-  (void) id;
+  struct twist_quic *q = user;
+  uint64_t now;
+
+  if (pump_stream (q, qs_find (q, id)) != TWIST_OK)
+    {
+      twist_connection_fail (q->twist, TWIST_ERR_TLS);
+      return;
+    }
+  now = twist_loop_now (q->loop) * 1000u;
+  quic_flush (q, now);
 }
 
 static void
@@ -235,23 +299,131 @@ ev_ticket (void *user, const gq_tls_ticket *ticket, uint32_t version)
 }
 
 static int
+ensure_dg (struct twist_quic *q)
+{
+  if (q->dg != NULL)
+    return TWIST_OK;
+  q->dg = malloc (QUIC_BATCH * QUIC_DG);
+  return q->dg == NULL ? TWIST_ERR_NOMEM : TWIST_OK;
+}
+
+static int
+send_queued (struct twist_quic *q)
+{
+  int left = q->dg_n - q->dg_i;
+
+  if (left <= 0)
+    {
+      q->dg_n = 0;
+      q->dg_i = 0;
+      twist_connection_force_write (q->twist, 0);
+      twist_connection_hold_read (q->twist, 0);
+      return TWIST_OK;
+    }
+#if defined __linux__
+  {
+    struct mmsghdr msg[QUIC_BATCH];
+    struct iovec iov[QUIC_BATCH];
+    int i;
+    int sent;
+
+    memset (msg, 0, sizeof msg);
+    for (i = 0; i < left; i++)
+      {
+        iov[i].iov_base = q->dg + (size_t) (q->dg_i + i) * QUIC_DG;
+        iov[i].iov_len = q->dg_len[q->dg_i + i];
+        msg[i].msg_hdr.msg_iov = &iov[i];
+        msg[i].msg_hdr.msg_iovlen = 1;
+      }
+    sent = sendmmsg (q->fd, msg, (unsigned int) left, 0);
+    if (sent < 0)
+      {
+        if (errno == EAGAIN || errno == EWOULDBLOCK)
+          {
+            twist_connection_force_write (q->twist, 1);
+            return TWIST_OK;
+          }
+        return TWIST_ERR_CONNECT;
+      }
+    q->dg_i += sent;
+  }
+#else
+  while (q->dg_i < q->dg_n)
+    {
+      ssize_t n = send (q->fd, q->dg + (size_t) q->dg_i * QUIC_DG,
+                        q->dg_len[q->dg_i], 0);
+
+      if (n < 0)
+        {
+          if (errno == EAGAIN || errno == EWOULDBLOCK)
+            {
+              twist_connection_force_write (q->twist, 1);
+              return TWIST_OK;
+            }
+          return TWIST_ERR_CONNECT;
+        }
+      q->dg_i++;
+    }
+#endif
+  if (q->dg_i >= q->dg_n)
+    {
+      q->dg_n = 0;
+      q->dg_i = 0;
+      twist_connection_force_write (q->twist, 0);
+      twist_connection_hold_read (q->twist, 0);
+    }
+  else
+    twist_connection_force_write (q->twist, 1);
+  return TWIST_OK;
+}
+
+static int
 quic_flush (struct twist_quic *q, uint64_t now_us)
 {
-  for (;;)
+  int rc;
+
+  if (q->ep == NULL || q->fd < 0)
+    return TWIST_OK;
+  rc = ensure_dg (q);
+  if (rc != TWIST_OK)
+    return rc;
+  rc = send_queued (q);
+  if (rc != TWIST_OK)
+    return rc;
+  if (q->dg_i > 0 && q->dg_i < q->dg_n)
     {
-      uint8_t buf[2048];
+      memmove (q->dg, q->dg + (size_t) q->dg_i * QUIC_DG,
+               (size_t) (q->dg_n - q->dg_i) * QUIC_DG);
+      memmove (q->dg_len, q->dg_len + q->dg_i,
+               (size_t) (q->dg_n - q->dg_i) * sizeof q->dg_len[0]);
+      q->dg_n -= q->dg_i;
+      q->dg_i = 0;
+    }
+  while (q->dg_n < QUIC_BATCH)
+    {
       size_t len = 0;
       gq_path to;
-      ssize_t n;
 
-      if (gq_endpoint_send (q->ep, now_us, buf, sizeof buf, &len, &to) != GQ_OK)
+      if (gq_endpoint_send (q->ep, now_us, q->dg + (size_t) q->dg_n * QUIC_DG,
+                            QUIC_DG, &len, &to) != GQ_OK)
         return TWIST_ERR_TLS;
       if (len == 0)
-        return TWIST_OK;
-      n = send (q->fd, buf, len, 0);
-      if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK)
-        return TWIST_ERR_CONNECT;
+        break;
+      q->dg_len[q->dg_n++] = len;
     }
+  return send_queued (q);
+}
+
+static void
+quic_socket_ready (struct twist_endpoint *ep)
+{
+  struct twist_quic *q = twist_connection_tls (ep->conn);
+  uint64_t now;
+
+  if (q == NULL)
+    return;
+  now = twist_loop_now (q->loop) * 1000u;
+  quic_flush (q, now);
 }
 
 static uint64_t
@@ -280,15 +452,77 @@ static ssize_t
 quic_read (void *user, uint8_t *buf, size_t len)
 {
   struct twist_quic *q = user;
-  ssize_t n;
   uint64_t now;
 
-  n = recv (q->fd, buf, len, 0);
-  if (n < 0)
-    return -1;
+  (void) buf;
+  (void) len;
   now = twist_loop_now (q->loop) * 1000u;
-  if (n > 0)
-    gq_endpoint_recv (q->ep, now, &q->path, buf, (size_t) n);
+  if (ensure_dg (q) != TWIST_OK)
+    {
+      errno = ENOMEM;
+      return -1;
+    }
+  for (;;)
+    {
+      int room = QUIC_BATCH - q->dg_n;
+      int got;
+      int i;
+
+      if (room <= 0)
+        {
+          quic_flush (q, now);
+          if (q->dg_n >= QUIC_BATCH)
+            {
+              twist_connection_hold_read (q->twist, 1);
+              break;
+            }
+          room = QUIC_BATCH - q->dg_n;
+        }
+#if defined __linux__
+      {
+        struct mmsghdr msg[QUIC_BATCH];
+        struct iovec iov[QUIC_BATCH];
+
+        memset (msg, 0, sizeof msg);
+        for (i = 0; i < room; i++)
+          {
+            iov[i].iov_base = q->dg + (size_t) (q->dg_n + i) * QUIC_DG;
+            iov[i].iov_len = QUIC_DG;
+            msg[i].msg_hdr.msg_iov = &iov[i];
+            msg[i].msg_hdr.msg_iovlen = 1;
+          }
+        got = recvmmsg (q->fd, msg, (unsigned int) room, 0, NULL);
+        if (got < 0)
+          {
+            if (errno == EAGAIN || errno == EWOULDBLOCK)
+              break;
+            return -1;
+          }
+        for (i = 0; i < got; i++)
+          gq_endpoint_recv (q->ep, now, &q->path,
+                            q->dg + (size_t) (q->dg_n + i) * QUIC_DG,
+                            msg[i].msg_len);
+        if (got == 0)
+          break;
+      }
+#else
+      {
+        ssize_t n = recv (q->fd, q->dg + (size_t) q->dg_n * QUIC_DG, QUIC_DG,
+                          0);
+
+        if (n < 0)
+          {
+            if (errno == EAGAIN || errno == EWOULDBLOCK)
+              break;
+            return -1;
+          }
+        if (n == 0)
+          break;
+        gq_endpoint_recv (q->ep, now, &q->path,
+                          q->dg + (size_t) q->dg_n * QUIC_DG, (size_t) n);
+      }
+#endif
+    }
   quic_flush (q, now);
   errno = EAGAIN;
   return -1;
@@ -305,26 +539,98 @@ quic_write (void *user, const uint8_t *buf, size_t len)
 }
 
 static int
+pend_append (struct quic_stream *s, const uint8_t *data, size_t len)
+{
+  size_t have = s->pend_len - s->pend_off;
+  uint8_t *p;
+
+  if (len == 0)
+    return TWIST_OK;
+  if (s->pend_off > 0)
+    {
+      memmove (s->pend, s->pend + s->pend_off, have);
+      s->pend_len = have;
+      s->pend_off = 0;
+    }
+  p = realloc (s->pend, s->pend_len + len);
+  if (p == NULL)
+    return TWIST_ERR_NOMEM;
+  memcpy (p + s->pend_len, data, len);
+  s->pend = p;
+  s->pend_len += len;
+  return TWIST_OK;
+}
+
+static int
+pump_stream (struct twist_quic *q, struct quic_stream *s)
+{
+  if (q == NULL || s == NULL || !s->live || q->conn == NULL)
+    return TWIST_ERR_AGAIN;
+  while (s->pend_off < s->pend_len)
+    {
+      long n = gq_conn_stream_write (q->conn, s->id, s->pend + s->pend_off,
+                                     s->pend_len - s->pend_off);
+
+      if (n < 0)
+        return TWIST_ERR_TLS;
+      if (n == 0)
+        return TWIST_OK;
+      s->pend_off += (size_t) n;
+    }
+  if (s->pend_finish)
+    {
+      if (gq_conn_stream_finish (q->conn, s->id) != GQ_OK)
+        return TWIST_ERR_TLS;
+      s->pend_finish = 0;
+    }
+  return TWIST_OK;
+}
+
+static int
 quic_app_send (struct twist_endpoint *ep, const uint8_t *data, size_t len)
 {
   struct twist_quic *q = twist_connection_tls (ep->conn);
-  long n;
+  struct quic_stream *s;
   uint64_t now;
+  int rc;
 
-  if (q == NULL || !q->have_stream)
+  s = q != NULL ? qs_cur (q) : NULL;
+  if (s == NULL)
     return TWIST_ERR_AGAIN;
-  n = gq_conn_stream_write (q->conn, q->stream_id, data, len);
-  if (n < 0)
-    return TWIST_ERR_TLS;
   /* Extended CONNECT keeps the stream open for later WebSocket
-     frames.  A normal request finishes it with this write.  */
-  if (q->hold_stream)
+     frames.  A normal request finishes once every byte is accepted.  */
+  if (s->pend_off < s->pend_len)
     {
-      if (n != (long) len)
+      rc = pend_append (s, data, len);
+      if (rc != TWIST_OK)
+        return rc;
+      if (!q->hold_stream)
+        s->pend_finish = 1;
+    }
+  else if (len > 0)
+    {
+      long n = gq_conn_stream_write (q->conn, s->id, data, len);
+
+      if (n < 0)
+        return TWIST_ERR_TLS;
+      if ((size_t) n < len)
+        {
+          rc = pend_append (s, data + n, len - (size_t) n);
+          if (rc != TWIST_OK)
+            return rc;
+          if (!q->hold_stream)
+            s->pend_finish = 1;
+        }
+      else if (!q->hold_stream
+               && gq_conn_stream_finish (q->conn, s->id) != GQ_OK)
         return TWIST_ERR_TLS;
     }
-  else if (gq_conn_stream_finish (q->conn, q->stream_id) != GQ_OK)
+  else if (!q->hold_stream
+           && gq_conn_stream_finish (q->conn, s->id) != GQ_OK)
     return TWIST_ERR_TLS;
+  rc = pump_stream (q, s);
+  if (rc != TWIST_OK)
+    return rc;
   now = twist_loop_now (q->loop) * 1000u;
   return quic_flush (q, now);
 }
@@ -342,14 +648,21 @@ int
 twist_quic_finish_stream (struct twist_connection *conn)
 {
   struct twist_quic *q = twist_connection_tls (conn);
+  struct quic_stream *s;
   uint64_t now;
 
   if (q == NULL || !q->hold_stream)
     return TWIST_OK;
   q->hold_stream = 0;
-  if (!q->have_stream || q->conn == NULL)
+  s = qs_cur (q);
+  if (s == NULL || q->conn == NULL)
     return TWIST_OK;
-  if (gq_conn_stream_finish (q->conn, q->stream_id) != GQ_OK)
+  if (s->pend_off < s->pend_len)
+    {
+      s->pend_finish = 1;
+      return TWIST_OK;
+    }
+  if (gq_conn_stream_finish (q->conn, s->id) != GQ_OK)
     return TWIST_ERR_TLS;
   now = twist_loop_now (q->loop) * 1000u;
   return quic_flush (q, now);
@@ -366,6 +679,13 @@ quic_free (void *p)
   gq_trust_free (q->trust);
   twist_client_auth_free (q->auth);
   free (q->server_name);
+  free (q->dg);
+  {
+    int i;
+
+    for (i = 0; i < q->nst; i++)
+      free (q->st[i].pend);
+  }
   free (q);
 }
 
@@ -407,11 +727,50 @@ twist_quic_open_stream (struct twist_connection *conn)
   q = twist_connection_tls (conn);
   if (q == NULL || q->conn == NULL)
     return TWIST_ERR_TLS;
+  if (q->nst >= QUIC_STREAMS)
+    return TWIST_ERR_AGAIN;
+  if (q->conn != NULL && q->nst > 0
+      && gq_conn_streams_available (q->conn, 1) == 0)
+    return TWIST_ERR_AGAIN;
   if (gq_conn_stream_open (q->conn, 1, &id) != GQ_OK)
     return TWIST_ERR_TLS;
-  q->stream_id = id;
-  q->have_stream = 1;
+  if (qs_add (q, id) != 0)
+    return TWIST_ERR_AGAIN;
   return TWIST_OK;
+}
+
+void
+twist_quic_bind (struct twist_connection *conn,
+                 size_t (*on_data) (void *, const uint8_t *, size_t, int),
+                 void *user)
+{
+  struct twist_quic *q;
+  struct quic_stream *s;
+
+  if (conn == NULL)
+    return;
+  q = twist_connection_tls (conn);
+  s = q != NULL ? qs_cur (q) : NULL;
+  if (s == NULL)
+    return;
+  s->on_data = on_data;
+  s->on_user = user;
+}
+
+int
+twist_quic_can_open (struct twist_connection *conn)
+{
+  struct twist_quic *q;
+
+  if (conn == NULL)
+    return 0;
+  q = twist_connection_tls (conn);
+  if (q == NULL || q->nst >= QUIC_STREAMS)
+    return 0;
+  if (q->conn != NULL && q->nst > 0
+      && gq_conn_streams_available (q->conn, 1) == 0)
+    return 0;
+  return 1;
 }
 
 int
@@ -522,6 +881,7 @@ twist_quic_dial (struct twist_loop *loop, const char *server_name,
   twist_connection_set_io (q->twist, quic_read, quic_write, q);
   twist_connection_set_fd (q->twist, fd);
   twist_connection_endpoint (q->twist)->send = quic_app_send;
+  twist_connection_endpoint (q->twist)->on_write_ready = quic_socket_ready;
   memset (&ecfg, 0, sizeof ecfg);
   memset (&eev, 0, sizeof eev);
   eev.user = q;

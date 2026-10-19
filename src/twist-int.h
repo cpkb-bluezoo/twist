@@ -163,7 +163,32 @@ struct twist_multi
   size_t done_off;
   long last_timeout;
   struct twist_storage *storage;
+  struct twist_pool *pool;
+  struct twist_dns_cache *dns;
+  struct twist_session *sessions;
 };
+
+struct twist_session
+{
+  char *key;
+  struct twist_loop *loop;
+  struct twist_connection *conn;
+  struct twist_h2 *h2;
+  int users;
+  int preface;
+  struct twist_session *next;
+};
+
+struct twist_session *twist_session_add (struct twist_multi *multi,
+                                         const char *key,
+                                         struct twist_loop *loop,
+                                         struct twist_connection *conn,
+                                         struct twist_h2 *h2);
+struct twist_session *twist_session_find (struct twist_multi *multi,
+                                          const char *key,
+                                          struct twist_loop *loop);
+void twist_session_release (struct twist_session *session);
+void twist_session_free_all (struct twist_multi *multi);
 
 /* ---- loop ---- */
 
@@ -173,6 +198,7 @@ void twist_loop_set_now (struct twist_loop *loop, uint64_t (*now_ms) (void *),
                          void *user);
 uint64_t twist_loop_now (struct twist_loop *loop);
 int twist_loop_run_once (struct twist_loop *loop);
+int twist_loop_run_once_ms (struct twist_loop *loop, int wait_ms);
 void twist_loop_on_readable (struct twist_loop *loop, int fd);
 void twist_loop_on_writable (struct twist_loop *loop, int fd);
 void twist_loop_on_timer (struct twist_loop *loop, uint64_t now_ms);
@@ -197,6 +223,8 @@ void twist_loop_unwatch_fd (struct twist_loop *loop, int fd);
 struct twist_multi *twist_loop_multi (struct twist_loop *loop);
 void twist_loop_set_multi (struct twist_loop *loop, struct twist_multi *multi);
 int twist_loop_waker (struct twist_loop *loop);
+uint8_t *twist_loop_take_rbuf (struct twist_loop *loop);
+void twist_loop_give_rbuf (struct twist_loop *loop, uint8_t *buf);
 
 /* ---- connection ---- */
 
@@ -219,8 +247,13 @@ int twist_connection_connect (struct twist_connection *conn,
 void twist_connection_connected (struct twist_connection *conn);
 void twist_connection_on_readable (struct twist_connection *conn);
 void twist_connection_on_writable (struct twist_connection *conn);
+void twist_connection_hold_read (struct twist_connection *conn, int hold);
+void twist_connection_force_write (struct twist_connection *conn, int force);
 int twist_connection_queue_out (struct twist_connection *conn,
                                 const uint8_t *data, size_t len);
+int twist_connection_send_parts (struct twist_connection *conn,
+                                 const uint8_t *a, size_t an,
+                                 const uint8_t *b, size_t bn);
 void twist_connection_deliver_app (struct twist_connection *conn,
                                    const uint8_t *data, size_t len);
 void twist_connection_set_alpn (struct twist_connection *conn,
@@ -282,6 +315,10 @@ int twist_quic_dial (struct twist_loop *loop, const char *server_name,
                      int port, const char *cafile, const char *certfile,
                      const char *keyfile, struct twist_connection **out);
 int twist_quic_open_stream (struct twist_connection *conn);
+int twist_quic_can_open (struct twist_connection *conn);
+void twist_quic_bind (struct twist_connection *conn,
+                      size_t (*on_data) (void *, const uint8_t *, size_t, int),
+                      void *user);
 
 int twist_tls_register (void);
 int twist_quic_register (void);
@@ -387,6 +424,7 @@ struct twist_dns_events
                 const uint8_t *hint);
   void (*truncated) (void *user);
   void (*failure) (void *user, int err);
+  void (*ttl) (void *user, uint32_t ttl);
 };
 
 /* TCP, DoT, and DoQ framing: a 16-bit length then one message.
@@ -479,6 +517,10 @@ int twist_pool_take (struct twist_pool *pool, const char *key,
                      struct twist_connection **out);
 int twist_pool_put (struct twist_pool *pool, const char *key,
                     struct twist_connection *conn);
+int twist_pool_put_idle (struct twist_pool *pool, const char *key,
+                         struct twist_connection *conn, uint64_t now_ms);
+void twist_pool_expire (struct twist_pool *pool, uint64_t now_ms);
+void twist_pool_set_lock (struct twist_pool *pool, int enabled);
 
 enum twist_proxy_kind
 {
@@ -522,6 +564,7 @@ struct twist_h1 *twist_h1_new (const struct twist_h1_events *ev);
 void twist_h1_free (struct twist_h1 *parser);
 size_t twist_h1_receive (struct twist_h1 *parser, const uint8_t *data,
                          size_t len);
+int twist_h1_keep (const struct twist_h1 *parser);
 int twist_h1_write_request (const char *method, const char *target,
                             const char *host, int http10,
                             const struct twist_slist *extra,
@@ -546,6 +589,13 @@ struct twist_h2 *twist_h2_new (const struct twist_h1_events *ev);
 void twist_h2_free (struct twist_h2 *h2);
 int twist_h2_client_preface (uint8_t **out, size_t *len);
 size_t twist_h2_receive (struct twist_h2 *h2, const uint8_t *data, size_t len);
+int twist_h2_can_open (const struct twist_h2 *h2);
+void twist_h2_set_next_owner (struct twist_h2 *h2,
+                              const struct twist_h1_events *ev);
+void twist_h2_drop_user (struct twist_h2 *h2, void *user);
+void twist_h2_set_emit (struct twist_h2 *h2,
+                        int (*emit) (void *, const uint8_t *, size_t),
+                        void *user);
 int twist_h2_preface (uint8_t **out, size_t *out_len);
 int twist_h2_request (struct twist_h2 *h2, const char *method,
                       const char *scheme, const char *authority,
@@ -770,7 +820,31 @@ struct twist_share
   struct twist_pool *pool;
   struct twist_hsts *hsts;
   struct twist_altsvc *altsvc;
+  struct twist_dns_cache *dns;
 };
+
+struct twist_dns_cache;
+
+struct twist_dns_cache *twist_dns_cache_new (void);
+void twist_dns_cache_free (struct twist_dns_cache *cache);
+void twist_dns_cache_set_lock (struct twist_dns_cache *cache, int on);
+int twist_dns_cache_put_msg (struct twist_dns_cache *cache, const char *name,
+                             int qtype, const uint8_t *msg, size_t len,
+                             uint64_t now_ms);
+int twist_dns_cache_get (struct twist_dns_cache *cache, const char *name,
+                         int qtype, struct twist_dns_addr *out,
+                         uint64_t now_ms);
+/* 0 owns the query, 1 waits for it, 2 filled HIT.  */
+int twist_dns_cache_begin (struct twist_dns_cache *cache,
+                           struct twist_loop *loop, const char *name, int qtype,
+                           void (*cb) (void *, int,
+                                       const struct twist_dns_addr *),
+                           void *user, uint64_t now_ms,
+                           struct twist_dns_addr *hit);
+void twist_dns_cache_end (struct twist_dns_cache *cache,
+                          struct twist_loop *loop, const char *name, int qtype,
+                          int err, const struct twist_dns_addr *addr,
+                          uint32_t ttl_sec, uint64_t now_ms);
 
 struct twist_hsts *twist_hsts_new (void);
 void twist_hsts_free (struct twist_hsts *h);
