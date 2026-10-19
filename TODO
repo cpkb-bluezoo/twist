@@ -10,8 +10,6 @@ Twist TODO List
   [ ] Brotli.  The coding table can take another name.  Which library,
       and whether a request may use it, is not decided.  Do not
       advertise "br" until it can be decoded.
-  [ ] Split tests/test-unit.c into one program per subsystem.  New
-      tests go in their own file.  tests/test-coding.c is the first.
   [ ] Decide how integration peers are provided.  make check stays
       in-process.  make check-integration dials a peer and skips with
       exit 77 when the peer is absent.  A podman lab is one candidate

@@ -29,6 +29,7 @@ pkgconfig_DATA = twist.pc
 
 EXTRA_DIST = HACKING ARCHITECTURE.md TODO build-aux/config.rpath
 
+## integration/ is distributed but not built by 'make check'.
 .PHONY: check-integration
 check-integration:
 	cd integration && $(MAKE) $(AM_MAKEFLAGS) check

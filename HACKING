@@ -101,10 +101,11 @@ Testing
   make check-integration  # peers on the network
   make distcheck          # before every release
 
-make check runs unit tests only.  They are deterministic and in-process:
-no sockets, no files, no wall clock (pass a virtual clock into the
-loop).  Anything that dials a peer goes in integration/ and skips with
-exit 77 when the peer is absent.
+make check runs the programs in tests/, one per subsystem.  They are
+deterministic and in-process: no sockets, no files, no wall clock (pass
+a virtual clock into the loop).  Anything that dials a peer goes in
+integration/ and skips with exit 77 when the peer is absent.
+integration/ is not a subdirectory of 'make check'.
 
 Copyright
 ---------
