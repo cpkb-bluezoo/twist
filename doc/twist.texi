@@ -160,6 +160,12 @@ the status is recorded and the body is written.
 @item --fail-early
 Stop at the first failed URL.  This applies to every URL on the
 command line.
+@item --compressed
+Ask for a gzip or deflate response and decompress it.
+@item --content-encoding @var{coding}
+Compress the request body.  @var{coding} is @code{gzip} or
+@code{deflate}.  The request carries @code{Content-Encoding}.  Reset
+by @option{--next}.
 @item -k
 @itemx --insecure
 Accepted for compatibility with curl.  The TLS engine still checks the
@@ -331,6 +337,8 @@ A bad argument was passed to the library.
 Too many redirects.
 @item 52
 The server closed before sending any data.
+@item 61
+The content encoding could not be decoded.
 @item 67
 Authentication failed.
 @item 68

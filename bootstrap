@@ -15,12 +15,19 @@ set -e
 cd "$(dirname "$0")"
 mkdir -p build-aux
 autopoint --force
-libtoolize --copy --force
+if command -v libtoolize >/dev/null 2>&1; then
+  libtoolize --copy --force
+elif command -v glibtoolize >/dev/null 2>&1; then
+  glibtoolize --copy --force
+else
+  echo "bootstrap: libtoolize was not found.  On Mac OS the name is glibtoolize." >&2
+  exit 1
+fi
 aclocal -I m4
 autoheader
 autoconf
 automake --add-missing --copy
 echo "Bootstrap complete. Configure with:"
-echo "  ./configure --with-quickstep=../quickstep"
+echo "  ./configure"
 echo "  make"
 echo "  make check"

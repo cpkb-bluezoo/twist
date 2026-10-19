@@ -24,6 +24,7 @@
 #include "twist-int.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -55,6 +56,11 @@ twist_poll_open (void)
   p->fd = epoll_create1 (EPOLL_CLOEXEC);
 #elif defined TWIST_POLL_KQUEUE
   p->fd = kqueue ();
+  if (p->fd >= 0 && fcntl (p->fd, F_SETFD, FD_CLOEXEC) < 0)
+    {
+      close (p->fd);
+      p->fd = -1;
+    }
 #else
   p->fd = -1;
 #endif

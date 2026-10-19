@@ -87,6 +87,8 @@ struct twist_http
   struct twist_dns_addr peer;
   char *hdr_line;
   size_t hdr_cap;
+  struct twist_coding *coding;
+  int decode_err;
 };
 
 static void http_begin (struct twist_http *h);
@@ -95,6 +97,7 @@ static void http_fail (struct twist_http *h, int err);
 static void http_free_parsers (struct twist_http *h);
 static void on_version (void *user, int major, int minor);
 static int on_switch (void *user);
+static int accepts_coding (const char *accept, const char *name);
 
 static struct twist_http *
 http_of (struct twist_endpoint *ep)
@@ -566,6 +569,42 @@ on_header (void *user, const char *name, size_t name_len, const char *value,
           twist_origin_set_h3 (h->easy, host, 1, port);
         }
     }
+  else if (name_len == 16 && strncasecmp (name, "content-encoding", 16) == 0
+           && h->easy->accept_encoding != NULL && h->coding == NULL
+           && h->decode_err == 0)
+    {
+      char token[32];
+      size_t i = 0;
+      size_t o = 0;
+
+      while (i < value_len && (value[i] == ' ' || value[i] == '\t'))
+        i++;
+      while (i < value_len && value[i] != ' ' && value[i] != '\t'
+             && value[i] != ',' && value[i] != ';')
+        {
+          if (o + 1 >= sizeof token)
+            {
+              o = sizeof token;
+              break;
+            }
+          token[o++] = value[i++];
+        }
+      while (i < value_len && (value[i] == ' ' || value[i] == '\t'))
+        i++;
+      token[o < sizeof token ? o : 0] = 0;
+      if (o == 0 || o >= sizeof token || i != value_len)
+        h->decode_err = TWIST_ERR_ENCODING;
+      else if (strcasecmp (token, "identity") != 0
+               && (accepts_coding (h->easy->accept_encoding, token)
+                   || (strcasecmp (token, "x-gzip") == 0
+                       && accepts_coding (h->easy->accept_encoding, "gzip"))))
+        {
+          if (!twist_coding_known (token))
+            h->decode_err = TWIST_ERR_ENCODING;
+          else
+            h->decode_err = twist_coding_open (&h->coding, token);
+        }
+    }
   else if (name_len == 10 && strncasecmp (name, "set-cookie", 10) == 0
            && h->easy->share != NULL && h->easy->share->jar != NULL)
     {
@@ -602,6 +641,72 @@ on_header (void *user, const char *name, size_t name_len, const char *value,
   h->easy->header_cb (line, 1, n, h->easy->header_data);
 }
 
+static int
+header_named (const struct twist_slist *list, const char *name)
+{
+  size_t n = strlen (name);
+
+  for (; list != NULL; list = list->next)
+    {
+      const char *s = list->data;
+
+      if (s != NULL && strncasecmp (s, name, n) == 0 && s[n] == ':')
+        return 1;
+    }
+  return 0;
+}
+
+static int
+accepts_coding (const char *accept, const char *name)
+{
+  size_t n;
+
+  if (accept == NULL || name == NULL)
+    return 0;
+  if (accept[0] == 0)
+    return 1;
+  n = strlen (name);
+  while (*accept != 0)
+    {
+      while (*accept == ' ' || *accept == '\t' || *accept == ',')
+        accept++;
+      if (strncasecmp (accept, name, n) == 0
+          && (accept[n] == 0 || accept[n] == ',' || accept[n] == ' '
+              || accept[n] == '\t' || accept[n] == ';'))
+        return 1;
+      while (*accept != 0 && *accept != ',')
+        accept++;
+    }
+  return 0;
+}
+
+static void
+deliver_body (struct twist_http *h, const uint8_t *data, size_t len)
+{
+  h->easy->size_download += len;
+  if (h->easy->failonerror && h->status >= 400)
+    return;
+  if (h->easy->write_cb != NULL && len > 0)
+    twist_write_bytes (h->easy->write_cb, h->easy->write_data, data, len);
+}
+
+static void
+release_coding (struct twist_http *h)
+{
+  uint8_t *tail = NULL;
+  size_t n = 0;
+
+  if (h->coding == NULL)
+    return;
+  if (h->decode_err == 0)
+    h->decode_err = twist_coding_finish (h->coding, &tail, &n);
+  if (h->decode_err == 0 && n > 0)
+    deliver_body (h, tail, n);
+  free (tail);
+  twist_coding_free (h->coding);
+  h->coding = NULL;
+}
+
 static void
 on_body (void *user, const uint8_t *data, size_t len)
 {
@@ -612,11 +717,26 @@ on_body (void *user, const uint8_t *data, size_t len)
       twist_ws_receive (h->wsess, data, len);
       return;
     }
-  h->easy->size_download += len;
-  if (h->easy->failonerror && h->status >= 400)
+  if (h->decode_err != 0)
     return;
-  if (h->easy->write_cb != NULL && len > 0)
-    h->easy->write_cb ((char *) data, 1, len, h->easy->write_data);
+  if (h->coding != NULL)
+    {
+      uint8_t *plain = NULL;
+      size_t n = 0;
+      int rc = twist_coding_feed (h->coding, data, len, &plain, &n);
+
+      if (rc != TWIST_OK)
+        {
+          h->decode_err = rc;
+          free (plain);
+          return;
+        }
+      if (n > 0)
+        deliver_body (h, plain, n);
+      free (plain);
+      return;
+    }
+  deliver_body (h, data, len);
 }
 
 static void http_message_done (void *user);
@@ -713,6 +833,25 @@ request_headers (struct twist_http *h)
     }
   for (scan = easy->headers; scan != NULL; scan = scan->next)
     list = twist_slist_append (list, scan->data);
+  if (easy->accept_encoding != NULL
+      && !header_named (easy->headers, "Accept-Encoding"))
+    {
+      const char *v = easy->accept_encoding[0] != 0
+        ? easy->accept_encoding : "gzip, deflate";
+
+      if (strlen (v) + 18 < sizeof buf)
+        {
+          snprintf (buf, sizeof buf, "Accept-Encoding: %s", v);
+          list = twist_slist_append (list, buf);
+        }
+    }
+  if (easy->content_encoding != NULL
+      && !header_named (easy->headers, "Content-Encoding")
+      && strlen (easy->content_encoding) + 19 < sizeof buf)
+    {
+      snprintf (buf, sizeof buf, "Content-Encoding: %s", easy->content_encoding);
+      list = twist_slist_append (list, buf);
+    }
   if (h->offered_h2c)
     {
       list = twist_slist_append (list, "Connection: Upgrade, HTTP2-Settings");
@@ -754,6 +893,7 @@ send_request (struct twist_http *h)
   struct twist_slist *extra;
   const uint8_t *body = NULL;
   size_t body_len = 0;
+  uint8_t *owned = NULL;
   uint8_t *out = NULL;
   size_t out_len = 0;
   const char *scheme;
@@ -802,6 +942,15 @@ send_request (struct twist_http *h)
       body = (const uint8_t *) easy->postfields;
       body_len = easy->postfieldsize_set && easy->postfieldsize >= 0
         ? (size_t) easy->postfieldsize : strlen (easy->postfields);
+      if (body_len > 0 && easy->content_encoding != NULL
+          && !header_named (easy->headers, "Content-Encoding"))
+        {
+          rc = twist_coding_encode (easy->content_encoding, body, body_len,
+                                    &owned, &body_len);
+          if (rc != TWIST_OK)
+            return rc;
+          body = owned;
+        }
     }
   extra = request_headers (h);
   http10 = h->req_http10
@@ -820,7 +969,10 @@ send_request (struct twist_http *h)
                                  body_len, &out, &out_len);
   twist_slist_free_all (extra);
   if (rc != TWIST_OK)
-    return rc;
+    {
+      free (owned);
+      return rc;
+    }
   if (h->mode == HTTP_H2 && !h->preface_sent)
     {
       uint8_t *pre = NULL;
@@ -829,6 +981,7 @@ send_request (struct twist_http *h)
       if (twist_h2_preface (&pre, &pn) != TWIST_OK)
         {
           free (out);
+          free (owned);
           return TWIST_ERR_NOMEM;
         }
       rc = twist_connection_send_parts (h->conn, pre, pn, out, out_len);
@@ -840,6 +993,7 @@ send_request (struct twist_http *h)
   else
     rc = twist_connection_send_parts (h->conn, out, out_len, NULL, 0);
   free (out);
+  free (owned);
   if (rc == TWIST_OK)
     {
       h->sent = 1;
@@ -947,6 +1101,13 @@ http_message_done (void *user)
   struct twist_easy *easy = h->easy;
   int use_get = 0;
   const char *host = easy->url != NULL ? easy->url->host : NULL;
+
+  release_coding (h);
+  if (h->decode_err != 0)
+    {
+      http_complete (h, h->decode_err);
+      return;
+    }
 
   if (host != NULL && (h->peer_minor == 0 || h->peer_minor == 1))
     twist_origin_set_http_minor (easy, host, h->peer_minor);
@@ -1621,6 +1782,7 @@ http_free (void *p)
   twist_proxy_free (h->proxy);
   http_free_parsers (h);
   twist_ws_free (h->wsess);
+  twist_coding_free (h->coding);
   free (h->ws_upgrade);
   free (h->ws_connection);
   free (h->ws_accept);

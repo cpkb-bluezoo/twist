@@ -33,13 +33,6 @@
 #define H3_MAX_LEN 65536u
 #define H3_MAX_STREAMS 100u
 
-int twist_qpack_decode (const uint8_t *data, size_t len,
-                        struct twist_h1_events *ev);
-int twist_qpack_encode_request (const char *method, const char *scheme,
-                                const char *authority, const char *path,
-                                const struct twist_slist *extra,
-                                uint8_t **out, size_t *out_len);
-
 struct twist_h3_stream
 {
   int live;

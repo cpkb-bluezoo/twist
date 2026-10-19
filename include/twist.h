@@ -56,7 +56,8 @@ enum twist_error
   TWIST_ERR_URL = 13,
   TWIST_ERR_ABORTED = 14,
   TWIST_ERR_FILE = 15,
-  TWIST_ERR_HTTP = 16
+  TWIST_ERR_HTTP = 16,
+  TWIST_ERR_ENCODING = 17
 };
 
 const char *twist_strerror (int err);
@@ -154,7 +155,12 @@ enum twist_opt
   /* quic://host[:port] DNS-over-QUIC resolver.  Empty clears it.  */
   TWISTOPT_DOQ_URL = 42,
   /* tls://host[:port] DNS-over-TLS resolver.  Empty clears it.  */
-  TWISTOPT_DOT_URL = 43
+  TWISTOPT_DOT_URL = 43,
+  /* Response codings to accept.  Empty string means gzip and deflate.
+     NULL does not advertise or decode.  */
+  TWISTOPT_ACCEPT_ENCODING = 44,
+  /* Compress the request body.  "gzip" or "deflate".  Empty clears it.  */
+  TWISTOPT_CONTENT_ENCODING = 45
 };
 
 enum twist_dns_transport

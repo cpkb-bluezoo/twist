@@ -123,16 +123,18 @@ doc/twist.1 is the short man page.
 
 Every string a person might read (twist_strerror, the CLI, diagnostics)
 is wrapped in _() and its source file is listed in po/POTFILES.in.  Do
-not translate RFC header names or scheme tokens.  Diagnostics on the
-CLI use the form "twist: message" on stderr.
+not translate RFC header names or scheme tokens.  A transfer diagnostic
+on the CLI has the form "twist: (N) message" on stderr.
 
 Building
 --------
 
   ./bootstrap
-  ./configure --with-quickstep=../quickstep
+  ./configure
   make
   make check
 
-No dependency other than quickstep and GNU readline is added without
-explicit approval.  Readline links into the twist program only.
+quickstep must already be installed, so that pkg-config can see
+quickstep.pc.  zlib is required.  No dependency other than quickstep,
+zlib, and GNU readline is added without explicit approval.  Readline
+links into the twist program only.

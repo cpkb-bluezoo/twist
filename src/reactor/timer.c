@@ -21,6 +21,7 @@
 #endif
 
 #include "atomic.h"
+#include "timer.h"
 #include "twist-int.h"
 
 #include <stdlib.h>

@@ -56,6 +56,7 @@ adding a special case to the loop.
       transfers need
 - [x] CLI: curl exit status, standard streams, and the options the
       library already implements
+- [x] gzip and deflate request compression and response decompression
 
 ## Phase 5: Remaining schemes
 
@@ -79,15 +80,20 @@ Each item is a new row in the scheme table. The loop does not change.
 
 - `make check` is in-process: parsers are fed at several chunk sizes,
   including 1-byte splits. No sockets, files or wall clock.
+- [ ] Split `tests/test-unit.c` into one program per subsystem.  New
+      tests go in their own file.  `tests/test-coding.c` is the first.
 - `make check-integration` dials a peer and skips with exit 77 when the
   peer is absent.
+- [ ] Decide how integration peers are provided.  A podman lab is one
+      candidate and is not chosen yet.
 - `make distcheck` is the release gate.
 
 ## Dependencies
 
 Approved:
 
-- quickstep (required)
+- quickstep (required, installed, found by pkg-config)
+- zlib (required)
 - GNU readline (CLI only)
 
 Nothing else is added without an explicit approval. MD5 for Digest

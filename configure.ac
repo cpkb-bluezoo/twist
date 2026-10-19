@@ -56,17 +56,34 @@ AC_SUBST([LIBTWIST_LTVERSION])
 AM_GNU_GETTEXT([external])
 AM_GNU_GETTEXT_VERSION([0.21])
 
+PKG_PROG_PKG_CONFIG
+AS_IF([test -z "$PKG_CONFIG"],
+  [AC_MSG_ERROR([pkg-config is required to find an installed quickstep])])
 AC_ARG_WITH([quickstep],
-  [AS_HELP_STRING([--with-quickstep=DIR],
-     [quickstep source or build tree @<:@default=../quickstep@:>@])],
-  [quickstep_path="$withval"],
-  [quickstep_path="$srcdir/../quickstep"])
-AS_IF([test -f "$quickstep_path/src/libquickstep.la"],
-  [QUICKSTEP_CFLAGS="-I$quickstep_path/include"
-   QUICKSTEP_LIBS="$quickstep_path/src/libquickstep.la"],
-  [AC_MSG_ERROR([libquickstep.la not found under $quickstep_path; build quickstep first])])
-AC_SUBST([QUICKSTEP_CFLAGS])
-AC_SUBST([QUICKSTEP_LIBS])
+  [AS_HELP_STRING([--with-quickstep=PREFIX],
+     [installation prefix of quickstep])],
+  [], [with_quickstep=yes])
+AS_IF([test "x$with_quickstep" = xno],
+  [AC_MSG_ERROR([quickstep is required])])
+AS_IF([test "x$with_quickstep" != xyes],
+  [tw_qs_pc=
+   AS_IF([test -d "$with_quickstep/lib/pkgconfig"],
+     [tw_qs_pc="$with_quickstep/lib/pkgconfig"])
+   AS_IF([test -d "$with_quickstep/lib64/pkgconfig"],
+     [tw_qs_pc="$with_quickstep/lib64/pkgconfig${tw_qs_pc:+:}$tw_qs_pc"])
+   AS_IF([test -n "$tw_qs_pc"],
+     [PKG_CONFIG_PATH="$tw_qs_pc${PKG_CONFIG_PATH:+:}$PKG_CONFIG_PATH"
+      export PKG_CONFIG_PATH])])
+PKG_CHECK_MODULES([QUICKSTEP], [quickstep], [],
+  [AC_MSG_ERROR([quickstep is not installed.  pkg-config must see quickstep.pc])])
+
+AC_CHECK_HEADER([zlib.h], [], [AC_MSG_ERROR([zlib.h is required])])
+tw_save_LIBS=$LIBS
+AC_CHECK_LIB([z], [inflate],
+  [ZLIB_LIBS="-lz"],
+  [AC_MSG_ERROR([zlib is required])])
+LIBS=$tw_save_LIBS
+AC_SUBST([ZLIB_LIBS])
 
 AC_ARG_WITH([readline],
   [AS_HELP_STRING([--with-readline],

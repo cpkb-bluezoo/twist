@@ -62,6 +62,8 @@ twist_strerror (int err)
       return _("could not open file");
     case TWIST_ERR_HTTP:
       return _("server returned an error");
+    case TWIST_ERR_ENCODING:
+      return _("bad content encoding");
     default:
       return _("unknown error");
     }

@@ -144,6 +144,8 @@ cli_status (int err, const char *url)
       return 47;
     case TWIST_ERR_CLOSED:
       return 52;
+    case TWIST_ERR_ENCODING:
+      return 61;
     case TWIST_ERR_AUTH:
       return 67;
     case TWIST_ERR_AGAIN:
@@ -184,6 +186,10 @@ usage (void)
   fputs (_("  -f, --fail              fail on HTTP errors (400 and above)\n"),
          stdout);
   fputs (_("      --fail-early        stop at the first failed URL\n"), stdout);
+  fputs (_("      --compressed        request a gzip or deflate response\n"),
+         stdout);
+  fputs (_("      --content-encoding C  gzip or deflate the request body\n"),
+         stdout);
   fputs (_("  -k, --insecure          accepted; certificates are still checked\n"),
          stdout);
   fputs (_("  -E, --cert FILE         client certificate (PEM)\n"), stdout);
@@ -1144,6 +1150,8 @@ main (int argc, char **argv)
     { "max-redirs", required_argument, NULL, 1 },
     { "fail", no_argument, NULL, 'f' },
     { "fail-early", no_argument, NULL, 27 },
+    { "compressed", no_argument, NULL, 30 },
+    { "content-encoding", required_argument, NULL, 31 },
     { "insecure", no_argument, NULL, 'k' },
     { "cert", required_argument, NULL, 'E' },
     { "key", required_argument, NULL, 15 },
@@ -1317,6 +1325,18 @@ main (int argc, char **argv)
           break;
         case 27:
           fail_early = 1;
+          break;
+        case 30:
+          twist_easy_setopt (op->easy, TWISTOPT_ACCEPT_ENCODING, "");
+          break;
+        case 31:
+          if (twist_easy_setopt (op->easy, TWISTOPT_CONTENT_ENCODING, optarg)
+              != TWIST_OK)
+            {
+              diag (_("unsupported content encoding"));
+              suggest ();
+              status = 2;
+            }
           break;
         case 'k':
           twist_easy_setopt (op->easy, TWISTOPT_SSL_VERIFYPEER, 0L);

@@ -115,6 +115,8 @@ struct twist_easy
   char *doh_url;
   char *doq_url;
   char *dot_url;
+  char *accept_encoding;
+  char *content_encoding;
   int doh_verifypeer;
   int nobody;
   int failonerror;
@@ -629,6 +631,23 @@ int twist_h3_request (struct twist_h3 *h3, const char *method,
                       const uint8_t *body, size_t body_len, uint8_t **out,
                       size_t *out_len);
 
+int twist_qpack_decode (const uint8_t *data, size_t len,
+                        struct twist_h1_events *ev);
+int twist_qpack_encode_request (const char *method, const char *scheme,
+                                const char *authority, const char *path,
+                                const struct twist_slist *extra,
+                                uint8_t **out, size_t *out_len);
+
+struct twist_coding;
+int twist_coding_known (const char *name);
+int twist_coding_open (struct twist_coding **out, const char *name);
+int twist_coding_feed (struct twist_coding *c, const uint8_t *data, size_t len,
+                       uint8_t **out, size_t *out_n);
+int twist_coding_finish (struct twist_coding *c, uint8_t **out, size_t *out_n);
+void twist_coding_free (struct twist_coding *c);
+int twist_coding_encode (const char *name, const uint8_t *in, size_t n,
+                         uint8_t **out, size_t *out_n);
+
 int twist_http_should_redirect (int status, const char *method, int follow,
                                 long redirs, long maxredirs, int *use_get);
 int twist_http_status_result (int failonerror, int status);
@@ -859,6 +878,8 @@ const char *twist_altsvc_lookup (struct twist_altsvc *a, const char *origin);
 
 char *twist_strdup (const char *s);
 void *twist_xmalloc (size_t n);
+size_t twist_write_bytes (twist_write_callback cb, void *user,
+                          const void *data, size_t len);
 
 void twist_i18n_init (void);
 

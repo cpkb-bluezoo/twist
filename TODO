@@ -4,24 +4,30 @@ Twist TODO List
 Done in the current tree
 ------------------------
 
-  [x] GNU package shape (automake gnu, Libtool, gettext, Texinfo)
-  [x] Loop, epoll/kqueue, connection, external driver
+  [x] GNU package shape (automake, Libtool, gettext, Texinfo)
+  [x] Loop, epoll and kqueue, connection, external driver
   [x] Runtime, storage pool, timers, waker
-  [x] quickstep TLS and QUIC under Endpoint
-  [x] Transfer engine: URL, scheme table, easy/multi/share, DNS, cache, proxy
-  [x] HTTP/1.1, HTTP/2, HTTP/3 push parsers
-  [x] Redirects, cookies, Basic, Digest, Bearer
-  [x] CLI --help, --version, and the HTTP curl options
+  [x] quickstep TLS and QUIC, found as an installed library
+  [x] Transfer engine: URL, scheme table, easy/multi/share, DNS, cache,
+      proxy
+  [x] HTTP/1, HTTP/2, HTTP/3, redirects, cookies, Basic, Digest, Bearer
+  [x] gzip and deflate request and response coding (zlib)
+  [x] CLI streams, exit status, and the curl options those transfers use
+  [x] FTP/FTPS, SMTP/SMTPS, IMAP/IMAPS, POP3/POP3S
+  [x] MQTT/MQTTS, LDAP/LDAPS, WebSocket, Gopher, DICT, TFTP, FILE
+  [x] DoH, and DoQ/DoT when the resolver advertises them
 
 Still to do
 -----------
 
-  [x] FTP/FTPS (control replies, EPSV/PASV, RETR/LIST, implicit TLS)
-  [ ] SMTP, IMAP, POP3, MQTT, LDAP
-  [ ] DICT, GOPHER, TELNET, RTSP, TFTP, FILE completion against the cache
-  [ ] WebSocket (ws/wss) upgrade handler
-  [ ] SCP/SFTP, SMB, RTMP
-  [ ] DoH resolver
-  [ ] kqueue and Windows poll backends on those hosts
-  [ ] io_uring backend
-  [ ] Full curl option checklist as each scheme lands
+  [ ] TELNET, RTSP
+  [ ] SCP/SFTP, SMB/SMBS, RTMP/RTMPS
+  [ ] NTLM and Negotiate, only after a dependency decision
+  [ ] Brotli.  The coding table can take another name.  Which library,
+      and whether a request may use it, is not decided.  Do not
+      advertise "br" until it can be decoded.
+  [ ] Split tests/test-unit.c by subsystem
+  [ ] Integration peers.  make check-integration still skips when no
+      peer is configured.  A podman lab is one way to supply the
+      servers and is not chosen yet.
+  [ ] io_uring poll backend

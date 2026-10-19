@@ -22,11 +22,12 @@
 
 #include "twist-int.h"
 
+#include <quickstep/crypto.h>
+#include <quickstep/status.h>
+
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
-#include <sys/random.h>
-#include <sys/types.h>
 
 /* Client WebSocket session after the HTTP opening.  Data payload is
    delivered as it arrives.  Control frames stay in a 125-byte buffer.
@@ -186,12 +187,10 @@ twist_ws_key (char key[25])
 {
   uint8_t raw[16];
   char *b64 = NULL;
-  ssize_t n;
 
   if (key == NULL)
     return TWIST_ERR_INVAL;
-  n = getrandom (raw, sizeof raw, 0);
-  if (n != (ssize_t) sizeof raw)
+  if (gq_random (raw, sizeof raw) != GQ_OK)
     return TWIST_ERR_PROTOCOL;
   if (twist_b64_encode (raw, sizeof raw, &b64) != TWIST_OK)
     return TWIST_ERR_NOMEM;
@@ -288,7 +287,6 @@ twist_ws_send (struct twist_ws *w, int opcode, int fin,
   size_t n = 0;
   uint8_t mask[4];
   size_t off = 0;
-  ssize_t got;
 
   if (w == NULL || w->send == NULL || opcode < 0 || opcode > 15)
     return TWIST_ERR_INVAL;
@@ -296,8 +294,7 @@ twist_ws_send (struct twist_ws *w, int opcode, int fin,
     return TWIST_ERR_PROTOCOL;
   if ((opcode & 0x8) != 0 && len > WS_CTRL)
     return TWIST_ERR_PROTOCOL;
-  got = getrandom (mask, sizeof mask, 0);
-  if (got != (ssize_t) sizeof mask)
+  if (gq_random (mask, sizeof mask) != GQ_OK)
     return TWIST_ERR_PROTOCOL;
   hdr[n++] = (uint8_t) ((fin ? 0x80 : 0) | opcode);
   if (len < 126)

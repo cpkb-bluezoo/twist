@@ -77,6 +77,32 @@ twist_slist_append (struct twist_slist *list, const char *data)
   return list;
 }
 
+size_t
+twist_write_bytes (twist_write_callback cb, void *user,
+                   const void *data, size_t len)
+{
+  const uint8_t *p = data;
+  size_t off = 0;
+
+  if (cb == NULL || data == NULL || len == 0)
+    return 0;
+  while (off < len)
+    {
+      char buf[512];
+      size_t n = len - off;
+      size_t got;
+
+      if (n > sizeof buf)
+        n = sizeof buf;
+      memcpy (buf, p + off, n);
+      got = cb (buf, 1, n, user);
+      off += got;
+      if (got < n)
+        break;
+    }
+  return off;
+}
+
 void
 twist_slist_free_all (struct twist_slist *list)
 {

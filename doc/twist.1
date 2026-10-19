@@ -147,6 +147,21 @@ status is recorded and the body is written.
 Stop at the first failed URL.  This applies to every URL on the
 command line.
 .TP
+.B \-\-compressed
+Ask for a gzip or deflate response and decompress it.
+.TP
+.BI \-\-content\-encoding " coding"
+Compress the request body.
+.I coding
+is
+.I gzip
+or
+.IR deflate .
+The request carries
+.BR Content-Encoding .
+Reset by
+.BR \-\-next .
+.TP
 .B \-k, \-\-insecure
 Accept the option.  The TLS engine still checks the trust store.
 .TP
@@ -417,6 +432,9 @@ Too many redirects.
 .TP
 .B 52
 The server closed before sending any data.
+.TP
+.B 61
+The content encoding could not be decoded.
 .TP
 .B 67
 Authentication failed.

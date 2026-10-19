@@ -835,7 +835,8 @@ twist_ftp_data (struct twist_ftp *f, const uint8_t *data, size_t len)
     return 0;
   if (f->easy->write_cb != NULL)
     {
-      accepted = f->easy->write_cb ((char *) data, 1, len, f->easy->write_data);
+      accepted = twist_write_bytes (f->easy->write_cb, f->easy->write_data,
+                                    data, len);
       if (accepted < len)
         {
           f->easy->size_download += accepted;

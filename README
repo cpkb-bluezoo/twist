@@ -1,38 +1,41 @@
-Twist - HTTP Client Skeleton
-============================
+Twist
+=====
 
 Copyright (C) 2026 Chris Burdess
 
-* What is Twist?
+Twist is a GNU transfer client.  HTTP/1, HTTP/2, and HTTP/3 are
+implemented, and further schemes plug into the same transfer engine.
+The command line follows curl for the options, standard streams, and
+exit status that the library already supports.
 
-Twist is a curl-compatible HTTP client. This is currently a **skeleton**
-implementation that will be built out to support HTTP/3, HTTP/2, and HTTP/1.x.
+Dependencies
+------------
 
-* Dependencies
+  - quickstep, installed so that pkg-config can see quickstep.pc
+  - zlib
+  - GNU readline, for the twist program only
 
-This skeleton uses:
-  - **quickstep** library for QUIC and TLS
-  - **GNU readline** for interactive input
+Nothing else is added without explicit approval.
 
-No other dependencies are used without explicit approval.
-
-* Build and Install
-
-Quick setup:
+Build and install
+-----------------
 
   ./bootstrap
-  ./configure --with-quickstep=../quickstep
+  ./configure
   make
+  make check
   make install
 
-See INSTALL for detailed instructions.
+If quickstep is installed under a prefix pkg-config does not search,
+pass that prefix:
 
-* Project Status
+  ./configure --with-quickstep=/prefix
 
-This is a **skeleton** - only basic structure is in place.
-Implementation of HTTP protocols and curl compatibility will follow.
+See INSTALL for the GNU build instructions, and DEVELOPMENT.md for
+what is finished and what is not.
 
-* License
+License
+-------
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by

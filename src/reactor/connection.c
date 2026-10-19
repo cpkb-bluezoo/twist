@@ -520,10 +520,15 @@ twist_connection_connect (struct twist_connection *c, const void *addr,
   int rc;
   const struct sockaddr *sa = addr;
 
-  fd = socket (sa->sa_family,
-               SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+  fd = socket (sa->sa_family, SOCK_STREAM, 0);
   if (fd < 0)
     return TWIST_ERR_CONNECT;
+  if (fcntl (fd, F_SETFL, O_NONBLOCK) < 0
+      || fcntl (fd, F_SETFD, FD_CLOEXEC) < 0)
+    {
+      close (fd);
+      return TWIST_ERR_CONNECT;
+    }
   {
     int one = 1;
 

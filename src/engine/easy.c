@@ -79,6 +79,8 @@ easy_clear (struct twist_easy *easy)
   free (easy->doh_url);
   free (easy->doq_url);
   free (easy->dot_url);
+  free (easy->accept_encoding);
+  free (easy->content_encoding);
   free (easy->cainfo);
   free (easy->sslcert);
   free (easy->sslkey);
@@ -303,6 +305,21 @@ twist_easy_setopt (twist_easy *easy, int opt, ...)
       break;
     case TWISTOPT_DOH_SSL_VERIFYPEER:
       easy->doh_verifypeer = va_arg (ap, long) != 0;
+      break;
+    case TWISTOPT_ACCEPT_ENCODING:
+      replace (&easy->accept_encoding, va_arg (ap, const char *));
+      break;
+    case TWISTOPT_CONTENT_ENCODING:
+      {
+        const char *s = va_arg (ap, const char *);
+
+        if (s != NULL && s[0] == 0)
+          s = NULL;
+        if (s != NULL && !twist_coding_known (s))
+          rc = TWIST_ERR_UNSUPPORTED;
+        else
+          replace (&easy->content_encoding, s);
+      }
       break;
     default:
       rc = TWIST_ERR_UNSUPPORTED;

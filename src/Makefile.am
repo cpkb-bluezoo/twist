@@ -24,7 +24,7 @@ AM_CPPFLAGS = -I$(top_srcdir)/include -I$(top_srcdir)/src $(QUICKSTEP_CFLAGS) \
 AM_CFLAGS = $(STD_CFLAGS) $(WARN_CFLAGS)
 
 libtwist_la_LDFLAGS = -version-info $(LIBTWIST_LTVERSION) -no-undefined
-libtwist_la_LIBADD = $(QUICKSTEP_LIBS) $(LTLIBINTL)
+libtwist_la_LIBADD = $(QUICKSTEP_LIBS) $(ZLIB_LIBS) $(LTLIBINTL)
 
 ## One library.  Sources are grouped by layer so a new scheme is a
 ## directory, not another file in a flat list.
@@ -74,6 +74,7 @@ libtwist_la_SOURCES = \
   dns/cache.c \
   dns/resolve.c \
   dns/wire.c \
+  http/coding.c \
   http/cookie.c \
   http/h1.c \
   http/h2.c \
