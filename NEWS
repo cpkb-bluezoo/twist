@@ -6,7 +6,7 @@ Please send Twist bug reports to <dog@gnu.org>
 
 Version 0.1 - unreleased
 
-  * HTTP/1, HTTP/2, and HTTP/3, plus the schemes marked done in
-    DEVELOPMENT.md
+  * HTTP/1, HTTP/2, and HTTP/3, plus FTP, mail, MQTT, LDAP,
+    WebSocket, Gopher, DICT, TFTP, and FILE
   * quickstep is an installed library found by pkg-config
   * gzip and deflate request and response coding, via zlib

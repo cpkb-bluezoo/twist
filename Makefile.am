@@ -27,7 +27,7 @@ include_HEADERS = include/twist.h
 pkgconfigdir = $(libdir)/pkgconfig
 pkgconfig_DATA = twist.pc
 
-EXTRA_DIST = HACKING ARCHITECTURE.md DEVELOPMENT.md build-aux/config.rpath
+EXTRA_DIST = HACKING ARCHITECTURE.md TODO build-aux/config.rpath
 
 .PHONY: check-integration
 check-integration:

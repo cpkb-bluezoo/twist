@@ -31,8 +31,8 @@ pass that prefix:
 
   ./configure --with-quickstep=/prefix
 
-See INSTALL for the GNU build instructions, and DEVELOPMENT.md for
-what is finished and what is not.
+See INSTALL for the GNU build instructions, and TODO for what is
+not yet implemented.
 
 License
 -------
