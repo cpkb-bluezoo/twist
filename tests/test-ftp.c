@@ -128,6 +128,23 @@ test_ftp_parser (void)
     check (strcmp (host, "192.0.2.10") == 0 && port == 1930, "pasv addr");
     check (twist_ftp_epsv ("229 Entering Extended Passive Mode (|||40000|)",
                            46, &port) == TWIST_OK && port == 40000, "epsv");
+    {
+      struct twist_dns_addr peer;
+      struct twist_dns_addr out;
+
+      memset (&peer, 0, sizeof peer);
+      peer.family = 4;
+      peer.addr[0] = 192;
+      peer.addr[1] = 0;
+      peer.addr[2] = 2;
+      peer.addr[3] = 1;
+      snprintf (peer.text, sizeof peer.text, "192.0.2.1");
+      check (twist_ftp_data_addr (&peer, port, &out) == TWIST_OK, "data addr");
+      check (memcmp (out.addr, peer.addr, 4) == 0
+             && strcmp (out.text, "192.0.2.1") == 0, "data peer");
+      check (twist_ftp_data_addr (&peer, 0, &out) == TWIST_ERR_INVAL,
+             "data port");
+    }
   }
 }
 
@@ -224,6 +241,16 @@ test_ftp_session (void)
     check (twist_url_parse_int ("ftp://alice:secret@127.0.0.1/pub/", &easy->url)
            == TWIST_OK, "auth url");
     f = twist_ftp_new (easy, 0);
+    {
+      struct twist_dns_addr peer;
+
+      memset (&peer, 0, sizeof peer);
+      peer.family = 4;
+      peer.addr[0] = 127;
+      peer.addr[3] = 1;
+      snprintf (peer.text, sizeof peer.text, "127.0.0.1");
+      twist_ftp_set_peer (f, &peer);
+    }
     feed_session (f, "220 ready\r\n", 1);
     check (strcmp (twist_ftp_command (f), "USER alice\r\n") == 0, "user");
     feed_session (f, "331 need pass\r\n", 1);
@@ -232,7 +259,7 @@ test_ftp_session (void)
     check (strcmp (twist_ftp_command (f), "PASV\r\n") == 0, "pasv fallback");
     feed_session (f, "227 Entering Passive Mode (192,0,2,10,7,138).\r\n", 1);
     check (strcmp (twist_ftp_command (f), "LIST pub\r\n") == 0, "list");
-    check (strcmp (twist_ftp_data_host (f), "192.0.2.10") == 0, "pasv host");
+    check (strcmp (twist_ftp_data_host (f), "127.0.0.1") == 0, "pasv host");
     check (twist_ftp_data_port (f) == 1930, "pasv port");
     twist_easy_cleanup (easy);
   }

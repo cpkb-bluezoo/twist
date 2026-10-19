@@ -349,6 +349,8 @@ void twist_url_free_int (struct twist_url *url);
 int twist_url_resolve_int (const struct twist_url *base, const char *ref,
                            struct twist_url **out);
 char *twist_url_format (const struct twist_url *url);
+/* Absolute-form request target without userinfo.  */
+int twist_url_proxy_target (const struct twist_url *url, char *buf, size_t cap);
 int twist_url_default_port (const char *scheme);
 
 #define TWIST_SCHEME_TLS 1u
@@ -412,6 +414,11 @@ struct twist_dns_addr
   char text[64];
 };
 
+/* Data connection uses the control peer.  port is the 227 port.  */
+int twist_ftp_data_addr (const struct twist_dns_addr *peer, int port,
+                         struct twist_dns_addr *out);
+void twist_ftp_set_peer (struct twist_ftp *ftp, const struct twist_dns_addr *peer);
+
 struct twist_dns_events
 {
   void *user;
@@ -438,6 +445,9 @@ size_t twist_dns_datagram_receive (const uint8_t *data, size_t len,
                                    const struct twist_dns_events *ev);
 int twist_dns_encode_query (const char *name, int qtype, uint16_t id,
                             uint8_t **out, size_t *len);
+/* QR set, id matches, and the first question name matches.  */
+int twist_dns_response_ok (const uint8_t *msg, size_t len, uint16_t id,
+                           const char *name);
 /* Two-byte length prefix.  zero_id clears the DNS id (DoQ).  */
 int twist_dns_frame_stream (const uint8_t *msg, size_t len, int zero_id,
                             uint8_t **out, size_t *outlen);
@@ -650,6 +660,9 @@ int twist_coding_encode (const char *name, const uint8_t *in, size_t n,
 
 int twist_http_should_redirect (int status, const char *method, int follow,
                                 long redirs, long maxredirs, int *use_get);
+/* 1 when a redirect must not replay credentials or a body.  */
+int twist_http_redirect_sensitive (const char *from_host, int from_https,
+                                   const char *to_host, int to_https);
 int twist_http_status_result (int failonerror, int status);
 
 /* ---- cookies, auth, share ---- */
@@ -787,6 +800,7 @@ void twist_imap_free (void *imap);
 size_t twist_imap_receive (struct twist_imap *imap, const uint8_t *data,
                            size_t len);
 const char *twist_imap_command (const struct twist_imap *imap);
+int twist_imap_mailbox (const char *box, char *out, size_t cap);
 
 struct twist_mqtt;
 struct twist_mqtt *twist_mqtt_new (struct twist_easy *easy, int live);
@@ -877,6 +891,7 @@ int twist_altsvc_note (struct twist_altsvc *a, const char *origin,
 const char *twist_altsvc_lookup (struct twist_altsvc *a, const char *origin);
 
 char *twist_strdup (const char *s);
+int twist_has_ctl (const char *s);
 void *twist_xmalloc (size_t n);
 size_t twist_write_bytes (twist_write_callback cb, void *user,
                           const void *data, size_t len);

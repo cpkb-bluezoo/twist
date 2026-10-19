@@ -52,6 +52,19 @@ twist_strdup (const char *s)
   return p;
 }
 
+int
+twist_has_ctl (const char *s)
+{
+  const unsigned char *p;
+
+  if (s == NULL)
+    return 0;
+  for (p = (const unsigned char *) s; *p != 0; p++)
+    if (*p == '\r' || *p == '\n')
+      return 1;
+  return 0;
+}
+
 struct twist_slist *
 twist_slist_append (struct twist_slist *list, const char *data)
 {

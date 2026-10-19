@@ -66,6 +66,21 @@ imap_recv (void *obj, const uint8_t *data, size_t len)
 }
 
 static void
+test_imap_mailbox (void)
+{
+  char box[64];
+
+  check (twist_imap_mailbox ("INBOX", box, sizeof box) == TWIST_OK
+         && strcmp (box, "INBOX") == 0, "imap atom");
+  check (twist_imap_mailbox ("INBOX{10}", box, sizeof box) == TWIST_OK
+         && strcmp (box, "\"INBOX{10}\"") == 0, "imap literal");
+  check (twist_imap_mailbox ("a\"b", box, sizeof box) == TWIST_ERR_URL,
+         "imap quote");
+  check (twist_imap_mailbox ("a\rb", box, sizeof box) == TWIST_ERR_URL,
+         "imap cr");
+}
+
+static void
 test_mail (void)
 {
   static const char plain[] = "Hi\r\n.x\r\n";
@@ -231,6 +246,7 @@ test_mail (void)
 int
 main (void)
 {
+  test_imap_mailbox ();
   test_mail ();
   return tests_finish ();
 }

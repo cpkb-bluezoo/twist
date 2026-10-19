@@ -101,6 +101,41 @@ next_tag (struct twist_imap *m)
   snprintf (m->expect, sizeof m->expect, "A%d", m->tag);
 }
 
+int
+twist_imap_mailbox (const char *box, char *out, size_t cap)
+{
+  const unsigned char *p;
+  int atom = 1;
+  size_t n;
+
+  if (box == NULL || box[0] == 0 || out == NULL || cap == 0)
+    return TWIST_ERR_URL;
+  for (p = (const unsigned char *) box; *p != 0; p++)
+    {
+      if (*p == '\r' || *p == '\n' || *p == '"' || *p == '\\' || *p < 0x20
+          || *p == 0x7f)
+        return TWIST_ERR_URL;
+      if (*p == '(' || *p == ')' || *p == '{' || *p == ' ' || *p == '%'
+          || *p == '*' || *p == ']')
+        atom = 0;
+    }
+  n = strlen (box);
+  if (atom)
+    {
+      if (n + 1 > cap)
+        return TWIST_ERR_URL;
+      memcpy (out, box, n + 1);
+      return TWIST_OK;
+    }
+  if (n + 3 > cap)
+    return TWIST_ERR_URL;
+  out[0] = '"';
+  memcpy (out + 1, box, n);
+  out[n + 1] = '"';
+  out[n + 2] = 0;
+  return TWIST_OK;
+}
+
 static int
 parse_target (struct twist_imap *m)
 {
@@ -177,15 +212,19 @@ deliver (struct twist_imap *m, const uint8_t *data, size_t len)
 static int
 start_box (struct twist_imap *m)
 {
+  char mailbox[300];
   int rc = parse_target (m);
 
+  if (rc != TWIST_OK)
+    return rc;
+  rc = twist_imap_mailbox (m->box, mailbox, sizeof mailbox);
   if (rc != TWIST_OK)
     return rc;
   next_tag (m);
   m->state = I_BOX;
   if (m->uid > 0)
-    return imap_send (m, "%s SELECT %s\r\n", m->expect, m->box);
-  return imap_send (m, "%s LIST \"\" %s\r\n", m->expect, m->box);
+    return imap_send (m, "%s SELECT %s\r\n", m->expect, mailbox);
+  return imap_send (m, "%s LIST \"\" %s\r\n", m->expect, mailbox);
 }
 
 static int

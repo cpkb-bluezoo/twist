@@ -45,6 +45,21 @@ test_url (void)
   check (rel != NULL && strcmp (rel->path, "/z") == 0, "rel path");
   check (strcmp (rel->host, "example.com") == 0, "rel host");
   twist_url_free_int (rel);
+  {
+    char target[128];
+
+    check (twist_url_proxy_target (url, target, sizeof target) == TWIST_OK,
+           "proxy target");
+    check (strcmp (target, "http://example.com:8080/a/b?x=1") == 0,
+           "proxy no user");
+  }
+  twist_url_free_int (url);
+  check (twist_url_parse_int ("http://example.com/a\r\nb", &url)
+         == TWIST_ERR_URL, "crlf path");
+  check (twist_url_parse_int ("http://ex\r\n.com/", &url) == TWIST_ERR_URL,
+         "crlf host");
+  check (twist_url_parse_int ("http://example.com/%0d%0a", &url) == TWIST_OK,
+         "encoded crlf");
   twist_url_free_int (url);
 }
 

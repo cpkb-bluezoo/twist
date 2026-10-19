@@ -31,6 +31,9 @@
 #include <strings.h>
 #include <sys/socket.h>
 
+#include <quickstep/crypto.h>
+#include <quickstep/status.h>
+
 enum
 {
   HTTP_H1 = 1,
@@ -57,6 +60,10 @@ struct twist_http
   int status;
   int auth_tries;
   int suppress_body;
+  int strip_auth;
+  char *origin_host;
+  int origin_https;
+  int origin_set;
   char *location;
   char *challenge;
   char *auth_line;
@@ -657,6 +664,29 @@ header_named (const struct twist_slist *list, const char *name)
 }
 
 static int
+header_is (const char *line, const char *name)
+{
+  size_t n = strlen (name);
+
+  return line != NULL && strncasecmp (line, name, n) == 0 && line[n] == ':';
+}
+
+static int
+header_sensitive (const char *line)
+{
+  return header_is (line, "Authorization")
+         || header_is (line, "Proxy-Authorization")
+         || header_is (line, "Cookie");
+}
+
+static int
+scheme_is_tls (const char *scheme)
+{
+  return scheme != NULL
+         && (strcmp (scheme, "https") == 0 || strcmp (scheme, "wss") == 0);
+}
+
+static int
 accepts_coding (const char *accept, const char *name)
 {
   size_t n;
@@ -787,14 +817,14 @@ request_headers (struct twist_http *h)
 
   snprintf (buf, sizeof buf, "User-Agent: %s", ua);
   list = twist_slist_append (list, buf);
-  if (h->auth_line != NULL)
+  if (!h->strip_auth && h->auth_line != NULL)
     list = twist_slist_append (list, h->auth_line);
-  else if (easy->bearer != NULL)
+  else if (!h->strip_auth && easy->bearer != NULL)
     {
       snprintf (buf, sizeof buf, "Authorization: Bearer %s", easy->bearer);
       list = twist_slist_append (list, buf);
     }
-  else if (easy->username != NULL
+  else if (!h->strip_auth && easy->username != NULL
            && (easy->auth == 0 || (easy->auth & TWISTAUTH_BASIC) != 0)
            && (easy->auth & TWISTAUTH_DIGEST) == 0)
     {
@@ -805,7 +835,7 @@ request_headers (struct twist_http *h)
           free (basic);
         }
     }
-  if (easy->cookie != NULL)
+  if (!h->strip_auth && easy->cookie != NULL)
     {
       snprintf (buf, sizeof buf, "Cookie: %s", easy->cookie);
       list = twist_slist_append (list, buf);
@@ -832,7 +862,11 @@ request_headers (struct twist_http *h)
       list = twist_slist_append (list, buf);
     }
   for (scan = easy->headers; scan != NULL; scan = scan->next)
-    list = twist_slist_append (list, scan->data);
+    {
+      if (h->strip_auth && header_sensitive (scan->data))
+        continue;
+      list = twist_slist_append (list, scan->data);
+    }
   if (easy->accept_encoding != NULL
       && !header_named (easy->headers, "Accept-Encoding"))
     {
@@ -912,8 +946,10 @@ send_request (struct twist_http *h)
     method = "POST";
   path = url->path != NULL && url->path[0] != 0 ? url->path : "/";
   if (h->proxy != NULL && !h->tunnel)
-    snprintf (target, sizeof target, "%s",
-              easy->effective_url != NULL ? easy->effective_url : path);
+    {
+      if (twist_url_proxy_target (url, target, sizeof target) != TWIST_OK)
+        return TWIST_ERR_URL;
+    }
   else if (url->query != NULL)
     snprintf (target, sizeof target, "%s?%s", path, url->query);
   else
@@ -1044,7 +1080,7 @@ http_restart (void *user)
     {
       port = h->easy->url->port > 0
         ? h->easy->url->port : twist_url_default_port (h->easy->url->scheme);
-      if (port == h->dial_port)
+      if (port == h->dial_port && (h->tls_on != 0) == (h->https != 0))
         same = 1;
     }
   h->conn = NULL;
@@ -1133,10 +1169,30 @@ http_message_done (void *user)
       const char *path = easy->url->path != NULL ? easy->url->path : "/";
 
       if ((easy->auth & TWISTAUTH_DIGEST) != 0)
-        rc = twist_auth_digest (h->challenge, method, path, easy->username,
-                                easy->password != NULL ? easy->password : "",
-                                (unsigned) (h->auth_tries + 1), "0a4f113b",
-                                &hdr);
+        {
+          char cnonce[17];
+          uint8_t raw[8];
+          static const char *hexd = "0123456789abcdef";
+          size_t i;
+
+          if (gq_random (raw, sizeof raw) != GQ_OK)
+            rc = TWIST_ERR_AUTH;
+          else
+            {
+              for (i = 0; i < sizeof raw; i++)
+                {
+                  cnonce[i * 2] = hexd[raw[i] >> 4];
+                  cnonce[i * 2 + 1] = hexd[raw[i] & 15];
+                }
+              cnonce[16] = 0;
+              rc = twist_auth_digest (h->challenge, method, path,
+                                      easy->username,
+                                      easy->password != NULL
+                                      ? easy->password : "",
+                                      (unsigned) (h->auth_tries + 1), cnonce,
+                                      &hdr);
+            }
+        }
       if (rc != TWIST_OK && (easy->auth & TWISTAUTH_BASIC) != 0)
         rc = twist_auth_basic (easy->username, easy->password, &hdr);
       if (rc == TWIST_OK)
@@ -1165,7 +1221,17 @@ http_message_done (void *user)
       easy->redirs++;
       if (use_get)
         h->suppress_body = 1;
-      h->https = next->scheme != NULL && strcmp (next->scheme, "https") == 0;
+      h->https = scheme_is_tls (next->scheme);
+      if (twist_http_redirect_sensitive (h->origin_host, h->origin_https,
+                                         next->host, h->https))
+        {
+          free (h->auth_line);
+          h->auth_line = NULL;
+          h->strip_auth = 1;
+          h->suppress_body = 1;
+        }
+      else
+        h->strip_auth = 0;
       twist_loop_post (easy->loop, http_restart, h);
       return;
     }
@@ -1727,6 +1793,15 @@ http_begin (struct twist_http *h)
       free (easy->effective_url);
       easy->effective_url = twist_url_format (url);
     }
+  if (!h->origin_set && url->host != NULL && url->host[0] != 0)
+    {
+      h->origin_host = twist_strdup (url->host);
+      if (h->origin_host != NULL)
+        {
+          h->origin_https = h->https;
+          h->origin_set = 1;
+        }
+    }
   if (easy->timeout_ms > 0 && h->timer == NULL)
     twist_loop_schedule (easy->loop,
                          twist_loop_now (easy->loop) + (uint64_t) easy->timeout_ms,
@@ -1789,6 +1864,7 @@ http_free (void *p)
   free (h->location);
   free (h->challenge);
   free (h->auth_line);
+  free (h->origin_host);
   free (h->dial_host);
   free (h->hdr_line);
   free (h);
@@ -1839,4 +1915,16 @@ twist_http_should_redirect (int status, const char *method, int follow,
   if (status == 301 || status == 302 || status == 303)
     *use_get = 1;
   return 1;
+}
+
+int
+twist_http_redirect_sensitive (const char *from_host, int from_https,
+                               const char *to_host, int to_https)
+{
+  if (from_https && !to_https)
+    return 1;
+  if (from_host == NULL || to_host == NULL || from_host[0] == 0
+      || to_host[0] == 0)
+    return 1;
+  return strcasecmp (from_host, to_host) != 0;
 }

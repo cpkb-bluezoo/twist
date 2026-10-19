@@ -326,10 +326,38 @@ static int
 emit_str (uint8_t **buf, size_t *n, size_t *cap, const char *s)
 {
   size_t len = strlen (s);
-  if (*n + len + 2 > *cap)
+  size_t extra = 1;
+  size_t rest;
+
+  if (len >= 127)
+    {
+      rest = len - 127;
+      do
+        {
+          extra++;
+          if (rest < 128)
+            break;
+          rest >>= 7;
+        }
+      while (rest > 0);
+    }
+  if (*n + extra + len > *cap)
     return TWIST_ERR_NOMEM;
-  (*buf)[(*n)++] = (uint8_t) len;
-  memcpy (*buf + *n, s, len);
+  if (len < 127)
+    (*buf)[(*n)++] = (uint8_t) len;
+  else
+    {
+      (*buf)[(*n)++] = 127;
+      rest = len - 127;
+      while (rest >= 128)
+        {
+          (*buf)[(*n)++] = (uint8_t) ((rest & 127u) | 128u);
+          rest >>= 7;
+        }
+      (*buf)[(*n)++] = (uint8_t) rest;
+    }
+  if (len > 0)
+    memcpy (*buf + *n, s, len);
   *n += len;
   return TWIST_OK;
 }

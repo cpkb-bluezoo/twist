@@ -342,8 +342,14 @@ twist_h1_write_request (const char *method, const char *target,
   size_t n = 0;
   int wr;
 
+  if (twist_has_ctl (method) || twist_has_ctl (target) || twist_has_ctl (host))
+    return TWIST_ERR_PROTOCOL;
   for (h = extra; h != NULL; h = h->next)
-    cap += strlen (h->data) + 2;
+    {
+      if (twist_has_ctl (h->data))
+        return TWIST_ERR_PROTOCOL;
+      cap += strlen (h->data) + 2;
+    }
   buf = twist_xmalloc (cap + 64);
   if (buf == NULL)
     return TWIST_ERR_NOMEM;

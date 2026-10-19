@@ -26,6 +26,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 /* DNS is one client protocol.  UDP, TCP, DoT, DoQ, and DoH only
    differ in how a message is framed.  The message itself is parsed
@@ -163,6 +164,26 @@ copy_name (const uint8_t *msg, size_t len, size_t *off, char *out, size_t cap)
         *off = pos;
     }
   return TWIST_ERR_PROTOCOL;
+}
+
+int
+twist_dns_response_ok (const uint8_t *msg, size_t len, uint16_t id,
+                       const char *name)
+{
+  size_t off = 12;
+  char got[256];
+
+  if (msg == NULL || name == NULL || name[0] == 0 || len < 12)
+    return 0;
+  if (rd16 (msg) != id)
+    return 0;
+  if ((rd16 (msg + 2) & 0x8000) == 0)
+    return 0;
+  if (rd16 (msg + 4) < 1)
+    return 0;
+  if (copy_name (msg, len, &off, got, sizeof got) != TWIST_OK)
+    return 0;
+  return strcasecmp (got, name) == 0;
 }
 
 static int

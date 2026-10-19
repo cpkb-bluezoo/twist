@@ -187,6 +187,41 @@ twist_jar_store (struct twist_jar *jar, const char *set_cookie,
       scan = attr;
     }
   free (pair);
+  if (twist_has_ctl (c->name) || twist_has_ctl (c->value))
+    {
+      free (c->name);
+      free (c->value);
+      free (c->domain);
+      free (c->path);
+      free (c);
+      return TWIST_ERR_PROTOCOL;
+    }
+  if (c->domain != NULL && c->domain[0] == '.')
+    {
+      char *stripped = twist_strdup (c->domain + 1);
+
+      if (stripped == NULL)
+        {
+          free (c->name);
+          free (c->value);
+          free (c->domain);
+          free (c->path);
+          free (c);
+          return TWIST_ERR_NOMEM;
+        }
+      free (c->domain);
+      c->domain = stripped;
+    }
+  if (c->domain == NULL || c->domain[0] == 0
+      || !domain_match (host, c->domain, 0))
+    {
+      free (c->name);
+      free (c->value);
+      free (c->domain);
+      free (c->path);
+      free (c);
+      return TWIST_ERR_PROTOCOL;
+    }
   c->next = jar->head;
   jar->head = c;
   return TWIST_OK;

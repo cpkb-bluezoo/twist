@@ -309,6 +309,17 @@ twist_ftp_pasv (const char *text, size_t len, char *host, size_t hostcap,
 }
 
 int
+twist_ftp_data_addr (const struct twist_dns_addr *peer, int port,
+                     struct twist_dns_addr *out)
+{
+  if (peer == NULL || out == NULL || peer->family == 0 || port <= 0
+      || port > 65535)
+    return TWIST_ERR_INVAL;
+  *out = *peer;
+  return TWIST_OK;
+}
+
+int
 twist_ftp_epsv (const char *text, size_t len, int *port)
 {
   const char *p;
@@ -458,30 +469,6 @@ ftp_send_transfer (struct twist_ftp *f)
 }
 
 static int
-literal_addr (const char *text, struct twist_dns_addr *out)
-{
-  struct in_addr a4;
-  struct in6_addr a6;
-
-  memset (out, 0, sizeof *out);
-  if (inet_pton (AF_INET, text, &a4) == 1)
-    {
-      out->family = 4;
-      memcpy (out->addr, &a4, 4);
-      snprintf (out->text, sizeof out->text, "%s", text);
-      return TWIST_OK;
-    }
-  if (inet_pton (AF_INET6, text, &a6) == 1)
-    {
-      out->family = 6;
-      memcpy (out->addr, &a6, 16);
-      snprintf (out->text, sizeof out->text, "%s", text);
-      return TWIST_OK;
-    }
-  return TWIST_ERR_RESOLVE;
-}
-
-static int
 dial_tcp (struct twist_ftp *f, struct twist_connection **slot,
           const struct twist_protocol_handler *handler, void *user,
           const struct twist_dns_addr *addr, int port)
@@ -558,11 +545,13 @@ open_data (struct twist_ftp *f, const char *text, size_t len, int epsv)
       snprintf (f->data_host, sizeof f->data_host, "%s", f->peer.text);
       f->data_addr = f->peer;
     }
-  else if (literal_addr (f->data_host, &f->data_addr) != TWIST_OK)
+  else if (twist_ftp_data_addr (&f->peer, port, &f->data_addr) != TWIST_OK)
     {
       ftp_complete (f, TWIST_ERR_RESOLVE);
       return;
     }
+  else
+    snprintf (f->data_host, sizeof f->data_host, "%s", f->data_addr.text);
   if (!f->live)
     {
       if (ftp_send_transfer (f) != TWIST_OK)
@@ -868,6 +857,13 @@ int
 twist_ftp_data_port (const struct twist_ftp *f)
 {
   return f != NULL ? f->data_port : 0;
+}
+
+void
+twist_ftp_set_peer (struct twist_ftp *f, const struct twist_dns_addr *peer)
+{
+  if (f != NULL && peer != NULL)
+    f->peer = *peer;
 }
 
 const char *

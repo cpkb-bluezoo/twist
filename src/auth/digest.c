@@ -67,6 +67,33 @@ hash_hex (int sha, const char *s, char *out, size_t cap)
   }
 }
 
+static int
+qop_is_auth (const char *qop)
+{
+  const char *p;
+
+  if (qop == NULL)
+    return 0;
+  p = qop;
+  while (*p != 0)
+    {
+      while (*p == ' ' || *p == '\t' || *p == ',')
+        p++;
+      if (strncasecmp (p, "auth", 4) == 0
+          && (p[4] == 0 || p[4] == ',' || p[4] == ' ' || p[4] == '\t'))
+        return 1;
+      while (*p != 0 && *p != ',')
+        p++;
+    }
+  return 0;
+}
+
+static int
+bad_digest_field (const char *s)
+{
+  return s != NULL && (twist_has_ctl (s) || strchr (s, '"') != NULL);
+}
+
 static const char *
 param (const char *chal, const char *key, char *buf, size_t cap)
 {
@@ -119,6 +146,11 @@ twist_auth_digest (const char *challenge, const char *method, const char *uri,
   ap = param (challenge, "algorithm", algo, sizeof algo);
   if (rp == NULL || np == NULL)
     return TWIST_ERR_AUTH;
+  if (bad_digest_field (user) || bad_digest_field (uri)
+      || bad_digest_field (realm) || bad_digest_field (nonce))
+    return TWIST_ERR_AUTH;
+  if (qp != NULL && qop[0] != 0 && !qop_is_auth (qop))
+    return TWIST_ERR_UNSUPPORTED;
   if (ap != NULL && strcasecmp (algo, "SHA-256") == 0)
     sha = 1;
   else if (ap != NULL && algo[0] != 0 && strcasecmp (algo, "MD5") != 0)
@@ -131,7 +163,7 @@ twist_auth_digest (const char *challenge, const char *method, const char *uri,
   rc = hash_hex (sha, tmp, ha2, sizeof ha2);
   if (rc != TWIST_OK)
     return rc;
-  if (qp != NULL && strstr (qop, "auth") != NULL)
+  if (qp != NULL && qop_is_auth (qop))
     snprintf (tmp, sizeof tmp, "%s:%s:%08x:%s:auth:%s", ha1, nonce, nc,
               cnonce != NULL ? cnonce : "twist", ha2);
   else
@@ -142,7 +174,7 @@ twist_auth_digest (const char *challenge, const char *method, const char *uri,
   hdr = twist_xmalloc (512);
   if (hdr == NULL)
     return TWIST_ERR_NOMEM;
-  if (qp != NULL && strstr (qop, "auth") != NULL)
+  if (qp != NULL && qop_is_auth (qop))
     snprintf (hdr, 512,
               "Authorization: Digest username=\"%s\", realm=\"%s\", nonce=\"%s\", uri=\"%s\", qop=auth, nc=%08x, cnonce=\"%s\", response=\"%s\"",
               user, realm, nonce, uri, nc, cnonce != NULL ? cnonce : "twist",

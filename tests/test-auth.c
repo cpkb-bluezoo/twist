@@ -54,6 +54,25 @@ test_auth (void)
          && use_get == 0, "307");
   check (twist_http_should_redirect (302, "GET", 1, 5, 5, &use_get) == 0,
          "max");
+  check (twist_http_redirect_sensitive ("bank.example", 1, "bank.example", 1)
+         == 0, "same origin");
+  check (twist_http_redirect_sensitive ("Bank.Example", 1, "bank.example", 1)
+         == 0, "host case");
+  check (twist_http_redirect_sensitive ("bank.example", 1, "evil.example", 1)
+         == 1, "cross host");
+  check (twist_http_redirect_sensitive ("bank.example", 1, "bank.example", 0)
+         == 1, "downgrade");
+  check (twist_http_redirect_sensitive ("bank.example", 0, "bank.example", 1)
+         == 0, "upgrade");
+  check (twist_auth_digest (chal, "GET", "/a\rb", "Mufasa", "Circle Of Life",
+                            1, "0a4f113b", &hdr) == TWIST_ERR_AUTH,
+         "digest ctl");
+  check (twist_auth_digest (chal, "GET", "/", "a\"b", "Circle Of Life",
+                            1, "0a4f113b", &hdr) == TWIST_ERR_AUTH,
+         "digest quote");
+  check (twist_auth_digest ("Digest realm=\"r\", nonce=\"n\", qop=\"auth-int\"",
+                            "GET", "/", "u", "p", 1, "c", &hdr)
+         == TWIST_ERR_UNSUPPORTED, "auth-int");
 }
 
 static void

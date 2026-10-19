@@ -144,6 +144,16 @@ test_dns (void)
   msg[qlen + 15] = 34;
   check (twist_dns_decode (msg, qlen + 16, 1, &addrs, &n) == TWIST_OK, "dec");
   check (n == 1 && strcmp (addrs[0].text, "93.184.216.34") == 0, "addr");
+  check (twist_dns_response_ok (msg, qlen + 16, 0x1234, "example.com") == 1,
+         "dns match");
+  check (twist_dns_response_ok (msg, qlen + 16, 0x0001, "example.com") == 0,
+         "dns id");
+  check (twist_dns_response_ok (msg, qlen + 16, 0x1234, "other.test") == 0,
+         "dns name");
+  msg[2] = 0x01;
+  check (twist_dns_response_ok (msg, qlen + 16, 0x1234, "example.com") == 0,
+         "dns qr");
+  msg[2] = 0x81;
   free (addrs);
   {
     uint8_t *framed = NULL;

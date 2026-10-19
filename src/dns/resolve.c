@@ -22,6 +22,9 @@
 
 #include "twist-int.h"
 
+#include <quickstep/crypto.h>
+#include <quickstep/status.h>
+
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <netinet/in.h>
@@ -105,6 +108,8 @@ struct dns_query
   struct twist_dns_cache *cache;
   int cache_lead;
   uint32_t ttl_sec;
+  uint16_t expect_id;
+  char expect_name[256];
   struct twist_url *doq_parsed;
   struct twist_url *dot_parsed;
   struct twist_dns_service svc;
@@ -226,14 +231,45 @@ nameserver (struct sockaddr_in *sin)
   return TWIST_OK;
 }
 
+static void copy_dns_name (char *dst, size_t cap, const char *src);
+
+static int
+random_id (uint16_t *id)
+{
+  uint8_t b[2];
+
+  if (gq_random (b, sizeof b) != GQ_OK)
+    return TWIST_ERR_RESOLVE;
+  *id = (uint16_t) (((unsigned) b[0] << 8) | b[1]);
+  return TWIST_OK;
+}
+
+static void
+set_expect (struct dns_query *q, uint16_t id, const char *name)
+{
+  q->expect_id = id;
+  copy_dns_name (q->expect_name, sizeof q->expect_name, name);
+}
+
+static int
+response_matches (const struct dns_query *q, const uint8_t *msg, size_t len)
+{
+  if (q->expect_name[0] == 0)
+    return 0;
+  return twist_dns_response_ok (msg, len, q->expect_id, q->expect_name);
+}
+
 static int
 ensure_pkt (struct dns_query *q)
 {
   int qtype = q->phase == PHASE_HTTPS ? 65 : 1;
-  uint16_t id = q->phase == PHASE_HTTPS ? 2 : 1;
+  uint16_t id;
 
   if (q->pkt != NULL)
     return TWIST_OK;
+  if (random_id (&id) != TWIST_OK)
+    return TWIST_ERR_RESOLVE;
+  set_expect (q, id, q->host);
   return twist_dns_encode_query (q->host, qtype, id, &q->pkt, &q->pktlen);
 }
 
@@ -251,9 +287,14 @@ dns_send (struct twist_endpoint *ep)
     {
       uint8_t *pkt = NULL;
       size_t n = 0;
-      int rc = twist_dns_encode_query ("_dns.resolver.arpa", 64, 3, &pkt, &n);
+      uint16_t id = 0;
+      int rc;
 
       q->sent = 1;
+      if (random_id (&id) != TWIST_OK)
+        rc = TWIST_ERR_RESOLVE;
+      else
+        rc = twist_dns_encode_query ("_dns.resolver.arpa", 64, id, &pkt, &n);
       if (rc != TWIST_OK)
         {
           q->ddr = 0;
@@ -286,6 +327,7 @@ dns_send (struct twist_endpoint *ep)
           len = n;
           frame = pkt;
         }
+      set_expect (q, id, "_dns.resolver.arpa");
       if (twist_endpoint_send (ep, data, len) != TWIST_OK)
         {
           q->ddr = 0;
@@ -345,6 +387,8 @@ dns_send (struct twist_endpoint *ep)
           dns_finish (q, rc);
           return;
         }
+      if (q->doq)
+        q->expect_id = 0;
       data = frame;
     }
   else
@@ -565,9 +609,24 @@ dns_receive (struct twist_endpoint *ep, const uint8_t *data, size_t len)
   ev.failure = on_fail;
   ev.ttl = on_ttl;
   if (q->tcp)
-    n = twist_dns_stream_receive (data, len, &ev);
+    {
+      size_t need;
+
+      if (len < 2)
+        return 0;
+      need = ((size_t) data[0] << 8) | data[1];
+      if (len < 2 + need)
+        return 0;
+      if (!response_matches (q, data + 2, need))
+        return 2 + need;
+      n = twist_dns_stream_receive (data, len, &ev);
+    }
   else
-    n = twist_dns_datagram_receive (data, len, &ev);
+    {
+      if (!response_matches (q, data, len))
+        return len;
+      n = twist_dns_datagram_receive (data, len, &ev);
+    }
   if (n == 0)
     return 0;
   advance (q, ep);
@@ -706,7 +765,8 @@ on_doh_msg (void *user, int err, const uint8_t *msg, size_t len)
   ev.truncated = on_trunc;
   ev.failure = on_fail;
   ev.ttl = on_ttl;
-  if (twist_dns_datagram_receive (msg, len, &ev) == 0)
+  if (!response_matches (q, msg, len)
+      || twist_dns_datagram_receive (msg, len, &ev) == 0)
     {
       dns_finish (q, TWIST_ERR_PROTOCOL);
       return;

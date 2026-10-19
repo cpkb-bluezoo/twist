@@ -239,6 +239,13 @@ twist_url_parse_int (const char *input, struct twist_url **out)
     }
   if (u->path == NULL)
     u->path = twist_strdup ("");
+  if (twist_has_ctl (u->user) || twist_has_ctl (u->password)
+      || twist_has_ctl (u->host) || twist_has_ctl (u->path)
+      || twist_has_ctl (u->query))
+    {
+      url_clear (u);
+      return TWIST_ERR_URL;
+    }
   if (u->port == 0 && !u->port_set)
     u->port = twist_url_default_port (u->scheme);
   *out = u;
@@ -325,6 +332,29 @@ twist_url_format (const struct twist_url *url)
   if (n < 0 || (size_t) n >= sizeof buf)
     return NULL;
   return twist_strdup (buf);
+}
+
+int
+twist_url_proxy_target (const struct twist_url *url, char *buf, size_t cap)
+{
+  const char *path;
+  const char *scheme;
+  const char *host;
+  int n;
+
+  if (url == NULL || buf == NULL || cap == 0)
+    return TWIST_ERR_INVAL;
+  scheme = url->scheme != NULL ? url->scheme : "http";
+  host = url->host != NULL ? url->host : "";
+  path = url->path != NULL && url->path[0] != 0 ? url->path : "/";
+  if (url->query != NULL)
+    n = snprintf (buf, cap, "%s://%s:%d%s?%s", scheme, host, url->port, path,
+                  url->query);
+  else
+    n = snprintf (buf, cap, "%s://%s:%d%s", scheme, host, url->port, path);
+  if (n < 0 || (size_t) n >= cap)
+    return TWIST_ERR_URL;
+  return TWIST_OK;
 }
 
 int

@@ -187,7 +187,40 @@ test_cookie (void)
   hdr = NULL;
   check (twist_jar_header (jar, "other.test", "/", 0, &hdr) == TWIST_OK, "miss");
   check (hdr == NULL, "no cookie");
+  check (twist_jar_store (jar, "a=b; Domain=bank.example", "evil.example", "/",
+                          1) == TWIST_ERR_PROTOCOL, "foreign domain");
+  check (twist_jar_store (jar, "a=b\r\nX: y; Path=/", "example.com", "/", 1)
+         == TWIST_ERR_PROTOCOL, "cookie ctl");
+  check (twist_jar_store (jar, "id=1; Domain=example.com", "www.example.com",
+                          "/", 1) == TWIST_OK, "parent domain");
+  check (twist_jar_header (jar, "www.example.com", "/", 1, &hdr) == TWIST_OK
+         && hdr != NULL && strstr (hdr, "id=1") != NULL, "parent send");
+  free (hdr);
+  hdr = NULL;
+  check (twist_jar_header (jar, "other.test", "/", 1, &hdr) == TWIST_OK
+         && (hdr == NULL || strstr (hdr, "id=1") == NULL), "parent miss");
+  free (hdr);
   twist_jar_free (jar);
+}
+
+static void
+test_hpack_long (void)
+{
+  struct twist_hpack *hp = twist_hpack_new ();
+  char path[301];
+  uint8_t *out = NULL;
+  size_t n = 0;
+
+  memset (path, 'a', 300);
+  path[300] = 0;
+  check (hp != NULL, "hpack");
+  check (twist_hpack_encode_request (hp, "GET", "https", "h", path, NULL,
+                                     &out, &n) == TWIST_OK, "hpack enc");
+  check (out != NULL && n > 306 && out[0] == 0x82 && out[1] == 0x87
+         && out[2] == 0x44 && out[3] == 0x7f && out[4] == (173 | 128)
+         && out[5] == 1 && memcmp (out + 6, path, 300) == 0, "hpack len");
+  free (out);
+  twist_hpack_free (hp);
 }
 
 static void
@@ -252,6 +285,7 @@ main (void)
   test_h2 ();
   test_h3 ();
   test_cookie ();
+  test_hpack_long ();
   test_h2_share ();
   test_http_status ();
   return tests_finish ();
