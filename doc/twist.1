@@ -41,7 +41,7 @@ Several URLs leave the status of the last transfer, unless
 stops at the first failure.
 .PP
 HTTP, file, FTP, mail, MQTT, LDAP, WebSocket, Gopher, DICT, TFTP,
-and the download of one file over SFTP and SCP
+and the transfer of one file over SFTP and SCP
 are implemented.  A scheme that is recognised but not implemented
 exits 1.
 .SH OPTIONS
@@ -192,7 +192,35 @@ or
 Referer header.
 .TP
 .BI \-r ", " \-\-range " range"
-Byte range.
+Byte range.  For sftp and scp it is
+.IR first\-last ,
+.IR first\- ,
+or
+.IR \-count
+for the last
+.I count
+bytes.  A range that starts beyond the end of the file exits 33.
+.TP
+.BI \-C ", " \-\-continue\-at " offset"
+Resume at byte
+.IR offset ,
+for sftp and scp.
+Use
+.B \-
+to find the offset.
+A download continues from the end of the file named by
+.B \-o
+or
+.BR \-O ,
+which is opened to add to it; with a number the file is added to from that
+byte of the remote file.
+An upload with
+.B \-T
+skips that many bytes of the local file and adds to the remote one at that
+offset; with
+.B \-
+the server is asked how big the remote file is.
+Exits 36 if the remote file is shorter than the offset.
 .TP
 .BI \-b ", " \-\-cookie " data"
 Cookie request header.  This is not a cookie jar file.
@@ -433,8 +461,19 @@ could not be read.
 .B 27
 Out of memory.
 .TP
+.B 25
+An sftp or scp upload failed.
+.TP
 .B 28
 The transfer timed out.
+.TP
+.B 33
+The range cannot be delivered: it starts beyond the end of the remote file, or
+is not one twist understands.
+.TP
+.B 36
+The transfer cannot be resumed: the remote file is shorter than the offset,
+the local data is, or the file to resume is not there.
 .TP
 .B 35
 The TLS handshake failed.

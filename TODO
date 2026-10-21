@@ -6,10 +6,13 @@ Twist TODO List
   [ ] SCP/SFTP, one handler over foxtrot (../foxtrot).  scp:// runs over
       SFTP; there is no SCP wire protocol.  Done: logging in with a key
       file or a password, known_hosts as curl does it (~/.ssh/known_hosts,
-      -k skips, no accept-new), a pinned fingerprint, and downloading one
-      file.  Still to do:
-        - upload (-T), resume (-C and -r), and a directory listing for a
-          URL ending in /
+      -k skips, no accept-new), a pinned fingerprint, downloading and
+      uploading one file, resuming either way (-C), and ranges (-r).
+      Still to do:
+        - a directory listing for a URL ending in /
+        - -Q and --quote commands, --ftp-create-dirs for uploads
+        - -C and -T completion of the URL for the other schemes (curl
+          does it for all of them; twist does it for sftp and scp only)
         - an ssh-agent client (on the loop)
         - FIDO keys: foxtrot is ready; twist supplies the token I/O
           (libfido2, optional, on the storage pool)

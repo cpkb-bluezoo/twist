@@ -66,6 +66,10 @@ twist_strerror (int err)
       return _("bad content encoding");
     case TWIST_ERR_HOSTKEY:
       return _("host key verification failed");
+    case TWIST_ERR_RANGE:
+      return _("the range cannot be delivered");
+    case TWIST_ERR_RESUME:
+      return _("the transfer cannot be resumed");
     default:
       return _("unknown error");
     }

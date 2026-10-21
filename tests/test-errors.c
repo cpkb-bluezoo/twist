@@ -38,6 +38,10 @@ test_errors (void)
                  twist_strerror (TWIST_ERR_PROTOCOL)) != 0, "http distinct");
   check (strcmp (twist_strerror (TWIST_ERR_HOSTKEY),
                  twist_strerror (TWIST_ERR_AUTH)) != 0, "hostkey distinct");
+  check (strcmp (twist_strerror (TWIST_ERR_RANGE),
+                 twist_strerror (TWIST_ERR_RESUME)) != 0, "range distinct");
+  check (strcmp (twist_strerror (TWIST_ERR_RESUME),
+                 twist_strerror (TWIST_ERR_ABORTED)) != 0, "resume distinct");
   easy = twist_easy_init ();
   check (easy != NULL && twist_easy_error (easy) == NULL, "no detail");
   twist_easy_set_error (easy, twist_strdup ("could not open file /no/such"));

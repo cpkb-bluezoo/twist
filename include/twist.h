@@ -58,7 +58,9 @@ enum twist_error
   TWIST_ERR_FILE = 15,
   TWIST_ERR_HTTP = 16,
   TWIST_ERR_ENCODING = 17,
-  TWIST_ERR_HOSTKEY = 18
+  TWIST_ERR_HOSTKEY = 18,
+  TWIST_ERR_RANGE = 19,
+  TWIST_ERR_RESUME = 20
 };
 
 const char *twist_strerror (int err);
@@ -172,7 +174,13 @@ enum twist_opt
   TWISTOPT_SSH_HOST_PUBLIC_KEY_SHA256 = 47,
   /* Passphrase for the private key file (TWISTOPT_SSLKEY serves sftp and
      scp too).  Empty clears it.  */
-  TWISTOPT_KEYPASSWD = 48
+  TWISTOPT_KEYPASSWD = 48,
+  /* Where to continue, for sftp and scp; pass a long long.  A download
+     starts at this byte of the file (the caller appends to what it has).  An
+     upload skips this many bytes of its data and appends at this offset of
+     the remote file; -1 asks the server how much of the file it has.  0
+     starts at the beginning.  */
+  TWISTOPT_RESUME_FROM = 49
 };
 
 enum twist_dns_transport

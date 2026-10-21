@@ -37,7 +37,7 @@
 #define SSH_MAX_KEYS 4
 #define SSH_MAX_ALGS 16
 
-struct twist_sftp_get;
+struct twist_sftp_xfer;
 struct twist_ssh_load;
 
 struct twist_ssh
@@ -59,7 +59,7 @@ struct twist_ssh
   unsigned keys_skipped;
   gf_knownhosts *known;
   enum gf_sigalg algs[SSH_MAX_ALGS];
-  struct twist_sftp_get *get;
+  struct twist_sftp_xfer *sftp;
   /* The files are read on the storage pool; while that is under way this is
      the job.  */
   struct twist_ssh_load *load;
@@ -81,6 +81,8 @@ struct twist_ssh
   int depth;
   int end_pending;
   int end_err;
+  /* Reading was paused because bytes came before the session existed.  */
+  int read_paused;
 };
 
 /* The transfer is over or about to be.  */
@@ -120,6 +122,6 @@ int twist_sftp_channel_failed (void *user, uint32_t id, uint32_t reason,
                                gf_slice text);
 int twist_sftp_request_reply (void *user, uint32_t id, int success);
 int twist_sftp_channel_closed (void *user, uint32_t id);
-void twist_sftp_free (struct twist_sftp_get *get);
+void twist_sftp_free (struct twist_sftp_xfer *xfer);
 
 #endif /* TWIST_SSH_INT_H */

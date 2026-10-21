@@ -189,7 +189,18 @@ for @option{-d} or @option{-T}.
 Referer header.
 @item -r @var{range}
 @itemx --range @var{range}
-Byte range.
+Byte range.  For @code{sftp} and @code{scp} it is @samp{@var{first}-@var{last}},
+@samp{@var{first}-}, or @samp{-@var{count}} for the last @var{count} bytes
+(@pxref{SFTP and SCP}).
+@item -C @var{offset}
+@itemx --continue-at @var{offset}
+Resume at byte @var{offset}, for @code{sftp} and @code{scp}.  Use @samp{-} to
+find the offset.  A download continues from the end of the file named by
+@option{-o} or @option{-O}, which is opened to add to it; with a number the
+file is added to from that byte of the remote file.  An upload with
+@option{-T} skips that many bytes of the local file and adds to the remote
+one at that offset; with @samp{-} the server is asked how big the remote file
+is.  Exits 36 if the remote file is shorter than the offset.
 @item -b @var{data}
 @itemx --cookie @var{data}
 Cookie request header.  This is not a cookie jar file.
@@ -335,8 +346,16 @@ A local file named by @option{-d}, @option{--data-binary},
 @option{--data-urlencode}, or @option{-T} could not be read.
 @item 27
 Out of memory.
+@item 25
+An @code{sftp} or @code{scp} upload failed.
 @item 28
 The transfer timed out.
+@item 33
+The range cannot be delivered: it starts beyond the end of the remote file, or
+is not one twist understands.
+@item 36
+The transfer cannot be resumed: the remote file is shorter than the offset, the
+local data is, or the file to resume is not there.
 @item 35
 The TLS handshake failed.
 @item 37
@@ -389,13 +408,34 @@ twist sftp://user@@host/path/to/file
 twist scp://user@@host/~/file
 @end example
 
-twist downloads one file over SSH.  @code{scp://} and @code{sftp://} are the
+twist transfers one file over SSH.  @code{scp://} and @code{sftp://} are the
 same transfer, which uses the SFTP subsystem of the server: twist does not
 implement the old SCP protocol, as OpenSSH's own @command{scp} has not since
 version 9.0.  A server with no SFTP subsystem fails with an error that says
 so.  The path is absolute, except that @samp{/~/} begins in the directory
 the server puts the user in.  An @code{scp} URL does not expand wildcards.
-Uploads and directory listings are not implemented yet.
+Directory listings are not implemented yet.
+
+@subheading Upload, resume and ranges
+
+@option{-T @var{file}} uploads a file.  The remote file is created, with mode
+0644 as curl does, and truncated if it is there.  When the URL names a
+directory (it ends in @samp{/}) the file gets the name of the local file, as
+with curl.  Data given with @option{-d} is uploaded the same way.
+
+@option{-C} continues a transfer that stopped.  An upload does not send what
+the server has, and writes on at that offset of the remote file without
+truncating it.  A download is added to the end of the output file.
+
+@option{-r} downloads part of a file: @samp{100-199} (both ends included),
+@samp{100-} (to the end), or @samp{-50} (the last 50 bytes).  A range that
+starts beyond the end of the file exits 33.  A range and @option{-C} cannot
+be used together.
+
+The size of the remote file is asked for only when it is needed: to check a
+download resume, to find the start of @samp{-50}, or to resume an upload.
+A server that does not say how big a file is cannot do the last, nor
+@samp{-50}.
 
 @subheading Logging in
 

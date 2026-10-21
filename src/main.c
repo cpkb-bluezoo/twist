@@ -75,6 +75,9 @@ struct cli_op
   char *mail_from;
   char *output_dir;
   int create_dirs;
+  int resume_set;
+  int resume_auto;
+  long long resume_off;
   twist_easy *easy;
   struct cli_op *next;
 };
@@ -144,6 +147,10 @@ cli_status (int err, const char *url)
       return 47;
     case TWIST_ERR_CLOSED:
       return 52;
+    case TWIST_ERR_RANGE:
+      return 33;
+    case TWIST_ERR_RESUME:
+      return 36;
     case TWIST_ERR_HOSTKEY:
       return 60;
     case TWIST_ERR_ENCODING:
@@ -207,6 +214,8 @@ usage (void)
   fputs (_("  -u, --user USER[:PASS]  user and password\n"), stdout);
   fputs (_("  -e, --referer URL       Referer header\n"), stdout);
   fputs (_("  -r, --range RANGE       byte range\n"), stdout);
+  fputs (_("  -C, --continue-at N     resume at byte N, or - to find it (sftp and scp)\n"),
+         stdout);
   fputs (_("  -b, --cookie DATA       Cookie header data\n"), stdout);
   fputs (_("      --oauth2-bearer T   Bearer token\n"), stdout);
   fputs (_("  -m, --max-time SECONDS  whole transfer limit\n"), stdout);
@@ -870,6 +879,68 @@ finish_headers (struct cli_headers *h)
 }
 
 static int
+is_ssh_url (const char *url)
+{
+  return strncmp (url, "sftp://", 7) == 0 || strncmp (url, "scp://", 6) == 0;
+}
+
+/* URL with the name of FILE added, if URL names a directory (it ends in a
+   slash, or has no path) and no more than that: sftp://host/dir/ becomes
+   sftp://host/dir/FILE.  The name is percent-encoded.  NULL if URL needs
+   nothing, or FILE has no name.  */
+static char *
+with_file_name (const char *url, const char *file)
+{
+  const char *host = strstr (url, "://");
+  const char *slash, *base;
+  size_t ulen = strlen (url), blen, i, o;
+  int add_slash;
+  char *out;
+
+  if (host == NULL || strpbrk (url, "?#") != NULL)
+    return NULL;
+  slash = strchr (host + 3, '/');
+  if (slash != NULL && slash[strlen (slash) - 1] != '/')
+    return NULL;
+  base = strrchr (file, '/');
+  base = base != NULL ? base + 1 : file;
+  blen = strlen (base);
+  if (blen == 0 || strcmp (file, "-") == 0)
+    return NULL;
+  add_slash = slash == NULL;
+  out = twist_xmalloc (ulen + 1 + blen * 3 + 1);
+  if (out == NULL)
+    return NULL;
+  memcpy (out, url, ulen);
+  o = ulen;
+  if (add_slash)
+    out[o++] = '/';
+  for (i = 0; i < blen; i++)
+    {
+      unsigned char c = (unsigned char) base[i];
+
+      if (isalnum (c) || c == '-' || c == '.' || c == '_' || c == '~')
+        out[o++] = (char) c;
+      else
+        o += (size_t) sprintf (out + o, "%%%02X", c);
+    }
+  out[o] = 0;
+  return out;
+}
+
+/* The size of the file at PATH, or 0 if there is none.  -1 if it cannot be
+   looked at.  */
+static long long
+size_of_file (const char *path)
+{
+  struct stat st;
+
+  if (stat (path, &st) != 0)
+    return errno == ENOENT ? 0 : -1;
+  return (long long) st.st_size;
+}
+
+static int
 run_one (twist_easy *easy, struct cli_op *op, const char *url,
          const char *output, int remote, const char *upload)
 {
@@ -883,7 +954,10 @@ run_one (twist_easy *easy, struct cli_op *op, const char *url,
   static char empty_body[] = "";
   const char *method = op->method;
   char *query_url = NULL;
+  char *named_url = NULL;
   const char *use_url = url;
+  const char *body_mode = "wb";
+  long long resume = 0;
   struct cli_headers hdrs;
   int rc;
   int code;
@@ -916,9 +990,48 @@ run_one (twist_easy *easy, struct cli_op *op, const char *url,
       free (out_path);
       return rc;
     }
+  if (op->resume_set)
+    {
+      int sends = upload != NULL || (op->has_data && !op->get);
+
+      if (!is_ssh_url (url))
+        {
+          diag_code (2, _("--continue-at works for sftp and scp only"));
+          free (out_path);
+          return 2;
+        }
+      if (sends)
+        resume = op->resume_auto ? -1 : op->resume_off;
+      else
+        {
+          /* A download goes on at the end of what is in the file, which is
+             opened to add to it.  */
+          if (op->resume_auto)
+            {
+              if (out_path == NULL)
+                {
+                  diag_code (2, _("--continue-at - needs an output file"));
+                  return 2;
+                }
+              resume = size_of_file (out_path);
+              if (resume < 0)
+                {
+                  char msg[256];
+
+                  snprintf (msg, sizeof msg, _("could not read %s"), out_path);
+                  diag_code (23, msg);
+                  free (out_path);
+                  return 23;
+                }
+            }
+          else
+            resume = op->resume_off;
+          body_mode = "ab";
+        }
+    }
   if (out_path != NULL)
     {
-      body = fopen (out_path, "wb");
+      body = fopen (out_path, body_mode);
       if (body == NULL)
         {
           char msg[256];
@@ -998,7 +1111,15 @@ run_one (twist_easy *easy, struct cli_op *op, const char *url,
   hdrs.body = body;
   hdrs.dump = dump;
   hdrs.include = op->include;
+  /* An upload to a directory goes to the file with the name it has here.  */
+  if (upload != NULL && is_ssh_url (use_url))
+    {
+      named_url = with_file_name (use_url, upload);
+      if (named_url != NULL)
+        use_url = named_url;
+    }
   twist_easy_setopt (easy, TWISTOPT_URL, use_url);
+  twist_easy_setopt (easy, TWISTOPT_RESUME_FROM, resume);
   twist_easy_setopt (easy, TWISTOPT_CUSTOMREQUEST, method);
   twist_easy_setopt (easy, TWISTOPT_NOBODY, op->head ? 1L : 0L);
   twist_easy_setopt (easy, TWISTOPT_POSTFIELDS, payload);
@@ -1044,6 +1165,7 @@ run_one (twist_easy *easy, struct cli_op *op, const char *url,
   emit_writeout (op->writeout, easy, code);
   free (up.p);
   free (query_url);
+  free (named_url);
   return code;
 }
 
@@ -1170,6 +1292,7 @@ main (int argc, char **argv)
     { "user", required_argument, NULL, 'u' },
     { "referer", required_argument, NULL, 'e' },
     { "range", required_argument, NULL, 'r' },
+    { "continue-at", required_argument, NULL, 'C' },
     { "cookie", required_argument, NULL, 'b' },
     { "oauth2-bearer", required_argument, NULL, 29 },
     { "max-time", required_argument, NULL, 'm' },
@@ -1249,7 +1372,7 @@ main (int argc, char **argv)
           continue;
         }
       c = getopt_long (argc, argv,
-                       "+:o:X:H:d:Lkx:A:u:Iw:fE:hm:e:r:b:sSOT:GgiD:q",
+                       "+:o:X:H:d:Lkx:A:u:Iw:fE:hm:e:r:b:sSOT:GgiD:qC:",
                        longs, NULL);
       if (c == -1)
         break;
@@ -1399,6 +1522,34 @@ main (int argc, char **argv)
           break;
         case 'r':
           twist_easy_setopt (op->easy, TWISTOPT_RANGE, optarg);
+          break;
+        case 'C':
+          if (strcmp (optarg, "-") == 0)
+            {
+              op->resume_set = 1;
+              op->resume_auto = 1;
+            }
+          else
+            {
+              char *end;
+              long long off;
+
+              errno = 0;
+              off = strtoll (optarg, &end, 10);
+              if (optarg[0] < '0' || optarg[0] > '9' || *end != 0
+                  || errno != 0)
+                {
+                  diag (_("numerical parameter expected"));
+                  suggest ();
+                  status = 2;
+                }
+              else
+                {
+                  op->resume_set = 1;
+                  op->resume_auto = 0;
+                  op->resume_off = off;
+                }
+            }
           break;
         case 'b':
           twist_easy_setopt (op->easy, TWISTOPT_COOKIE, optarg);

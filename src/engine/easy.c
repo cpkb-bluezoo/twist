@@ -209,6 +209,9 @@ twist_easy_setopt (twist_easy *easy, int opt, ...)
     case TWISTOPT_CAINFO:
       replace (&easy->cainfo, va_arg (ap, const char *));
       break;
+    case TWISTOPT_RESUME_FROM:
+      easy->resume_from = va_arg (ap, long long);
+      break;
     case TWISTOPT_SSH_KNOWNHOSTS:
     case TWISTOPT_SSH_HOST_PUBLIC_KEY_SHA256:
     case TWISTOPT_KEYPASSWD:

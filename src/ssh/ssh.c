@@ -279,6 +279,13 @@ twist_ssh_begin (struct twist_ssh *s)
   rc = gf_session_start (s->session, twist_ssh_now_us (s));
   s->depth--;
   ssh_after (s, rc);
+  /* What the server sent while the files were loading was not taken; the
+     connection offers it again.  */
+  if (s->read_paused && s->ep != NULL)
+    {
+      s->read_paused = 0;
+      twist_endpoint_resume_read (s->ep);
+    }
   return rc == GF_OK ? TWIST_OK
                      : s->easy->result != TWIST_OK ? s->easy->result
                                                    : TWIST_ERR_PROTOCOL;
@@ -313,8 +320,12 @@ twist_ssh_receive (struct twist_ssh *s, const uint8_t *data, size_t len)
 {
   int rc;
 
-  if (s == NULL || s->session == NULL || s->finished)
+  if (s == NULL || s->finished)
     return len;
+  /* The files are still loading: the session does not exist, and it must
+     see these bytes when it does.  Take none of them.  */
+  if (s->session == NULL)
+    return 0;
   s->depth++;
   rc = gf_session_receive (s->session, twist_ssh_now_us (s), data, len);
   s->depth--;
@@ -382,9 +393,17 @@ static size_t
 ssh_on_recv (struct twist_endpoint *ep, const uint8_t *data, size_t len)
 {
   struct twist_ssh *s = ep->user_data;
+  size_t took;
 
   s->ep = ep;
-  return twist_ssh_receive (s, data, len);
+  took = twist_ssh_receive (s, data, len);
+  if (took == 0 && s->session == NULL && !s->finished && !s->read_paused)
+    {
+      /* Nothing to read it with yet: stop reading until there is.  */
+      s->read_paused = 1;
+      twist_endpoint_pause_read (ep);
+    }
+  return took;
 }
 
 static void
@@ -437,7 +456,7 @@ twist_ssh_free (void *p)
   /* The session owns the SFTP client, so it goes first.  */
   if (s->session != NULL)
     gf_session_free (s->session);
-  twist_sftp_free (s->get);
+  twist_sftp_free (s->sftp);
   twist_ssh_keys_free (s);
   gf_knownhosts_free (s->known);
   free (s->user);
