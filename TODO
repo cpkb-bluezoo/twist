@@ -55,3 +55,8 @@ Twist TODO List
           thread and deadlocks on any file over four chunks, because
           nothing acknowledges them.  Remove inline mode, or make the
           handler refuse it.
+        - pool.c twist_pool_expire: it walks the list without the lock
+          and expires any loop's connections, not only the caller's.
+          Only the tests call it; real expiry is a timer on each
+          connection's own loop.  Remove it, or make it take a loop and
+          hold the lock, before anything else calls it.
