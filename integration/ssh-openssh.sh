@@ -44,9 +44,11 @@ command -v ssh-keygen >/dev/null 2>&1 || skip "no ssh-keygen"
 
 work=$(mktemp -d "${TMPDIR:-/tmp}/twist-ssh.XXXXXX") || skip "no temp dir"
 sshd_pid=
+agent_pid=
 cleanup ()
 {
   [ -n "$sshd_pid" ] && kill "$sshd_pid" 2>/dev/null
+  [ -n "$agent_pid" ] && kill "$agent_pid" 2>/dev/null
   rm -rf "$work"
 }
 trap cleanup EXIT INT TERM
@@ -61,6 +63,9 @@ check ()
     fail=1
   fi
 }
+
+# The person's own agent is none of this test's business.
+unset SSH_AUTH_SOCK SSH_AGENT_PID
 
 user=$(id -un)
 mkdir -p "$work/home/.ssh" "$work/srv"
@@ -357,6 +362,116 @@ if [ ! -w "$work/srv/locked" ]; then
     "sftp://$user@$base$work/srv/locked"
   rc=$?
   check "$([ $rc -eq 9 ] && echo ok)" "upload to a file we may not write gives 9 (got $rc)"
+fi
+
+# 14. ssh-agent.  A real agent holds keys, and twist asks it to sign.  Keys
+# are tried in the agent's order, a key named with --key is used alone, and
+# the agent is never fatal: whatever is wrong with it, the other ways are
+# still tried.
+if command -v ssh-agent >/dev/null 2>&1 && command -v ssh-add >/dev/null 2>&1 \
+   && [ ${#work} -lt 80 ]; then
+  sock="$work/agent.sock"
+  agent_pid=$(ssh-agent -s -a "$sock" | sed -n 's/^SSH_AGENT_PID=\([0-9]*\);.*/\1/p')
+  hostline=$(cut -d' ' -f1,2 "$work/hostkey.pub")
+  # The host as twist looks it up (with the port), and as ssh-add does for a
+  # key restricted to a destination (without).
+  printf '[127.0.0.1]:%s %s\n' "$port" "$hostline" > "$work/home/.ssh/known_hosts"
+  printf '127.0.0.1 %s\n' "$hostline" > "$work/agent_hosts"
+  for k in wrong1 wrong2 wrong3 wrong4 enckey conkey; do
+    rm -f "$work/$k" "$work/$k.pub"
+  done
+  for k in wrong1 wrong2 wrong3 wrong4 conkey; do
+    ssh-keygen -q -t ed25519 -N '' -f "$work/$k"
+  done
+  ssh-keygen -q -t ed25519 -N 'correct horse' -f "$work/enckey"
+  cat "$work/enckey.pub" "$work/conkey.pub" >> "$work/authorized_keys"
+  printf '#!/bin/sh\necho "correct horse"\n' > "$work/askpass"
+  chmod +x "$work/askpass"
+  agent ()
+  {
+    ( SSH_AUTH_SOCK="$sock"; export SSH_AUTH_SOCK; "$@" )
+  }
+  ask ()
+  {
+    ( SSH_AUTH_SOCK="$sock"; export SSH_AUTH_SOCK
+      SSH_ASKPASS="$work/askpass"; SSH_ASKPASS_REQUIRE=force
+      export SSH_ASKPASS SSH_ASKPASS_REQUIRE
+      ssh-add -q "$@" </dev/null 2>/dev/null )
+  }
+  rm -f "$work/home/.ssh/id_ed25519" "$work/home/.ssh/id_ecdsa" \
+        "$work/home/.ssh/id_rsa"
+  url="sftp://$user@$base$work/srv/small.txt"
+
+  # The agent holds a key the server knows, and the user has no key files.
+  agent ssh-add -q "$work/userkey"
+  rm -f "$work/out"
+  agent t -k -o "$work/out" "$url"
+  rc=$?
+  [ $rc -eq 0 ] && [ "$(cat "$work/out")" = small ]
+  check "$([ $? -eq 0 ] && echo ok)" "login by a key in the agent (exit $rc)"
+
+  # A key named with --key is used alone: the agent is not asked, so a wrong
+  # agent is harmless and the named key decides.
+  rm -f "$work/out"
+  agent t -k --key "$work/otherkey" -o "$work/out" "$url"
+  rc=$?
+  check "$([ $rc -eq 67 ] && echo ok)" "a named key is used alone, wrong here, 67 (got $rc)"
+
+  # Several keys the server does not know come first.  The server counts each
+  # as a failed attempt and allows six, so four are fine.
+  agent ssh-add -D -q
+  for k in wrong1 wrong2 wrong3 wrong4; do agent ssh-add -q "$work/$k"; done
+  agent ssh-add -q "$work/userkey"
+  rm -f "$work/out"
+  agent t -k -o "$work/out" "$url"
+  rc=$?
+  [ $rc -eq 0 ] && [ "$(cat "$work/out")" = small ]
+  check "$([ $? -eq 0 ] && echo ok)" "the right key after four wrong ones (exit $rc)"
+
+  # A key protected by a passphrase, which twist cannot decrypt, can be used
+  # through the agent, which has it.
+  agent ssh-add -D -q
+  ask "$work/enckey"
+  rm -f "$work/out"
+  agent t -k -o "$work/out" "$url"
+  rc=$?
+  [ $rc -eq 0 ] && [ "$(cat "$work/out")" = small ]
+  check "$([ $? -eq 0 ] && echo ok)" "a passphrase-protected key in the agent (exit $rc)"
+  t -k --key "$work/enckey" -o /dev/null "$url" 2> "$work/err"
+  rc=$?
+  check "$([ $rc -eq 67 ] && grep -q 'protected by a passphrase' "$work/err" && echo ok)" \
+    "the same key as a file is refused, and says why (exit $rc)"
+
+  # A key that may be used only for this server.  The agent signs for it only
+  # once it has been told which server this is and which key that server
+  # showed (session-bind).
+  agent ssh-add -D -q
+  agent ssh-add -q -H "$work/agent_hosts" -h 127.0.0.1 "$work/conkey"
+  rm -f "$work/out"
+  agent t -k -o "$work/out" "$url"
+  rc=$?
+  [ $rc -eq 0 ] && [ "$(cat "$work/out")" = small ]
+  check "$([ $? -eq 0 ] && echo ok)" "a key restricted to a destination (exit $rc)"
+
+  # No agent where SSH_AUTH_SOCK says.  Not fatal in itself: a key file works,
+  # and with nothing else the failure names the agent.
+  ( SSH_AUTH_SOCK="$work/nothing-here.sock"; export SSH_AUTH_SOCK
+    t -k -o /dev/null "$url" 2> "$work/err" )
+  rc=$?
+  check "$([ $rc -eq 67 ] && grep -q 'ssh-agent: cannot connect' "$work/err" && echo ok)" \
+    "no agent at the socket, and nothing else: 67, and it says so (exit $rc)"
+  ( SSH_AUTH_SOCK="$work/nothing-here.sock"; export SSH_AUTH_SOCK
+    t -k --key "$work/userkey" -o "$work/out" "$url" )
+  rc=$?
+  check "$([ $rc -eq 0 ] && echo ok)" "a dead agent does not stop a key file (exit $rc)"
+
+  # No agent at all.
+  t -k -o /dev/null "$url" 2> "$work/err"
+  rc=$?
+  check "$([ $rc -eq 67 ] && grep -q 'no private key or password' "$work/err" && echo ok)" \
+    "no agent, no key, no password: 67 (exit $rc)"
+else
+  echo "ssh-openssh: no ssh-agent, or the work directory is too long for its socket; skipping the agent checks" >&2
 fi
 
 [ $fail -eq 0 ] || exit 1

@@ -25,6 +25,7 @@
 #include "ssh/ssh-int.h"
 
 #include <foxtrot/chan.h>
+#include <foxtrot/wire.h>
 #include <foxtrot/crypto.h>
 #include <foxtrot/key.h>
 #include <foxtrot/knownhosts.h>
@@ -32,10 +33,14 @@
 #include <foxtrot/sftp.h>
 #include <foxtrot/status.h>
 
+#include <errno.h>
+#include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/un.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -90,6 +95,12 @@ struct server
   uint64_t first_read;
   uint32_t write_status;	/* Answer writes with this instead of OK.  */
   int hide_size;		/* Say nothing of a file's size.  */
+  /* More keys the server accepts, and the fingerprints it was offered, in
+     order.  */
+  gf_key *also[4];
+  size_t nalso;
+  char offered[16][64];
+  unsigned noffered;
   /* The directory being listed.  */
   const struct dent *dents;
   size_t ndents, dpos;
@@ -138,12 +149,19 @@ sv_auth_request (void *user, const gf_auth_request *req)
   if (req->method == GF_AUTH_PASSWORD && sv->password != NULL)
     ok = req->password.len == strlen (sv->password)
          && memcmp (req->password.data, sv->password, req->password.len) == 0;
-  else if (req->method == GF_AUTH_PUBLICKEY && sv->authorized != NULL
-           && gf_key_equal (req->key, sv->authorized))
+  else if (req->method == GF_AUTH_PUBLICKEY)
     {
-      if (!req->has_signature)
+      int known = sv->authorized != NULL && gf_key_equal (req->key, sv->authorized);
+      size_t i;
+
+      for (i = 0; i < sv->nalso; i++)
+        if (gf_key_equal (req->key, sv->also[i]))
+          known = 1;
+      if (!req->has_signature && sv->noffered < 16)
+        gf_key_fingerprint (req->key, sv->offered[sv->noffered++], 64);
+      if (known && !req->has_signature)
         return gf_session_auth_pk_ok (sv->s) != GF_OK;
-      ok = 1;
+      ok = known;
     }
   if (ok)
     return gf_session_auth_accept (sv->s) != GF_OK;
@@ -458,6 +476,10 @@ server_new (struct server *sv)
 static void
 server_free (struct server *sv)
 {
+  size_t i;
+
+  for (i = 0; i < sv->nalso; i++)
+    gf_key_free (sv->also[i]);
   free (sv->up);
   gf_session_free (sv->s);
   gf_key_free (sv->host);
@@ -524,6 +546,11 @@ pump (struct world *w, struct twist_easy *easy, size_t chunk)
     }
 }
 
+/* As pump, with a loop to run: the files and the agent come back through it.
+   Gives up after about three seconds in which nothing moves.  */
+static void pump_with_loop (struct twist_multi *multi, struct world *w,
+                            struct twist_easy *easy, size_t chunk);
+
 /* What the transfer wrote.  */
 static uint8_t got[2 * FILE_LEN];
 static size_t got_len;
@@ -541,6 +568,33 @@ collect (char *ptr, size_t size, size_t nmemb, void *user)
   memcpy (got + got_len, ptr, n);
   got_len += n;
   return n;
+}
+
+static void
+pump_with_loop (struct twist_multi *multi, struct world *w,
+                struct twist_easy *easy, size_t chunk)
+{
+  int idle = 0, running = 0;
+  struct timespec nap = { 0, 2000000 };
+
+  while (!easy->done && idle < 1500)
+    {
+      size_t moved = drain (&w->c2s, chunk, to_server, w);
+
+      /* A connection keeps what the handler does not take, and offers it
+         again; this pipe cannot, so the server's bytes wait until the
+         client has a session to read them.  */
+      if (w->ssh->session != NULL)
+        moved += drain (&w->sv->out, chunk, to_client, w);
+      twist_multi_perform (multi, &running);
+      if (moved != 0)
+        idle = 0;
+      else
+        {
+          idle++;
+          nanosleep (&nap, NULL);
+        }
+    }
 }
 
 static void
@@ -589,12 +643,15 @@ struct setup
   long long resume;
   const char *range;
   int list_only;
+  struct twist_multi *multi;	/* Run on a real loop.  */
+  const char *agent;		/* The agent socket option.  */
+  unsigned agent_timeout_ms;
 };
 
 /* Every field, so that none is forgotten: URL, whether to check the host key,
    and the password; the rest is for the test to set.  */
 #define SETUP(url, verify, pw) \
-  { (url), (verify), (pw), NULL, NULL, NULL, 0, NULL, 0, 0, 0, NULL, 0 }
+  { (url), (verify), (pw), NULL, NULL, NULL, 0, NULL, 0, 0, 0, NULL, 0, NULL, NULL, 0 }
 
 /* The read callback for a streamed upload: it hands out the data in pieces
    of an awkward size.  */
@@ -654,7 +711,16 @@ start (struct world *w, struct server *sv, const struct setup *su)
     twist_easy_setopt (easy, TWISTOPT_DIRLISTONLY, 1L);
   w->sv = sv;
   w->c2s.len = 0;
+  if (su->agent != NULL)
+    twist_easy_setopt (easy, TWISTOPT_SSH_AGENT_SOCKET, su->agent);
+  if (su->multi != NULL)
+    {
+      easy->multi = su->multi;
+      easy->loop = su->multi->loop;
+    }
   w->ssh = twist_ssh_new (easy, 0);
+  if (su->agent_timeout_ms != 0)
+    w->ssh->agent_timeout_ms = su->agent_timeout_ms;
   check (w->ssh != NULL, "ssh new");
   twist_ssh_set_sink (w->ssh, client_sink, &w->c2s);
   twist_ssh_set_time (w->ssh, now_us);
@@ -672,7 +738,9 @@ run (struct world *w, struct server *sv, const struct setup *su)
      start returned.  */
   if (rc != TWIST_OK && !easy->done)
     twist_easy_finish (easy, rc);
-  if (rc == TWIST_OK)
+  if (rc == TWIST_OK && su->multi != NULL)
+    pump_with_loop (su->multi, w, easy, su->chunk != 0 ? su->chunk : 65536);
+  else if (rc == TWIST_OK)
     pump (w, easy, su->chunk != 0 ? su->chunk : 65536);
   return easy;
 }
@@ -1533,6 +1601,738 @@ test_listing (void)
   test_listing_more ();
 }
 
+/* ---- an ssh-agent ---- */
+
+/* An agent in the test, on a Unix socket with its own thread, speaking the
+   protocol of draft-ietf-sshm-ssh-agent.  It holds keys it can sign with,
+   and can misbehave in the ways an agent can.  Its counters are read after
+   it has been stopped, which joins the thread.  */
+
+#define AG_KEYS 12
+#define AG_CONNS 4
+
+struct agent
+{
+  int listen_fd;
+  char path[108];
+  pthread_t thread;
+  int stop;
+  int fd[AG_CONNS];
+  uint8_t in[AG_CONNS][8192];
+  size_t inlen[AG_CONNS];
+  gf_key *keys[AG_KEYS];	/* Not owned.  */
+  size_t nkeys;
+  /* What it does wrong.  */
+  int junk;			/* An identity that is not a key, first.  */
+  int refuse_sign;		/* FAILURE for a request to sign.  */
+  int close_on_sign;		/* Hang up on one.  */
+  int silent;			/* Never answers a request for identities.  */
+  int garbage;			/* Answers it with a frame of length 0.  */
+  int oversize;			/* Or with one over the limit.  */
+  int bind_reply;		/* 6, 5 or 28 for session-bind; 0: 5.  */
+  /* What it saw.  */
+  unsigned connections, id_requests, sign_requests, binds;
+  uint32_t last_flags;
+  uint8_t bind_host[512];
+  size_t bind_host_len;
+  uint8_t bind_session[128];
+  size_t bind_session_len;
+};
+
+static void
+put32 (uint8_t *p, uint32_t v)
+{
+  p[0] = (uint8_t) (v >> 24);
+  p[1] = (uint8_t) (v >> 16);
+  p[2] = (uint8_t) (v >> 8);
+  p[3] = (uint8_t) v;
+}
+
+static void
+ag_reply (int fd, const uint8_t *payload, size_t n)
+{
+  uint8_t head[4];
+
+  put32 (head, (uint32_t) n);
+  if (write (fd, head, 4) == 4 && n > 0)
+    (void) !write (fd, payload, n);
+}
+
+static void
+ag_identities (struct agent *a, int fd)
+{
+  uint8_t buf[8192];
+  gf_writer w;
+  size_t i, blen;
+
+  if (a->silent)
+    return;
+  if (a->garbage)
+    {
+      ag_reply (fd, NULL, 0);
+      return;
+    }
+  if (a->oversize)
+    {
+      uint8_t head[4];
+
+      put32 (head, 300000);
+      (void) !write (fd, head, 4);
+      return;
+    }
+  gf_writer_init (&w, buf, sizeof buf);
+  gf_wr_u8 (&w, 12);
+  gf_wr_u32 (&w, (uint32_t) (a->nkeys + (a->junk ? 1 : 0)));
+  if (a->junk)
+    {
+      gf_wr_string (&w, "not a key", 9);
+      gf_wr_string (&w, "junk", 4);
+    }
+  for (i = 0; i < a->nkeys; i++)
+    {
+      const uint8_t *blob = gf_key_blob (a->keys[i], &blen);
+
+      gf_wr_string (&w, blob, blen);
+      gf_wr_string (&w, "test key", 8);
+    }
+  ag_reply (fd, buf, w.len);
+}
+
+static void
+ag_sign (struct agent *a, int idx, const uint8_t *p, size_t n)
+{
+  gf_reader r;
+  gf_slice blob, data;
+  uint32_t flags;
+  uint8_t sig[1024], out[1100];
+  size_t i, siglen = 0, nalgs;
+  gf_writer w;
+
+  a->sign_requests++;
+  if (a->close_on_sign)
+    {
+      close (a->fd[idx]);
+      a->fd[idx] = -1;
+      return;
+    }
+  gf_reader_init (&r, p + 1, n - 1);
+  if (gf_rd_string (&r, &blob) != GF_OK || gf_rd_string (&r, &data) != GF_OK
+      || gf_rd_u32 (&r, &flags) != GF_OK || a->refuse_sign)
+    {
+      static const uint8_t fail[] = { 5 };
+
+      ag_reply (a->fd[idx], fail, 1);
+      return;
+    }
+  a->last_flags = flags;
+  for (i = 0; i < a->nkeys; i++)
+    {
+      size_t blen;
+      const uint8_t *kb = gf_key_blob (a->keys[i], &blen);
+      const enum gf_sigalg *algs = gf_key_sigalgs (a->keys[i], &nalgs);
+      enum gf_sigalg alg = algs[0];
+
+      if (blen != blob.len || memcmp (kb, blob.data, blen) != 0)
+        continue;
+      if (gf_key_type (a->keys[i]) == GF_KEY_RSA)
+        alg = (flags & 4u) ? GF_SIG_RSA_SHA2_512 : GF_SIG_RSA_SHA2_256;
+      if (gf_key_sign (a->keys[i], alg, data.data, data.len, sig, sizeof sig,
+                       &siglen) != GF_OK)
+        break;
+      gf_writer_init (&w, out, sizeof out);
+      gf_wr_u8 (&w, 14);
+      gf_wr_string (&w, sig, siglen);
+      ag_reply (a->fd[idx], out, w.len);
+      return;
+    }
+  {
+    static const uint8_t fail[] = { 5 };
+
+    ag_reply (a->fd[idx], fail, 1);
+  }
+}
+
+static void
+ag_extension (struct agent *a, int idx, const uint8_t *p, size_t n)
+{
+  gf_reader r;
+  gf_slice name, host, session, sig;
+  int fwd;
+  uint8_t reply = (uint8_t) (a->bind_reply != 0 ? a->bind_reply : 5);
+
+  gf_reader_init (&r, p + 1, n - 1);
+  if (gf_rd_string (&r, &name) == GF_OK && gf_slice_equals (name, "session-bind@openssh.com")
+      && gf_rd_string (&r, &host) == GF_OK && gf_rd_string (&r, &session) == GF_OK
+      && gf_rd_string (&r, &sig) == GF_OK && gf_rd_bool (&r, &fwd) == GF_OK
+      && gf_rd_finish (&r) == GF_OK && !fwd)
+    {
+      a->binds++;
+      if (host.len <= sizeof a->bind_host)
+        {
+          memcpy (a->bind_host, host.data, host.len);
+          a->bind_host_len = host.len;
+        }
+      if (session.len <= sizeof a->bind_session)
+        {
+          memcpy (a->bind_session, session.data, session.len);
+          a->bind_session_len = session.len;
+        }
+    }
+  else
+    reply = 5;
+  ag_reply (a->fd[idx], &reply, 1);
+}
+
+static void
+ag_frame (struct agent *a, int idx, const uint8_t *p, size_t n)
+{
+  switch (p[0])
+    {
+    case 11:
+      a->id_requests++;
+      ag_identities (a, a->fd[idx]);
+      break;
+    case 13:
+      ag_sign (a, idx, p, n);
+      break;
+    case 27:
+      ag_extension (a, idx, p, n);
+      break;
+    default:
+      {
+        static const uint8_t fail[] = { 5 };
+
+        ag_reply (a->fd[idx], fail, 1);
+      }
+    }
+}
+
+static void *
+ag_serve (void *arg)
+{
+  struct agent *a = arg;
+  struct pollfd fds[AG_CONNS + 1];
+  int map[AG_CONNS + 1];
+  int i, n;
+
+  while (!__atomic_load_n (&a->stop, __ATOMIC_ACQUIRE))
+    {
+      n = 0;
+      fds[n].fd = a->listen_fd;
+      fds[n].events = POLLIN;
+      map[n++] = -1;
+      for (i = 0; i < AG_CONNS; i++)
+        if (a->fd[i] >= 0)
+          {
+            fds[n].fd = a->fd[i];
+            fds[n].events = POLLIN;
+            map[n++] = i;
+          }
+      if (poll (fds, (nfds_t) n, 20) <= 0)
+        continue;
+      if (fds[0].revents & POLLIN)
+        {
+          int c = accept (a->listen_fd, NULL, NULL);
+
+          for (i = 0; c >= 0 && i < AG_CONNS; i++)
+            if (a->fd[i] < 0)
+              {
+                a->fd[i] = c;
+                a->inlen[i] = 0;
+                a->connections++;
+                c = -1;
+              }
+          if (c >= 0)
+            close (c);
+        }
+      for (i = 1; i < n; i++)
+        {
+          int idx = map[i];
+          ssize_t nread;
+
+          if (!(fds[i].revents & (POLLIN | POLLHUP)) || a->fd[idx] < 0)
+            continue;
+          nread = read (a->fd[idx], a->in[idx] + a->inlen[idx],
+                        sizeof a->in[idx] - a->inlen[idx]);
+          if (nread <= 0)
+            {
+              close (a->fd[idx]);
+              a->fd[idx] = -1;
+              continue;
+            }
+          a->inlen[idx] += (size_t) nread;
+          while (a->fd[idx] >= 0 && a->inlen[idx] >= 4)
+            {
+              size_t len = ((size_t) a->in[idx][0] << 24)
+                           | ((size_t) a->in[idx][1] << 16)
+                           | ((size_t) a->in[idx][2] << 8) | a->in[idx][3];
+
+              if (len == 0 || len + 4 > sizeof a->in[idx])
+                {
+                  close (a->fd[idx]);
+                  a->fd[idx] = -1;
+                  break;
+                }
+              if (a->inlen[idx] < len + 4)
+                break;
+              ag_frame (a, idx, a->in[idx] + 4, len);
+              if (a->fd[idx] >= 0)
+                {
+                  memmove (a->in[idx], a->in[idx] + 4 + len,
+                           a->inlen[idx] - 4 - len);
+                  a->inlen[idx] -= 4 + len;
+                }
+            }
+        }
+    }
+  for (i = 0; i < AG_CONNS; i++)
+    if (a->fd[i] >= 0)
+      close (a->fd[i]);
+  return NULL;
+}
+
+static int agent_serial;
+
+static int
+agent_start (struct agent *a)
+{
+  struct sockaddr_un sa;
+  int i;
+
+  memset (a, 0, sizeof *a);
+  for (i = 0; i < AG_CONNS; i++)
+    a->fd[i] = -1;
+  /* A Unix socket's path is short; the scratch directories are not.  */
+  snprintf (a->path, sizeof a->path, "/tmp/twist-agent-%ld-%d.sock",
+            (long) getpid (), agent_serial++);
+  unlink (a->path);
+  a->listen_fd = socket (AF_UNIX, SOCK_STREAM, 0);
+  if (a->listen_fd < 0)
+    return -1;
+  memset (&sa, 0, sizeof sa);
+  sa.sun_family = AF_UNIX;
+  snprintf (sa.sun_path, sizeof sa.sun_path, "%s", a->path);
+  if (bind (a->listen_fd, (struct sockaddr *) &sa, sizeof sa) != 0
+      || listen (a->listen_fd, 4) != 0)
+    return -1;
+  return pthread_create (&a->thread, NULL, ag_serve, a);
+}
+
+static void
+agent_stop (struct agent *a)
+{
+  __atomic_store_n (&a->stop, 1, __ATOMIC_RELEASE);
+  pthread_join (a->thread, NULL);
+  close (a->listen_fd);
+  unlink (a->path);
+}
+
+/* One transfer through an agent, and what came of it.  */
+struct acase
+{
+  int nwrong;			/* Keys the server does not know, first.  */
+  int junk, refuse_sign, close_on_sign, silent, garbage, oversize;
+  int bind_reply;
+  int rsa;			/* The agent's key is an RSA key.  */
+  int no_agent_key;		/* The agent holds none of the right key.  */
+  int agent_listens;		/* 0: the socket is a path with no agent.  */
+  const char *option;		/* The socket option; NULL: not set.  */
+  int env;			/* Name the socket in SSH_AUTH_SOCK.  */
+  int file_key;			/* A key the server knows in ~/.ssh.  */
+  int explicit_key;		/* --key, the right key.  */
+  int password;			/* The client has a password, right.  */
+  unsigned timeout_ms;		/* For the identities.  */
+  int abandon;			/* Let go before the agent answers.  */
+};
+
+struct aresult
+{
+  int done, result;
+  char detail[320];
+  unsigned connections, id_requests, sign_requests, binds;
+  uint32_t flags;
+  int bind_match;		/* The bind named the host key and session.  */
+  unsigned noffered;
+  char first_offered[64];
+  char authorized_fp[64];
+  char file_key_fp[64];
+  size_t got;
+};
+
+static void
+run_acase (const struct acase *c, struct aresult *res)
+{
+  struct server *sv = calloc (1, sizeof *sv);
+  struct world *w = calloc (1, sizeof *w);
+  struct agent ag;
+  gf_key *wrong[AG_KEYS];
+  struct twist_multi *multi = twist_multi_init ();
+  struct twist_easy *easy;
+  struct setup su = SETUP ("sftp://alice@127.0.0.1/data.bin", 0, NULL);
+  char keytext[2048], path[320], ssh_dir[300];
+  size_t kn = 0;
+  int i, nwrong = c->nwrong;
+
+  memset (res, 0, sizeof *res);
+  check (sv != NULL && w != NULL && multi != NULL, "agent case allocation");
+  check (server_new (sv) == 0, "server");
+  sv->password = c->password ? "secret" : NULL;
+  if (c->rsa)
+    {
+      gf_key_free (sv->authorized);
+      check (gf_key_generate (&sv->authorized, GF_KEY_RSA, 2048) == GF_OK,
+             "rsa key");
+    }
+  gf_key_fingerprint (sv->authorized, res->authorized_fp, 64);
+  if (c->agent_listens)
+    check (agent_start (&ag) == 0, "agent");
+  else
+    {
+      memset (&ag, 0, sizeof ag);
+      snprintf (ag.path, sizeof ag.path, "/tmp/twist-no-agent-%ld.sock",
+                (long) getpid ());
+      unlink (ag.path);
+    }
+  for (i = 0; i < nwrong && i < AG_KEYS - 1; i++)
+    {
+      check (gf_key_generate (&wrong[i], GF_KEY_ED25519, 0) == GF_OK, "wrong");
+      ag.keys[ag.nkeys++] = wrong[i];
+    }
+  if (!c->no_agent_key)
+    ag.keys[ag.nkeys++] = sv->authorized;
+  ag.junk = c->junk;
+  ag.refuse_sign = c->refuse_sign;
+  ag.close_on_sign = c->close_on_sign;
+  ag.silent = c->silent;
+  ag.garbage = c->garbage;
+  ag.oversize = c->oversize;
+  ag.bind_reply = c->bind_reply;
+
+  if (c->file_key)
+    {
+      check (gf_key_generate (&sv->also[0], GF_KEY_ED25519, 0) == GF_OK,
+             "file key");
+      sv->nalso = 1;
+      gf_key_fingerprint (sv->also[0], res->file_key_fp, 64);
+      check (gf_key_to_openssh_private (sv->also[0], keytext, sizeof keytext,
+                                        &kn) == GF_OK, "file key text");
+      snprintf (ssh_dir, sizeof ssh_dir, "%s/.ssh", home);
+      mkdir (ssh_dir, 0700);
+      snprintf (path, sizeof path, "%s/id_ed25519", ssh_dir);
+      write_file (path, keytext, kn, 0600);
+    }
+  if (c->explicit_key)
+    {
+      check (gf_key_to_openssh_private (sv->authorized, keytext,
+                                        sizeof keytext, &kn) == GF_OK,
+             "key text");
+      snprintf (path, sizeof path, "%s/explicit", home);
+      write_file (path, keytext, kn, 0600);
+      su.keyfile = path;
+    }
+  if (c->password)
+    su.password = "secret";
+  if (c->env)
+    setenv ("SSH_AUTH_SOCK", ag.path, 1);
+  else
+    unsetenv ("SSH_AUTH_SOCK");
+  su.multi = multi;
+  su.agent = c->option != NULL && strcmp (c->option, "path") == 0
+             ? ag.path : c->option;
+  su.agent_timeout_ms = c->timeout_ms;
+
+  easy = start (w, sv, &su);
+  if (c->abandon)
+    {
+      struct timespec nap = { 0, 20000000 };
+
+      check (twist_ssh_start (w->ssh) == TWIST_OK, "start");
+      nanosleep (&nap, NULL);
+      twist_easy_cleanup (easy);
+      twist_multi_cleanup (multi);
+      goto stop;
+    }
+  {
+    int rc = twist_ssh_start (w->ssh);
+
+    if (rc != TWIST_OK && !easy->done)
+      twist_easy_finish (easy, rc);
+    if (rc == TWIST_OK)
+      pump_with_loop (multi, w, easy, 65536);
+  }
+  res->done = easy->done;
+  res->result = easy->result;
+  snprintf (res->detail, sizeof res->detail, "%s",
+            twist_easy_error (easy) != NULL ? twist_easy_error (easy) : "");
+  res->got = got_len;
+  if (getenv ("ACASE_DEBUG") != NULL)
+    fprintf (stderr, "DBG case: done=%d result=%d detail='%s' got=%zu\n",
+             res->done, res->result, res->detail, res->got);
+  res->noffered = sv->noffered;
+  if (sv->noffered > 0)
+    snprintf (res->first_offered, sizeof res->first_offered, "%s",
+              sv->offered[0]);
+  twist_easy_cleanup (easy);
+  twist_multi_cleanup (multi);
+stop:
+  if (c->agent_listens)
+    {
+      agent_stop (&ag);
+      res->connections = ag.connections;
+      res->id_requests = ag.id_requests;
+      res->sign_requests = ag.sign_requests;
+      res->binds = ag.binds;
+      res->flags = ag.last_flags;
+      if (ag.binds > 0)
+        {
+          size_t hl;
+          const uint8_t *hb = gf_key_blob (sv->host, &hl);
+          const gf_conn_info *info = gf_session_info (sv->s);
+
+          res->bind_match = info != NULL && ag.bind_host_len == hl
+                            && memcmp (ag.bind_host, hb, hl) == 0
+                            && ag.bind_session_len == info->session_id_len
+                            && memcmp (ag.bind_session, info->session_id,
+                                       ag.bind_session_len) == 0;
+        }
+    }
+  for (i = 0; i < nwrong && i < AG_KEYS - 1; i++)
+    gf_key_free (wrong[i]);
+  server_free (sv);
+  free (sv);
+  free (w);
+  unsetenv ("SSH_AUTH_SOCK");
+  if (c->file_key)
+    {
+      snprintf (path, sizeof path, "%s/.ssh/id_ed25519", home);
+      unlink (path);
+      snprintf (path, sizeof path, "%s/.ssh", home);
+      rmdir (path);
+    }
+  if (c->explicit_key)
+    {
+      snprintf (path, sizeof path, "%s/explicit", home);
+      unlink (path);
+    }
+}
+
+static int
+detail_contains (const struct aresult *r, const char *text)
+{
+  return strstr (r->detail, text) != NULL;
+}
+
+/* The agent signs for a key the server knows, and the client has nothing
+   else: no password, no key file.  */
+static void
+test_agent_login (void)
+{
+  struct acase c = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, "path", 0, 0, 0, 0, 0, 0 };
+  struct aresult r;
+
+  run_acase (&c, &r);
+  check (r.done && r.result == TWIST_OK && r.got == FILE_LEN, "login by agent");
+  check (r.connections == 1 && r.id_requests == 1 && r.sign_requests == 1,
+         "one connection, one list, one signature");
+  check (r.flags == 0, "an Ed25519 signature needs no flags");
+
+  /* The socket named by the environment, with the option not set.  */
+  c.option = NULL;
+  c.env = 1;
+  run_acase (&c, &r);
+  check (r.done && r.result == TWIST_OK && r.sign_requests == 1,
+         "SSH_AUTH_SOCK is used when the option is not");
+
+  /* An empty option means no agent, whatever the environment says.  */
+  c.option = "";
+  c.password = 1;
+  run_acase (&c, &r);
+  check (r.done && r.result == TWIST_OK && r.connections == 0,
+         "an empty option turns the agent off");
+  c.password = 0;
+
+  /* A key that is not one is skipped, and the real one still works.  */
+  c.option = "path";
+  c.env = 0;
+  c.junk = 1;
+  run_acase (&c, &r);
+  check (r.done && r.result == TWIST_OK && r.sign_requests == 1,
+         "an identity that is not a key is skipped");
+}
+
+/* Keys the server does not know come first.  There is no limit of twist's
+   own, as with curl: the server's decides.  */
+static void
+test_agent_many_keys (void)
+{
+  struct acase c = { 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, "path", 0, 0, 0, 0, 0, 0 };
+  struct aresult r;
+
+  run_acase (&c, &r);
+  check (r.done && r.result == TWIST_OK && r.sign_requests == 1,
+         "the right key is the eighth");
+  check (r.noffered == 8, "all eight were offered, in turn");
+  check (strcmp (r.first_offered, r.authorized_fp) != 0,
+         "the agent's order is kept: the right key was not first");
+}
+
+/* A key named on the command line is used alone.  Without one the agent's
+   come before the files'.  */
+static void
+test_agent_precedence (void)
+{
+  struct acase c = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, "path", 0, 0, 1, 0, 0, 0 };
+  struct aresult r;
+
+  run_acase (&c, &r);
+  check (r.done && r.result == TWIST_OK && r.connections == 0,
+         "a named key is used without asking the agent");
+
+  c.explicit_key = 0;
+  c.file_key = 1;
+  run_acase (&c, &r);
+  check (r.done && r.result == TWIST_OK && r.sign_requests == 1
+         && strcmp (r.first_offered, r.authorized_fp) == 0,
+         "the agent's key is offered before the file's");
+
+  /* An agent with nothing for the server goes on to the files.  */
+  c.no_agent_key = 1;
+  run_acase (&c, &r);
+  check (r.done && r.result == TWIST_OK && r.id_requests == 1
+         && r.sign_requests == 0
+         && strcmp (r.first_offered, r.file_key_fp) == 0,
+         "an empty agent leaves the files' keys");
+}
+
+/* An agent that will not sign, or hangs up when asked, costs its key and
+   nothing else.  The password still works.  */
+static void
+test_agent_refusal (void)
+{
+  struct acase c = { 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, "path", 0, 0, 0, 1, 0, 0 };
+  struct aresult r;
+
+  run_acase (&c, &r);
+  check (r.done && r.result == TWIST_OK && r.sign_requests == 1,
+         "an agent that refuses to sign: the password does");
+  c.refuse_sign = 0;
+  c.close_on_sign = 1;
+  run_acase (&c, &r);
+  check (r.done && r.result == TWIST_OK && r.sign_requests == 1,
+         "an agent that hangs up on a request: the password does");
+
+  /* With nothing else to try, the failure says why.  */
+  c.password = 0;
+  run_acase (&c, &r);
+  check (r.done && r.result == TWIST_ERR_AUTH
+         && detail_contains (&r, "ssh-agent"),
+         "the agent is named when it was the only hope");
+}
+
+/* An agent that is not there, or says nonsense.  Never fatal by itself.  */
+static void
+test_agent_failures (void)
+{
+  struct acase c = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, "path", 0, 0, 0, 1, 0, 0 };
+  struct aresult r;
+
+  /* The socket has nothing behind it.  */
+  run_acase (&c, &r);
+  check (r.done && r.result == TWIST_OK, "no agent at the socket: password");
+  c.password = 0;
+  run_acase (&c, &r);
+  check (r.done && r.result == TWIST_ERR_AUTH
+         && detail_contains (&r, "ssh-agent: cannot connect"),
+         "and it says so when nothing else was left");
+
+  /* A path no Unix socket can have.  */
+  c.password = 1;
+  c.option = "/tmp/01234567890123456789012345678901234567890123456789"
+             "0123456789012345678901234567890123456789012345678901234567890123456789";
+  run_acase (&c, &r);
+  check (r.done && r.result == TWIST_OK, "a path that is too long: password");
+  c.password = 0;
+  run_acase (&c, &r);
+  check (r.done && detail_contains (&r, "too long"),
+         "a path that is too long is said to be");
+
+  /* An agent that answers with nonsense.  */
+  c.agent_listens = 1;
+  c.option = "path";
+  c.password = 1;
+  c.garbage = 1;
+  run_acase (&c, &r);
+  check (r.done && r.result == TWIST_OK && r.sign_requests == 0,
+         "a frame of length 0 from the agent: password");
+  c.garbage = 0;
+  c.oversize = 1;
+  run_acase (&c, &r);
+  check (r.done && r.result == TWIST_OK && r.sign_requests == 0,
+         "a frame over the limit from the agent: password");
+  c.oversize = 0;
+
+  /* An agent that never answers: given a few moments, not the transfer's
+     whole life.  */
+  c.silent = 1;
+  c.timeout_ms = 200;
+  run_acase (&c, &r);
+  check (r.done && r.result == TWIST_OK && r.id_requests == 1,
+         "an agent that never answers: password after the wait");
+  c.password = 0;
+  run_acase (&c, &r);
+  check (r.done && r.result == TWIST_ERR_AUTH
+         && detail_contains (&r, "did not answer"),
+         "and it is said to have been silent");
+}
+
+/* RSA keys: the algorithm decides the flags.  */
+static void
+test_agent_rsa (void)
+{
+  struct acase c = { 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1, "path", 0, 0, 0, 0, 0, 0 };
+  struct aresult r;
+
+  run_acase (&c, &r);
+  check (r.done && r.result == TWIST_OK && r.sign_requests == 1
+         && (r.flags == 2 || r.flags == 4), "an RSA key signs with SHA-2 flags");
+}
+
+/* An agent holding keys restricted to a destination wants to be told which
+   server this is, with the host key and the session identifier.  Whatever it
+   answers, the login goes on.  */
+static void
+test_agent_session_bind (void)
+{
+  struct acase c = { 0, 0, 0, 0, 0, 0, 0, 6, 0, 0, 1, "path", 0, 0, 0, 0, 0, 0 };
+  struct aresult r;
+
+  run_acase (&c, &r);
+  check (r.done && r.result == TWIST_OK && r.binds == 1 && r.bind_match,
+         "the agent is told the host key and the session");
+  c.bind_reply = 5;
+  run_acase (&c, &r);
+  check (r.done && r.result == TWIST_OK && r.binds == 1,
+         "an agent that answers FAILURE to it is still used");
+  c.bind_reply = 28;
+  run_acase (&c, &r);
+  check (r.done && r.result == TWIST_OK && r.binds == 1,
+         "and so is one that does not know the extension");
+}
+
+/* The transfer is let go of while the agent has not answered.  Nothing may
+   be touched afterwards; valgrind finds it if it is.  */
+static void
+test_agent_abandoned (void)
+{
+  struct acase c = { 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, "path", 0, 0, 0, 0, 0, 1 };
+  struct aresult r;
+  int i;
+
+  for (i = 0; i < 3; i++)
+    run_acase (&c, &r);
+  check (1, "abandoned while the agent was asked");
+}
+
 /* A peer that is not SSH-2.  */
 static void
 test_bad_peer (void)
@@ -1783,6 +2583,14 @@ main (void)
   test_download_resume ();
   test_ranges ();
   test_listing ();
+  test_agent_login ();
+  test_agent_many_keys ();
+  test_agent_precedence ();
+  test_agent_refusal ();
+  test_agent_failures ();
+  test_agent_rsa ();
+  test_agent_session_bind ();
+  test_agent_abandoned ();
   test_no_subsystem ();
   test_auth ();
   test_host_key ();

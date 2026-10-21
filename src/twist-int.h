@@ -104,6 +104,7 @@ struct twist_easy
   char *keypasswd;
   long long resume_from;
   int dirlistonly;
+  char *ssh_agent_socket;
   long timeout_ms;
   long connect_timeout_ms;
   char *proxy;

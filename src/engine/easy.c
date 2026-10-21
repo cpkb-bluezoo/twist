@@ -95,6 +95,7 @@ easy_clear (struct twist_easy *easy)
   free (easy->content_encoding);
   free (easy->cainfo);
   free (easy->ssh_knownhosts);
+  free (easy->ssh_agent_socket);
   free (easy->ssh_hostpubsha256);
   if (easy->keypasswd != NULL)
     {
@@ -211,6 +212,9 @@ twist_easy_setopt (twist_easy *easy, int opt, ...)
       break;
     case TWISTOPT_RESUME_FROM:
       easy->resume_from = va_arg (ap, long long);
+      break;
+    case TWISTOPT_SSH_AGENT_SOCKET:
+      replace (&easy->ssh_agent_socket, va_arg (ap, const char *));
       break;
     case TWISTOPT_DIRLISTONLY:
       easy->dirlistonly = va_arg (ap, long) != 0;

@@ -7,21 +7,24 @@ Twist TODO List
       SFTP; there is no SCP wire protocol.  Done: logging in with a key
       file or a password, known_hosts as curl does it (~/.ssh/known_hosts,
       -k skips, no accept-new), a pinned fingerprint, downloading and
-      uploading one file, resuming either way (-C), and ranges (-r).
+      uploading one file, resuming either way (-C), ranges (-r),
+      directory listings, and keys in an ssh-agent.
       Still to do:
         - -Q and --quote commands, --ftp-create-dirs for uploads
         - -l for ftp URLs, which would send NLST; it only affects sftp
           now
         - -C and -T completion of the URL for the other schemes (curl
           does it for all of them; twist does it for sftp and scp only)
-        - an ssh-agent client (on the loop)
-        - FIDO keys: foxtrot is ready; twist supplies the token I/O
-          (libfido2, optional, on the storage pool)
+        - FIDO keys held in a file: foxtrot is ready; twist supplies the
+          token I/O (libfido2, optional, on the storage pool).  Keys
+          held by an ssh-agent already work, with the agent doing the
+          token I/O.
         - keyboard-interactive login
       Requires libgcrypt >= 1.12.4.
   [ ] Passphrase-protected OpenSSH-format private keys.  Blocked on
       bcrypt-pbkdf being available in libgcrypt; it is deliberately not
-      taken from anywhere else.  ssh-agent is the workaround.
+      taken from anywhere else.  An ssh-agent holding the key is the
+      workaround, and works.
   [ ] SMB/SMBS
   [ ] RTMP/RTMPS
   [ ] NTLM and Negotiate, only after an explicit dependency decision

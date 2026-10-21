@@ -183,7 +183,11 @@ enum twist_opt
   TWISTOPT_RESUME_FROM = 49,
   /* For sftp, list a directory by name only, one to a line, not in the
      server's long form.  */
-  TWISTOPT_DIRLISTONLY = 50
+  TWISTOPT_DIRLISTONLY = 50,
+  /* The ssh-agent socket for sftp and scp.  Unset: the one named by the
+     environment variable SSH_AUTH_SOCK.  An empty string: no agent.  An
+     explicit private key (TWISTOPT_SSLKEY) is used alone, without the agent.  */
+  TWISTOPT_SSH_AGENT_SOCKET = 51
 };
 
 enum twist_dns_transport

@@ -347,10 +347,7 @@ load_done (void *user, int err)
       memcpy (s->algs, l->algs, sizeof s->algs);
       s->nalgs = l->nalgs;
       for (i = 0; i < l->nkeys; i++)
-        {
-          s->keys[i] = l->keys[i];
-          s->key_ptrs[i] = l->keys[i];
-        }
+        s->keys[i] = l->keys[i];
       s->nkeys = l->nkeys;
       l->nkeys = 0;
       s->keys_skipped = l->skipped;
@@ -363,10 +360,8 @@ load_done (void *user, int err)
         }
       else if (!twist_ssh_done (s))
         {
-          int rc = twist_ssh_begin (s);
-
-          if (rc != TWIST_OK)
-            twist_ssh_finish (s, rc);
+          s->load_ready = 1;
+          twist_ssh_maybe_begin (s);
         }
     }
   load_free (l);
@@ -510,6 +505,11 @@ twist_ssh_keys_free (struct twist_ssh *s)
   for (i = 0; i < s->nkeys; i++)
     gf_key_free (s->keys[i]);
   s->nkeys = 0;
+  for (i = 0; i < s->nakeys; i++)
+    gf_key_free (s->akeys[i]);
+  free (s->akeys);
+  s->akeys = NULL;
+  s->nakeys = s->cap_akeys = 0;
 }
 
 void
@@ -524,7 +524,11 @@ twist_ssh_auth_hint (struct twist_ssh *s, char *buf, size_t cap)
                 "read; passphrase-protected OpenSSH keys cannot be "
                 "decrypted yet)"),
               s->keys_skipped);
-  else if (s->nkeys == 0 && s->password == NULL && used + 1 < cap)
+  else if (s->nkeys == 0 && s->nakeys == 0 && s->password == NULL
+           && used + 1 < cap)
     snprintf (buf + used, cap - used,
               _(" (no private key or password was available)"));
+  used = strlen (buf);
+  if (s->agent_note[0] != 0 && used + 1 < cap)
+    snprintf (buf + used, cap - used, _(" (ssh-agent: %s)"), s->agent_note);
 }

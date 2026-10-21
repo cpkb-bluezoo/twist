@@ -39,6 +39,7 @@
 
 struct twist_sftp_xfer;
 struct twist_ssh_load;
+struct ssh_agent;
 
 struct twist_ssh
 {
@@ -51,12 +52,25 @@ struct twist_ssh
   gf_session_events events;
   char *user;
   char *password;
+  /* The keys that were read from files, which have a private part.  */
   gf_key *keys[SSH_MAX_KEYS];
-  const gf_key *key_ptrs[SSH_MAX_KEYS];
   size_t nkeys;
+  /* The keys the agent holds: public parts, signed for by the agent.  */
+  gf_key **akeys;
+  size_t nakeys, cap_akeys;
+  /* All of them as the session takes them: the agent's first.  */
+  const gf_key **allkeys;
   /* Default key files that were not offered because the library cannot
      decrypt them.  */
   unsigned keys_skipped;
+  /* The session starts when the files are loaded and the agent has said
+     what it holds (or was not asked, or failed); whichever is last starts it. */
+  int load_ready;
+  int agent_wait;
+  int begun;
+  struct ssh_agent *agent;
+  char agent_note[240];
+  unsigned agent_timeout_ms;	/* For the identities; 0: 10 seconds.  */
   gf_knownhosts *known;
   enum gf_sigalg algs[SSH_MAX_ALGS];
   struct twist_sftp_xfer *sftp;
@@ -95,6 +109,13 @@ twist_ssh_done (const struct twist_ssh *s)
 /* ssh.c */
 /* Make the session from what the job loaded and start it.  */
 int twist_ssh_begin (struct twist_ssh *s);
+/* Start the session if everything it waits for has come, once.  An error
+   ends the transfer.  */
+void twist_ssh_maybe_begin (struct twist_ssh *s);
+/* The agent's answer to a request to sign, for the session; or that it
+   could not.  */
+void twist_ssh_sign_answer (struct twist_ssh *s, const uint8_t *sig, size_t len);
+void twist_ssh_sign_failed (struct twist_ssh *s);
 uint64_t twist_ssh_now_us (const struct twist_ssh *s);
 /* Keep DETAIL as the message of the transfer unless one is already set.  */
 void twist_ssh_detail (struct twist_ssh *s, const char *detail);
@@ -114,6 +135,18 @@ int twist_ssh_host_key (void *user, const gf_key *key);
 void twist_ssh_keys_free (struct twist_ssh *s);
 /* Add what the failure of authentication leaves to say.  */
 void twist_ssh_auth_hint (struct twist_ssh *s, char *buf, size_t cap);
+
+/* agent.c: the ssh-agent, a socket on the loop.  The codec is foxtrot's. */
+/* Connect and ask what the agent holds, if there is one to ask: the file
+   named by the option or SSH_AUTH_SOCK, and no key was named.  Sets
+   agent_wait while the answer is awaited.  Never fails the transfer.  */
+void twist_ssh_agent_start (struct twist_ssh *s);
+void twist_ssh_agent_free (struct twist_ssh *s);
+/* Ask the agent to sign.  0 if it has the job; nonzero if it cannot.  */
+int twist_ssh_agent_sign (struct twist_ssh *s, const gf_key *key,
+                          enum gf_sigalg alg, gf_slice data);
+/* Tell the agent which server this is, once the host key is trusted.  */
+void twist_ssh_agent_bind (struct twist_ssh *s, const gf_conn_info *info);
 
 /* sftp.c: the session events that carry a download, and the end of it.  */
 int twist_sftp_authenticated (void *user, gf_slice username);

@@ -255,7 +255,8 @@ client certificate and none was given, the handshake fails.  When one
 was given, it is presented.
 @item --key @var{file}
 Private key for @option{--cert}.  For @code{sftp} and @code{scp} it is the
-private key to log in with.
+private key to log in with, and it is used alone: an ssh-agent is not asked
+(@pxref{SFTP and SCP}).
 @item --pass @var{phrase}
 Passphrase for the private key file, for the formats twist can decrypt
 (@pxref{SFTP and SCP}).
@@ -461,15 +462,32 @@ A server that does not say how big a file is cannot do the last, nor
 
 @subheading Logging in
 
-A private key is used if there is one: the file named by @option{--key}, or
-else @file{~/.ssh/id_ed25519}, @file{id_ecdsa} and @file{id_rsa} in that
-order.  Then a password, from @option{-u} or the URL.  The key files twist reads are OpenSSH's,
-PEM and PKCS#8, and PuTTY's version 3.  @strong{A passphrase-protected key in
-the OpenSSH format, which is what @command{ssh-keygen} writes by default,
-cannot be used}, because its key derivation is not in libgcrypt and twist
-does not take it from anywhere else.  Use an unencrypted key, or one
-converted with @command{ssh-keygen -p -m PKCS8} and given its passphrase
-with @option{--pass}.  There is no ssh-agent support yet.
+Keys are tried in this order.  A key named with @option{--key} is used alone,
+and nothing else is asked.  Otherwise the keys in an @command{ssh-agent}, in
+the agent's order, then @file{~/.ssh/id_ed25519}, @file{id_ecdsa} and
+@file{id_rsa}.  Then a password, from @option{-u} or the URL.
+
+The agent is the one named by the environment variable @env{SSH_AUTH_SOCK}.
+twist asks it what it holds and to sign; the private keys never reach twist.
+This includes keys that are protected by a passphrase, restricted to certain
+servers (@command{ssh-add -h}), or kept on a security key.  Whatever is wrong
+with the agent, whether there is none, it does not answer, or it refuses, is
+not fatal: the other keys and the password are tried, and if they all fail
+the message says what the agent did.  A server that counts every key it turns
+away as a failed attempt, as @command{sshd} does, allows a limited number of
+keys in the agent to be tried, six unless it is set otherwise.  This is the
+server's limit, as it is for curl and @command{ssh}.
+
+The key files twist reads are OpenSSH's, PEM and PKCS#8, and PuTTY's version
+3.  @strong{A passphrase-protected key file in the OpenSSH format, which is
+what @command{ssh-keygen} writes by default, cannot be read}, because its key
+derivation is not in libgcrypt and twist does not take it from anywhere else.
+Put the key in an agent (@command{ssh-add}), which can use it, or convert it
+with @command{ssh-keygen -p -m PKCS8} and give its passphrase with
+@option{--pass}.
+
+The library takes the agent's socket from @code{TWISTOPT_SSH_AGENT_SOCKET}; an
+empty string means no agent.
 
 @subheading The host key
 

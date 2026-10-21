@@ -370,6 +370,18 @@ Host keys are checked against `~/.ssh/known_hosts` by default, as the
 curl tool does. A key that is missing or changed fails the transfer, there
 is no accept-new mode, and turning off peer verification (`-k`) skips the
 check. A pinned SHA-256 of the host key is the other way to trust a host.
+The ssh-agent is a Unix socket opened as an endpoint on the loop, with the
+protocol (framing, requests, replies, and the session-bind that tells the
+agent which server this is) in foxtrot, which does no I/O. The session needs
+the list of keys when it is made, so the agent is asked what it holds as the
+transfer starts, alongside the job that reads the files, and the session starts
+when both have come. An answer for a signature comes back later, from the
+loop, to the session. A key named with --key is used alone and the agent is
+not contacted; otherwise the agent's keys come before the files'. The agent is
+never fatal: a missing socket, no answer within ten seconds for the list, a
+refusal or nonsense leave a note that is said if authentication then fails, and
+the other keys and the password are tried.
+
 Work that can block stays off the loop: the ssh-agent socket is an ordinary
 non-blocking fd on the loop, but a FIDO token (libfido2 is blocking) runs
 as a job on the storage pool, and the result comes back through the loop's

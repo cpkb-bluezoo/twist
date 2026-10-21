@@ -244,6 +244,52 @@ ssh_password (const struct twist_easy *easy)
   return NULL;
 }
 
+/* The agent is asked to sign for a key it holds.  */
+static int
+ssh_auth_sign (void *user, const gf_key *key, enum gf_sigalg alg,
+               gf_slice data)
+{
+  return twist_ssh_agent_sign (user, key, alg, data);
+}
+
+/* The key exchange is done and the host key is trusted: tell the agent
+   which server this is, so that it will sign for keys restricted to it.  */
+static int
+ssh_established (void *user, const gf_conn_info *info)
+{
+  twist_ssh_agent_bind (user, info);
+  return 0;
+}
+
+/* The agent's answer, or its failure, for the session.  They come from the
+   loop and not from inside a call into the session, so the session may act
+   on them and call back; see depth.  */
+void
+twist_ssh_sign_answer (struct twist_ssh *s, const uint8_t *sig, size_t len)
+{
+  int rc;
+
+  if (s->session == NULL || twist_ssh_done (s))
+    return;
+  s->depth++;
+  rc = gf_session_auth_sign_respond (s->session, sig, len);
+  s->depth--;
+  ssh_after (s, rc);
+}
+
+void
+twist_ssh_sign_failed (struct twist_ssh *s)
+{
+  int rc;
+
+  if (s->session == NULL || twist_ssh_done (s))
+    return;
+  s->depth++;
+  rc = gf_session_auth_sign_fail (s->session);
+  s->depth--;
+  ssh_after (s, rc);
+}
+
 /* The files are loaded: make the session and start it.  */
 int
 twist_ssh_begin (struct twist_ssh *s)
@@ -259,12 +305,34 @@ twist_ssh_begin (struct twist_ssh *s)
     }
   s->config.conn.software = "twist_" TWIST_VERSION_STRING;
   s->config.client_auth.user = s->user;
-  s->config.client_auth.keys = s->nkeys > 0 ? s->key_ptrs : NULL;
-  s->config.client_auth.nkeys = s->nkeys;
+  /* The agent's keys first, then those read from files.  */
+  {
+    size_t total = s->nakeys + s->nkeys, i;
+
+    if (total > 0)
+      {
+        s->allkeys = calloc (total, sizeof *s->allkeys);
+        if (s->allkeys == NULL)
+          return TWIST_ERR_NOMEM;
+        for (i = 0; i < s->nakeys; i++)
+          s->allkeys[i] = s->akeys[i];
+        for (i = 0; i < s->nkeys; i++)
+          s->allkeys[s->nakeys + i] = s->keys[i];
+      }
+    s->config.client_auth.keys = s->allkeys;
+    s->config.client_auth.nkeys = total;
+    /* No limit of ours on how many keys are offered.  foxtrot counts an
+       attempt only for a request that carries a signature or a password,
+       not for asking whether the server would have a key, so a server that
+       turns keys away does not use them up; its own limit decides, as it
+       does for curl and ssh.  */
+  }
   s->config.client_auth.password = s->password;
   s->events.user = s;
   s->events.write = ssh_write;
   s->events.host_key = twist_ssh_host_key;
+  s->events.established = ssh_established;
+  s->events.auth_sign = ssh_auth_sign;
   s->events.authenticated = twist_sftp_authenticated;
   s->events.auth_failed = ssh_auth_failed;
   s->events.channel_confirmed = twist_sftp_confirmed;
@@ -291,6 +359,19 @@ twist_ssh_begin (struct twist_ssh *s)
                                                    : TWIST_ERR_PROTOCOL;
 }
 
+void
+twist_ssh_maybe_begin (struct twist_ssh *s)
+{
+  int rc;
+
+  if (twist_ssh_done (s) || s->begun || !s->load_ready || s->agent_wait)
+    return;
+  s->begun = 1;
+  rc = twist_ssh_begin (s);
+  if (rc != TWIST_OK)
+    twist_ssh_finish (s, rc);
+}
+
 /* Begin a transfer: check what can be checked, then load the files on the
    storage pool, and the loop goes on from there.  An error returned is for
    the caller to end the transfer with; once the job is submitted the
@@ -312,6 +393,9 @@ twist_ssh_start (struct twist_ssh *s)
                              "with --user"));
       return TWIST_ERR_AUTH;
     }
+  /* The agent is asked first, so that the files cannot finish ahead of the
+     wish to wait for it.  */
+  twist_ssh_agent_start (s);
   return twist_ssh_load_start (s);
 }
 
@@ -453,11 +537,13 @@ twist_ssh_free (void *p)
     twist_timer_cancel (s->timer);
   twist_mail_link_close (&s->link);
   twist_ssh_load_abandon (s);
+  twist_ssh_agent_free (s);
   /* The session owns the SFTP client, so it goes first.  */
   if (s->session != NULL)
     gf_session_free (s->session);
   twist_sftp_free (s->sftp);
   twist_ssh_keys_free (s);
+  free (s->allkeys);
   gf_knownhosts_free (s->known);
   free (s->user);
   if (s->password != NULL)

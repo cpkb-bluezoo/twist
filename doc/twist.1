@@ -307,6 +307,11 @@ given, it is presented.
 Private key for
 .BR \-\-cert .
 For sftp and scp, the private key to log in with.
+It is used alone: an ssh-agent is not asked.
+Without it, the keys in the agent named by
+.B SSH_AUTH_SOCK
+are tried first, then those in
+.IR ~/.ssh .
 .TP
 .BI \-\-pass " phrase"
 Passphrase for the private key file, for the formats twist can decrypt.
