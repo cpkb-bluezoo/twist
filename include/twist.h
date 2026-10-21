@@ -180,7 +180,10 @@ enum twist_opt
      upload skips this many bytes of its data and appends at this offset of
      the remote file; -1 asks the server how much of the file it has.  0
      starts at the beginning.  */
-  TWISTOPT_RESUME_FROM = 49
+  TWISTOPT_RESUME_FROM = 49,
+  /* For sftp, list a directory by name only, one to a line, not in the
+     server's long form.  */
+  TWISTOPT_DIRLISTONLY = 50
 };
 
 enum twist_dns_transport

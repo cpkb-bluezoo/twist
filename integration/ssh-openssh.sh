@@ -23,7 +23,7 @@
 # user key made here, and downloads a file with twist: by key, with the host
 # checked against a known_hosts file, with a pinned fingerprint, and with -k;
 # and the failures (an unknown or changed host key, a missing file); and
-# uploads, resuming either way, and ranges.  Skips,
+# uploads, resuming either way, ranges, and directory listings.  Skips,
 # with status 77, if there is no sshd, no ssh-keygen or no twist to run.
 #
 # An sshd that is not root can only log in the user who runs it, so that is
@@ -194,14 +194,45 @@ t -k --hostpubsha256 "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" \
 rc=$?
 check "$([ $rc -eq 60 ] && echo ok)" "wrong pin gives 60 even with -k (got $rc)"
 
-# 8. A directory is not implemented yet, and scp does not expand wildcards.
-t -k --key "$work/userkey" -o /dev/null "sftp://$user@$base$work/srv/"
+# 8. A directory listing, with names a server cannot be trusted with: a
+# newline (which would make a line that is not an entry), a terminal escape,
+# a space and a dot.  scp does not list, and does not expand wildcards.
+mkdir -p "$work/srv/lsdir/sub"
+printf 'a' > "$work/srv/lsdir/plain.txt"
+printf 'b' > "$work/srv/lsdir/with space.txt"
+printf 'c' > "$work/srv/lsdir/.hidden"
+printf 'd' > "$work/srv/lsdir/$(printf 'new\nline')"
+printf 'e' > "$work/srv/lsdir/$(printf 'esc\033[31mred')"
+entries=$(find "$work/srv/lsdir" -mindepth 1 -maxdepth 1 -printf x | wc -c)
+entries=$((entries + 2))
+t -k --key "$work/userkey" -l -o "$work/names" "sftp://$user@$base$work/srv/lsdir/"
 rc=$?
-check "$([ $rc -ne 0 ] && echo ok)" "directory listing is refused (got $rc)"
+lines=$(wc -l < "$work/names")
+check "$([ $rc -eq 0 ] && [ "$lines" -eq "$entries" ] && echo ok)" \
+  "a listing has one line to an entry, $entries (exit $rc, got $lines)"
+check "$(grep -qFx 'plain.txt' "$work/names" && grep -qFx 'with space.txt' "$work/names" && grep -qFx '.hidden' "$work/names" && grep -qFx 'sub' "$work/names" && grep -qFx '.' "$work/names" && grep -qFx '..' "$work/names" && echo ok)" \
+  "the names are in the listing"
+check "$(grep -qF "$(printf '\033')" "$work/names" || echo ok)" \
+  "no escape character reaches the output"
+check "$(grep -qFx 'new?line' "$work/names" && grep -qFx 'esc?[31mred' "$work/names" && echo ok)" \
+  "control characters in names are shown as ?"
+t -k --key "$work/userkey" -o "$work/long" "sftp://$user@$base$work/srv/lsdir/"
+rc=$?
+lines=$(wc -l < "$work/long")
+check "$([ $rc -eq 0 ] && [ "$lines" -eq "$entries" ] && grep -q 'plain.txt' "$work/long" && grep -qE '^d[rwx-]{9} ' "$work/long" && echo ok)" \
+  "the long form is the server's, one line to an entry (exit $rc)"
+t -k --key "$work/userkey" -l -o /dev/null "sftp://$user@$base$work/srv/nodir/"
+rc=$?
+check "$([ $rc -eq 78 ] && echo ok)" "a directory that is not there gives 78 (got $rc)"
+t -k --key "$work/userkey" -l -o /dev/null "sftp://$user@$base$work/srv/data.bin/"
+rc=$?
+check "$([ $rc -eq 78 ] && echo ok)" "a file with a slash after it gives 78 (got $rc)"
+t -k --key "$work/userkey" -o /dev/null "scp://$user@$base$work/srv/lsdir/"
+rc=$?
+check "$([ $rc -eq 78 ] && echo ok)" "scp does not list a directory, 78 (got $rc)"
 t -k --key "$work/userkey" -o /dev/null "scp://$user@$base$work/srv/*.txt"
 rc=$?
 check "$([ $rc -ne 0 ] && echo ok)" "scp wildcard is refused (got $rc)"
-
 
 # 9. Upload: a new file, with the mode a new file gets, and to a directory
 # URL, which takes the name of the local file.

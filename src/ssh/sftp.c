@@ -51,7 +51,16 @@
    SFTP_WINDOW outstanding, then close it.  A resume skips the data that is
    already there, on both sides: the first bytes of the source are not sent
    and the writes go on at that offset of the file, which is not truncated.
-   The offset is given, or found by asking the server how big the file is.  */
+   The offset is given, or found by asking the server how big the file is.
+
+   List.  A URL for a directory (it ends in a slash) over sftp:// opens the
+   directory and reads it a batch of entries at a time until the end.  Each
+   entry is written as a line: the server's long form of it, or just the
+   name.  What a server sends is not trusted with the application's output:
+   a newline in a name would make a line that is not an entry, and control
+   characters can do what they like to a terminal.  So control characters,
+   and the UTF-8 form of the C1 ones, are replaced with ?.  scp:// does not
+   list; it names one file.  */
 
 #define SFTP_CHUNK 32768u
 #define SFTP_WINDOW 16u
@@ -63,6 +72,7 @@
 #define TAG_CLOSE ((void *) 2)
 #define TAG_STAT ((void *) 3)
 #define TAG_FSTAT ((void *) 4)
+#define TAG_READDIR ((void *) 5)
 #define TAG_WRITE 16u
 
 #define NEW_FILE_MODE 0644
@@ -91,6 +101,8 @@ struct twist_sftp_xfer
   int have_handle;
   int put;
   int closing;
+  int list;			/* A directory listing.  */
+  int list_only;		/* Names only.  */
 
   /* Download.  */
   struct slot *slots;
@@ -156,10 +168,11 @@ hexval (int c)
    what is not one file: a directory, or for scp a wildcard (which the
    shell of an scp server would expand and SFTP does not).  */
 static int
-file_path (struct twist_ssh *s, int put, char **out)
+file_path (struct twist_ssh *s, int put, char **out, int *dir)
 {
   struct twist_easy *e = s->easy;
-  const char *raw = e->url->path != NULL ? e->url->path : "/";
+  const char *raw = e->url->path != NULL && e->url->path[0] != 0
+                    ? e->url->path : "/";
   size_t n = strlen (raw), i, o = 0;
   char *p = malloc (n + 1);
   const char *use;
@@ -192,18 +205,48 @@ file_path (struct twist_ssh *s, int put, char **out)
     use = ".";
   else
     use = p;
+  *dir = 0;
   if (use[0] == 0 || use[strlen (use) - 1] == '/')
     {
-      free (p);
+      char listed[4096];
+      size_t len = strlen (use);
+
       if (put)
         {
+          free (p);
           twist_ssh_detail (s, _("the path names a directory; give the "
                                  "name of the file to upload to"));
           return TWIST_ERR_URL;
         }
-      twist_ssh_detail (s, _("a directory listing over SFTP is not "
-                             "implemented yet"));
-      return TWIST_ERR_UNSUPPORTED;
+      if (e->url->scheme != NULL && strcmp (e->url->scheme, "scp") == 0)
+        {
+          char msg[4200];
+
+          snprintf (msg, sizeof msg, _("%s: not a regular file; scp:// names "
+                                       "one file, use sftp:// to list a "
+                                       "directory"), p);
+          e->proto_status = 78;
+          free (p);
+          twist_ssh_detail (s, msg);
+          return TWIST_ERR_FILE;
+        }
+      /* A directory: without its trailing slashes, which servers differ
+         about.  Nothing left means the root, or the home directory if the
+         URL said ~.  */
+      if (len >= sizeof listed)
+        {
+          free (p);
+          return TWIST_ERR_URL;
+        }
+      memcpy (listed, use, len + 1);
+      while (len > 1 && listed[len - 1] == '/')
+        listed[--len] = 0;
+      if (listed[0] == 0)
+        strcpy (listed, ".");
+      *dir = 1;
+      *out = twist_strdup (listed);
+      free (p);
+      return *out != NULL ? TWIST_OK : TWIST_ERR_NOMEM;
     }
   if (e->url->scheme != NULL && strcmp (e->url->scheme, "scp") == 0
       && strpbrk (use, "*?[") != NULL)
@@ -281,7 +324,17 @@ plan (struct twist_sftp_xfer *g)
   struct twist_easy *e = g->ssh->easy;
   long long resume = e->resume_from;
 
-  g->put = e->postfields != NULL || e->read_cb != NULL;
+  if (g->list)
+    {
+      if (e->range != NULL || resume != 0)
+        {
+          twist_ssh_detail (g->ssh, _("a range or a resume does not apply to "
+                                      "a directory listing"));
+          return TWIST_ERR_INVAL;
+        }
+      g->list_only = e->dirlistonly;
+      return TWIST_OK;
+    }
   if (g->put)
     {
       if (e->range != NULL)
@@ -358,7 +411,7 @@ fail_status (struct twist_sftp_xfer *g, const gf_sftp_response *r)
   switch (r->status)
     {
     case GF_FX_NO_SUCH_FILE:
-      what = _("no such file");
+      what = g->list ? _("no such directory") : _("no such file");
       if (!g->put)
         status = 78;
       break;
@@ -797,6 +850,117 @@ write_response (struct twist_sftp_xfer *g, const gf_sftp_response *r)
   pump_writes (g);
 }
 
+
+/* ---- listing ---- */
+
+/* Copy IN to OUT with the control characters, and the UTF-8 form of the C1
+   ones, made ?.  OUT has room for N bytes.  Returns how many were written.  */
+static size_t
+sanitize (uint8_t *out, const uint8_t *in, size_t n)
+{
+  size_t i = 0, o = 0;
+
+  while (i < n)
+    {
+      uint8_t c = in[i];
+
+      if (c < 0x20 || c == 0x7f)
+        {
+          out[o++] = '?';
+          i++;
+        }
+      else if (c == 0xc2 && i + 1 < n && in[i + 1] >= 0x80 && in[i + 1] <= 0x9f)
+        {
+          out[o++] = '?';
+          i += 2;
+        }
+      else
+        {
+          out[o++] = c;
+          i++;
+        }
+    }
+  return o;
+}
+
+static void
+ask_more_names (struct twist_sftp_xfer *g)
+{
+  if (gf_sftp_client_readdir (g->client, g->handle, g->hlen, TAG_READDIR, NULL)
+      != GF_OK)
+    fail (g, TWIST_ERR_PROTOCOL, _("the SFTP request failed"));
+}
+
+/* One entry, as a line.  Returns 0 if the application refused it.  */
+static int
+write_entry (struct twist_sftp_xfer *g, const gf_sftp_name *name)
+{
+  struct twist_easy *e = g->ssh->easy;
+  gf_slice text = name->filename;
+  uint8_t *line;
+  size_t n;
+
+  if (!g->list_only && name->longname.len > 0)
+    text = name->longname;
+  line = malloc (text.len + 1);
+  if (line == NULL)
+    {
+      fail (g, TWIST_ERR_NOMEM, NULL);
+      return 0;
+    }
+  n = sanitize (line, text.data, text.len);
+  line[n++] = '\n';
+  if (e->write_cb != NULL
+      && twist_write_bytes (e->write_cb, e->write_data, line, n) < n)
+    {
+      free (line);
+      fail (g, TWIST_ERR_ABORTED, NULL);
+      return 0;
+    }
+  e->size_download += n;
+  free (line);
+  return 1;
+}
+
+/* The answer to a READDIR: some entries, or the end.  */
+static void
+list_response (struct twist_sftp_xfer *g, const gf_sftp_response *r)
+{
+  gf_sftp_response names = *r;
+  gf_sftp_name name;
+  uint32_t seen = 0;
+
+  if (r->type == GF_FXP_STATUS && r->status == GF_FX_EOF)
+    {
+      close_file (g);
+      return;
+    }
+  if (r->type == GF_FXP_STATUS)
+    {
+      fail_status (g, r);
+      return;
+    }
+  if (r->type != GF_FXP_NAME)
+    {
+      fail (g, TWIST_ERR_PROTOCOL, _("an unexpected SFTP answer to a read of "
+                                     "a directory"));
+      return;
+    }
+  while (gf_sftp_response_next_name (&names, &name))
+    {
+      seen++;
+      if (!write_entry (g, &name))
+        return;
+    }
+  if (seen == 0)
+    {
+      /* An answer with nothing in it is not progress: take it as the end.  */
+      close_file (g);
+      return;
+    }
+  ask_more_names (g);
+}
+
 /* ---- the file ---- */
 
 static void
@@ -805,6 +969,12 @@ open_file (struct twist_sftp_xfer *g)
   gf_sftp_attrs attrs;
   uint32_t flags = GF_FXF_READ;
 
+  if (g->list)
+    {
+      if (gf_sftp_client_opendir (g->client, g->path, TAG_OPEN, NULL) != GF_OK)
+        fail (g, TWIST_ERR_PROTOCOL, _("the SFTP open failed"));
+      return;
+    }
   memset (&attrs, 0, sizeof attrs);
   if (g->put)
     {
@@ -893,7 +1063,9 @@ sftp_response (void *user, const gf_sftp_response *r)
       memcpy (g->handle, r->handle.data, r->handle.len);
       g->hlen = r->handle.len;
       g->have_handle = 1;
-      if (g->put)
+      if (g->list)
+        ask_more_names (g);
+      else if (g->put)
         begin_writes (g);
       else if (g->check_resume || g->suffix)
         {
@@ -918,6 +1090,11 @@ sftp_response (void *user, const gf_sftp_response *r)
   if (r->tag == TAG_CLOSE)
     {
       twist_ssh_finish (g->ssh, TWIST_OK);
+      return 0;
+    }
+  if (r->tag == TAG_READDIR)
+    {
+      list_response (g, r);
       return 0;
     }
   if (g->put)
@@ -969,9 +1146,10 @@ twist_sftp_authenticated (void *user, gf_slice username)
     }
   g->ssh = s;
   s->sftp = g;
-  rc = plan (g);
+  g->put = s->easy->postfields != NULL || s->easy->read_cb != NULL;
+  rc = file_path (s, g->put, &g->path, &g->list);
   if (rc == TWIST_OK)
-    rc = file_path (s, g->put, &g->path);
+    rc = plan (g);
   if (rc != TWIST_OK)
     {
       twist_ssh_finish (s, rc);

@@ -55,6 +55,13 @@ struct pipe
   size_t len;
 };
 
+/* An entry of a directory: its name, and the server's long form of it.  */
+struct dent
+{
+  const char *name;
+  const char *longname;
+};
+
 struct server
 {
   struct pipe out;
@@ -83,6 +90,11 @@ struct server
   uint64_t first_read;
   uint32_t write_status;	/* Answer writes with this instead of OK.  */
   int hide_size;		/* Say nothing of a file's size.  */
+  /* The directory being listed.  */
+  const struct dent *dents;
+  size_t ndents, dpos;
+  unsigned batch;		/* Entries to a READDIR answer.  */
+  unsigned readdirs;
 };
 
 static uint64_t now_us = 1000000;
@@ -176,6 +188,107 @@ sv_attrs_size (struct server *sv, uint32_t id, uint64_t size)
   return gf_sftp_server_attrs (sv->sftp, id, &a) != GF_OK;
 }
 
+
+/* The directories the server has: a short one whose names are awkward
+   (spaces, a newline, a terminal escape, UTF-8 and the UTF-8 form of a C1
+   control), an empty one, and a big one made by the test.  */
+static const struct dent main_dir[] = {
+  { ".", "drwxr-xr-x    3 u g 4096 Oct 21 14:04 ." },
+  { "..", "drwxr-xr-x    4 u g 4096 Oct 21 14:04 .." },
+  { "plain.txt", "-rw-r--r--    1 u g    6 Oct 21 14:04 plain.txt" },
+  { "with space.txt", "-rw-r--r--    1 u g    1 Oct 21 14:04 with space.txt" },
+  { "esc\033[31mred", "-rw-r--r--    1 u g    1 Oct 21 14:04 esc\033[31mred" },
+  { "new\nline", "-rw-r--r--    1 u g    1 Oct 21 14:04 new\nline" },
+  { "caf\xc3\xa9", "-rw-r--r--    1 u g    1 Oct 21 14:04 caf\xc3\xa9" },
+  { "csi\xc2\x9b" "31m", "-rw-r--r--    1 u g    1 Oct 21 14:04 csi\xc2\x9b" "31m" },
+  { "nolong", "" }
+};
+#define MAIN_DIR_N (sizeof main_dir / sizeof main_dir[0])
+
+struct big_ent
+{
+  char name[32];
+  char lng[80];
+};
+
+static struct dent *big_dir;
+static struct big_ent *big_ents;
+#define BIG_DIR_N 2500
+
+static void
+make_big_dir (void)
+{
+  size_t i;
+
+  big_dir = calloc (BIG_DIR_N, sizeof *big_dir);
+  big_ents = calloc (BIG_DIR_N, sizeof *big_ents);
+  for (i = 0; i < BIG_DIR_N; i++)
+    {
+      snprintf (big_ents[i].name, sizeof big_ents[i].name, "file%04u",
+                (unsigned) i);
+      snprintf (big_ents[i].lng, sizeof big_ents[i].lng,
+                "-rw-r--r--    1 u g %4u Jan  1 00:00 file%04u",
+                (unsigned) i, (unsigned) i);
+      big_dir[i].name = big_ents[i].name;
+      big_dir[i].longname = big_ents[i].lng;
+    }
+}
+
+static int
+sv_opendir (struct server *sv, const gf_sftp_request *req, const char *path)
+{
+  static const uint8_t dh[] = { 'D', '1' };
+
+  snprintf (sv->opened, sizeof sv->opened, "%s", path);
+  sv->dents = NULL;
+  sv->ndents = sv->dpos = 0;
+  if (strcmp (path, "/dir") == 0 || strcmp (path, "sub") == 0
+      || strcmp (path, ".") == 0 || strcmp (path, "/") == 0)
+    {
+      sv->dents = main_dir;
+      sv->ndents = MAIN_DIR_N;
+    }
+  else if (strcmp (path, "/big") == 0)
+    {
+      sv->dents = big_dir;
+      sv->ndents = BIG_DIR_N;
+    }
+  else if (strcmp (path, "/empty") != 0)
+    {
+      if (strcmp (path, "/denied") == 0)
+        return gf_sftp_server_status (sv->sftp, req->id,
+                                      GF_FX_PERMISSION_DENIED,
+                                      "not for you") != GF_OK;
+      return gf_sftp_server_status (sv->sftp, req->id, GF_FX_NO_SUCH_FILE,
+                                    "No such file") != GF_OK;
+    }
+  return gf_sftp_server_handle (sv->sftp, req->id, dh, sizeof dh) != GF_OK;
+}
+
+static int
+sv_readdir (struct server *sv, const gf_sftp_request *req)
+{
+  gf_sftp_name names[256];
+  size_t n = 0;
+  unsigned batch = sv->batch != 0 && sv->batch <= 256 ? sv->batch : 3;
+
+  sv->readdirs++;
+  if (sv->dpos >= sv->ndents)
+    return gf_sftp_server_status (sv->sftp, req->id, GF_FX_EOF, "") != GF_OK;
+  memset (names, 0, sizeof names);
+  while (n < batch && sv->dpos < sv->ndents)
+    {
+      const struct dent *d = &sv->dents[sv->dpos++];
+
+      names[n].filename.data = (const uint8_t *) d->name;
+      names[n].filename.len = strlen (d->name);
+      names[n].longname.data = (const uint8_t *) d->longname;
+      names[n].longname.len = strlen (d->longname);
+      n++;
+    }
+  return gf_sftp_server_names (sv->sftp, req->id, n, names) != GF_OK;
+}
+
 static int
 sv_sftp_request (void *user, const gf_sftp_request *req)
 {
@@ -260,6 +373,10 @@ sv_sftp_request (void *user, const gf_sftp_request *req)
         return gf_sftp_server_status (sv->sftp, req->id, GF_FX_OK, "")
                != GF_OK;
       }
+    case GF_FXP_OPENDIR:
+      return sv_opendir (sv, req, path);
+    case GF_FXP_READDIR:
+      return sv_readdir (sv, req);
     case GF_FXP_FSTAT:
       return sv_attrs_size (sv, req->id, is_u ? sv->up_len : sv->filelen);
     case GF_FXP_STAT:
@@ -410,6 +527,7 @@ pump (struct world *w, struct twist_easy *easy, size_t chunk)
 /* What the transfer wrote.  */
 static uint8_t got[2 * FILE_LEN];
 static size_t got_len;
+static size_t collect_limit;	/* Refuse data past this much; 0: no limit.  */
 
 static size_t
 collect (char *ptr, size_t size, size_t nmemb, void *user)
@@ -417,7 +535,8 @@ collect (char *ptr, size_t size, size_t nmemb, void *user)
   size_t n = size * nmemb;
 
   (void) user;
-  if (got_len + n > sizeof got)
+  if (got_len + n > sizeof got
+      || (collect_limit != 0 && got_len + n > collect_limit))
     return 0;
   memcpy (got + got_len, ptr, n);
   got_len += n;
@@ -469,12 +588,13 @@ struct setup
   int streamed;			/* Give it through a read callback.  */
   long long resume;
   const char *range;
+  int list_only;
 };
 
 /* Every field, so that none is forgotten: URL, whether to check the host key,
    and the password; the rest is for the test to set.  */
 #define SETUP(url, verify, pw) \
-  { (url), (verify), (pw), NULL, NULL, NULL, 0, NULL, 0, 0, 0, NULL }
+  { (url), (verify), (pw), NULL, NULL, NULL, 0, NULL, 0, 0, 0, NULL, 0 }
 
 /* The read callback for a streamed upload: it hands out the data in pieces
    of an awkward size.  */
@@ -530,6 +650,8 @@ start (struct world *w, struct server *sv, const struct setup *su)
     twist_easy_setopt (easy, TWISTOPT_RESUME_FROM, su->resume);
   if (su->range != NULL)
     twist_easy_setopt (easy, TWISTOPT_RANGE, su->range);
+  if (su->list_only)
+    twist_easy_setopt (easy, TWISTOPT_DIRLISTONLY, 1L);
   w->sv = sv;
   w->c2s.len = 0;
   w->ssh = twist_ssh_new (easy, 0);
@@ -653,19 +775,12 @@ test_paths (void)
   twist_easy_cleanup (easy);
   server_free (&sv);
 
-  /* A wildcard in an scp URL, and a directory, are refused up front.  */
+  /* A wildcard in an scp URL is refused up front.  */
   check (server_new (&sv) == 0, "server 3");
   su.url = "scp://alice@127.0.0.1/dir/*.txt";
   easy = run (&w, &sv, &su);
   check (easy->done && easy->result == TWIST_ERR_URL
          && detail_has (easy, "wildcards"), "scp wildcard");
-  twist_easy_cleanup (easy);
-  server_free (&sv);
-  check (server_new (&sv) == 0, "server 4");
-  su.url = "sftp://alice@127.0.0.1/dir/";
-  easy = run (&w, &sv, &su);
-  check (easy->done && easy->result == TWIST_ERR_UNSUPPORTED
-         && detail_has (easy, "listing"), "directory");
   twist_easy_cleanup (easy);
   server_free (&sv);
 }
@@ -1246,6 +1361,178 @@ test_ranges (void)
   range_error ("", 0, "an empty range");
 }
 
+/* ---- directory listings ---- */
+
+static int
+text_is (const char *expect)
+{
+  return got_len == strlen (expect) && memcmp (got, expect, got_len) == 0;
+}
+
+/* The listing of main_dir.  What a server sends is not to be trusted with
+   the terminal or the line structure of the output: a newline in a name
+   would make a line that is not an entry, and a control character can do
+   anything to a terminal.  Control characters, and the UTF-8 form of the C1
+   ones, come out as ?.  */
+#define MAIN_DIR_LONG \
+  "drwxr-xr-x    3 u g 4096 Oct 21 14:04 .\n" \
+  "drwxr-xr-x    4 u g 4096 Oct 21 14:04 ..\n" \
+  "-rw-r--r--    1 u g    6 Oct 21 14:04 plain.txt\n" \
+  "-rw-r--r--    1 u g    1 Oct 21 14:04 with space.txt\n" \
+  "-rw-r--r--    1 u g    1 Oct 21 14:04 esc?[31mred\n" \
+  "-rw-r--r--    1 u g    1 Oct 21 14:04 new?line\n" \
+  "-rw-r--r--    1 u g    1 Oct 21 14:04 caf\xc3\xa9\n" \
+  "-rw-r--r--    1 u g    1 Oct 21 14:04 csi?31m\n" \
+  "nolong\n"
+#define MAIN_DIR_NAMES \
+  ".\n..\nplain.txt\nwith space.txt\nesc?[31mred\nnew?line\ncaf\xc3\xa9\n" \
+  "csi?31m\nnolong\n"
+
+static void
+list_case (const char *url, int list_only, const char *expect,
+           const char *path_seen, const char *what)
+{
+  struct server sv;
+  struct world w;
+  struct twist_easy *easy;
+  struct setup su = SETUP (url, 0, "secret");
+
+  check (server_new (&sv) == 0, "server");
+  su.list_only = list_only;
+  easy = run (&w, &sv, &su);
+  check (easy->done && easy->result == TWIST_OK && text_is (expect), what);
+  check (strcmp (sv.opened, path_seen) == 0, "the directory asked for");
+  check (sv.closed_handle, "the directory handle was closed");
+  twist_easy_cleanup (easy);
+  server_free (&sv);
+}
+
+/* The state of a test is large (a server and a world hold megabytes of pipe),
+   so the cases are called one after another, not from inside each other.  */
+static void
+test_listing_more (void)
+{
+  struct server sv;
+  struct world w;
+  struct twist_easy *easy;
+  struct setup su = SETUP ("sftp://alice@127.0.0.1/big/", 0, "secret");
+  char line[96], *want;
+  size_t i, off = 0;
+
+  /* Nothing in it.  */
+  check (server_new (&sv) == 0, "server");
+  su.url = "sftp://alice@127.0.0.1/empty/";
+  easy = run (&w, &sv, &su);
+  check (easy->done && easy->result == TWIST_OK && got_len == 0,
+         "an empty directory");
+  twist_easy_cleanup (easy);
+  server_free (&sv);
+
+  /* More entries than one answer holds, in the order the server gave.  */
+  check (server_new (&sv) == 0, "server");
+  sv.batch = 64;
+  su.url = "sftp://alice@127.0.0.1/big/";
+  easy = run (&w, &sv, &su);
+  want = malloc (BIG_DIR_N * 96);
+  for (i = 0; i < BIG_DIR_N; i++)
+    off += (size_t) snprintf (want + off, 96, "%s\n", big_dir[i].longname);
+  check (easy->done && easy->result == TWIST_OK && got_len == off
+         && memcmp (got, want, off) == 0, "a big directory, in order");
+  check (sv.readdirs >= BIG_DIR_N / 64, "read in many answers");
+  snprintf (line, sizeof line, "%s\n", big_dir[BIG_DIR_N - 1].longname);
+  check (got_len >= strlen (line)
+         && memcmp (got + got_len - strlen (line), line, strlen (line)) == 0,
+         "the last entry");
+  free (want);
+  twist_easy_cleanup (easy);
+  server_free (&sv);
+
+  /* What the server says about a directory that cannot be listed.  */
+  check (server_new (&sv) == 0, "server");
+  su.url = "sftp://alice@127.0.0.1/nope/";
+  easy = run (&w, &sv, &su);
+  check (easy->done && easy->result == TWIST_ERR_FILE
+         && easy->proto_status == 78 && detail_has (easy, "directory")
+         && detail_has (easy, "/nope"), "no such directory");
+  twist_easy_cleanup (easy);
+  server_free (&sv);
+  check (server_new (&sv) == 0, "server");
+  su.url = "sftp://alice@127.0.0.1/denied/";
+  easy = run (&w, &sv, &su);
+  check (easy->done && easy->result == TWIST_ERR_FILE
+         && easy->proto_status == 9 && detail_has (easy, "not for you"),
+         "a directory that may not be listed");
+  twist_easy_cleanup (easy);
+  server_free (&sv);
+  check (server_new (&sv) == 0, "server");
+  su.url = "sftp://alice@127.0.0.1/data.bin/";
+  easy = run (&w, &sv, &su);
+  check (easy->done && easy->result == TWIST_ERR_FILE
+         && easy->proto_status == 78, "a file with a slash after it");
+  twist_easy_cleanup (easy);
+  server_free (&sv);
+
+  /* The application refuses the text part way.  */
+  check (server_new (&sv) == 0, "server");
+  su.url = "sftp://alice@127.0.0.1/dir/";
+  collect_limit = 60;
+  easy = run (&w, &sv, &su);
+  collect_limit = 0;
+  check (easy->done && easy->result == TWIST_ERR_ABORTED,
+         "a listing the application refuses");
+  twist_easy_cleanup (easy);
+  server_free (&sv);
+
+  /* A range or a resume means nothing for a directory.  */
+  check (server_new (&sv) == 0, "server");
+  su.range = "0-9";
+  easy = run (&w, &sv, &su);
+  check (easy->done && easy->result == TWIST_ERR_INVAL
+         && detail_has (easy, "does not apply"), "a range and a directory");
+  twist_easy_cleanup (easy);
+  server_free (&sv);
+  check (server_new (&sv) == 0, "server");
+  su.range = NULL;
+  su.resume = 10;
+  easy = run (&w, &sv, &su);
+  check (easy->done && easy->result == TWIST_ERR_INVAL
+         && detail_has (easy, "does not apply"), "a resume and a directory");
+  twist_easy_cleanup (easy);
+  server_free (&sv);
+
+  /* scp does not list: it names one file.  */
+  check (server_new (&sv) == 0, "server");
+  su.resume = 0;
+  su.url = "scp://alice@127.0.0.1/dir/";
+  easy = run (&w, &sv, &su);
+  check (easy->done && easy->result == TWIST_ERR_FILE
+         && easy->proto_status == 78 && detail_has (easy, "sftp://")
+         && got_len == 0, "scp does not list a directory");
+  twist_easy_cleanup (easy);
+  server_free (&sv);
+}
+
+static void
+test_listing (void)
+{
+  /* The server's long form of each entry, as it sent them, and names only.  */
+  list_case ("sftp://alice@127.0.0.1/dir/", 0, MAIN_DIR_LONG, "/dir",
+             "a listing, long form");
+  list_case ("sftp://alice@127.0.0.1/dir/", 1, MAIN_DIR_NAMES, "/dir",
+             "a listing, names only");
+  /* Every way of naming a directory.  */
+  list_case ("sftp://alice@127.0.0.1/", 1, MAIN_DIR_NAMES, "/", "the root");
+  list_case ("sftp://alice@127.0.0.1", 1, MAIN_DIR_NAMES, "/",
+             "no path at all");
+  list_case ("sftp://alice@127.0.0.1/~/", 1, MAIN_DIR_NAMES, ".",
+             "the home directory");
+  list_case ("sftp://alice@127.0.0.1/~/sub/", 1, MAIN_DIR_NAMES, "sub",
+             "a directory under home");
+  list_case ("sftp://alice@127.0.0.1/dir///", 1, MAIN_DIR_NAMES, "/dir",
+             "slashes at the end");
+  test_listing_more ();
+}
+
 /* A peer that is not SSH-2.  */
 static void
 test_bad_peer (void)
@@ -1480,6 +1767,7 @@ main (void)
     content[i] = (uint8_t) (i * 7 + (i >> 8));
   for (i = 0; i < sizeof big; i++)
     big[i] = (uint8_t) (i * 13 + (i >> 11) + 5);
+  make_big_dir ();
   test_download (65536);
   test_download (64);
   test_download (1);
@@ -1494,6 +1782,7 @@ main (void)
   test_upload_errors ();
   test_download_resume ();
   test_ranges ();
+  test_listing ();
   test_no_subsystem ();
   test_auth ();
   test_host_key ();

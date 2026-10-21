@@ -216,6 +216,8 @@ usage (void)
   fputs (_("  -r, --range RANGE       byte range\n"), stdout);
   fputs (_("  -C, --continue-at N     resume at byte N, or - to find it (sftp and scp)\n"),
          stdout);
+  fputs (_("  -l, --list-only         list names only, for a directory (sftp)\n"),
+         stdout);
   fputs (_("  -b, --cookie DATA       Cookie header data\n"), stdout);
   fputs (_("      --oauth2-bearer T   Bearer token\n"), stdout);
   fputs (_("  -m, --max-time SECONDS  whole transfer limit\n"), stdout);
@@ -1293,6 +1295,7 @@ main (int argc, char **argv)
     { "referer", required_argument, NULL, 'e' },
     { "range", required_argument, NULL, 'r' },
     { "continue-at", required_argument, NULL, 'C' },
+    { "list-only", no_argument, NULL, 'l' },
     { "cookie", required_argument, NULL, 'b' },
     { "oauth2-bearer", required_argument, NULL, 29 },
     { "max-time", required_argument, NULL, 'm' },
@@ -1372,7 +1375,7 @@ main (int argc, char **argv)
           continue;
         }
       c = getopt_long (argc, argv,
-                       "+:o:X:H:d:Lkx:A:u:Iw:fE:hm:e:r:b:sSOT:GgiD:qC:",
+                       "+:o:X:H:d:Lkx:A:u:Iw:fE:hm:e:r:b:sSOT:GgiD:qC:l",
                        longs, NULL);
       if (c == -1)
         break;
@@ -1522,6 +1525,9 @@ main (int argc, char **argv)
           break;
         case 'r':
           twist_easy_setopt (op->easy, TWISTOPT_RANGE, optarg);
+          break;
+        case 'l':
+          twist_easy_setopt (op->easy, TWISTOPT_DIRLISTONLY, 1L);
           break;
         case 'C':
           if (strcmp (optarg, "-") == 0)

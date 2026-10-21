@@ -103,6 +103,7 @@ struct twist_easy
   char *ssh_hostpubsha256;
   char *keypasswd;
   long long resume_from;
+  int dirlistonly;
   long timeout_ms;
   long connect_timeout_ms;
   char *proxy;

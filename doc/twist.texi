@@ -192,6 +192,10 @@ Referer header.
 Byte range.  For @code{sftp} and @code{scp} it is @samp{@var{first}-@var{last}},
 @samp{@var{first}-}, or @samp{-@var{count}} for the last @var{count} bytes
 (@pxref{SFTP and SCP}).
+@item -l
+@itemx --list-only
+List the names only, one to a line, not the server's long form, when the URL
+names a directory.  For @code{sftp} (@pxref{SFTP and SCP}).
 @item -C @var{offset}
 @itemx --continue-at @var{offset}
 Resume at byte @var{offset}, for @code{sftp} and @code{scp}.  Use @samp{-} to
@@ -414,7 +418,25 @@ implement the old SCP protocol, as OpenSSH's own @command{scp} has not since
 version 9.0.  A server with no SFTP subsystem fails with an error that says
 so.  The path is absolute, except that @samp{/~/} begins in the directory
 the server puts the user in.  An @code{scp} URL does not expand wildcards.
-Directory listings are not implemented yet.
+
+@subheading Directory listings
+
+An @code{sftp} URL that ends in @samp{/}, or has no path, lists that
+directory: @samp{sftp://host/} the root, @samp{sftp://host/~/} the user's home
+directory, @samp{sftp://host/dir/} a directory.  Each entry is a line, in
+the long form the server gives (like @command{ls -l}), in the order the server
+sends them, including @file{.}, @file{..} and files whose names begin with a
+dot.  @option{-l} gives the names only.
+
+What a server sends is not trusted with the output: a newline in a file name
+would make a line that is not an entry, and control characters can do as they
+please to a terminal.  So control characters in a listing, and the UTF-8 form
+of the C1 ones, are replaced with @samp{?}.  curl writes them as they come.
+
+An @code{scp} URL does not list: it names one file, and a URL that ends in
+@samp{/} exits 78.  A directory that is not there, or a file followed by a
+slash, exits 78 too, and one that may not be listed exits 9.  A range or
+@option{-C} means nothing for a listing and is refused.
 
 @subheading Upload, resume and ranges
 

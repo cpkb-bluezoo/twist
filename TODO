@@ -9,8 +9,9 @@ Twist TODO List
       -k skips, no accept-new), a pinned fingerprint, downloading and
       uploading one file, resuming either way (-C), and ranges (-r).
       Still to do:
-        - a directory listing for a URL ending in /
         - -Q and --quote commands, --ftp-create-dirs for uploads
+        - -l for ftp URLs, which would send NLST; it only affects sftp
+          now
         - -C and -T completion of the URL for the other schemes (curl
           does it for all of them; twist does it for sftp and scp only)
         - an ssh-agent client (on the loop)
