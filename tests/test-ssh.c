@@ -971,6 +971,36 @@ test_auth (void)
   rmdir (ssh_dir);
 }
 
+/* The user name and password in the URL are percent-encoded, and the server
+   is given what they say, not how they are written.  The password here holds
+   the three characters that cannot be written as they are.  */
+static void
+test_url_credentials (void)
+{
+  struct server sv;
+  struct world w;
+  struct twist_easy *easy;
+  struct setup su = SETUP ("sftp://%61lice:p%40ss%3Aw%2Frd%25@127.0.0.1/data.bin",
+                           0, NULL);
+
+  check (server_new (&sv) == 0, "server");
+  sv.password = "p@ss:w/rd%";
+  easy = run (&w, &sv, &su);
+  check (easy->done && easy->result == TWIST_OK && got_len == sizeof content,
+         "login with an encoded user name and password");
+  twist_easy_cleanup (easy);
+  server_free (&sv);
+
+  /* Written the other way, it is the encoded text that is wrong.  */
+  check (server_new (&sv) == 0, "server");
+  sv.password = "p%40ss%3Aw%2Frd%25";
+  easy = run (&w, &sv, &su);
+  check (easy->done && easy->result == TWIST_ERR_AUTH,
+         "the encoded text is not the password");
+  twist_easy_cleanup (easy);
+  server_free (&sv);
+}
+
 /* The host key: known_hosts, a pin, and -k.  */
 static void
 test_host_key (void)
@@ -2593,6 +2623,7 @@ main (void)
   test_agent_abandoned ();
   test_no_subsystem ();
   test_auth ();
+  test_url_credentials ();
   test_host_key ();
   test_bad_peer ();
   test_timeout ();

@@ -46,6 +46,71 @@ url_clear (struct twist_url *u)
   free (u);
 }
 
+/* Percent escapes of a user name or password, undone in place.  Anything
+   that is not an escape (a percent without two hex digits after it) is left
+   as it is.  -1 if the result would hold a NUL, which would end the string
+   early.  */
+static int
+userinfo_unescape (char *s)
+{
+  char *r = s, *w = s;
+
+  if (s == NULL)
+    return 0;
+  while (*r != 0)
+    {
+      if (r[0] == '%' && isxdigit ((unsigned char) r[1])
+          && isxdigit ((unsigned char) r[2]))
+        {
+          int hi = isdigit ((unsigned char) r[1])
+                   ? r[1] - '0' : tolower ((unsigned char) r[1]) - 'a' + 10;
+          int lo = isdigit ((unsigned char) r[2])
+                   ? r[2] - '0' : tolower ((unsigned char) r[2]) - 'a' + 10;
+          int c = hi * 16 + lo;
+
+          if (c == 0)
+            return -1;
+          *w++ = (char) c;
+          r += 3;
+        }
+      else
+        *w++ = *r++;
+    }
+  *w = 0;
+  return 0;
+}
+
+/* Write S as the user name or password of a URL: everything but the
+   characters that need no escape is a percent escape.  Returns the length,
+   or -1 if CAP is too small.  */
+static int
+userinfo_escape (const char *s, char *out, size_t cap)
+{
+  size_t o = 0;
+
+  for (; *s != 0; s++)
+    {
+      unsigned char c = (unsigned char) *s;
+
+      if (isalnum (c) || c == '-' || c == '.' || c == '_' || c == '~')
+        {
+          if (o + 1 >= cap)
+            return -1;
+          out[o++] = (char) c;
+        }
+      else
+        {
+          if (o + 3 >= cap)
+            return -1;
+          o += (size_t) sprintf (out + o, "%%%02X", c);
+        }
+    }
+  if (o >= cap)
+    return -1;
+  out[o] = 0;
+  return (int) o;
+}
+
 int
 twist_url_parse_int (const char *input, struct twist_url **out)
 {
@@ -239,6 +304,15 @@ twist_url_parse_int (const char *input, struct twist_url **out)
     }
   if (u->path == NULL)
     u->path = twist_strdup ("");
+  /* The name and the password are encoded in the URL and used as they are.
+     Decoded here, once, before the check below, which then sees what the
+     handlers will: an encoded CR or LF is as much a way into a command as a
+     raw one.  */
+  if (userinfo_unescape (u->user) != 0 || userinfo_unescape (u->password) != 0)
+    {
+      url_clear (u);
+      return TWIST_ERR_URL;
+    }
   if (twist_has_ctl (u->user) || twist_has_ctl (u->password)
       || twist_has_ctl (u->host) || twist_has_ctl (u->path)
       || twist_has_ctl (u->query))
@@ -314,15 +388,20 @@ char *
 twist_url_format (const struct twist_url *url)
 {
   char buf[2048];
+  char user[768] = "", password[768] = "";
   int n;
 
   if (url == NULL || url->scheme == NULL)
     return NULL;
+  if ((url->user != NULL && userinfo_escape (url->user, user, sizeof user) < 0)
+      || (url->password != NULL
+          && userinfo_escape (url->password, password, sizeof password) < 0))
+    return NULL;
   n = snprintf (buf, sizeof buf, "%s://%s%s%s%s%s:%d%s%s%s",
                 url->scheme,
-                url->user != NULL ? url->user : "",
+                user,
                 url->password != NULL ? ":" : "",
-                url->password != NULL ? url->password : "",
+                password,
                 url->user != NULL ? "@" : "",
                 url->host != NULL ? url->host : "",
                 url->port,

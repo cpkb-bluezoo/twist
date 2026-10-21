@@ -462,6 +462,13 @@ A server that does not say how big a file is cannot do the last, nor
 
 @subheading Logging in
 
+A user name or password written in the URL is percent-encoded, as it must be
+if it holds an @samp{@@}, a @samp{:} or a @samp{/}: @samp{p@@ss} is
+@samp{p%40ss}.  twist uses what the encoding says.  This holds for every
+scheme.  A name or password that decodes to a carriage return, a line feed or
+a NUL is refused as a malformed URL, since it would otherwise reach a command
+the protocol is built from.
+
 Keys are tried in this order.  A key named with @option{--key} is used alone,
 and nothing else is asked.  Otherwise the keys in an @command{ssh-agent}, in
 the agent's order, then @file{~/.ssh/id_ed25519}, @file{id_ecdsa} and

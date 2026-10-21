@@ -36,6 +36,63 @@
 #include <time.h>
 #include <unistd.h>
 
+/* The user name and password in a URL are percent-encoded, because they may
+   hold the characters that end them (@ : /).  What the handlers use is the
+   name and the password themselves, and what is written back is encoded
+   again.  An encoded CR, LF or NUL is no better than a raw one: the name
+   goes into FTP and SMTP commands.  */
+static void
+test_url_userinfo (void)
+{
+  struct twist_url *u = NULL, *again = NULL;
+  char *text;
+
+  check (twist_url_parse_int ("sftp://us%40er:p%3Ass%2Fw%25@host/x", &u)
+         == TWIST_OK, "encoded userinfo parses");
+  check (u != NULL && strcmp (u->user, "us@er") == 0
+         && strcmp (u->password, "p:ss/w%") == 0, "userinfo is decoded");
+  text = twist_url_format (u);
+  check (text != NULL
+         && strcmp (text, "sftp://us%40er:p%3Ass%2Fw%25@host:22/x") == 0,
+         "and encoded again when written");
+  if (text != NULL)
+    {
+      check (twist_url_parse_int (text, &again) == TWIST_OK
+             && strcmp (again->user, u->user) == 0
+             && strcmp (again->password, u->password) == 0,
+             "it round-trips");
+      twist_url_free_int (again);
+    }
+  free (text);
+  twist_url_free_int (u);
+
+  /* Not an escape: left as it is.  A plus is a plus.  UTF-8 is bytes.  */
+  check (twist_url_parse_int ("ftp://a%zzb+c%4:d%C3%A9@host/", &u) == TWIST_OK
+         && strcmp (u->user, "a%zzb+c%4") == 0
+         && strcmp (u->password, "d\xc3\xa9") == 0, "what is not an escape");
+  twist_url_free_int (u);
+
+  /* A password that is empty is not one that is missing.  */
+  check (twist_url_parse_int ("sftp://user:@host/", &u) == TWIST_OK
+         && u->password != NULL && u->password[0] == 0, "an empty password");
+  twist_url_free_int (u);
+  check (twist_url_parse_int ("sftp://user@host/", &u) == TWIST_OK
+         && u->password == NULL, "no password");
+  twist_url_free_int (u);
+
+  /* What would end a command, or the string.  */
+  check (twist_url_parse_int ("ftp://a%0d%0aDELE%20x:pw@host/", &u)
+         == TWIST_ERR_URL, "an encoded CRLF in the user");
+  check (twist_url_parse_int ("ftp://a:b%0ac@host/", &u) == TWIST_ERR_URL,
+         "an encoded LF in the password");
+  check (twist_url_parse_int ("sftp://a%00b:pw@host/", &u) == TWIST_ERR_URL,
+         "an encoded NUL in the user");
+  check (twist_url_parse_int ("sftp://a:b%00c@host/", &u) == TWIST_ERR_URL,
+         "an encoded NUL in the password");
+  check (twist_url_parse_int ("ftp://a\r\nb:pw@host/", &u) == TWIST_ERR_URL,
+         "a raw CRLF, as before");
+}
+
 static void
 test_url (void)
 {
@@ -644,6 +701,7 @@ int
 main (void)
 {
   test_url ();
+  test_url_userinfo ();
   test_scheme ();
   test_proxy ();
   test_conn_pool ();
