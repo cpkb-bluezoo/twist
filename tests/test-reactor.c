@@ -22,7 +22,9 @@
 
 #include "check.h"
 #include "twist-int.h"
+#include "reactor/atomic.h"
 #include "reactor/cmdq.h"
+#include <pthread.h>
 #include <unistd.h>
 
 #include <stdio.h>
@@ -122,6 +124,138 @@ cmd_b (void *user)
 {
   (void) user;
   cmd_order[cmd_n++] = 2;
+}
+
+/* The queue has several producers: the workers of the storage pool, the
+   resolver and the loops post to the loop that consumes.  Each message is
+   a token; it must run once, and the messages of one producer in the order
+   they were posted.  A queue that recycles its nodes unsafely loses
+   messages, runs some twice and mixes up the order, so this is run enough
+   times to catch it nearly every time.  */
+struct cq_run;
+
+struct cq_token
+{
+  struct cq_run *run;
+  unsigned producer;
+  unsigned seq;			/* From 1.  */
+};
+
+struct cq_run
+{
+  struct twist_cmdq *q;
+  unsigned nprod, per;
+  struct cq_token *tokens;
+  unsigned char *ran;
+  unsigned *last;
+  unsigned long done, twice, disordered;
+  twist_atomic_int go;
+  twist_atomic_int finished;
+};
+
+static void
+cq_run_token (void *user)
+{
+  struct cq_token *t = user;
+  struct cq_run *r = t->run;
+  size_t idx = (size_t) t->producer * r->per + (t->seq - 1);
+
+  if (r->ran[idx]++ != 0)
+    r->twice++;
+  if (t->seq != r->last[t->producer] + 1)
+    r->disordered++;
+  r->last[t->producer] = t->seq;
+  r->done++;
+}
+
+static void *
+cq_producer (void *arg)
+{
+  struct cq_token *first = arg;
+  struct cq_run *r = first->run;
+  unsigned i;
+
+  while (!twist_atomic_load (&r->go))
+    ;
+  for (i = 0; i < r->per; i++)
+    twist_cmdq_push (r->q, cq_run_token, &first[i]);
+  __atomic_add_fetch (&r->finished, 1, __ATOMIC_RELEASE);
+  return NULL;
+}
+
+/* One round: NPROD producers post PER messages each while this thread
+   drains.  Returns 1 if every message ran exactly once and in order.  */
+static int
+cq_round (unsigned nprod, unsigned per)
+{
+  struct cq_run r;
+  pthread_t th[8];
+  unsigned i, j;
+  unsigned long total = (unsigned long) nprod * per, lost = 0, k, before;
+  int ok;
+
+  memset (&r, 0, sizeof r);
+  r.nprod = nprod;
+  r.per = per;
+  r.tokens = calloc (total, sizeof *r.tokens);
+  r.ran = calloc (total, 1);
+  r.last = calloc (nprod, sizeof *r.last);
+  r.q = twist_cmdq_new ();
+  if (r.tokens == NULL || r.ran == NULL || r.last == NULL || r.q == NULL)
+    {
+      check (0, "cmdq stress allocation");
+      return 0;
+    }
+  for (i = 0; i < nprod; i++)
+    for (j = 0; j < per; j++)
+      {
+        struct cq_token *t = &r.tokens[(size_t) i * per + j];
+
+        t->run = &r;
+        t->producer = i;
+        t->seq = j + 1;
+      }
+  for (i = 0; i < nprod; i++)
+    pthread_create (&th[i], NULL, cq_producer, &r.tokens[(size_t) i * per]);
+  twist_atomic_store (&r.go, 1);
+  /* Drain while they post.  */
+  while (r.done < total && twist_atomic_load (&r.finished) < (int) nprod)
+    twist_cmdq_drain (r.q);
+  for (i = 0; i < nprod; i++)
+    pthread_join (th[i], NULL);
+  /* Everything posted is in the queue now: take what is left.  */
+  do
+    {
+      before = r.done;
+      twist_cmdq_drain (r.q);
+    }
+  while (r.done != before && r.done < total);
+  for (k = 0; k < total; k++)
+    if (!r.ran[k])
+      lost++;
+  ok = lost == 0 && r.twice == 0 && r.disordered == 0 && r.done == total;
+  twist_cmdq_free (r.q);
+  free (r.tokens);
+  free (r.ran);
+  free (r.last);
+  return ok;
+}
+
+static void
+test_cmdq_producers (void)
+{
+  int bad = 0, i;
+
+  /* A hang is a failure too, not a stuck test run.  */
+  alarm (120);
+  for (i = 0; i < 6; i++)
+    if (!cq_round (2, 100000))
+      bad++;
+  for (i = 0; i < 2; i++)
+    if (!cq_round (4, 50000))
+      bad++;
+  alarm (0);
+  check (bad == 0, "the command queue loses, repeats or reorders nothing");
 }
 
 static void
@@ -315,6 +449,7 @@ main (void)
 {
   test_timer ();
   test_cmdq ();
+  test_cmdq_producers ();
   test_connection ();
   test_inbound_ceiling ();
   return tests_finish ();
