@@ -1524,10 +1524,13 @@ twist_dns_resolve_service (struct twist_loop *loop, const char *host,
                   NULL, NULL, 0, NULL, NULL, cb, user);
 }
 
+/* A name is looked up within the time to connect, and no longer than the
+   whole transfer may take.  */
 static long
 easy_timeout (const struct twist_easy *easy)
 {
-  if (easy->connect_timeout_ms > 0)
+  if (easy->connect_timeout_ms > 0
+      && (easy->timeout_ms <= 0 || easy->connect_timeout_ms < easy->timeout_ms))
     return easy->connect_timeout_ms;
   return easy->timeout_ms;
 }

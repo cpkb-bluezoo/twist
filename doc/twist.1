@@ -267,7 +267,9 @@ Limit for the whole transfer.  Up to three decimal places are
 accepted.
 .TP
 .BI \-\-connect\-timeout " seconds"
-Limit for the connect, in seconds.
+Limit for making the connection, in seconds; five minutes if it is not given.
+For sftp and scp it covers the lookup, the TCP connect, a proxy and the SSH
+handshake up to the login.
 .TP
 .B \-s, \-\-silent
 Hide the transfer diagnostic.  The exit status is unchanged.

@@ -25,6 +25,7 @@
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -40,6 +41,44 @@ on_timeout (void *user)
   link->timer = NULL;
   if (link->fail != NULL)
     link->fail (link->user, TWIST_ERR_TIMEOUT);
+}
+
+static void
+on_phase_timeout (void *user)
+{
+  struct twist_mail_link *link = user;
+  char msg[128];
+
+  link->phase_timer = NULL;
+  if (twist_easy_error (link->easy) == NULL)
+    {
+      snprintf (msg, sizeof msg, _("timed out after %ld ms making the "
+                                   "connection"), link->easy->connect_timeout_ms);
+      twist_easy_set_error (link->easy, twist_strdup (msg));
+    }
+  if (link->fail != NULL)
+    link->fail (link->user, TWIST_ERR_TIMEOUT);
+}
+
+void
+twist_mail_link_phase_begin (struct twist_mail_link *link)
+{
+  if (link->phase_timer == NULL && link->easy->connect_timeout_ms > 0
+      && link->easy->loop != NULL)
+    twist_loop_schedule (link->easy->loop,
+                         twist_loop_now (link->easy->loop)
+                         + (uint64_t) link->easy->connect_timeout_ms,
+                         on_phase_timeout, link, &link->phase_timer);
+}
+
+void
+twist_mail_link_phase_end (struct twist_mail_link *link)
+{
+  if (link->phase_timer != NULL)
+    {
+      twist_timer_cancel (link->phase_timer);
+      link->phase_timer = NULL;
+    }
 }
 
 static void
@@ -194,6 +233,7 @@ twist_mail_link_detach (struct twist_mail_link *link)
       twist_timer_cancel (link->timer);
       link->timer = NULL;
     }
+  twist_mail_link_phase_end (link);
   link->conn = NULL;
   return c;
 }
@@ -216,6 +256,7 @@ twist_mail_link_close (struct twist_mail_link *link)
     return;
   if (link->timer != NULL)
     twist_timer_cancel (link->timer);
+  twist_mail_link_phase_end (link);
   twist_connection_free (link->conn);
   twist_proxy_free (link->proxy);
   free (link->dial_host);

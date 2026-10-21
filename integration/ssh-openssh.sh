@@ -878,6 +878,36 @@ if command -v python3 >/dev/null 2>&1; then
   t -k --key "$work/userkey" -x "http://127.0.0.1:1" -o /dev/null "$s1" 2>/dev/null
   rc=$?
   check "$([ $rc -eq 7 ] && echo ok)" "no proxy there is 7 (exit $rc)"
+
+  # 22. --connect-timeout covers the whole of making the connection: the
+  # proxy, and the SSH handshake up to the login.  A server that takes the
+  # connection and does not go on is given up on (28) in about the time; a
+  # transfer after the login is not cut off by it.
+  ms () { echo $(( $(date +%s%N) / 1000000 )); }
+  for stalled in silent banner; do
+    start_proxy $stalled x
+    t0=$(ms)
+    t -k --key "$work/userkey" --connect-timeout 1 -o /dev/null \
+      "sftp://$user@127.0.0.1:$pxport/x" 2> "$work/err"
+    rc=$?
+    took=$(( $(ms) - t0 ))
+    check "$([ $rc -eq 28 ] && [ $took -ge 900 ] && [ $took -lt 4000 ] && echo ok)" \
+      "a server that is $stalled: 28 after the connect timeout (took $took ms, exit $rc)"
+  done
+  start_proxy silent x
+  t0=$(ms)
+  t -k --key "$work/userkey" --connect-timeout 1 -x "http://127.0.0.1:$pxport" -o /dev/null "$s1" 2>/dev/null
+  rc=$?
+  took=$(( $(ms) - t0 ))
+  check "$([ $rc -eq 28 ] && [ $took -ge 900 ] && [ $took -lt 4000 ] && echo ok)" \
+    "a proxy that says nothing: 28 (took $took ms, exit $rc)"
+  t0=$(ms)
+  t -k --key "$work/userkey" --connect-timeout 1 --limit-rate 400K -o /dev/null \
+    "sftp://$user@127.0.0.1:$port$work/srv/data.bin"
+  rc=$?
+  took=$(( $(ms) - t0 ))
+  check "$([ $rc -eq 0 ] && [ $took -ge 1000 ] && echo ok)" \
+    "a transfer longer than the connect timeout goes on (took $took ms, exit $rc)"
 else
   echo "ssh-openssh: no python3; skipping the proxy checks" >&2
 fi

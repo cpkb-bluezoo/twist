@@ -533,6 +533,10 @@ twist_ssh_begin (struct twist_ssh *s)
       s->config.conn.prefs.sigalgs = s->algs;
     }
   s->config.conn.software = "twist_" TWIST_VERSION_STRING;
+  /* The key exchange has the time allowed for connecting, not foxtrot's 60
+     seconds; the time to be connected in is the user's to set.  */
+  if (s->easy->connect_timeout_ms > 0)
+    s->config.conn.kex_timeout_us = (uint64_t) s->easy->connect_timeout_ms * 1000u;
   s->config.client_auth.user = s->user;
   /* The agent's keys first, then those read from files.  */
   {
@@ -865,5 +869,9 @@ twist_ssh_attach (struct twist_easy *easy)
   rc = twist_mail_link_open (&s->link, easy, &ssh_handler, s, ssh_fail);
   if (rc != TWIST_OK)
     ssh_complete (s, rc);
+  else
+    /* Connected, through a proxy if there is one, and logged in, in the time
+       allowed for it.  */
+    twist_mail_link_phase_begin (&s->link);
   return easy->done ? easy->result : TWIST_OK;
 }

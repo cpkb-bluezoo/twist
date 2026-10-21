@@ -381,6 +381,14 @@ Host keys are checked against `~/.ssh/known_hosts` by default, as the
 curl tool does. A key that is missing or changed fails the transfer, there
 is no accept-new mode, and turning off peer verification (`-k`) skips the
 check. A pinned SHA-256 of the host key is the other way to trust a host.
+The connect timeout is one budget for the whole of making a connection, as in
+curl. The mail link (the shared dialer) arms a phase timer for a protocol that
+asks (`twist_mail_link_phase_begin`), and the protocol ends it when it is up;
+for SSH that is the login, so a long transfer is not cut off and a kept session
+never starts one. The key exchange is given the same time (`kex_timeout_us`)
+in place of foxtrot's 60 seconds. The default is five minutes, and a name is
+looked up within the connect timeout or the total time, whichever is less.
+
 An IPv6 literal is stored without its brackets, and a zone (`fe80::1%eth0`,
 written `%25eth0` in a URL, RFC 6874) stays in the host, as ssh keeps it for
 known_hosts. `twist_url_host_text` writes a host back with brackets (and with

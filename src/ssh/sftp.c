@@ -1651,6 +1651,7 @@ twist_sftp_authenticated (void *user, gf_slice username)
   int rc;
 
   (void) username;
+  twist_mail_link_phase_end (&s->link);
   g = calloc (1, sizeof *g);
   if (g == NULL)
     {

@@ -33,6 +33,10 @@
 struct twist_loop;
 struct twist_connection;
 struct twist_timer;
+
+/* How long making a connection may take, if nothing else is said: five
+   minutes, as in curl.  */
+#define TWIST_DEFAULT_CONNECT_TIMEOUT_MS 300000L
 struct twist_runtime;
 struct twist_storage;
 struct twist_dns_addr;
@@ -850,6 +854,9 @@ struct twist_mail_link
   struct twist_connection *conn;
   struct twist_proxy *proxy;
   struct twist_timer *timer;
+  /* The time to be connected in, from the start: see
+     twist_mail_link_phase_begin.  */
+  struct twist_timer *phase_timer;
   char *dial_host;
   int dial_port;
   const struct twist_protocol_handler *handler;
@@ -861,6 +868,13 @@ int twist_mail_link_open (struct twist_mail_link *link, struct twist_easy *easy,
                           const struct twist_protocol_handler *handler,
                           void *user, void (*fail) (void *user, int err));
 void twist_mail_link_close (struct twist_mail_link *link);
+/* Making the connection has a time limit (the transfer's connect timeout)
+   that runs from the start of the dial to the moment the protocol says it is
+   up: the lookup, the TCP connect, a proxy, and a protocol's greeting and
+   login.  The protocol that wants it calls begin once the dial has started and
+   end when it is up; one that never calls begin has only the TCP connect's.  */
+void twist_mail_link_phase_begin (struct twist_mail_link *link);
+void twist_mail_link_phase_end (struct twist_mail_link *link);
 /* Give up the connection without closing it, to keep it for another
    transfer.  The timer for this one is cancelled.  */
 struct twist_connection *twist_mail_link_detach (struct twist_mail_link *link);

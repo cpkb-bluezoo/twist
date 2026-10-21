@@ -99,6 +99,22 @@ test_url_userinfo (void)
    after %25 (a percent sign, encoded); the host keeps it as ssh does
    (fe80::1%eth0), it is written back encoded, and it is not part of the
    authority a Host header names.  */
+/* A connection that is not made in time is given up on: the default is five
+   minutes, as in curl, and 0 means that again.  */
+static void
+test_connect_timeout_default (void)
+{
+  twist_easy *easy = twist_easy_init ();
+
+  check (easy != NULL && easy->connect_timeout_ms == 300000,
+         "a connect timeout by default");
+  twist_easy_setopt (easy, TWISTOPT_CONNECTTIMEOUT_MS, 5000L);
+  check (easy->connect_timeout_ms == 5000, "set");
+  twist_easy_setopt (easy, TWISTOPT_CONNECTTIMEOUT_MS, 0L);
+  check (easy->connect_timeout_ms == 300000, "0 is the default");
+  twist_easy_cleanup (easy);
+}
+
 static void
 test_url_ipv6 (void)
 {
@@ -1249,6 +1265,7 @@ main (void)
   test_url ();
   test_url_userinfo ();
   test_url_ipv6 ();
+  test_connect_timeout_default ();
   test_http_ipv6_host ();
   test_scheme ();
   test_proxy_http ();

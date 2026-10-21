@@ -50,6 +50,7 @@ twist_easy_init (void)
   if (easy == NULL)
     return NULL;
   easy->maxredirs = 50;
+  easy->connect_timeout_ms = TWIST_DEFAULT_CONNECT_TIMEOUT_MS;
   easy->verifypeer = 1;
   easy->doh_verifypeer = 1;
   easy->http_version = TWIST_HTTP_VERSION_NONE;
@@ -320,7 +321,11 @@ twist_easy_setopt (twist_easy *easy, int opt, ...)
       easy->failonerror = va_arg (ap, long) != 0;
       break;
     case TWISTOPT_CONNECTTIMEOUT_MS:
-      easy->connect_timeout_ms = va_arg (ap, long);
+      {
+        long ms = va_arg (ap, long);
+
+        easy->connect_timeout_ms = ms > 0 ? ms : TWIST_DEFAULT_CONNECT_TIMEOUT_MS;
+      }
       break;
     case TWISTOPT_SHARE:
       easy->share = va_arg (ap, struct twist_share *);

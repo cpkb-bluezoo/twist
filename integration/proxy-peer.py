@@ -19,10 +19,12 @@
 
 """A proxy to test twist against, for integration/ssh-openssh.sh.
 
-usage: proxy-peer.py http|socks MODE PORTFILE LOGFILE
+usage: proxy-peer.py http|socks|silent|banner MODE PORTFILE LOGFILE
 
 Listens on the loopback, writes its port to PORTFILE, and writes one line to
-LOGFILE for each thing it is asked.  MODE is one of:
+LOGFILE for each thing it is asked.  The kinds silent and banner are not
+proxies: they take the connection and say nothing, or only an SSH banner, and
+never go on (MODE is not used).  For a proxy MODE is one of:
 
   ok          open any tunnel
   coalesce    send the server's first bytes in the same write as the reply
@@ -156,9 +158,15 @@ def socks(c):
     relay(c, u)
 
 
+def stall(c):
+    if kind == "banner":
+        c.sendall(b"SSH-2.0-stall_1\r\n")
+    select.select([], [], [], 600)
+
+
 def handle(c):
     try:
-        (http if kind == "http" else socks)(c)
+        {"http": http, "socks": socks}.get(kind, stall)(c)
     except OSError:
         pass
     finally:

@@ -63,6 +63,12 @@ Twist TODO List
       use a connection made under others.  The SSH key hashes its
       equivalents (see ssh_pool_key in src/ssh/ssh.c).  The command line is
       unaffected because one operation has one set of options.
+  [ ] --connect-timeout covers the greeting and login for SSH only.  The
+      other protocols on the shared dialer (SMTP, POP3, IMAP, LDAP, ...) have
+      it for the lookup and the TCP connect, and a server that takes the
+      connection and sends no greeting is waited for until --max-time.  They
+      can call twist_mail_link_phase_begin and _end when they are up.  FTP
+      and HTTP dial themselves and do the same.
   [ ] Passphrase-protected OpenSSH-format private keys.  Blocked on
       bcrypt-pbkdf being available in libgcrypt; it is deliberately not
       taken from anywhere else.  An ssh-agent holding the key is the

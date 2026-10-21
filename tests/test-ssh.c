@@ -5226,6 +5226,198 @@ test_proxies (void)
   test_proxy_ipv6 (PX_SOCKS_KIND);
 }
 
+/* ---- the connect timeout ---- */
+
+/* A server that takes the connection and says nothing, or sends its banner
+   and nothing after.  */
+struct stall
+{
+  int lfd, port, banner;
+  pthread_t thread;
+  volatile int stop;
+  int fds[16];
+  int nfds;
+};
+
+static void *
+stall_serve (void *arg)
+{
+  struct stall *st = arg;
+
+  while (!st->stop)
+    {
+      struct pollfd f = { st->lfd, POLLIN, 0 };
+      int fd;
+
+      if (poll (&f, 1, 50) <= 0)
+        continue;
+      fd = accept (st->lfd, NULL, NULL);
+      if (fd < 0)
+        continue;
+      if (st->banner)
+        send (fd, "SSH-2.0-stall_1\r\n", 17, MSG_NOSIGNAL);
+      if (st->nfds < 16)
+        st->fds[st->nfds++] = fd;
+      else
+        close (fd);
+    }
+  return NULL;
+}
+
+static int
+stall_start (struct stall *st, int banner)
+{
+  struct sockaddr_in sin;
+  socklen_t len = sizeof sin;
+
+  memset (st, 0, sizeof *st);
+  st->banner = banner;
+  st->lfd = socket (AF_INET, SOCK_STREAM, 0);
+  if (st->lfd < 0)
+    return -1;
+  memset (&sin, 0, sizeof sin);
+  sin.sin_family = AF_INET;
+  sin.sin_addr.s_addr = htonl (INADDR_LOOPBACK);
+  if (bind (st->lfd, (struct sockaddr *) &sin, sizeof sin) != 0
+      || listen (st->lfd, 8) != 0
+      || getsockname (st->lfd, (struct sockaddr *) &sin, &len) != 0)
+    return -1;
+  st->port = ntohs (sin.sin_port);
+  return pthread_create (&st->thread, NULL, stall_serve, st) == 0 ? 0 : -1;
+}
+
+static void
+stall_stop (struct stall *st)
+{
+  int i;
+
+  st->stop = 1;
+  pthread_join (st->thread, NULL);
+  for (i = 0; i < st->nfds; i++)
+    close (st->fds[i]);
+  close (st->lfd);
+}
+
+/* Fetch from PORT with a connect timeout of MS, optionally through PROXY;
+   how long it took, in seconds, is in *TOOK.  */
+static int
+timed_get (struct twist_multi *multi, int port, const char *proxy, long ms,
+           double *took)
+{
+  struct twist_easy *easy = tcp_easy (0, "secret", NULL);
+  char url[100];
+  double t0 = seconds ();
+  int rc;
+
+  snprintf (url, sizeof url, "sftp://alice@127.0.0.1:%d/data.bin", port);
+  twist_easy_setopt (easy, TWISTOPT_URL, url);
+  twist_easy_setopt (easy, TWISTOPT_CONNECTTIMEOUT_MS, ms);
+  if (proxy != NULL)
+    twist_easy_setopt (easy, TWISTOPT_PROXY, proxy);
+  got_len = 0;
+  rc = twist_easy_perform_in (multi, easy);
+  *took = seconds () - t0;
+  twist_easy_cleanup (easy);
+  return rc;
+}
+
+/* The connect timeout is for all of making the connection: the TCP connect,
+   the proxy and the SSH handshake up to the login.  A server that takes the
+   connection and does not go on is given up on, where before it was waited
+   for for ever.  */
+/* foxtrot gives a key exchange 60 seconds unless told otherwise.  The time
+   allowed for connecting is the user's: it is what the key exchange gets.  */
+static void
+test_connect_timeout_kex (void)
+{
+  struct server sv;
+  struct world w;
+  struct twist_easy *easy;
+  struct setup su = SETUP ("sftp://alice@127.0.0.1/data.bin", 0, "secret");
+
+  check (server_new (&sv) == 0, "server");
+  easy = start (&w, &sv, &su);
+  twist_easy_setopt (easy, TWISTOPT_CONNECTTIMEOUT_MS, 120000L);
+  check (twist_ssh_start (w.ssh) == TWIST_OK, "start");
+  pump (&w, easy, 65536);
+  check (easy->done && easy->result == TWIST_OK
+         && w.ssh->config.conn.kex_timeout_us == 120000000u,
+         "the key exchange has the connect timeout");
+  twist_easy_cleanup (easy);
+  server_free (&sv);
+}
+
+static void
+test_connect_timeout (void)
+{
+  test_connect_timeout_kex ();
+  struct stall silent, banner;
+  struct tcp_server ts;
+  struct twist_multi *multi;
+  struct twist_easy *easy;
+  char proxy[80];
+  double took;
+
+  check (stall_start (&silent, 0) == 0 && stall_start (&banner, 1) == 0
+         && ts_start (&ts) == 0, "servers");
+  multi = twist_multi_init ();
+
+  check (timed_get (multi, silent.port, NULL, 500, &took) == TWIST_ERR_TIMEOUT
+         && took >= 0.4 && took < 2.0, "a server that says nothing");
+  if (took < 0.4 || took >= 2.0)
+    fprintf (stderr, "  took %.2f s\n", took);
+  check (timed_get (multi, banner.port, NULL, 500, &took) == TWIST_ERR_TIMEOUT
+         && took >= 0.4 && took < 2.0, "a server that sends only its banner");
+  snprintf (proxy, sizeof proxy, "http://127.0.0.1:%d", silent.port);
+  check (timed_get (multi, ts.port, proxy, 500, &took) == TWIST_ERR_TIMEOUT
+         && took >= 0.4 && took < 2.0, "an HTTP proxy that says nothing");
+  snprintf (proxy, sizeof proxy, "socks5://127.0.0.1:%d", silent.port);
+  check (timed_get (multi, ts.port, proxy, 500, &took) == TWIST_ERR_TIMEOUT
+         && took >= 0.4 && took < 2.0, "a SOCKS proxy that says nothing");
+  check (ts_accepted (&ts) == 0, "and the server behind it was not reached");
+
+  /* The timeout ends at the login: a transfer that goes on longer is not cut
+     off by it.  This one takes about a second at its rate.  */
+  easy = tcp_easy (0, "secret", NULL);
+  twist_easy_setopt (easy, TWISTOPT_CONNECTTIMEOUT_MS, 400L);
+  twist_easy_setopt (easy, TWISTOPT_MAX_RECV_SPEED_LARGE, (uint64_t) 100000);
+  {
+    double t0 = seconds ();
+
+    check (tcp_get (multi, easy, &ts, "sftp", "/data.bin") == TWIST_OK
+           && got_data (), "a transfer that outlasts the connect timeout");
+    took = seconds () - t0;
+    check (took > 0.8, "and did take longer than it");
+  }
+
+  /* A session that is kept needs no connecting, so a connect timeout that is
+     too short for anything does not touch it.  */
+  twist_easy_setopt (easy, TWISTOPT_MAX_RECV_SPEED_LARGE, (uint64_t) 0);
+  twist_easy_setopt (easy, TWISTOPT_CONNECTTIMEOUT_MS, 1L);
+  check (tcp_get (multi, easy, &ts, "sftp", "/data.bin") == TWIST_OK
+         && got_data () && ts_accepted (&ts) == 1,
+         "a kept session is not subject to it");
+  twist_easy_cleanup (easy);
+
+  /* The total timeout still ends a server that stalls.  */
+  easy = tcp_easy (0, "secret", NULL);
+  {
+    char url[100];
+    double t0 = seconds ();
+
+    snprintf (url, sizeof url, "sftp://alice@127.0.0.1:%d/x", banner.port);
+    twist_easy_setopt (easy, TWISTOPT_URL, url);
+    twist_easy_setopt (easy, TWISTOPT_TIMEOUT_MS, 500L);
+    check (twist_easy_perform_in (multi, easy) == TWIST_ERR_TIMEOUT
+           && seconds () - t0 < 2.0, "the total timeout, as before");
+  }
+  twist_easy_cleanup (easy);
+  twist_multi_cleanup (multi);
+  ts_stop (&ts);
+  stall_stop (&banner);
+  stall_stop (&silent);
+}
+
 /* A transfer that goes away while its job is queued or running: the job
    finishes by itself and frees what it made.  Whichever happens first, the
    result must not be touched; valgrind finds it if it is.  */
@@ -5343,6 +5535,7 @@ main (void)
   test_ipv6_literal ();
   test_ipv6_zone ();
   test_proxies ();
+  test_connect_timeout ();
   rmdir (home);
   return tests_finish ();
 }
