@@ -40,6 +40,7 @@ Documentation License''.
 * Overview::
 * Library::
 * Invocation::
+* Variables::
 * URL globbing::
 * SFTP and SCP::
 * GNU Free Documentation License::
@@ -262,6 +263,20 @@ Print @var{format} on standard output after the body.
 @code{@{content_type@}}, @code{@{exitcode@}}, and @code{@{errormsg@}}
 are replaced.  @code{\n}, @code{\r}, @code{\t}, and @code{%%} are
 recognised.  An unknown @code{@{name@}} is empty.
+@item --url @var{url}
+A URL to fetch.  It is the same as a URL given without an option, and can be
+given as an expansion (@option{--expand-url}).
+@item --variable @var{name=text}
+@itemx --variable @var{name@@file}
+@itemx --variable %@var{name}
+Set a variable (@pxref{Variables}).  @samp{name@@file} reads it from a file,
+or from standard input for @samp{-}; @samp{%name} takes it from the
+environment, and @samp{%name=text} or @samp{%name@@file} says what it is if
+the environment does not have it.
+@item --expand-@var{option} @var{parameter}
+Any option that takes a parameter, with the variables in the parameter
+expanded first (@pxref{Variables}): @option{--expand-url},
+@option{--expand-data}, @option{--expand-header}, @option{--expand-output}.
 @item -g
 @itemx --globoff
 Do not expand @samp{@{@}} and @samp{[]} in URLs (@pxref{URL globbing}).
@@ -432,6 +447,77 @@ The @code{sftp} or @code{scp} server could not do what was asked.
 @item 81
 The operation could not be started.
 @end table
+
+@node Variables
+@chapter Variables
+
+A command line can set variables and use them in the parameters of options.
+They are the same as curl's.
+
+@example
+twist --variable name=smith --expand-url 'https://example.com/@{@{name@}@}' ...
+twist --variable who=smith --expand-data '@{"user": "@{@{who:json@}@}"@}' ...
+twist --variable '%HOME' --expand-output '@{@{HOME@}@}/page.html' URL
+@end example
+
+@option{--variable name=text} gives @var{name} the text; @option{--variable
+name@@file} gives it the contents of the file, and @samp{-} for the file is
+standard input.  A name is letters, digits and underscores, and case matters;
+the content can be anything, to ten megabytes.  A variable that is set again
+has its new content.  The environment is imported by name: @option{--variable
+%name} takes it from there and is an error if the environment does not have it;
+@option{--variable %name=text} (or @samp{%name@@file}) says what it is when the
+environment does not, and the environment's value is used when it does, even if
+that is empty.
+
+A variable is used in the parameter of an option whose name has @samp{expand-}
+put before it.  @option{--expand-data} is @option{--data} with each
+@samp{@{@{name@}@}} in the parameter replaced by the content.  The option
+may be given as @option{--expand-url=value} too.  This works for every long
+option that takes a parameter, and not for a URL given as an argument, which
+is not an option: use @option{--url} for that.  A variable is what it is at the
+place on the command line where it is used, so it is set before it is needed;
+variables stay across @option{--next}.
+
+@itemize
+@item
+A name that is not set is empty.
+@item
+@samp{\@{@{} is @samp{@{@{} and is not the start of a variable.
+@item
+Anything that is not @samp{@{@{name@}@}} (with a name of the right kind, and no
+spaces) is left as it is.
+@item
+The content is not expanded again.
+@item
+The expanded text is a string, so content with a NUL in it is an error unless
+a function encodes it (@code{b64}, @code{json} or @code{url}).
+@item
+The result may not be over ten megabytes.
+@end itemize
+
+Functions follow the name after colons, and are applied from left to right:
+@samp{@{@{name:trim:b64@}@}}.  A comma can separate them too.
+
+@table @code
+@item trim
+Takes the white space off both ends.
+@item json
+Writes the content as the inside of a JSON string: quotes, backslashes and
+control characters escaped, UTF-8 left as it is.  The quotes are not added.
+@item url
+Percent-encodes everything but letters, digits and @samp{-._~}.
+@item b64
+Base64.
+@item 64dec
+From base64, padded or not.  What is not base64 gives @samp{[64dec-fail]}.
+@end table
+
+An error in a variable or an expansion is a bad option: the message names the
+option and what is wrong, and the status is 2 (26 for a file that cannot be
+read).  A URL that comes out of an expansion is globbed afterwards
+(@pxref{URL globbing}), so content with braces or brackets in it, put in a URL,
+should go through @code{url} or be used with @option{-g}.
 
 @node URL globbing
 @chapter URL globbing

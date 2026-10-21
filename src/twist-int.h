@@ -595,6 +595,28 @@ const char *twist_glob_value (const struct twist_glob *g, size_t n);
 char *twist_glob_name (const struct twist_glob *g, const char *tmpl);
 void twist_glob_free (struct twist_glob *g);
 
+/* Variables, as the curl documentation has them (the tool's --variable and
+   the --expand- options).  A set holds names that are letters, digits and
+   underscores, and content that may be any bytes.  */
+struct twist_vars;
+struct twist_vars *twist_vars_new (void);
+void twist_vars_free (struct twist_vars *vars);
+/* Define from a --variable parameter: "name=text", "name@file" ("-" is
+   standard input), "%name" (the environment's; it must be set), and
+   "%name=text" or "%name@file" (the default for when it is not).  A name or
+   a parameter that is wrong, or an environment variable that is not set, is
+   TWIST_ERR_INVAL; a file that cannot be read, TWIST_ERR_FILE.  ERR says what.  */
+int twist_vars_define (struct twist_vars *vars, const char *spec, char *err,
+                       size_t cap);
+/* TEXT with each {{name}} replaced by the content, empty if there is none, and
+   each {{name:fn:fn}} by the content after the functions (trim, json, url,
+   b64, 64dec), left to right.  \{{ is {{.  Anything that is not a reference
+   stays as it is.  A function that is not one, or content with a NUL that is
+   not encoded, or a result of over ten megabytes, is an error: NULL, and ERR
+   says why.  A new string.  */
+char *twist_vars_expand (const struct twist_vars *vars, const char *text,
+                         char *err, size_t cap);
+
 struct twist_pool;
 struct twist_pool *twist_pool_new (void);
 void twist_pool_free (struct twist_pool *pool);

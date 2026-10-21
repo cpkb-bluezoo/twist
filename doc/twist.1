@@ -44,6 +44,56 @@ HTTP, file, FTP, mail, MQTT, LDAP, WebSocket, Gopher, DICT, TFTP,
 and SFTP and SCP (a file to a URL, up or down, and directory listings for SFTP)
 are implemented.  A scheme that is recognised but not implemented
 exits 1.
+.SH VARIABLES
+A command line can set variables and use them in the parameters of options.
+.TP
+.BI \-\-variable " name=text"
+.TQ
+.BI \-\-variable " name@file"
+Set a variable.
+The name is letters, digits and underscores.
+A file of
+.B \-
+is standard input.
+The content can be anything, up to ten megabytes.
+.TP
+.BI \-\-variable " %name"
+.TQ
+.BI \-\-variable " %name=text"
+Import the environment's variable.
+Without
+.B =text
+it is an error if the environment does not have it; with it, that is the
+value when it does not.
+.TP
+.BI \-\-expand\- option " parameter"
+Any option that takes a parameter, with each
+.B {{name}}
+in the parameter replaced by the variable's content, empty if there is none.
+.B \\{{
+is
+.BR {{ .
+The URL given as an argument is not expanded; use
+.B \-\-url
+for one that is.
+Content with a NUL in it is an error unless a function encodes it.
+.PP
+Functions follow the name after colons and apply from left to right:
+.BR {{name:trim:b64}} .
+.B trim
+removes white space from both ends,
+.B json
+quotes the content for the inside of a JSON string,
+.B url
+percent-encodes it,
+.B b64
+encodes it as base64, and
+.B 64dec
+decodes base64.
+.PP
+.nf
+twist --variable name=smith --expand-url 'https://example.com/{{name}}'
+.fi
 .SH "URL GLOBBING"
 A URL may name many things at once, for any scheme, as with curl.
 .TP
@@ -353,6 +403,9 @@ and
 are recognised.  An unknown
 .B %{name}
 is empty.
+.TP
+.BI \-\-url " url"
+A URL to fetch.
 .TP
 .B \-g, \-\-globoff
 Do not expand {} and [] in URLs.

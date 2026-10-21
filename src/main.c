@@ -224,6 +224,11 @@ usage (void)
   fputs (_("      --cacert FILE       CA trust bundle (PEM)\n"), stdout);
   fputs (_("  -x, --proxy URL         proxy (http:// or socks5://), may hold user:password@\n"), stdout);
   fputs (_("  -U, --proxy-user U:P    user and password for the proxy\n"), stdout);
+  fputs (_("      --url URL           a URL to fetch\n"), stdout);
+  fputs (_("      --variable N=TEXT   set a variable (N@FILE, %N for the environment)\n"),
+         stdout);
+  fputs (_("      --expand-OPTION P   OPTION with {{name}} in its parameter expanded\n"),
+         stdout);
   fputs (_("  -A, --user-agent NAME   User-Agent\n"), stdout);
   fputs (_("  -u, --user USER[:PASS]  user and password\n"), stdout);
   fputs (_("  -e, --referer URL       Referer header\n"), stdout);
@@ -845,7 +850,11 @@ emit_writeout (const char *fmt, twist_easy *easy, int code)
           else if (*p == 't')
             fputc ('\t', stdout);
           else
-            fputc (*p, stdout);
+            {
+              /* Not an escape: as written, with its backslash.  */
+              fputc ('\\', stdout);
+              fputc (*p, stdout);
+            }
         }
       else if (*p == '%' && p[1] == '%')
         {
@@ -1486,6 +1495,59 @@ new_op (void)
   return op;
 }
 
+/* --expand-NAME is any option that takes a parameter, with variables expanded
+   in it.  The table of long options gets a twin for each of those, whose value
+   has this bit set.  */
+#define EXPAND_BIT (1 << 16)
+
+static struct option *
+expand_options (const struct option *longs)
+{
+  size_t n = 0, i, o = 0, names = 0;
+  struct option *out;
+  char *at;
+
+  while (longs[n].name != NULL)
+    {
+      if (longs[n].has_arg == required_argument)
+        names += strlen (longs[n].name) + sizeof "expand-";
+      n++;
+    }
+  /* The table, and the names of the twins after it: one block to free.  */
+  out = calloc (1, (2 * n + 1) * sizeof *out + names);
+  if (out == NULL)
+    return NULL;
+  at = (char *) (out + 2 * n + 1);
+  for (i = 0; i < n; i++)
+    out[o++] = longs[i];
+  for (i = 0; i < n; i++)
+    if (longs[i].has_arg == required_argument)
+      {
+        size_t len = strlen (longs[i].name) + sizeof "expand-";
+
+        snprintf (at, len, "expand-%s", longs[i].name);
+        out[o].name = at;
+        out[o].has_arg = required_argument;
+        out[o].flag = NULL;
+        out[o].val = longs[i].val | EXPAND_BIT;
+        o++;
+        at += len;
+      }
+  return out;
+}
+
+/* The long name of the option with this value.  */
+static const char *
+option_name (const struct option *longs, int val)
+{
+  size_t i;
+
+  for (i = 0; longs[i].name != NULL; i++)
+    if (longs[i].val == val)
+      return longs[i].name;
+  return "?";
+}
+
 int
 main (int argc, char **argv)
 {
@@ -1552,12 +1614,17 @@ main (int argc, char **argv)
     { "dot-url", required_argument, NULL, 18 },
     { "mail-from", required_argument, NULL, 11 },
     { "mail-rcpt", required_argument, NULL, 12 },
+    { "variable", required_argument, NULL, 36 },
+    { "url", required_argument, NULL, 37 },
     { "help", no_argument, NULL, 'h' },
     { "version", no_argument, NULL, 7 },
     { NULL, 0, NULL, 0 }
   };
   struct cli_op *ops = NULL;
   struct cli_op *op = NULL;
+  struct option *expandable = NULL;
+  struct twist_vars *vars = NULL;
+  char *expanded = NULL;
   int c;
   int status = 0;
 
@@ -1571,6 +1638,14 @@ main (int argc, char **argv)
   op = new_op ();
   ops = op;
   if (op == NULL)
+    {
+      diag_code (27, twist_strerror (TWIST_ERR_NOMEM));
+      status = 27;
+      goto done;
+    }
+  vars = twist_vars_new ();
+  expandable = expand_options (longs);
+  if (vars == NULL || expandable == NULL)
     {
       diag_code (27, twist_strerror (TWIST_ERR_NOMEM));
       status = 27;
@@ -1608,11 +1683,51 @@ main (int argc, char **argv)
         }
       c = getopt_long (argc, argv,
                        "+:o:X:H:d:Lkx:A:u:Iw:fE:hm:e:r:b:sSOT:GgiD:qC:lQ:U:",
-                       longs, NULL);
+                       expandable, NULL);
       if (c == -1)
         break;
+      if (c > 0 && (c & EXPAND_BIT))
+        {
+          /* --expand-NAME: the parameter has its variables in it.  */
+          char reason[300];
+
+          c &= ~EXPAND_BIT;
+          expanded = twist_vars_expand (vars, optarg, reason, sizeof reason);
+          if (expanded == NULL)
+            {
+              char msg[420];
+
+              snprintf (msg, sizeof msg, _("option --expand-%s: %s"),
+                        option_name (longs, c), reason);
+              diag (msg);
+              suggest ();
+              status = 2;
+              goto done;
+            }
+          optarg = expanded;
+        }
       switch (c)
         {
+        case 36:
+          {
+            char reason[300];
+            int rc = twist_vars_define (vars, optarg, reason, sizeof reason);
+
+            if (rc != TWIST_OK)
+              {
+                char msg[420];
+
+                snprintf (msg, sizeof msg, _("option --variable: %s"), reason);
+                diag (msg);
+                suggest ();
+                status = rc == TWIST_ERR_FILE ? 26
+                         : rc == TWIST_ERR_NOMEM ? 27 : 2;
+              }
+          }
+          break;
+        case 37:
+          status = append_item (&op->urls, &op->urls_tail, optarg, 0);
+          break;
         case 'o':
           status = append_item (&op->outputs, &op->outputs_tail, optarg, 0);
           break;
@@ -2032,6 +2147,8 @@ main (int argc, char **argv)
           status = 2;
           break;
         }
+      free (expanded);
+      expanded = NULL;
       if (status == 27)
         diag_code (27, twist_strerror (TWIST_ERR_NOMEM));
       if (status != 0)
@@ -2050,6 +2167,9 @@ main (int argc, char **argv)
     status = last;
   }
 done:
+  free (expanded);
+  free (expandable);
+  twist_vars_free (vars);
   while (ops != NULL)
     {
       struct cli_op *next = ops->next;

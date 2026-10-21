@@ -807,6 +807,29 @@ rc=$?
 check "$([ $rc -eq 0 ] && [ "$(cat "$work/srv/up_1.bin")" = one ] && [ "$(cat "$work/srv/up_2.bin")" = one ] && echo ok)" \
   "an upload to each place a pattern makes (exit $rc)"
 
+# 24. Variables.  The URL, the data of an upload and the user are made from
+# variables; a variable can be a file or the environment's.
+printf '[127.0.0.1]:%s %s\n' "$port" "$hostpub" > "$work/home/.ssh/known_hosts"
+printf '  small.txt\n' > "$work/vname"
+rm -f "$work/v.out" "$work/srv/varup.bin"
+t --key "$work/userkey" --variable "h=127.0.0.1" --variable "p=$port" \
+  --variable "dir=$work/srv" --variable "f@$work/vname" \
+  --expand-user "$user" --expand-url "sftp://{{h}}:{{p}}{{dir}}/{{f:trim}}" \
+  -o "$work/v.out"
+rc=$?
+check "$([ $rc -eq 0 ] && [ "$(cat "$work/v.out")" = small ] && echo ok)" \
+  "the URL and the file's name from variables (exit $rc)"
+t --key "$work/userkey" --variable "who=$user" --variable body=hello \
+  --expand-data '{{body}}-world' --expand-url "sftp://{{who}}@$base$work/srv/varup.bin"
+rc=$?
+check "$([ $rc -eq 0 ] && [ "$(cat "$work/srv/varup.bin")" = hello-world ] && echo ok)" \
+  "the data of an upload from a variable (exit $rc)"
+UP_NAME=varup.bin t --key "$work/userkey" --variable '%UP_NAME' --variable "who=$user" \
+  --expand-url "sftp://{{who}}@$base$work/srv/{{UP_NAME}}" -o "$work/v.out"
+rc=$?
+check "$([ $rc -eq 0 ] && [ "$(cat "$work/v.out")" = hello-world ] && echo ok)" \
+  "a name from the environment (exit $rc)"
+
 # 21. Proxies.  Through an HTTP CONNECT proxy and a SOCKS5 one, in front of the
 # real sshd.  The server speaks first, so the case that matters is its banner
 # arriving in the same write as the proxy's reply.  A refusal is 56 for

@@ -381,6 +381,17 @@ Host keys are checked against `~/.ssh/known_hosts` by default, as the
 curl tool does. A key that is missing or changed fails the transfer, there
 is no accept-new mode, and turning off peer verification (`-k`) skips the
 check. A pinned SHA-256 of the host key is the other way to trust a host.
+Variables (`src/engine/vars.c`) are the curl tool's. `--variable` defines a name
+in a table of byte strings (to ten megabytes), from text, a file, or the
+environment. For each long option that takes a parameter the command line adds
+a twin called `expand-NAME` to the `getopt_long` table, whose value carries a
+marker bit; when one comes back the parameter is expanded with the variables
+as they are at that point, so order on the command line matters. A function
+chain (`trim`, `json`, `url`, `b64`, `64dec`) is run over a copy of the
+content; the result is a string, so a NUL that has not been encoded is an
+error, and a result over the limit is refused before it is built. Globbing is
+done after, on the expanded URL.
+
 URL globbing (`src/engine/glob.c`) is the curl tool's: a pattern is parsed once
 into text, sets and ranges, and the URLs come from an odometer one at a time,
 the last glob going fastest, so a range of billions costs nothing until used.
