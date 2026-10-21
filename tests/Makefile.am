@@ -20,10 +20,15 @@ AM_TESTS_ENVIRONMENT = \
 
 noinst_HEADERS = check.h http-ev.h feed.h body.h
 
-TESTS = test-reactor test-engine test-http test-auth test-dns test-ftp \
-	test-mail test-mqtt test-ldap test-ws test-gopher test-dict \
-	test-tftp test-file test-tls test-errors test-coding test-ssh test-quote test-rate
-check_PROGRAMS = $(TESTS)
+PROGRAM_TESTS = test-reactor test-engine test-http test-auth test-dns \
+	test-ftp test-mail test-mqtt test-ldap test-ws test-gopher test-dict \
+	test-tftp test-file test-tls test-errors test-coding test-ssh \
+	test-quote test-rate test-glob
+## The tool itself, on local files.
+SCRIPT_TESTS = cli-glob.sh
+TESTS = $(PROGRAM_TESTS) $(SCRIPT_TESTS)
+check_PROGRAMS = $(PROGRAM_TESTS)
+EXTRA_DIST = cli-glob.sh
 
 test_reactor_SOURCES = test-reactor.c check.c
 test_engine_SOURCES = test-engine.c check.c
@@ -44,6 +49,7 @@ test_errors_SOURCES = test-errors.c check.c
 test_coding_SOURCES = test-coding.c
 test_ssh_SOURCES = test-ssh.c check.c
 test_ssh_LDADD = $(LDADD) $(FOXTROT_LIBS)
+test_glob_SOURCES = test-glob.c check.c
 test_rate_SOURCES = test-rate.c check.c
 test_quote_SOURCES = test-quote.c check.c
 test_quote_LDADD = $(LDADD) $(FOXTROT_LIBS)

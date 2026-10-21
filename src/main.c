@@ -77,6 +77,7 @@ struct cli_op
   struct twist_slist *postquote;
   int ftp_create_dirs;
   uint64_t limit_rate;		/* Bytes a second; 0: none.  */
+  int globoff;			/* -g: {} and [] in a URL are plain.  */
   char *mail_from;
   char *output_dir;
   int create_dirs;
@@ -251,7 +252,7 @@ usage (void)
   printf (_("  -w, --write-out FORMAT  print after the body (%%{http_code},\n"
             "                          %%{size_download}, %%{url_effective},\n"
             "                          %%{content_type}, %%{exitcode})\n"));
-  fputs (_("  -g, --globoff           accepted; URLs are never expanded\n"),
+  fputs (_("  -g, --globoff           do not expand {a,b} and [1-9] in URLs\n"),
          stdout);
   fputs (_("  -q, --disable           accepted; no config file is read\n"),
          stdout);
@@ -1334,6 +1335,61 @@ run_one (twist_easy *easy, struct cli_op *op, const char *url,
   return code;
 }
 
+/* One URL as written, which may be a pattern: the transfers it makes, in
+   order.  The output name is made for each, with #1 for what the first glob
+   is, and so on.  The status is the last transfer's, or the first failure
+   with --fail-early.  A pattern that is wrong is a malformed URL (3), for
+   this one only.  */
+static int
+run_glob (struct cli_op *op, const char *pattern, const char *output,
+          int remote, const char *upload)
+{
+  struct twist_glob *g = NULL;
+  char err[1200], *url;
+  int status = 0, rc;
+
+  rc = twist_glob_parse (pattern, &g, err, sizeof err);
+  if (rc == TWIST_ERR_URL)
+    {
+      diag_code (3, err);
+      return 3;
+    }
+  if (rc != TWIST_OK)
+    {
+      diag_code (27, twist_strerror (rc));
+      return 27;
+    }
+  while ((rc = twist_glob_next (g, &url)) == 1)
+    {
+      char *name = NULL;
+
+      if (output != NULL && !remote)
+        {
+          name = twist_glob_name (g, output);
+          if (name == NULL)
+            {
+              free (url);
+              status = 27;
+              diag_code (27, twist_strerror (TWIST_ERR_NOMEM));
+              break;
+            }
+        }
+      status = run_one (op->easy, op, url, name != NULL ? name : output,
+                        remote, upload);
+      free (name);
+      free (url);
+      if (status != 0 && fail_early)
+        break;
+    }
+  if (rc < 0)
+    {
+      status = 27;
+      diag_code (27, twist_strerror (TWIST_ERR_NOMEM));
+    }
+  twist_glob_free (g);
+  return status;
+}
+
 static int
 run_op (struct cli_op *op)
 {
@@ -1369,7 +1425,10 @@ run_op (struct cli_op *op)
           upload = up->text;
           up = up->next;
         }
-      status = run_one (op->easy, op, url->text, output, remote, upload);
+      if (op->globoff)
+        status = run_one (op->easy, op, url->text, output, remote, upload);
+      else
+        status = run_glob (op, url->text, output, remote, upload);
       if (status != 0 && fail_early)
         break;
     }
@@ -1835,6 +1894,8 @@ main (int argc, char **argv)
             status = 27;
           break;
         case 'g':
+          op->globoff = 1;
+          break;
         case 'q':
           break;
         case 28:

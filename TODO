@@ -7,7 +7,7 @@ Twist TODO List
       SFTP; there is no SCP wire protocol.  Done: logging in with a key
       file or a password, known_hosts as curl does it (~/.ssh/known_hosts,
       -k skips, no accept-new), a pinned fingerprint, downloading and
-      uploading one file, resuming either way (-C), ranges (-r),
+      uploading a file to each URL, resuming either way (-C), ranges (-r),
       directory listings, keys in an ssh-agent, keyboard-interactive login
       with the password, and one connection for the URLs of a command
       line.
@@ -48,10 +48,9 @@ Twist TODO List
           now
         - -C and -T completion of the URL for the other schemes (curl
           does it for all of them; twist does it for sftp and scp only)
-        - FIDO keys held in a file: foxtrot is ready; twist supplies the
-          token I/O (libfido2, optional, on the storage pool).  Keys
-          held by an ssh-agent already work, with the agent doing the
-          token I/O.
+        - FIDO keys held in a file are not supported, and will not be: no
+          libfido2.  Keys held by an ssh-agent work, with the agent doing
+          the token I/O.
         - keyboard-interactive questions that need a person, such as a
           one-time code: twist answers only a single hidden question
           with the password, as curl does.  A prompt on the terminal
@@ -73,6 +72,9 @@ Twist TODO List
       bcrypt-pbkdf being available in libgcrypt; it is deliberately not
       taken from anywhere else.  An ssh-agent holding the key is the
       workaround, and works.
+  [ ] URL globbing is done for URLs and for -o names (#N).  curl also globs
+      the file given to -T ({a,b} there, with #N in the URL), and --output-dir
+      does not take #N.  Neither is done here: -T takes the name as written.
   [ ] SMB/SMBS
   [ ] RTMP/RTMPS
   [ ] NTLM and Negotiate, only after an explicit dependency decision

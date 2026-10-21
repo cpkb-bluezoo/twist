@@ -1,5 +1,6 @@
 src/strerror.c
 src/main.c
+src/engine/glob.c
 src/engine/proxy.c
 src/file/file.c
 src/mail/dial.c

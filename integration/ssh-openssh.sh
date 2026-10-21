@@ -779,6 +779,34 @@ else
   echo "ssh-openssh: no IPv6 loopback; skipping the IPv6 checks" >&2
 fi
 
+# 23. URL globbing over SFTP: one pattern, several files, one login.  A set of
+# names and a range, #1 and #2 in the names of the files that are written, and
+# the same for uploads, which go to each place the pattern makes.
+printf 'one\n' > "$work/srv/f1.txt"
+printf 'two\n' > "$work/srv/f2.txt"
+printf 'three\n' > "$work/srv/f3.txt"
+printf '[127.0.0.1]:%s %s\n' "$port" "$hostpub" > "$work/home/.ssh/known_hosts"
+rm -f "$work"/g_*.out
+before=$(logins)
+t --key "$work/userkey" -o "$work/g_#1.out" "sftp://$user@$base$work/srv/f[1-3].txt"
+rc=$?
+sleep 0.3
+n=$(( $(logins) - before ))
+ok=
+[ $rc -eq 0 ] && [ "$(cat "$work/g_1.out")" = one ] && [ "$(cat "$work/g_2.out")" = two ] \
+  && [ "$(cat "$work/g_3.out")" = three ] && [ $n -eq 1 ] && ok=ok
+check "$ok" "a range of three files, one login (logins $n, exit $rc)"
+rm -f "$work"/g_*.out
+t --key "$work/userkey" -o "$work/g_#1_#2.out" "sftp://$user@$base$work/srv/{f,small}[1-2].txt" 2>/dev/null
+rc=$?
+check "$([ -f "$work/g_f_1.out" ] && [ -f "$work/g_f_2.out" ] && [ $rc -ne 0 ] && echo ok)" \
+  "a set and a range, with the status of the last (exit $rc)"
+rm -f "$work/srv/up_1.bin" "$work/srv/up_2.bin"
+t --key "$work/userkey" -T "$work/srv/f1.txt" "sftp://$user@$base$work/srv/up_[1-2].bin"
+rc=$?
+check "$([ $rc -eq 0 ] && [ "$(cat "$work/srv/up_1.bin")" = one ] && [ "$(cat "$work/srv/up_2.bin")" = one ] && echo ok)" \
+  "an upload to each place a pattern makes (exit $rc)"
+
 # 21. Proxies.  Through an HTTP CONNECT proxy and a SOCKS5 one, in front of the
 # real sshd.  The server speaks first, so the case that matters is its banner
 # arriving in the same write as the proxy's reply.  A refusal is 56 for

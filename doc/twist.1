@@ -41,9 +41,55 @@ Several URLs leave the status of the last transfer, unless
 stops at the first failure.
 .PP
 HTTP, file, FTP, mail, MQTT, LDAP, WebSocket, Gopher, DICT, TFTP,
-and the transfer of one file over SFTP and SCP
+and SFTP and SCP (a file to a URL, up or down, and directory listings for SFTP)
 are implemented.  A scheme that is recognised but not implemented
 exits 1.
+.SH "URL GLOBBING"
+A URL may name many things at once, for any scheme, as with curl.
+.TP
+.BI { a,b,c }
+One of these, in turn.  A set cannot hold a set, and a backslash before a
+character in it makes it plain.
+.TP
+.BI [ 1-10 ]
+A range of numbers.
+.B [01-10]
+keeps the width of its start, and
+.B [1-10:3]
+takes every third.
+.TP
+.BI [ a-z ]
+A range of letters, in one case, which also takes a step.
+.PP
+A URL with several of these makes all their combinations, the last going
+fastest, and a very large number of them is no trouble: they are made one at a
+time.
+A backslash before a brace or a bracket makes it plain text, and an IPv6
+address in brackets is left alone.
+A pattern that is wrong exits 3 with a message that shows where.
+.PP
+In the name given to
+.B \-o
+the text
+.B #1
+is what the first glob was in the URL, and
+.BR #2 ,
+the second, and so on; a number with no glob stays as it is.
+An
+.B \-o
+goes with the URL it is next to, and so with all that URL makes, so a name with
+no
+.B #
+is written over by each.
+.B \-O
+names each from its own URL.
+.B \-g
+turns all of this off.
+.PP
+.nf
+twist -o 'page_#1.html' 'https://example.com/p[1-3].html'
+twist -O 'sftp://host/{a,b,c}.txt'
+.fi
 .SH OPTIONS
 .TP
 .B \-h, \-\-help
@@ -309,7 +355,9 @@ are recognised.  An unknown
 is empty.
 .TP
 .B \-g, \-\-globoff
-Accepted.  URLs are never expanded.
+Do not expand {} and [] in URLs.
+See
+.BR "URL GLOBBING" .
 .TP
 .B \-q, \-\-disable
 Accepted.  No config file is read.

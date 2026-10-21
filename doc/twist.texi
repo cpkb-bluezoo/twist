@@ -40,6 +40,7 @@ Documentation License''.
 * Overview::
 * Library::
 * Invocation::
+* URL globbing::
 * SFTP and SCP::
 * GNU Free Documentation License::
 @end menu
@@ -263,7 +264,7 @@ are replaced.  @code{\n}, @code{\r}, @code{\t}, and @code{%%} are
 recognised.  An unknown @code{@{name@}} is empty.
 @item -g
 @itemx --globoff
-Accepted.  URLs are never expanded.
+Do not expand @samp{@{@}} and @samp{[]} in URLs (@pxref{URL globbing}).
 @item -q
 @itemx --disable
 Accepted.  No config file is read.
@@ -432,6 +433,51 @@ The @code{sftp} or @code{scp} server could not do what was asked.
 The operation could not be started.
 @end table
 
+@node URL globbing
+@chapter URL globbing
+
+A URL may name many things at once, for every scheme, as with curl:
+
+@table @code
+@item @{a,b,c@}
+One of these, in turn.  A set cannot hold another set or a range, and an
+empty element is the empty string.  In a set a backslash makes the character
+after it plain.
+@item [1-10]
+A range of numbers.  @samp{[01-10]} keeps the width of its start, with
+zeros, and @samp{[1-10:3]} takes every third.
+@item [a-z]
+A range of letters of one case, which also takes a step.
+@end table
+
+A URL with several makes all the combinations, in order, the last going
+fastest: @samp{@{x,y@}/[1-2]} is @samp{x/1}, @samp{x/2}, @samp{y/1},
+@samp{y/2}.  They are made one at a time, so a range of billions starts at
+once.  Outside a set a backslash before a brace or bracket makes it plain, and
+the brackets of an IPv6 address are not a range.  A pattern that is wrong is a
+malformed URL (status 3) and the message shows the place:
+
+@example
+twist: (3) bad range in URL position 25:
+http://127.0.0.1:1/[3-1]
+                        ^
+@end example
+
+The name given to @option{-o} may hold @samp{#1}, @samp{#2} and so on, for
+what the first glob, the second, and so on, were in the URL that is being
+fetched: @samp{twist -o 'page_#1.html' 'https://example.com/p[1-3].html'}
+writes @file{page_1.html} to @file{page_3.html}.  A number with no glob is
+text, as is a @samp{#} with no number; a backslash does not stop it.  The
+@option{-o} goes with the URL it is given next to, and so with everything that
+URL makes: a name with no @samp{#} is written by each in turn.  @option{-O}
+names each file from its own URL.  Each transfer is a transfer: a failure of
+one does not stop the rest unless @option{--fail-early} says so, and the
+status is the last one's.  @option{-g} turns it all off.
+
+Over @code{sftp} the URLs for one server share a connection, so
+@samp{sftp://host/dir/f[1-100].txt} logs in once.  There is no wildcard
+in a remote path, such as @samp{*.txt}, as there is none in curl.
+
 @node SFTP and SCP
 @chapter SFTP and SCP
 
@@ -440,8 +486,11 @@ twist sftp://user@@host/path/to/file
 twist scp://user@@host/~/file
 @end example
 
-twist transfers one file over SSH.  @code{scp://} and @code{sftp://} are the
-same transfer, which uses the SFTP subsystem of the server: twist does not
+twist transfers a file over SSH for each URL, up or down, and lists a directory
+for an @code{sftp} URL.  Several URLs on a command line are several transfers,
+and those for one server share a connection (see @emph{Several URLs} below).  URLs are
+expanded as any URL is (@pxref{URL globbing}) with @samp{@{a,b@}} and
+@samp{[1-3]}, but a path has no wildcard such as @samp{*}.  @code{scp://} and @code{sftp://} are the same transfer, which uses the SFTP subsystem of the server: twist does not
 implement the old SCP protocol, as OpenSSH's own @command{scp} has not since
 version 9.0.  A server with no SFTP subsystem fails with an error that says
 so.  The path is absolute, except that @samp{/~/} begins in the directory

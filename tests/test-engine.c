@@ -165,6 +165,14 @@ test_url_ipv6 (void)
   check (twist_url_host_text (u, 0, buf, sizeof buf) == TWIST_OK
          && strcmp (buf, "[fe80::1]") == 0, "and without it, for a Host header");
   twist_url_free_int (u);
+  /* A URL with no port, such as a file, is written without one.  */
+  check (twist_url_parse_int ("file:///tmp/x%20y", &u) == TWIST_OK, "file");
+  text = twist_url_format (u);
+  check (text != NULL && strcmp (text, "file:///tmp/x%20y") == 0,
+         "a file URL has no :0");
+  free (text);
+  twist_url_free_int (u);
+
   check (twist_url_parse_int ("sftp://[fe80::1%253]/", &u) == TWIST_OK
          && strcmp (u->host, "fe80::1%3") == 0, "a zone that is a number");
   twist_url_free_int (u);

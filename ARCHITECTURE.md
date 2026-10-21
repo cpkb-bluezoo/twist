@@ -381,6 +381,14 @@ Host keys are checked against `~/.ssh/known_hosts` by default, as the
 curl tool does. A key that is missing or changed fails the transfer, there
 is no accept-new mode, and turning off peer verification (`-k`) skips the
 check. A pinned SHA-256 of the host key is the other way to trust a host.
+URL globbing (`src/engine/glob.c`) is the curl tool's: a pattern is parsed once
+into text, sets and ranges, and the URLs come from an odometer one at a time,
+the last glob going fastest, so a range of billions costs nothing until used.
+The command line pairs an `-o` with the URL as written and gives each URL the
+name with `#N` filled in; the transfers are ordinary ones on the operation's
+loop, so SFTP URLs on one server share a session. Errors carry the URL and a
+caret under the place, as curl's do.
+
 The connect timeout is one budget for the whole of making a connection, as in
 curl. The mail link (the shared dialer) arms a phase timer for a protocol that
 asks (`twist_mail_link_phase_begin`), and the protocol ends it when it is up;
@@ -436,9 +444,10 @@ refusal or nonsense leave a note that is said if authentication then fails, and
 the other keys and the password are tried.
 
 Work that can block stays off the loop: the ssh-agent socket is an ordinary
-non-blocking fd on the loop, but a FIDO token (libfido2 is blocking) runs
-as a job on the storage pool, and the result comes back through the loop's
-post queue.
+non-blocking fd on the loop, and reading the key files and known_hosts is a job
+on the storage pool whose result comes back through the loop's post queue.
+There is no token I/O in twist (no libfido2): a security key works through an
+ssh-agent, which does it.
 
 Known limitation: passphrase-protected OpenSSH-format private keys (what
 `ssh-keygen` writes by default) cannot be used, because their key

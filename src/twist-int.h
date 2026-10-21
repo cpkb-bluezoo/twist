@@ -571,6 +571,30 @@ void twist_rate_note (struct twist_rate *r, uint64_t n);
    limit if that is less, and at least 1.  */
 size_t twist_rate_chunk (const struct twist_rate *r, size_t max);
 
+/* URL globbing, as the curl tool has it.  A pattern is a URL with {a,b,c}
+   (one of these), [1-10] and [a-z] (a range; [01-10] keeps its width, [1-10:3]
+   steps) in it.  The URLs it makes come one at a time, in order, the last glob
+   going fastest, so a great many of them cost nothing until they are asked
+   for.  A backslash makes a brace or bracket plain.  [ ] around an IPv6
+   address is not a range.  */
+struct twist_glob;
+/* On an error ERR holds the reason, the URL and a caret under the place, and
+   TWIST_ERR_URL is returned.  A pattern with no glob makes one URL.  */
+int twist_glob_parse (const char *pattern, struct twist_glob **out, char *err,
+                      size_t cap);
+/* The next URL, in a new string: 1; 0 when there are no more; -1 if out of
+   memory.  */
+int twist_glob_next (struct twist_glob *g, char **url);
+/* How many globs the pattern has, and what the Nth (from 1) is in the URL
+   last made; NULL for a number that is none.  */
+size_t twist_glob_count (const struct twist_glob *g);
+const char *twist_glob_value (const struct twist_glob *g, size_t n);
+/* TEMPLATE with #N, N from 1 to the number of globs, replaced by the Nth
+   glob's value in the URL last made.  Anything else, #0 or #3 of two, a #
+   with no number, stays as it is.  A new string.  */
+char *twist_glob_name (const struct twist_glob *g, const char *tmpl);
+void twist_glob_free (struct twist_glob *g);
+
 struct twist_pool;
 struct twist_pool *twist_pool_new (void);
 void twist_pool_free (struct twist_pool *pool);

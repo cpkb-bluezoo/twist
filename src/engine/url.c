@@ -498,7 +498,7 @@ twist_url_format (const struct twist_url *url)
 {
   char buf[2048];
   char user[768] = "", password[768] = "";
-  char host[512];
+  char host[512], portbuf[16];
   int n;
 
   if (url == NULL || url->scheme == NULL)
@@ -509,14 +509,16 @@ twist_url_format (const struct twist_url *url)
     return NULL;
   if (twist_url_host_text (url, 1, host, sizeof host) != TWIST_OK)
     return NULL;
-  n = snprintf (buf, sizeof buf, "%s://%s%s%s%s%s:%d%s%s%s",
+  /* A scheme with no port, such as file, is written without one.  */
+  snprintf (portbuf, sizeof portbuf, url->port > 0 ? ":%d" : "", url->port);
+  n = snprintf (buf, sizeof buf, "%s://%s%s%s%s%s%s%s%s%s",
                 url->scheme,
                 user,
                 url->password != NULL ? ":" : "",
                 password,
                 url->user != NULL ? "@" : "",
                 host,
-                url->port,
+                portbuf,
                 url->path != NULL ? url->path : "/",
                 url->query != NULL ? "?" : "",
                 url->query != NULL ? url->query : "");
