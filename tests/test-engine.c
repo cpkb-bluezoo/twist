@@ -28,6 +28,7 @@
 #include <netinet/in.h>
 #include <poll.h>
 #include <pthread.h>
+#include <pwd.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -353,6 +354,41 @@ test_release_transfer (void)
   close (fd);
 }
 
+/* A person's home: $HOME if it says, else what the password file says.
+   They differ when something sets $HOME to somewhere else, and lack of it
+   (a cron job, a stripped environment) must not mean having no home.  */
+static void
+test_home_dir (void)
+{
+  char out[256], small[4];
+  char *saved = getenv ("HOME") != NULL ? twist_strdup (getenv ("HOME")) : NULL;
+  struct passwd pw, *res = NULL;
+  char buf[4096];
+
+  check (getpwuid_r (getuid (), &pw, buf, sizeof buf, &res) == 0 && res != NULL
+         && res->pw_dir != NULL && res->pw_dir[0] != 0, "a password entry");
+  if (res == NULL)
+    return;
+  setenv ("HOME", "/somewhere/else", 1);
+  check (twist_home_dir (out, sizeof out) == 1
+         && strcmp (out, "/somewhere/else") == 0, "HOME is used");
+  unsetenv ("HOME");
+  check (twist_home_dir (out, sizeof out) == 1 && strcmp (out, res->pw_dir) == 0,
+         "no HOME: the password file's");
+  setenv ("HOME", "", 1);
+  check (twist_home_dir (out, sizeof out) == 1 && strcmp (out, res->pw_dir) == 0,
+         "an empty HOME is no HOME");
+  setenv ("HOME", "/somewhere/else", 1);
+  check (twist_home_dir (small, sizeof small) == 0,
+         "a home that does not fit is not cut short");
+  unsetenv ("HOME");
+  check (twist_home_dir (small, sizeof small) == 0 || strlen (res->pw_dir) < 4,
+         "nor the password file's");
+  if (saved != NULL)
+    setenv ("HOME", saved, 1);
+  free (saved);
+}
+
 static void
 pool_work (void *arg)
 {
@@ -613,6 +649,7 @@ main (void)
   test_conn_pool ();
   test_multi_perform ();
   test_release_transfer ();
+  test_home_dir ();
   test_pool_completion_at_cleanup ();
   test_pool_eviction_stays_on_the_loop ();
   test_share_pool_does_not_outlive_loops ();

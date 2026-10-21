@@ -492,7 +492,8 @@ empty string means no agent.
 @subheading The host key
 
 The host key is checked against @file{~/.ssh/known_hosts}, as the curl tool
-does.  A host that is not in the file, or whose key differs from the one in
+does.  Here, and for the key files above, @file{~} is @env{HOME}, or the home
+directory in the password file if @env{HOME} is not set or is empty.  A host that is not in the file, or whose key differs from the one in
 it, fails the transfer (status 60); there is no way to accept a new host
 key by asking.  Add it with @command{ssh-keyscan}, connect once with
 @command{ssh}, or give its fingerprint with @option{--hostpubsha256}.

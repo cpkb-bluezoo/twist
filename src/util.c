@@ -22,8 +22,10 @@
 
 #include "twist-int.h"
 
+#include <pwd.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 void *
 twist_xmalloc (size_t n)
@@ -34,6 +36,27 @@ twist_xmalloc (size_t n)
     n = 1;
   p = malloc (n);
   return p;
+}
+
+int
+twist_home_dir (char *out, size_t cap)
+{
+  const char *home = getenv ("HOME");
+  struct passwd pw, *res = NULL;
+  char buf[4096];
+
+  if (home == NULL || home[0] == 0)
+    {
+      /* Several loops can ask at once, so the reentrant form.  */
+      if (getpwuid_r (getuid (), &pw, buf, sizeof buf, &res) != 0
+          || res == NULL || res->pw_dir == NULL || res->pw_dir[0] == 0)
+        return 0;
+      home = res->pw_dir;
+    }
+  if (strlen (home) >= cap)
+    return 0;
+  memcpy (out, home, strlen (home) + 1);
+  return 1;
 }
 
 char *

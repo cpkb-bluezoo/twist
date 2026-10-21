@@ -378,7 +378,8 @@ twist_ssh_load_start (struct twist_ssh *s)
 {
   struct twist_easy *e = s->easy;
   struct twist_ssh_load *l = calloc (1, sizeof *l);
-  const char *home = getenv ("HOME");
+  char home[1024];
+  int have_home = twist_home_dir (home, sizeof home);
   int rc;
 
   if (l == NULL)
@@ -386,13 +387,13 @@ twist_ssh_load_start (struct twist_ssh *s)
   l->ssh = s;
   l->verify = e->verifypeer;
   l->knownhosts = copy_or_null (e->ssh_knownhosts);
-  l->home = copy_or_null (home);
+  l->home = have_home ? twist_strdup (home) : NULL;
   l->keyfile = copy_or_null (e->sslkey);
   l->passphrase = copy_or_null (e->keypasswd);
   host_name (e->url, l->host, sizeof l->host);
   l->port = (unsigned) e->url->port;
   if ((e->ssh_knownhosts != NULL && l->knownhosts == NULL)
-      || (home != NULL && l->home == NULL)
+      || (have_home && l->home == NULL)
       || (e->sslkey != NULL && l->keyfile == NULL)
       || (e->keypasswd != NULL && l->passphrase == NULL))
     {

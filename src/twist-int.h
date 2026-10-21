@@ -927,6 +927,10 @@ int twist_altsvc_note (struct twist_altsvc *a, const char *origin,
 const char *twist_altsvc_lookup (struct twist_altsvc *a, const char *origin);
 
 char *twist_strdup (const char *s);
+/* The user's home directory: $HOME if it is set and not empty, else the one
+   in the password file.  Copied to OUT (CAP bytes); returns 1, or 0 if there
+   is none or it does not fit.  */
+int twist_home_dir (char *out, size_t cap);
 int twist_has_ctl (const char *s);
 void *twist_xmalloc (size_t n);
 size_t twist_write_bytes (twist_write_callback cb, void *user,
