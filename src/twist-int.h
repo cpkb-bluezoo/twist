@@ -172,6 +172,12 @@ struct twist_multi
   struct twist_pool *pool;
   struct twist_dns_cache *dns;
   struct twist_session *sessions;
+  /* Pools other than ours, a share's, that transfers of this handle parked
+     connections in.  They outlive this handle's loop, so what is bound to
+     the loop is taken out when the handle goes.  */
+  struct twist_pool **shared_pools;
+  size_t n_shared_pools;
+  size_t cap_shared_pools;
 };
 
 struct twist_session
@@ -538,6 +544,9 @@ int twist_pool_put_idle (struct twist_pool *pool, const char *key,
                          struct twist_connection *conn, uint64_t now_ms);
 void twist_pool_expire (struct twist_pool *pool, uint64_t now_ms);
 void twist_pool_set_lock (struct twist_pool *pool, int enabled);
+size_t twist_pool_count (struct twist_pool *pool);
+void twist_pool_drop_loop (struct twist_pool *pool, struct twist_loop *loop);
+void twist_multi_note_pool (struct twist_multi *multi, struct twist_pool *pool);
 
 enum twist_proxy_kind
 {

@@ -85,6 +85,32 @@ multi_watch (void *user, int fd, int interest)
   multi->socket_cb (NULL, fd, what, multi->socket_user, NULL);
 }
 
+/* Remember that POOL, which is not ours, holds or may hold connections
+   bound to this handle's loop.  */
+void
+twist_multi_note_pool (struct twist_multi *multi, struct twist_pool *pool)
+{
+  size_t i;
+
+  if (multi == NULL || pool == NULL || pool == multi->pool)
+    return;
+  for (i = 0; i < multi->n_shared_pools; i++)
+    if (multi->shared_pools[i] == pool)
+      return;
+  if (multi->n_shared_pools == multi->cap_shared_pools)
+    {
+      size_t cap = multi->cap_shared_pools == 0 ? 2 : multi->cap_shared_pools * 2;
+      struct twist_pool **grown = realloc (multi->shared_pools,
+                                           cap * sizeof *grown);
+
+      if (grown == NULL)
+        return;
+      multi->shared_pools = grown;
+      multi->cap_shared_pools = cap;
+    }
+  multi->shared_pools[multi->n_shared_pools++] = pool;
+}
+
 void
 twist_multi_cleanup (twist_multi *multi)
 {
@@ -111,8 +137,13 @@ twist_multi_cleanup (twist_multi *multi)
   if (multi->own_loop)
     {
       twist_loop_drain (multi->loop);
+      /* A share's pool keeps what it holds after this loop is gone; what is
+         bound to the loop must not stay in it.  */
+      for (i = 0; i < multi->n_shared_pools; i++)
+        twist_pool_drop_loop (multi->shared_pools[i], multi->loop);
       twist_loop_free (multi->loop);
     }
+  free (multi->shared_pools);
   free (multi->easies);
   free (multi->done);
   free (multi->done_result);
@@ -138,6 +169,8 @@ twist_multi_add_handle (twist_multi *multi, twist_easy *easy)
   multi->easies[multi->n_easies++] = easy;
   easy->multi = multi;
   easy->loop = multi->loop;
+  if (easy->share != NULL)
+    twist_multi_note_pool (multi, easy->share->pool);
   easy->done = 0;
   return twist_transfer_start (easy);
 }

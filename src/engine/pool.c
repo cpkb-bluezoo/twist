@@ -184,15 +184,19 @@ count_key (struct twist_pool *pool, const char *key)
   return n;
 }
 
+/* The idle slot of LOOP that has waited longest, for KEY if given.  Only a
+   loop's own slots: its connections, timers and poller belong to the thread
+   that runs it, and a pool shared by several loops is touched by all of
+   them.  */
 static struct twist_pool_slot *
-oldest (struct twist_pool *pool, const char *key)
+oldest (struct twist_pool *pool, const char *key, struct twist_loop *loop)
 {
   struct twist_pool_slot *s;
   struct twist_pool_slot *best = NULL;
 
   for (s = pool->head; s != NULL; s = s->next)
     {
-      if (s->discarded || s->queued)
+      if (s->discarded || s->queued || s->loop != loop)
         continue;
       if (key != NULL && (s->key == NULL || strcmp (s->key, key) != 0))
         continue;
@@ -222,6 +226,20 @@ twist_pool_free (struct twist_pool *pool)
     slot_discard (pool, pool->head);
   pthread_mutex_destroy (&pool->mu);
   free (pool);
+}
+
+/* How many connections are parked.  */
+size_t
+twist_pool_count (struct twist_pool *pool)
+{
+  size_t n;
+
+  if (pool == NULL)
+    return 0;
+  pool_lock (pool);
+  n = pool->n;
+  pool_unlock (pool);
+  return n;
 }
 
 void
@@ -275,9 +293,12 @@ twist_pool_put_idle (struct twist_pool *pool, const char *key,
   struct twist_pool_slot *s;
   struct twist_endpoint *ep;
   struct twist_pool_slot *drop;
+  struct twist_loop *loop;
 
   if (pool == NULL || key == NULL || conn == NULL)
     return TWIST_ERR_INVAL;
+  ep = twist_connection_endpoint (conn);
+  loop = twist_endpoint_loop (ep);
   s = calloc (1, sizeof *s);
   if (s == NULL)
     return TWIST_ERR_NOMEM;
@@ -288,32 +309,67 @@ twist_pool_put_idle (struct twist_pool *pool, const char *key,
       return TWIST_ERR_NOMEM;
     }
   s->conn = conn;
-  s->loop = twist_endpoint_loop (twist_connection_endpoint (conn));
+  s->loop = loop;
   s->idle_at = now_ms;
   s->pool = pool;
-  ep = twist_connection_endpoint (conn);
-  ep->user_data = s;
-  twist_connection_set_handler (conn, &idle_handler);
-  if (s->loop != NULL)
-    twist_loop_schedule (s->loop, now_ms + TWIST_POOL_AGE_MS, idle_timeout, s,
-                         &s->timer);
   pool_lock (pool);
   while (count_key (pool, key) >= TWIST_POOL_PER_KEY
          || pool->n >= TWIST_POOL_TOTAL)
     {
       drop = oldest (pool, count_key (pool, key) >= TWIST_POOL_PER_KEY
-                     ? key : NULL);
+                     ? key : NULL, loop);
       if (drop == NULL)
         break;
       pool_unlock (pool);
       slot_discard (pool, drop);
       pool_lock (pool);
     }
+  if (count_key (pool, key) >= TWIST_POOL_PER_KEY
+      || pool->n >= TWIST_POOL_TOTAL)
+    {
+      /* Full of other loops' connections, which are not ours to free.  The
+         connection stays with the caller.  */
+      pool_unlock (pool);
+      free (s->key);
+      free (s);
+      return TWIST_ERR_AGAIN;
+    }
+  /* There is room: the pool takes the connection.  This is done with the
+     lock held so the slot is whole when anyone can see it.  */
+  ep->user_data = s;
+  twist_connection_set_handler (conn, &idle_handler);
+  if (loop != NULL)
+    twist_loop_schedule (loop, now_ms + TWIST_POOL_AGE_MS, idle_timeout, s,
+                         &s->timer);
   s->next = pool->head;
   pool->head = s;
   pool->n++;
   pool_unlock (pool);
   return TWIST_OK;
+}
+
+/* Discard every connection parked for LOOP.  A loop is freed with the
+   multi handle that owns it, and a pool that outlives it, a share's, must
+   not keep what is bound to it.  Called on the loop's thread, while it is
+   still there.  */
+void
+twist_pool_drop_loop (struct twist_pool *pool, struct twist_loop *loop)
+{
+  struct twist_pool_slot *s;
+
+  if (pool == NULL || loop == NULL)
+    return;
+  for (;;)
+    {
+      pool_lock (pool);
+      for (s = pool->head; s != NULL; s = s->next)
+        if (s->loop == loop && !s->discarded)
+          break;
+      pool_unlock (pool);
+      if (s == NULL)
+        return;
+      slot_discard (pool, s);
+    }
 }
 
 int

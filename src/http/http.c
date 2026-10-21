@@ -250,6 +250,9 @@ http_park (struct twist_http *h)
   pool = http_pool (h);
   if (pool == NULL || http_pool_key (h, key, sizeof key) != TWIST_OK)
     return;
+  /* A pool that is not the handle's own outlives its loop.  */
+  if (h->easy->multi != NULL)
+    twist_multi_note_pool (h->easy->multi, pool);
   c = h->conn;
   h->conn = NULL;
   if (twist_pool_put (pool, key, c) != TWIST_OK)

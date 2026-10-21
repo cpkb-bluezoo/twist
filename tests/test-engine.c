@@ -26,6 +26,8 @@
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <netinet/in.h>
+#include <poll.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -383,6 +385,225 @@ test_pool_completion_at_cleanup (void)
   check (done == 5, "completions posted before cleanup are delivered");
 }
 
+
+/* A pool shared by several loops holds a few connections in all.  When it
+   is full the oldest is dropped; that must be one of the loop that is
+   parking a new one, because a loop's connections, its timers and its
+   poller belong to the thread that runs it.  Another loop's are not ours
+   to free.  */
+static void
+test_pool_eviction_stays_on_the_loop (void)
+{
+  struct twist_loop *a = twist_loop_new (1);
+  struct twist_loop *b = twist_loop_new (1);
+  struct twist_pool *pool = twist_pool_new ();
+  struct twist_connection *got = NULL;
+  char key[16];
+  int i, kept = 0, left_of_b = 0;
+
+  check (a != NULL && b != NULL && pool != NULL, "eviction setup");
+  twist_pool_set_lock (pool, 1);
+  for (i = 0; i < 20; i++)
+    {
+      snprintf (key, sizeof key, "a%d", i);
+      check (twist_pool_put_idle (pool, key, twist_connection_new (a), 1000)
+             == TWIST_OK, "park on a");
+    }
+  /* b parks more than there is room for.  What it cannot make room for in
+     its own connections is not parked.  */
+  for (i = 0; i < 20; i++)
+    {
+      struct twist_connection *c = twist_connection_new (b);
+
+      snprintf (key, sizeof key, "b%d", i);
+      if (twist_pool_put_idle (pool, key, c, 2000) != TWIST_OK)
+        twist_connection_free (c);
+    }
+  for (i = 0; i < 20; i++)
+    {
+      snprintf (key, sizeof key, "a%d", i);
+      if (twist_pool_take (pool, key, &got) == TWIST_OK)
+        {
+          kept++;
+          twist_connection_free (got);
+        }
+    }
+  check (kept == 20, "another loop's parked connections are not evicted");
+  for (i = 0; i < 20; i++)
+    {
+      snprintf (key, sizeof key, "b%d", i);
+      if (twist_pool_take (pool, key, &got) == TWIST_OK)
+        {
+          left_of_b++;
+          twist_connection_free (got);
+        }
+    }
+  check (left_of_b > 0 && left_of_b <= 12, "b was held to the room there was");
+  twist_pool_free (pool);
+  twist_loop_free (a);
+  twist_loop_free (b);
+}
+
+/* ---- a small HTTP/1.1 server that keeps connections open ---- */
+
+#define KA_MAX 16
+
+struct ka
+{
+  int listen_fd;
+  int port;
+  int conns[KA_MAX];
+  int stop;
+  pthread_t thread;
+};
+
+static void *
+ka_serve (void *arg)
+{
+  struct ka *k = arg;
+  static const char reply[] =
+    "HTTP/1.1 200 OK\r\nContent-Length: 6\r\nContent-Type: text/plain\r\n\r\n"
+    "hello\n";
+  struct pollfd fds[KA_MAX + 1];
+  int i, n;
+
+  while (!__atomic_load_n (&k->stop, __ATOMIC_ACQUIRE))
+    {
+      n = 0;
+      fds[n].fd = k->listen_fd;
+      fds[n++].events = POLLIN;
+      for (i = 0; i < KA_MAX; i++)
+        if (k->conns[i] >= 0)
+          {
+            fds[n].fd = k->conns[i];
+            fds[n++].events = POLLIN;
+          }
+      if (poll (fds, (nfds_t) n, 50) <= 0)
+        continue;
+      if (fds[0].revents & POLLIN)
+        {
+          int c = accept (k->listen_fd, NULL, NULL);
+
+          for (i = 0; c >= 0 && i < KA_MAX; i++)
+            if (k->conns[i] < 0)
+              {
+                k->conns[i] = c;
+                c = -1;
+              }
+          if (c >= 0)
+            close (c);
+        }
+      for (i = 0; i < KA_MAX; i++)
+        {
+          char buf[2048];
+          ssize_t got;
+          int j, hit = 0;
+
+          if (k->conns[i] < 0)
+            continue;
+          for (j = 1; j < n; j++)
+            if (fds[j].fd == k->conns[i] && (fds[j].revents & (POLLIN | POLLHUP)))
+              hit = 1;
+          if (!hit)
+            continue;
+          got = read (k->conns[i], buf, sizeof buf);
+          if (got <= 0)
+            {
+              close (k->conns[i]);
+              k->conns[i] = -1;
+            }
+          else if (write (k->conns[i], reply, sizeof reply - 1) < 0)
+            {
+              close (k->conns[i]);
+              k->conns[i] = -1;
+            }
+        }
+    }
+  for (i = 0; i < KA_MAX; i++)
+    if (k->conns[i] >= 0)
+      close (k->conns[i]);
+  return NULL;
+}
+
+static int
+ka_start (struct ka *k)
+{
+  struct sockaddr_in sin;
+  socklen_t len = sizeof sin;
+  int i;
+
+  memset (k, 0, sizeof *k);
+  for (i = 0; i < KA_MAX; i++)
+    k->conns[i] = -1;
+  k->listen_fd = socket (AF_INET, SOCK_STREAM, 0);
+  if (k->listen_fd < 0)
+    return -1;
+  memset (&sin, 0, sizeof sin);
+  sin.sin_family = AF_INET;
+  sin.sin_addr.s_addr = htonl (INADDR_LOOPBACK);
+  if (bind (k->listen_fd, (struct sockaddr *) &sin, sizeof sin) != 0
+      || listen (k->listen_fd, 8) != 0
+      || getsockname (k->listen_fd, (struct sockaddr *) &sin, &len) != 0)
+    return -1;
+  k->port = ntohs (sin.sin_port);
+  return pthread_create (&k->thread, NULL, ka_serve, k);
+}
+
+static void
+ka_stop (struct ka *k)
+{
+  __atomic_store_n (&k->stop, 1, __ATOMIC_RELEASE);
+  pthread_join (k->thread, NULL);
+  close (k->listen_fd);
+}
+
+static size_t
+ka_body (char *ptr, size_t size, size_t nmemb, void *user)
+{
+  size_t *total = user;
+
+  (void) ptr;
+  *total += size * nmemb;
+  return size * nmemb;
+}
+
+/* A share keeps its connection pool for longer than any transfer, and each
+   twist_easy_perform makes its own loop and frees it.  A connection parked
+   by a transfer is bound to that loop; it cannot outlive it.  Left in the
+   share's pool it is used by a later transfer, or freed by the share's
+   cleanup, against memory that is gone.  So nothing may be left parked for a
+   loop that is gone.  (valgrind shows the harm; this shows the cause.)  */
+static void
+test_share_pool_does_not_outlive_loops (void)
+{
+  struct ka k;
+  twist_share *share = twist_share_init ();
+  char url[64];
+  int i;
+
+  check (share != NULL && ka_start (&k) == 0, "keep-alive server");
+  snprintf (url, sizeof url, "http://127.0.0.1:%d/", k.port);
+  check (twist_share_setopt (share, TWIST_LOCK_DATA_CONNECT) == TWIST_OK,
+         "share lock");
+  for (i = 0; i < 3; i++)
+    {
+      twist_easy *easy = twist_easy_init ();
+      size_t total = 0;
+
+      twist_easy_setopt (easy, TWISTOPT_URL, url);
+      twist_easy_setopt (easy, TWISTOPT_SHARE, share);
+      twist_easy_setopt (easy, TWISTOPT_WRITEFUNCTION, ka_body);
+      twist_easy_setopt (easy, TWISTOPT_WRITEDATA, &total);
+      check (twist_easy_perform (easy) == TWIST_OK && total == 6,
+             "a transfer on a share");
+      twist_easy_cleanup (easy);
+      check (twist_pool_count (share->pool) == 0,
+             "nothing stays parked for a loop that has been freed");
+    }
+  twist_share_cleanup (share);
+  ka_stop (&k);
+}
+
 int
 main (void)
 {
@@ -393,5 +614,7 @@ main (void)
   test_multi_perform ();
   test_release_transfer ();
   test_pool_completion_at_cleanup ();
+  test_pool_eviction_stays_on_the_loop ();
+  test_share_pool_does_not_outlive_loops ();
   return tests_finish ();
 }
