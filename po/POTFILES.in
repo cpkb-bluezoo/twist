@@ -2,3 +2,4 @@ src/strerror.c
 src/main.c
 src/file/file.c
 src/http/http.c
+src/ssh/ssh.c

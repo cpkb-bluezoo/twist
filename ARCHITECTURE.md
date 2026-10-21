@@ -353,8 +353,37 @@ later is a new `attach` function, not a new reactor.
 | dict, gopher, gophers, telnet, rtsp | TCP endpoint | new, small |
 | tftp | datagram handler | new |
 | file | storage pool | new |
-| scp, sftp | SSH under the same endpoint | new, large |
+| scp, sftp | TCP endpoint, SSH session (foxtrot) on it, SFTP on a channel | foxtrot |
 | smb, smbs, rtmp, rtmps | TCP endpoint | new, large |
+
+`scp` and `sftp` are one handler. foxtrot is an I/O-free SSH engine
+(transport, authentication, channels, SFTP v3) in the same style as
+quickstep: the endpoint feeds bytes to `gf_session_receive`, the session's
+`write` callback goes to `twist_endpoint_send`, and its deadline is armed
+on the loop. The SCP wire protocol is not implemented. `scp://` runs over
+SFTP, as OpenSSH's own `scp` has since 9.0, so a server with no `sftp`
+subsystem fails with an error that says so. The two schemes differ only in
+what the URL may mean: `scp://` names one file and never lists a
+directory, and shell wildcards are rejected, not expanded.
+
+Host keys are checked against `~/.ssh/known_hosts` by default, as the
+curl tool does. A key that is missing or changed fails the transfer, there
+is no accept-new mode, and turning off peer verification (`-k`) skips the
+check. A pinned SHA-256 of the host key is the other way to trust a host.
+Work that can block stays off the loop: the ssh-agent socket is an ordinary
+non-blocking fd on the loop, but a FIDO token (libfido2 is blocking) runs
+as a job on the storage pool, and the result comes back through the loop's
+post queue.
+
+Known limitation: passphrase-protected OpenSSH-format private keys (what
+`ssh-keygen` writes by default) cannot be used, because their key
+derivation, bcrypt-pbkdf, is not in libgcrypt. twist will not take it from
+another source, to keep the licensing of the program clear. The limitation
+ends when libgcrypt provides it. Keys held by an ssh-agent are unaffected,
+and so are unencrypted keys and the encrypted formats foxtrot reads
+without bcrypt (PKCS#8 under PBES2, PuTTY version 3).
+foxtrot needs libgcrypt 1.12.4 or later (earlier ones abort on some Ed25519
+keys a peer can send), which twist accepts as a dependency.
 
 DNS is not a URL scheme the easy handle dials for its own sake. It is
 the resolver the dialer uses, implemented as a datagram handler, with

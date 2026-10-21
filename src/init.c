@@ -22,6 +22,8 @@
 
 #include "twist-int.h"
 
+#include <foxtrot/crypto.h>
+
 static int inited;
 
 int
@@ -32,6 +34,10 @@ twist_global_init (void)
   if (inited)
     return TWIST_OK;
   twist_i18n_init ();
+  /* libgcrypt must be initialised before the storage pool starts threads.
+     Only SSH needs it, and foxtrot refuses a libgcrypt that is too old, so
+     a failure here is not fatal: the SSH schemes report it when used.  */
+  (void) gf_crypto_init ();
   rc = twist_tls_register ();
   if (rc != TWIST_OK)
     return rc;

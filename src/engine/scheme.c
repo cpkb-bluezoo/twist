@@ -92,6 +92,12 @@ attach_dict (struct twist_easy *easy)
 }
 
 static int
+attach_ssh (struct twist_easy *easy)
+{
+  return twist_ssh_attach (easy);
+}
+
+static int
 attach_tftp (struct twist_easy *easy)
 {
   return twist_tftp_attach (easy);
@@ -132,8 +138,8 @@ static const struct twist_scheme schemes[] = {
   { "rtsp", 554, TWIST_SCHEME_PROXY_OK, twist_scheme_unsupported },
   { "tftp", 69, TWIST_SCHEME_DATAGRAM | TWIST_SCHEME_READY, attach_tftp },
   { "file", 0, TWIST_SCHEME_READY, attach_file },
-  { "scp", 22, TWIST_SCHEME_PROXY_OK, twist_scheme_unsupported },
-  { "sftp", 22, TWIST_SCHEME_PROXY_OK, twist_scheme_unsupported },
+  { "scp", 22, TWIST_SCHEME_PROXY_OK | TWIST_SCHEME_READY, attach_ssh },
+  { "sftp", 22, TWIST_SCHEME_PROXY_OK | TWIST_SCHEME_READY, attach_ssh },
   { "smb", 445, TWIST_SCHEME_PROXY_OK, twist_scheme_unsupported },
   { "smbs", 445, TWIST_SCHEME_TLS | TWIST_SCHEME_PROXY_OK, twist_scheme_unsupported },
   { "rtmp", 1935, TWIST_SCHEME_PROXY_OK, twist_scheme_unsupported },

@@ -3,7 +3,16 @@ Twist TODO List
 
   [ ] TELNET
   [ ] RTSP
-  [ ] SCP/SFTP
+  [ ] SCP/SFTP, one handler over foxtrot (../foxtrot).  scp:// runs over
+      SFTP; there is no SCP wire protocol.  foxtrot is ready for FIDO
+      keys on the client side; twist supplies the token I/O (libfido2,
+      optional, on the storage pool).  Needs in twist: an ssh-agent
+      client (on the loop), known_hosts checking as curl does it
+      (~/.ssh/known_hosts, -k skips, no accept-new), and options for
+      all of them.  Requires libgcrypt >= 1.12.4.
+  [ ] Passphrase-protected OpenSSH-format private keys.  Blocked on
+      bcrypt-pbkdf being available in libgcrypt; it is deliberately not
+      taken from anywhere else.  ssh-agent is the workaround.
   [ ] SMB/SMBS
   [ ] RTMP/RTMPS
   [ ] NTLM and Negotiate, only after an explicit dependency decision

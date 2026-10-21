@@ -57,7 +57,8 @@ enum twist_error
   TWIST_ERR_ABORTED = 14,
   TWIST_ERR_FILE = 15,
   TWIST_ERR_HTTP = 16,
-  TWIST_ERR_ENCODING = 17
+  TWIST_ERR_ENCODING = 17,
+  TWIST_ERR_HOSTKEY = 18
 };
 
 const char *twist_strerror (int err);

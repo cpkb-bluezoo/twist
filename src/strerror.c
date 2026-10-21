@@ -64,6 +64,8 @@ twist_strerror (int err)
       return _("server returned an error");
     case TWIST_ERR_ENCODING:
       return _("bad content encoding");
+    case TWIST_ERR_HOSTKEY:
+      return _("host key verification failed");
     default:
       return _("unknown error");
     }

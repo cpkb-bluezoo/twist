@@ -36,6 +36,8 @@ test_errors (void)
                  twist_strerror (TWIST_ERR_URL)) != 0, "file distinct");
   check (strcmp (twist_strerror (TWIST_ERR_HTTP),
                  twist_strerror (TWIST_ERR_PROTOCOL)) != 0, "http distinct");
+  check (strcmp (twist_strerror (TWIST_ERR_HOSTKEY),
+                 twist_strerror (TWIST_ERR_AUTH)) != 0, "hostkey distinct");
   easy = twist_easy_init ();
   check (easy != NULL && twist_easy_error (easy) == NULL, "no detail");
   twist_easy_set_error (easy, twist_strdup ("could not open file /no/such"));

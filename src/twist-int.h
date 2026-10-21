@@ -837,6 +837,26 @@ size_t twist_dict_receive (struct twist_dict *dict, const uint8_t *data,
 void twist_dict_closed (struct twist_dict *dict, int err);
 int twist_dict_attach (struct twist_easy *easy);
 
+/* scp and sftp: an SSH session (foxtrot) on a TCP endpoint.  The output
+   of a handler built with twist_ssh_new (easy, 0) goes to the sink set
+   with twist_ssh_set_sink, and its clock is set with twist_ssh_set_time
+   (microseconds), so that it can be driven in-process.  twist_ssh_start
+   sends our identification and begins the key exchange.  */
+struct twist_ssh;
+struct twist_ssh *twist_ssh_new (struct twist_easy *easy, int live);
+void twist_ssh_free (void *ssh);
+void twist_ssh_set_sink (struct twist_ssh *ssh,
+                         int (*sink) (void *user, const uint8_t *data,
+                                      size_t len),
+                         void *user);
+void twist_ssh_set_time (struct twist_ssh *ssh, uint64_t now_us);
+int twist_ssh_start (struct twist_ssh *ssh);
+size_t twist_ssh_receive (struct twist_ssh *ssh, const uint8_t *data,
+                          size_t len);
+void twist_ssh_timeout (struct twist_ssh *ssh);
+uint64_t twist_ssh_deadline (const struct twist_ssh *ssh);
+int twist_ssh_attach (struct twist_easy *easy);
+
 struct twist_tftp;
 struct twist_tftp *twist_tftp_new (struct twist_easy *easy, int live);
 void twist_tftp_free (void *tftp);
@@ -900,6 +920,7 @@ void twist_i18n_init (void);
 
 void twist_easy_set_error (struct twist_easy *easy, char *msg);
 int twist_easy_finish (struct twist_easy *easy, int result);
+void twist_easy_release_transfer (struct twist_easy *easy);
 int twist_transfer_start (struct twist_easy *easy);
 
 #endif /* TWIST_INT_H */

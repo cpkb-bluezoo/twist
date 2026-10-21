@@ -77,6 +77,26 @@ AS_IF([test "x$with_quickstep" != xyes],
 PKG_CHECK_MODULES([QUICKSTEP], [quickstep], [],
   [AC_MSG_ERROR([quickstep is not installed.  pkg-config must see quickstep.pc])])
 
+dnl foxtrot is the SSH engine under scp and sftp, installed beside quickstep.
+dnl It needs libgcrypt 1.12.4 or later, which it checks when it starts.
+AC_ARG_WITH([foxtrot],
+  [AS_HELP_STRING([--with-foxtrot=PREFIX],
+     [installation prefix of foxtrot])],
+  [], [with_foxtrot=yes])
+AS_IF([test "x$with_foxtrot" = xno],
+  [AC_MSG_ERROR([foxtrot is required])])
+AS_IF([test "x$with_foxtrot" != xyes],
+  [tw_ft_pc=
+   AS_IF([test -d "$with_foxtrot/lib/pkgconfig"],
+     [tw_ft_pc="$with_foxtrot/lib/pkgconfig"])
+   AS_IF([test -d "$with_foxtrot/lib64/pkgconfig"],
+     [tw_ft_pc="$with_foxtrot/lib64/pkgconfig${tw_ft_pc:+:}$tw_ft_pc"])
+   AS_IF([test -n "$tw_ft_pc"],
+     [PKG_CONFIG_PATH="$tw_ft_pc${PKG_CONFIG_PATH:+:}$PKG_CONFIG_PATH"
+      export PKG_CONFIG_PATH])])
+PKG_CHECK_MODULES([FOXTROT], [foxtrot], [],
+  [AC_MSG_ERROR([foxtrot is not installed.  pkg-config must see foxtrot.pc])])
+
 AC_CHECK_HEADER([zlib.h], [], [AC_MSG_ERROR([zlib.h is required])])
 tw_save_LIBS=$LIBS
 AC_CHECK_LIB([z], [inflate],

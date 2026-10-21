@@ -20,11 +20,12 @@ lib_LTLIBRARIES = libtwist.la
 bin_PROGRAMS = twist
 
 AM_CPPFLAGS = -I$(top_srcdir)/include -I$(top_srcdir)/src $(QUICKSTEP_CFLAGS) \
-  -DLOCALEDIR=\"$(localedir)\"
+  $(FOXTROT_CFLAGS) -DLOCALEDIR=\"$(localedir)\"
 AM_CFLAGS = $(STD_CFLAGS) $(WARN_CFLAGS)
 
 libtwist_la_LDFLAGS = -version-info $(LIBTWIST_LTVERSION) -no-undefined
-libtwist_la_LIBADD = $(QUICKSTEP_LIBS) $(ZLIB_LIBS) $(LTLIBINTL)
+libtwist_la_LIBADD = $(QUICKSTEP_LIBS) $(FOXTROT_LIBS) $(ZLIB_LIBS) \
+  $(LTLIBINTL)
 
 ## One library.  Sources are grouped by layer so a new scheme is a
 ## directory, not another file in a flat list.
@@ -34,7 +35,7 @@ libtwist_la_LIBADD = $(QUICKSTEP_LIBS) $(ZLIB_LIBS) $(LTLIBINTL)
 ##   dns/      DNS client: message parser, transport order, resolver
 ##   auth/     SASL clients, HTTP Basic and Digest, MD5, SHA-256
 ##   http/     HTTP/1, HTTP/2, HTTP/3 and cookies
-##   ftp/ file/ mail/ mqtt/ ldap/ ws/ gopher/ dict/ tftp/  scheme handlers
+##   ftp/ file/ mail/ mqtt/ ldap/ ws/ gopher/ dict/ tftp/ ssh/  scheme handlers
 ##   mime/     streaming MIME writer
 ##   tls/      quickstep TLS and QUIC under the connection
 
@@ -100,6 +101,7 @@ libtwist_la_SOURCES = \
   gopher/gopher.c \
   dict/dict.c \
   tftp/tftp.c \
+  ssh/ssh.c \
   tls/identity.c \
   tls/quic.c \
   tls/tls.c

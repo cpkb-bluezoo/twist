@@ -144,6 +144,8 @@ cli_status (int err, const char *url)
       return 47;
     case TWIST_ERR_CLOSED:
       return 52;
+    case TWIST_ERR_HOSTKEY:
+      return 60;
     case TWIST_ERR_ENCODING:
       return 61;
     case TWIST_ERR_AUTH:

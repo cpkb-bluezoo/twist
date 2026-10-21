@@ -6,22 +6,23 @@
 ## tests 'make check' runs.  Peers on the network live in ../integration
 ## and are started with 'make check-integration'.
 
-AM_CPPFLAGS = -I$(top_srcdir)/include -I$(top_srcdir)/src $(QUICKSTEP_CFLAGS)
+AM_CPPFLAGS = -I$(top_srcdir)/include -I$(top_srcdir)/src $(QUICKSTEP_CFLAGS) \
+	$(FOXTROT_CFLAGS)
 AM_CFLAGS = $(STD_CFLAGS) $(WARN_CFLAGS)
 
 LDADD = $(top_builddir)/src/libtwist.la $(ZLIB_LIBS)
 
-## quickstep is installed, and the dynamic linker may not search its
-## libdir.  The libtool wrappers only add the uninstalled libtwist.
+## quickstep and foxtrot are installed, and the dynamic linker may not search
+## their libdirs.  The libtool wrappers only add the uninstalled libtwist.
 AM_TESTS_ENVIRONMENT = \
-	LD_LIBRARY_PATH="`$(PKG_CONFIG) --variable=libdir quickstep`:$$LD_LIBRARY_PATH"; \
+	LD_LIBRARY_PATH="`$(PKG_CONFIG) --variable=libdir quickstep`:`$(PKG_CONFIG) --variable=libdir foxtrot`:$$LD_LIBRARY_PATH"; \
 	export LD_LIBRARY_PATH;
 
 noinst_HEADERS = check.h http-ev.h feed.h body.h
 
 TESTS = test-reactor test-engine test-http test-auth test-dns test-ftp \
 	test-mail test-mqtt test-ldap test-ws test-gopher test-dict \
-	test-tftp test-file test-tls test-errors test-coding
+	test-tftp test-file test-tls test-errors test-coding test-ssh
 check_PROGRAMS = $(TESTS)
 
 test_reactor_SOURCES = test-reactor.c check.c
@@ -41,3 +42,5 @@ test_file_SOURCES = test-file.c check.c
 test_tls_SOURCES = test-tls.c check.c
 test_errors_SOURCES = test-errors.c check.c
 test_coding_SOURCES = test-coding.c
+test_ssh_SOURCES = test-ssh.c check.c
+test_ssh_LDADD = $(LDADD) $(FOXTROT_LIBS)
