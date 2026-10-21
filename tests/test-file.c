@@ -26,6 +26,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
+#include <unistd.h>
 
 static int file_body_calls;
 static int file_hopped;
@@ -114,10 +116,169 @@ test_file_url (void)
   }
 }
 
+
+/* ---- a file of several chunks ---- */
+
+#define BIG_FILE (3 * 1024 * 1024)
+
+static char big_path[64];
+
+static unsigned char
+big_byte (size_t i)
+{
+  return (unsigned char) (i * 31 + (i >> 9));
+}
+
+static int
+make_big_file (void)
+{
+  int fd;
+  size_t i;
+  unsigned char *buf = malloc (BIG_FILE);
+
+  snprintf (big_path, sizeof big_path, "/tmp/twist-test-file-XXXXXX");
+  fd = mkstemp (big_path);
+  if (fd < 0 || buf == NULL)
+    return -1;
+  for (i = 0; i < BIG_FILE; i++)
+    buf[i] = big_byte (i);
+  if (write (fd, buf, BIG_FILE) != BIG_FILE)
+    {
+      close (fd);
+      free (buf);
+      return -1;
+    }
+  close (fd);
+  free (buf);
+  return 0;
+}
+
+static size_t big_seen;
+static int big_wrong;
+static int big_calls;
+static int big_abort_after;	/* Refuse the data after this many calls.  */
+
+static size_t
+big_body (char *ptr, size_t size, size_t nmemb, void *userdata)
+{
+  size_t n = size * nmemb, i;
+
+  (void) userdata;
+  big_calls++;
+  if (big_abort_after > 0 && big_calls > big_abort_after)
+    return 0;
+  for (i = 0; i < n; i++)
+    if ((unsigned char) ptr[i] != big_byte (big_seen + i))
+      big_wrong = 1;
+  big_seen += n;
+  return n;
+}
+
+static twist_easy *
+big_easy (void)
+{
+  twist_easy *easy = twist_easy_init ();
+  char url[96];
+
+  snprintf (url, sizeof url, "file://%s", big_path);
+  twist_easy_setopt (easy, TWISTOPT_URL, url);
+  twist_easy_setopt (easy, TWISTOPT_WRITEFUNCTION, big_body);
+  big_seen = 0;
+  big_wrong = 0;
+  big_calls = 0;
+  return easy;
+}
+
+/* A file is delivered whole and in order through the pipeline of chunks.  */
+static void
+test_file_large (void)
+{
+  twist_easy *easy = big_easy ();
+
+  alarm (30);
+  check (twist_easy_perform (easy) == TWIST_OK, "a large file");
+  alarm (0);
+  check (big_seen == BIG_FILE && !big_wrong, "the whole file, in order");
+  twist_easy_cleanup (easy);
+}
+
+/* The application refuses the data part way: the transfer ends with an
+   error, and ends.  */
+static void
+test_file_refused (void)
+{
+  twist_easy *easy = big_easy ();
+
+  big_abort_after = 3;
+  alarm (30);
+  check (twist_easy_perform (easy) == TWIST_ERR_ABORTED, "data refused");
+  alarm (0);
+  check (big_calls == 4, "no data after it was refused");
+  big_abort_after = 0;
+  twist_easy_cleanup (easy);
+}
+
+/* A transfer that is let go of while the worker is part way through the
+   file, with its pipeline full and nobody acknowledging.  The worker waits
+   for the loop, and the loop's thread is the one letting go, so releasing it
+   has to acknowledge the chunks itself.  An alarm turns a hang into a
+   failure.  NAP_NS is how long the worker is given first, and PUMPS how many
+   times the loop runs before the release, so that some chunks have reached
+   the application and some have not.  */
+static void
+file_abandon (int remove_first, long nap_ns, int pumps)
+{
+  twist_multi *multi = twist_multi_init ();
+  twist_easy *easy = big_easy ();
+  struct timespec nap = { 0, nap_ns };
+  int calls_at_release, running = 0, i;
+
+  alarm (30);
+  check (twist_multi_add_handle (multi, easy) == TWIST_OK, "add the file");
+  if (nap_ns > 0)
+    nanosleep (&nap, NULL);
+  for (i = 0; i < pumps; i++)
+    twist_multi_perform (multi, &running);
+  if (remove_first)
+    check (twist_multi_remove_handle (multi, easy) == TWIST_OK, "remove it");
+  calls_at_release = big_calls;
+  twist_multi_cleanup (multi);
+  alarm (0);
+  check (big_calls == calls_at_release,
+         "nothing is delivered to the application after it is released");
+  twist_easy_cleanup (easy);
+}
+
+static void
+test_file_abandoned (void)
+{
+  int i;
+
+  /* The pipeline full and nothing acknowledged.  */
+  file_abandon (1, 150000000L, 0);
+  file_abandon (0, 150000000L, 0);
+  /* Let go of at every stage: reading, posting, part delivered.  */
+  for (i = 0; i < 30; i++)
+    {
+      file_abandon (i % 2, (long) i * 400000L, i % 4);
+      check (big_seen <= BIG_FILE && !big_wrong,
+             "what was delivered before the release was right");
+    }
+}
+
 int
 main (void)
 {
   test_file_url ();
   test_file_pool ();
+  if (make_big_file () != 0)
+    check (0, "a large file to read");
+  else
+    {
+      test_file_large ();
+      test_file_refused ();
+      test_file_abandoned ();
+      unlink (big_path);
+    }
   return tests_finish ();
 }

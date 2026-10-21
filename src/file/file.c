@@ -29,10 +29,18 @@
 #include <string.h>
 #include <strings.h>
 #include <sys/stat.h>
+#include <time.h>
 
 /* Four chunks may be in flight.  The worker waits only when that
    pipeline is full, and it stops when the easy aborts.  The worker
-   owns the file until the last ack, so the loop cannot free it early.  */
+   owns the file until the last ack, so the loop cannot free it early.
+
+   The loop's thread acknowledges the chunks the worker posts.  When the
+   transfer is let go of before it is done, that same thread is the one that
+   waits for the worker to retire, so it has to acknowledge the chunks itself
+   while it waits: the worker can be waiting for room to post another.  A
+   transfer that has been let go of delivers nothing to the application and
+   tells the multi handle nothing.  */
 
 #define FILE_CHUNK 16384
 #define FILE_PIPELINE 4
@@ -55,6 +63,7 @@ struct twist_file
   pthread_cond_t cv;
   int live;
   int stop;
+  int abandoned;
   int inflight;
   size_t total;
   int err;
@@ -65,12 +74,35 @@ static void
 file_free (void *p)
 {
   struct twist_file *f = p;
+  struct twist_loop *loop;
 
   if (f == NULL)
     return;
+  loop = f->easy != NULL ? f->easy->loop : NULL;
   pthread_mutex_lock (&f->mu);
+  f->abandoned = 1;
+  f->stop = 1;
+  pthread_cond_broadcast (&f->cv);
   while (f->live)
-    pthread_cond_wait (&f->cv, &f->mu);
+    {
+      struct timespec until;
+
+      /* Acknowledge what the worker has posted: it may be waiting for room.  */
+      pthread_mutex_unlock (&f->mu);
+      if (loop != NULL)
+        twist_loop_drain (loop);
+      pthread_mutex_lock (&f->mu);
+      if (!f->live)
+        break;
+      clock_gettime (CLOCK_REALTIME, &until);
+      until.tv_nsec += 1000000;
+      if (until.tv_nsec >= 1000000000)
+        {
+          until.tv_sec++;
+          until.tv_nsec -= 1000000000;
+        }
+      pthread_cond_timedwait (&f->cv, &f->mu, &until);
+    }
   pthread_mutex_unlock (&f->mu);
   pthread_cond_destroy (&f->cv);
   pthread_mutex_destroy (&f->mu);
@@ -114,6 +146,21 @@ file_on_loop (void *user)
   struct twist_easy *easy = f->easy;
   int err = c->err;
 
+  if (f->abandoned)
+    {
+      /* Let go of: nothing is for the application or the multi handle now.  */
+      free (c->data);
+      free (c->errmsg);
+      c->data = NULL;
+      c->errmsg = NULL;
+      pthread_mutex_lock (&f->mu);
+      c->busy = 0;
+      if (f->inflight > 0)
+        f->inflight--;
+      pthread_cond_broadcast (&f->cv);
+      pthread_mutex_unlock (&f->mu);
+      return;
+    }
   if (c->data != NULL && c->len > 0 && f->err == TWIST_OK && err == TWIST_OK
       && easy->write_cb != NULL)
     {
@@ -148,7 +195,7 @@ file_on_loop (void *user)
     f->inflight--;
   if (f->err != TWIST_OK)
     f->stop = 1;
-  pthread_cond_signal (&f->cv);
+  pthread_cond_broadcast (&f->cv);
   pthread_mutex_unlock (&f->mu);
 }
 
@@ -161,14 +208,22 @@ hand_off (struct twist_file *f, char *data, size_t len, int err, char *msg,
   int rc;
 
   pthread_mutex_lock (&f->mu);
-  while (f->inflight >= FILE_PIPELINE)
-    pthread_cond_wait (&f->cv, &f->mu);
-  if (f->stop && !final_note)
+  for (;;)
     {
-      pthread_mutex_unlock (&f->mu);
-      free (data);
-      free (msg);
-      return f->err != TWIST_OK ? f->err : TWIST_ERR_ABORTED;
+      /* A stop is looked for before waiting for room, not only after: the
+         one that wants it may be waiting for this thread.  */
+      if (f->stop && !final_note)
+        {
+          int why = f->err != TWIST_OK ? f->err : TWIST_ERR_ABORTED;
+
+          pthread_mutex_unlock (&f->mu);
+          free (data);
+          free (msg);
+          return why;
+        }
+      if (f->inflight < FILE_PIPELINE)
+        break;
+      pthread_cond_wait (&f->cv, &f->mu);
     }
   for (i = 0; i < FILE_PIPELINE; i++)
     if (!f->slot[i].busy)
@@ -203,7 +258,7 @@ hand_off (struct twist_file *f, char *data, size_t len, int err, char *msg,
       c->busy = 0;
       if (f->inflight > 0)
         f->inflight--;
-      pthread_cond_signal (&f->cv);
+      pthread_cond_broadcast (&f->cv);
       pthread_mutex_unlock (&f->mu);
       return rc;
     }
@@ -224,7 +279,7 @@ file_retire (struct twist_file *f)
 {
   pthread_mutex_lock (&f->mu);
   f->live = 0;
-  pthread_cond_signal (&f->cv);
+  pthread_cond_broadcast (&f->cv);
   pthread_mutex_unlock (&f->mu);
 }
 
