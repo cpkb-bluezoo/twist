@@ -105,8 +105,14 @@ twist_multi_cleanup (twist_multi *multi)
   twist_dns_cache_free (multi->dns);
   twist_session_free_all (multi);
   twist_storage_free (multi->storage);
+  /* The pool's threads are joined, so every job has run and posted its
+     completion.  Deliver them: each owns its job and what the job carries,
+     and dropped with the loop they would leak.  */
   if (multi->own_loop)
-    twist_loop_free (multi->loop);
+    {
+      twist_loop_drain (multi->loop);
+      twist_loop_free (multi->loop);
+    }
   free (multi->easies);
   free (multi->done);
   free (multi->done_result);

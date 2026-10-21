@@ -244,33 +244,19 @@ ssh_password (const struct twist_easy *easy)
   return NULL;
 }
 
+/* The files are loaded: make the session and start it.  */
 int
-twist_ssh_start (struct twist_ssh *s)
+twist_ssh_begin (struct twist_ssh *s)
 {
   int rc;
 
-  if (s == NULL || s->session != NULL)
-    return TWIST_ERR_INVAL;
-  if (gf_crypto_init () != GF_OK)
-    {
-      twist_ssh_detail (s, _("SSH needs libgcrypt 1.12.4 or later, and the "
-                             "one in use is older or unusable"));
-      return TWIST_ERR_UNSUPPORTED;
-    }
-  if (s->user[0] == 0)
-    {
-      twist_ssh_detail (s, _("no user name for SSH; give one in the URL or "
-                             "with --user"));
-      return TWIST_ERR_AUTH;
-    }
   memset (&s->config, 0, sizeof s->config);
   memset (&s->events, 0, sizeof s->events);
-  /* Files are read here, once, before the first byte goes out.  */
-  rc = twist_ssh_trust_load (s);
-  if (rc == TWIST_OK)
-    rc = twist_ssh_keys_load (s);
-  if (rc != TWIST_OK)
-    return rc;
+  if (s->nalgs > 0)
+    {
+      s->config.conn.prefs.nsigalgs = s->nalgs;
+      s->config.conn.prefs.sigalgs = s->algs;
+    }
   s->config.conn.software = "twist_" TWIST_VERSION_STRING;
   s->config.client_auth.user = s->user;
   s->config.client_auth.keys = s->nkeys > 0 ? s->key_ptrs : NULL;
@@ -293,9 +279,33 @@ twist_ssh_start (struct twist_ssh *s)
   rc = gf_session_start (s->session, twist_ssh_now_us (s));
   s->depth--;
   ssh_after (s, rc);
-  if (rc != GF_OK)
-    return s->easy->result != TWIST_OK ? s->easy->result : TWIST_ERR_PROTOCOL;
-  return TWIST_OK;
+  return rc == GF_OK ? TWIST_OK
+                     : s->easy->result != TWIST_OK ? s->easy->result
+                                                   : TWIST_ERR_PROTOCOL;
+}
+
+/* Begin a transfer: check what can be checked, then load the files on the
+   storage pool, and the loop goes on from there.  An error returned is for
+   the caller to end the transfer with; once the job is submitted the
+   transfer ends itself.  */
+int
+twist_ssh_start (struct twist_ssh *s)
+{
+  if (s == NULL || s->session != NULL || s->load != NULL)
+    return TWIST_ERR_INVAL;
+  if (gf_crypto_init () != GF_OK)
+    {
+      twist_ssh_detail (s, _("SSH needs libgcrypt 1.12.4 or later, and the "
+                             "one in use is older or unusable"));
+      return TWIST_ERR_UNSUPPORTED;
+    }
+  if (s->user[0] == 0)
+    {
+      twist_ssh_detail (s, _("no user name for SSH; give one in the URL or "
+                             "with --user"));
+      return TWIST_ERR_AUTH;
+    }
+  return twist_ssh_load_start (s);
 }
 
 size_t
@@ -423,6 +433,7 @@ twist_ssh_free (void *p)
   if (s->timer != NULL)
     twist_timer_cancel (s->timer);
   twist_mail_link_close (&s->link);
+  twist_ssh_load_abandon (s);
   /* The session owns the SFTP client, so it goes first.  */
   if (s->session != NULL)
     gf_session_free (s->session);

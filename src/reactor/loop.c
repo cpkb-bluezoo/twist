@@ -364,6 +364,13 @@ twist_loop_schedule (struct twist_loop *loop, uint64_t deadline_ms,
   return twist_timer_heap_push (loop->timers, deadline_ms, cb, user, out);
 }
 
+/* Run what has been posted, and nothing else: no timers, no I/O.  */
+void
+twist_loop_drain (struct twist_loop *loop)
+{
+  twist_cmdq_drain (loop->cmds);
+}
+
 int
 twist_loop_post (struct twist_loop *loop, void (*fn) (void *), void *user)
 {

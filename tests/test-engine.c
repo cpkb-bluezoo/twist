@@ -351,6 +351,38 @@ test_release_transfer (void)
   close (fd);
 }
 
+static void
+pool_work (void *arg)
+{
+  (void) arg;
+}
+
+static void
+pool_done (void *user, int err)
+{
+  (void) err;
+  ++*(int *) user;
+}
+
+/* A job on the multi's storage pool whose completion is posted to its loop.
+   If the multi is cleaned up before the loop has run, the completion must
+   still be delivered: it owns the job and whatever the job carries, and
+   dropping it with the loop leaks both.  The pool's threads are joined
+   first, so every job has run and posted by then.  */
+static void
+test_pool_completion_at_cleanup (void)
+{
+  struct twist_multi *multi = twist_multi_init ();
+  int done = 0, i;
+
+  check (multi != NULL, "multi");
+  for (i = 0; i < 5; i++)
+    check (twist_storage_submit (multi->storage, pool_work, NULL, pool_done,
+                                 &done, multi->loop) == TWIST_OK, "submit");
+  twist_multi_cleanup (multi);
+  check (done == 5, "completions posted before cleanup are delivered");
+}
+
 int
 main (void)
 {
@@ -360,5 +392,6 @@ main (void)
   test_conn_pool ();
   test_multi_perform ();
   test_release_transfer ();
+  test_pool_completion_at_cleanup ();
   return tests_finish ();
 }

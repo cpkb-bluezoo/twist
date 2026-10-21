@@ -36,6 +36,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
 /* The twist handler is the client; a foxtrot session is the server, in the
@@ -794,6 +795,148 @@ test_no_user (void)
   free (sink);
 }
 
+/* Wait, driving the loop, until COND holds or about two seconds pass.  */
+#define WAIT_FOR(multi, cond)                                           \
+  do                                                                    \
+    {                                                                   \
+      struct timespec nap_ = { 0, 2000000 };                            \
+      int running_ = 0, spins_;                                         \
+                                                                        \
+      for (spins_ = 0; spins_ < 1000 && !(cond); spins_++)              \
+        {                                                               \
+          twist_multi_perform ((multi), &running_);                     \
+          nanosleep (&nap_, NULL);                                      \
+        }                                                               \
+    }                                                                   \
+  while (0)
+
+/* Put EASY on MULTI's loop and storage pool without starting a transfer:
+   twist_multi_add_handle would start the real handler, which dials.  The
+   handler under test is driven by hand.  */
+static void
+attach_by_hand (struct twist_multi *multi, struct twist_easy *easy)
+{
+  easy->multi = multi;
+  easy->loop = multi->loop;
+}
+
+/* With a real loop and storage pool the files are read and parsed on a
+   worker thread, and the loop takes the result.  The key and the
+   known_hosts file are the server's, so the transfer only succeeds if what
+   the worker made is what the session uses.  */
+static void
+test_off_the_loop (void)
+{
+  struct server sv;
+  struct world w;
+  struct twist_multi *multi = twist_multi_init ();
+  struct twist_easy *easy = twist_easy_init ();
+  char keytext[2048], keyfile[300], kh[300];
+  size_t kn = 0;
+
+  check (multi != NULL && server_new (&sv) == 0, "server and multi");
+  check (gf_key_to_openssh_private (sv.authorized, keytext, sizeof keytext,
+                                    &kn) == GF_OK, "key text");
+  snprintf (keyfile, sizeof keyfile, "%s/poolkey", home);
+  write_file (keyfile, keytext, kn, 0600);
+  known_hosts_with (sv.host, kh, sizeof kh);
+  check (twist_url_parse_int ("sftp://alice@127.0.0.1/data.bin", &easy->url)
+         == TWIST_OK, "url");
+  twist_easy_setopt (easy, TWISTOPT_SSLKEY, keyfile);
+  twist_easy_setopt (easy, TWISTOPT_SSH_KNOWNHOSTS, kh);
+  easy->write_cb = collect;
+  got_len = 0;
+  attach_by_hand (multi, easy);
+  w.sv = &sv;
+  w.c2s.len = 0;
+  w.ssh = twist_ssh_new (easy, 0);
+  twist_ssh_set_sink (w.ssh, client_sink, &w.c2s);
+  check (twist_ssh_start (w.ssh) == TWIST_OK, "start submits the job");
+  WAIT_FOR (multi, w.c2s.len > 0 || easy->done);
+  check (w.c2s.len > 0, "the session started when the job was done");
+  check (w.ssh->load_thread_set
+         && !pthread_equal (w.ssh->load_thread, pthread_self ()),
+         "the files were read off the loop thread");
+  pump (&w, easy, 65536);
+  check (easy->done && easy->result == TWIST_OK
+         && got_len == sizeof content && memcmp (got, content, got_len) == 0,
+         "download with a key and known_hosts loaded by the pool");
+  twist_easy_cleanup (easy);
+  twist_multi_cleanup (multi);
+  server_free (&sv);
+  unlink (keyfile);
+  unlink (kh);
+}
+
+/* What the job finds wrong comes back through the loop as the end of the
+   transfer.  */
+static void
+test_off_the_loop_errors (void)
+{
+  struct server sv;
+  struct world w;
+  struct twist_multi *multi = twist_multi_init ();
+  struct twist_easy *easy = twist_easy_init ();
+
+  check (multi != NULL && server_new (&sv) == 0, "server and multi");
+  check (twist_url_parse_int ("sftp://alice@127.0.0.1/data.bin", &easy->url)
+         == TWIST_OK, "url");
+  twist_easy_setopt (easy, TWISTOPT_SSLKEY, "/nonexistent/key");
+  attach_by_hand (multi, easy);
+  w.sv = &sv;
+  w.c2s.len = 0;
+  w.ssh = twist_ssh_new (easy, 0);
+  twist_ssh_set_sink (w.ssh, client_sink, &w.c2s);
+  check (twist_ssh_start (w.ssh) == TWIST_OK, "start submits the job");
+  WAIT_FOR (multi, easy->done);
+  check (easy->done && easy->result == TWIST_ERR_FILE
+         && detail_has (easy, "cannot read the private key"),
+         "the job's error ends the transfer");
+  check (w.c2s.len == 0, "nothing was sent");
+  twist_easy_cleanup (easy);
+  twist_multi_cleanup (multi);
+  server_free (&sv);
+}
+
+/* A transfer that goes away while its job is queued or running: the job
+   finishes by itself and frees what it made.  Whichever happens first, the
+   result must not be touched; valgrind finds it if it is.  */
+static void
+test_abandoned_job (void)
+{
+  int i;
+
+  for (i = 0; i < 60; i++)
+    {
+      struct twist_multi *multi = twist_multi_init ();
+      struct twist_easy *easy = twist_easy_init ();
+      struct twist_ssh *ssh;
+      struct pipe *sink = calloc (1, sizeof *sink);
+      struct timespec nap = { 0, 300000 * (i % 7) };
+
+      check (multi != NULL && sink != NULL, "multi");
+      check (twist_url_parse_int ("sftp://alice@127.0.0.1/data.bin",
+                                  &easy->url) == TWIST_OK, "url");
+      twist_easy_setopt (easy, TWISTOPT_PASSWORD, "secret");
+      twist_easy_setopt (easy, TWISTOPT_SSL_VERIFYPEER, 0L);
+      attach_by_hand (multi, easy);
+      ssh = twist_ssh_new (easy, 0);
+      twist_ssh_set_sink (ssh, client_sink, sink);
+      check (twist_ssh_start (ssh) == TWIST_OK, "start");
+      nanosleep (&nap, NULL);
+      /* Drop the transfer, then let the loop see whatever the job posted.  */
+      twist_easy_cleanup (easy);
+      {
+        int running = 0, k;
+
+        for (k = 0; k < 20; k++)
+          twist_multi_perform (multi, &running);
+      }
+      twist_multi_cleanup (multi);
+      free (sink);
+    }
+}
+
 int
 main (void)
 {
@@ -825,6 +968,9 @@ main (void)
   test_bad_peer ();
   test_timeout ();
   test_no_user ();
+  test_off_the_loop ();
+  test_off_the_loop_errors ();
+  test_abandoned_job ();
   rmdir (home);
   return tests_finish ();
 }

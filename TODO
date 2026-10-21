@@ -14,8 +14,6 @@ Twist TODO List
         - FIDO keys: foxtrot is ready; twist supplies the token I/O
           (libfido2, optional, on the storage pool)
         - keyboard-interactive login
-        - move the reads of the key files and known_hosts to the storage
-          pool (they block the loop for a moment now)
       Requires libgcrypt >= 1.12.4.
   [ ] Passphrase-protected OpenSSH-format private keys.  Blocked on
       bcrypt-pbkdf being available in libgcrypt; it is deliberately not

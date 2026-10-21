@@ -222,6 +222,7 @@ int twist_loop_schedule (struct twist_loop *loop, uint64_t deadline_ms,
                          struct twist_timer **out);
 void twist_timer_cancel (struct twist_timer *timer);
 int twist_loop_post (struct twist_loop *loop, void (*fn) (void *), void *user);
+void twist_loop_drain (struct twist_loop *loop);
 void twist_loop_watch_fd (struct twist_loop *loop, int fd, int interest,
                           struct twist_connection *conn);
 void twist_loop_unwatch_fd (struct twist_loop *loop, int fd);

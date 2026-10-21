@@ -26,6 +26,7 @@
 #include <foxtrot/keyfmt.h>
 #include <foxtrot/status.h>
 
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -40,10 +41,57 @@
    is another way to trust a host; it is checked first, a match is enough,
    and a mismatch fails whatever -k says.
 
-   Files are read whole, once, before the connection is used: they are small
-   and local, and a transfer does not start without them.  */
+   The files are read, and parsed, on the storage pool and not on the loop:
+   a read can wait on a slow disk, and a passphrase-protected key can ask for
+   millions of rounds of key derivation.  The job works on a copy of what it
+   needs and touches nothing of the transfer, which may be gone before it is
+   done; the loop adopts the result, or drops it if the transfer is gone.  */
 
 #define SSH_FILE_MAX (1024 * 1024)
+
+struct twist_ssh_load
+{
+  struct twist_ssh *ssh;	/* NULL once the transfer is gone.  */
+  /* In: copies.  */
+  int verify;
+  char *knownhosts;		/* Named, or NULL for the default.  */
+  char *home;
+  char *keyfile;		/* Named, or NULL for the usual ones.  */
+  char *passphrase;
+  char host[256];
+  unsigned port;
+  /* Out.  */
+  int err;
+  char detail[1200];
+  pthread_t thread;
+  gf_knownhosts *known;
+  enum gf_sigalg algs[SSH_MAX_ALGS];
+  size_t nalgs;
+  gf_key *keys[SSH_MAX_KEYS];
+  size_t nkeys;
+  unsigned skipped;
+};
+
+static void
+load_free (struct twist_ssh_load *l)
+{
+  size_t i;
+
+  if (l == NULL)
+    return;
+  free (l->knownhosts);
+  free (l->home);
+  free (l->keyfile);
+  if (l->passphrase != NULL)
+    {
+      memset (l->passphrase, 0, strlen (l->passphrase));
+      free (l->passphrase);
+    }
+  gf_knownhosts_free (l->known);
+  for (i = 0; i < l->nkeys; i++)
+    gf_key_free (l->keys[i]);
+  free (l);
+}
 
 /* The contents of PATH, NUL-terminated, or NULL.  */
 static char *
@@ -86,16 +134,15 @@ read_file (const char *path, size_t *len)
 }
 
 static int
-home_path (char *out, size_t cap, const char *rest)
+home_path (const struct twist_ssh_load *l, char *out, size_t cap,
+           const char *rest)
 {
-  const char *home = getenv ("HOME");
-
-  if (home == NULL || home[0] == 0)
+  if (l->home == NULL || l->home[0] == 0)
     return 0;
-  return snprintf (out, cap, "%s/%s", home, rest) < (int) cap;
+  return snprintf (out, cap, "%s/%s", l->home, rest) < (int) cap;
 }
 
-/* ---- host keys ---- */
+/* ---- the known_hosts file ---- */
 
 /* The host as known_hosts names it: an IPv6 literal without brackets.  */
 static void
@@ -115,47 +162,279 @@ host_name (const struct twist_url *url, char *out, size_t cap)
   out[n] = 0;
 }
 
-int
-twist_ssh_trust_load (struct twist_ssh *s)
+static void
+load_known_hosts (struct twist_ssh_load *l)
 {
-  struct twist_easy *e = s->easy;
-  char def[1024], host[256], msg[1100];
-  const char *path = e->ssh_knownhosts;
-  int explicit_path = path != NULL;
+  char def[1024];
+  const char *path = l->knownhosts;
   char *text;
   size_t n = 0;
 
-  if (!e->verifypeer)
-    return TWIST_OK;
-  if (path == NULL && home_path (def, sizeof def, ".ssh/known_hosts"))
+  if (!l->verify)
+    return;
+  if (path == NULL && home_path (l, def, sizeof def, ".ssh/known_hosts"))
     path = def;
-  if (gf_knownhosts_new (&s->known) != GF_OK)
-    return TWIST_ERR_NOMEM;
+  if (gf_knownhosts_new (&l->known) != GF_OK)
+    {
+      l->err = TWIST_ERR_NOMEM;
+      return;
+    }
   if (path != NULL)
     {
       text = read_file (path, &n);
       if (text != NULL)
         {
-          gf_knownhosts_load (s->known, text, n, NULL);
+          gf_knownhosts_load (l->known, text, n, NULL);
           free (text);
         }
-      else if (explicit_path)
+      else if (l->knownhosts != NULL)
         {
-          snprintf (msg, sizeof msg, _("cannot read the known_hosts file %s"),
-                    path);
-          twist_ssh_detail (s, msg);
-          return TWIST_ERR_FILE;
+          l->err = TWIST_ERR_FILE;
+          snprintf (l->detail, sizeof l->detail,
+                    _("cannot read the known_hosts file %s"), l->knownhosts);
+          return;
         }
     }
   /* A host known by one kind of key is asked for that kind, so that it
      cannot answer with another.  */
-  host_name (e->url, host, sizeof host);
-  s->config.conn.prefs.nsigalgs
-    = gf_knownhosts_sigalgs (s->known, host, (unsigned) e->url->port,
-                             s->algs, SSH_MAX_ALGS);
-  s->config.conn.prefs.sigalgs = s->algs;
+  l->nalgs = gf_knownhosts_sigalgs (l->known, l->host, l->port, l->algs,
+                                    SSH_MAX_ALGS);
+}
+
+/* ---- the client's keys ---- */
+
+/* Read the private key in PATH in whichever format it has.  The OpenSSH
+   format is read without a passphrase: its key derivation, bcrypt-pbkdf,
+   is not in libgcrypt, and twist does not take it from anywhere else.  */
+static int
+load_private_key (gf_key **out, const char *path, const char *passphrase,
+                  int *openssh_format)
+{
+  size_t n = 0;
+  char *t = read_file (path, &n);
+  int rc;
+
+  *openssh_format = 0;
+  if (t == NULL)
+    return GF_ERR_INVAL;
+  if (strncmp (t, "-----BEGIN OPENSSH PRIVATE KEY-----", 35) == 0)
+    {
+      *openssh_format = 1;
+      rc = gf_key_from_openssh_private (out, t, n);
+    }
+  else if (strncmp (t, "-----BEGIN ", 11) == 0)
+    rc = gf_key_from_pem (out, t, n, passphrase);
+  else if (strncmp (t, "PuTTY-User-Key-File-", 20) == 0)
+    rc = gf_key_from_ppk (out, t, n, passphrase, NULL, 0);
+  else
+    rc = GF_ERR_ENCODING;
+  memset (t, 0, n);
+  free (t);
+  return rc;
+}
+
+static void
+add_key (struct twist_ssh_load *l, gf_key *key)
+{
+  if (!gf_key_has_private (key) || l->nkeys >= SSH_MAX_KEYS)
+    {
+      /* A security key (FIDO) has no private part here, and nothing yet
+         drives a token.  */
+      gf_key_free (key);
+      return;
+    }
+  l->keys[l->nkeys++] = key;
+}
+
+static void
+load_keys (struct twist_ssh_load *l)
+{
+  static const char *const usual[] = {
+    ".ssh/id_ed25519", ".ssh/id_ecdsa", ".ssh/id_rsa"
+  };
+  char path[1024];
+  gf_key *key = NULL;
+  int openssh, rc;
+  size_t i;
+
+  if (l->keyfile != NULL)
+    {
+      rc = load_private_key (&key, l->keyfile, l->passphrase, &openssh);
+      if (rc == GF_OK && gf_key_has_private (key))
+        {
+          add_key (l, key);
+          return;
+        }
+      gf_key_free (key);
+      if (rc == GF_ERR_INVAL)
+        {
+          l->err = TWIST_ERR_FILE;
+          snprintf (l->detail, sizeof l->detail,
+                    _("cannot read the private key file %s"), l->keyfile);
+        }
+      else if (rc == GF_ERR_UNSUPPORTED && openssh)
+        {
+          l->err = TWIST_ERR_AUTH;
+          snprintf (l->detail, sizeof l->detail,
+                    _("%s is protected by a passphrase, in the OpenSSH "
+                      "format, which twist cannot decrypt yet; use an "
+                      "ssh-agent, or convert it (ssh-keygen -p -m PKCS8)"),
+                    l->keyfile);
+        }
+      else if (rc == GF_ERR_PASSPHRASE)
+        {
+          l->err = TWIST_ERR_AUTH;
+          snprintf (l->detail, sizeof l->detail,
+                    _("the passphrase for %s is wrong or missing (--pass)"),
+                    l->keyfile);
+        }
+      else
+        {
+          l->err = TWIST_ERR_AUTH;
+          snprintf (l->detail, sizeof l->detail,
+                    _("cannot use %s as a private key (%s)"), l->keyfile,
+                    gf_strerror (rc));
+        }
+      return;
+    }
+  for (i = 0; i < sizeof usual / sizeof usual[0]; i++)
+    {
+      if (!home_path (l, path, sizeof path, usual[i]))
+        break;
+      key = NULL;
+      rc = load_private_key (&key, path, l->passphrase, &openssh);
+      if (rc == GF_OK)
+        add_key (l, key);
+      else if (rc != GF_ERR_INVAL)
+        {
+          /* There, but not usable: say so if nothing else works.  */
+          gf_key_free (key);
+          l->skipped++;
+        }
+    }
+}
+
+/* ---- the job ---- */
+
+/* On a worker thread.  Touches the load and nothing else.  */
+static void
+load_work (void *arg)
+{
+  struct twist_ssh_load *l = arg;
+
+  l->thread = pthread_self ();
+  load_known_hosts (l);
+  if (l->err == TWIST_OK)
+    load_keys (l);
+}
+
+/* On the loop.  The transfer takes what the job made, if it is still
+   there, and goes on.  */
+static void
+load_done (void *user, int err)
+{
+  struct twist_ssh_load *l = user;
+  struct twist_ssh *s = l->ssh;
+  size_t i;
+
+  if (s != NULL)
+    {
+      s->load = NULL;
+      if (err != TWIST_OK && l->err == TWIST_OK)
+        l->err = err;
+      s->known = l->known;
+      l->known = NULL;
+      memcpy (s->algs, l->algs, sizeof s->algs);
+      s->nalgs = l->nalgs;
+      for (i = 0; i < l->nkeys; i++)
+        {
+          s->keys[i] = l->keys[i];
+          s->key_ptrs[i] = l->keys[i];
+        }
+      s->nkeys = l->nkeys;
+      l->nkeys = 0;
+      s->keys_skipped = l->skipped;
+      s->load_thread = l->thread;
+      s->load_thread_set = 1;
+      if (!twist_ssh_done (s) && l->err != TWIST_OK)
+        {
+          twist_ssh_detail (s, l->detail);
+          twist_ssh_finish (s, l->err);
+        }
+      else if (!twist_ssh_done (s))
+        {
+          int rc = twist_ssh_begin (s);
+
+          if (rc != TWIST_OK)
+            twist_ssh_finish (s, rc);
+        }
+    }
+  load_free (l);
+}
+
+static char *
+copy_or_null (const char *s)
+{
+  return s != NULL ? twist_strdup (s) : NULL;
+}
+
+int
+twist_ssh_load_start (struct twist_ssh *s)
+{
+  struct twist_easy *e = s->easy;
+  struct twist_ssh_load *l = calloc (1, sizeof *l);
+  const char *home = getenv ("HOME");
+  int rc;
+
+  if (l == NULL)
+    return TWIST_ERR_NOMEM;
+  l->ssh = s;
+  l->verify = e->verifypeer;
+  l->knownhosts = copy_or_null (e->ssh_knownhosts);
+  l->home = copy_or_null (home);
+  l->keyfile = copy_or_null (e->sslkey);
+  l->passphrase = copy_or_null (e->keypasswd);
+  host_name (e->url, l->host, sizeof l->host);
+  l->port = (unsigned) e->url->port;
+  if ((e->ssh_knownhosts != NULL && l->knownhosts == NULL)
+      || (home != NULL && l->home == NULL)
+      || (e->sslkey != NULL && l->keyfile == NULL)
+      || (e->keypasswd != NULL && l->passphrase == NULL))
+    {
+      load_free (l);
+      return TWIST_ERR_NOMEM;
+    }
+  s->load = l;
+  if (e->multi != NULL && e->multi->storage != NULL && e->loop != NULL)
+    {
+      rc = twist_storage_submit (e->multi->storage, load_work, l, load_done, l,
+                                 e->loop);
+      if (rc != TWIST_OK)
+        {
+          s->load = NULL;
+          load_free (l);
+        }
+      return rc;
+    }
+  /* No loop, as when the handler is driven in-process: do it here.  */
+  load_work (l);
+  load_done (l, TWIST_OK);
   return TWIST_OK;
 }
+
+/* The transfer is going away with the job unfinished: the job finishes by
+   itself and frees what it has.  */
+void
+twist_ssh_load_abandon (struct twist_ssh *s)
+{
+  if (s->load != NULL)
+    {
+      s->load->ssh = NULL;
+      s->load = NULL;
+    }
+}
+
+/* ---- the host key callback ---- */
 
 /* A fingerprint as ssh-keygen prints it or as curl is given one: without
    the "SHA256:" and without padding.  */
@@ -221,112 +500,6 @@ twist_ssh_host_key (void *user, const gf_key *key)
   twist_ssh_detail (s, msg);
   s->pending_err = TWIST_ERR_HOSTKEY;
   return 1;
-}
-
-/* ---- the client's keys ---- */
-
-/* Read the private key in PATH in whichever format it has.  The OpenSSH
-   format is read without a passphrase: its key derivation, bcrypt-pbkdf,
-   is not in libgcrypt, and twist does not take it from anywhere else.  */
-static int
-load_private_key (gf_key **out, const char *path, const char *passphrase,
-                  int *openssh_format)
-{
-  size_t n = 0;
-  char *t = read_file (path, &n);
-  int rc;
-
-  *openssh_format = 0;
-  if (t == NULL)
-    return GF_ERR_INVAL;
-  if (strncmp (t, "-----BEGIN OPENSSH PRIVATE KEY-----", 35) == 0)
-    {
-      *openssh_format = 1;
-      rc = gf_key_from_openssh_private (out, t, n);
-    }
-  else if (strncmp (t, "-----BEGIN ", 11) == 0)
-    rc = gf_key_from_pem (out, t, n, passphrase);
-  else if (strncmp (t, "PuTTY-User-Key-File-", 20) == 0)
-    rc = gf_key_from_ppk (out, t, n, passphrase, NULL, 0);
-  else
-    rc = GF_ERR_ENCODING;
-  memset (t, 0, n);
-  free (t);
-  return rc;
-}
-
-static int
-add_key (struct twist_ssh *s, gf_key *key)
-{
-  if (!gf_key_has_private (key) || s->nkeys >= SSH_MAX_KEYS)
-    {
-      /* A security key (FIDO) has no private part here, and nothing yet
-         drives a token.  */
-      gf_key_free (key);
-      return 0;
-    }
-  s->keys[s->nkeys] = key;
-  s->key_ptrs[s->nkeys] = key;
-  s->nkeys++;
-  return 1;
-}
-
-int
-twist_ssh_keys_load (struct twist_ssh *s)
-{
-  struct twist_easy *e = s->easy;
-  static const char *const usual[] = {
-    ".ssh/id_ed25519", ".ssh/id_ecdsa", ".ssh/id_rsa"
-  };
-  char path[1024], msg[1200];
-  gf_key *key = NULL;
-  int openssh, rc;
-  size_t i;
-
-  if (e->sslkey != NULL)
-    {
-      rc = load_private_key (&key, e->sslkey, e->keypasswd, &openssh);
-      if (rc == GF_OK && gf_key_has_private (key))
-        {
-          add_key (s, key);
-          return TWIST_OK;
-        }
-      gf_key_free (key);
-      if (rc == GF_ERR_INVAL)
-        snprintf (msg, sizeof msg, _("cannot read the private key file %s"),
-                  e->sslkey);
-      else if (rc == GF_ERR_UNSUPPORTED && openssh)
-        snprintf (msg, sizeof msg,
-                  _("%s is protected by a passphrase, in the OpenSSH format, "
-                    "which twist cannot decrypt yet; use an ssh-agent, or "
-                    "convert it (ssh-keygen -p -m PKCS8)"), e->sslkey);
-      else if (rc == GF_ERR_PASSPHRASE)
-        snprintf (msg, sizeof msg,
-                  _("the passphrase for %s is wrong or missing (--pass)"),
-                  e->sslkey);
-      else
-        snprintf (msg, sizeof msg,
-                  _("cannot use %s as a private key (%s)"), e->sslkey,
-                  gf_strerror (rc));
-      twist_ssh_detail (s, msg);
-      return rc == GF_ERR_INVAL ? TWIST_ERR_FILE : TWIST_ERR_AUTH;
-    }
-  for (i = 0; i < sizeof usual / sizeof usual[0]; i++)
-    {
-      if (!home_path (path, sizeof path, usual[i]))
-        break;
-      key = NULL;
-      rc = load_private_key (&key, path, e->keypasswd, &openssh);
-      if (rc == GF_OK)
-        add_key (s, key);
-      else if (rc != GF_ERR_INVAL)
-        {
-          /* There, but not usable: say so if nothing else works.  */
-          gf_key_free (key);
-          s->keys_skipped++;
-        }
-    }
-  return TWIST_OK;
 }
 
 void

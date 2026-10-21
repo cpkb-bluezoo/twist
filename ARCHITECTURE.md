@@ -382,11 +382,13 @@ another source, to keep the licensing of the program clear. The limitation
 ends when libgcrypt provides it. Keys held by an ssh-agent are unaffected,
 and so are unencrypted keys and the encrypted formats foxtrot reads
 without bcrypt (PKCS#8 under PBES2, PuTTY version 3).
-The key files and the known_hosts file are read whole, once, when the
-session starts, before the first byte goes out. They are small and local,
-and a transfer does not begin without them, but it is a blocking read on the
-loop; it is the one exception to keeping work that can block off the loop, and
-it should move to the storage pool if a transfer is ever started from a loop that cannot afford it.
+
+The key files and the known_hosts file are read, and parsed, by one job on
+the storage pool before the session is made: a read can wait on a slow disk,
+and a passphrase-protected key can ask for millions of rounds of key
+derivation. The job works on a copy of what it needs and touches nothing of
+the transfer, which may be gone before it is done. The loop adopts the
+result, or drops it if the transfer is gone; the transfer never waits for it.
 
 foxtrot needs libgcrypt 1.12.4 or later (earlier ones abort on some Ed25519
 keys a peer can send), which twist accepts as a dependency.
