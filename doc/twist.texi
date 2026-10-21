@@ -40,6 +40,7 @@ Documentation License''.
 * Overview::
 * Library::
 * Invocation::
+* SFTP and SCP::
 * GNU Free Documentation License::
 @end menu
 
@@ -169,7 +170,9 @@ by @option{--next}.
 @item -k
 @itemx --insecure
 Accepted for compatibility with curl.  The TLS engine still checks the
-configured trust store.
+configured trust store.  For @code{sftp} and @code{scp} it skips the
+@file{known_hosts} check (@pxref{SFTP and SCP}); a fingerprint given with
+@option{--hostpubsha256} is still checked.
 @item -x @var{url}
 @itemx --proxy @var{url}
 Proxy.  Use @code{http://} or @code{socks5://}.
@@ -236,7 +239,16 @@ the file are sent after the leaf.  The matching private key is
 client certificate and none was given, the handshake fails.  When one
 was given, it is presented.
 @item --key @var{file}
-Private key for @option{--cert}.
+Private key for @option{--cert}.  For @code{sftp} and @code{scp} it is the
+private key to log in with.
+@item --pass @var{phrase}
+Passphrase for the private key file, for the formats twist can decrypt
+(@pxref{SFTP and SCP}).
+@item --hostpubsha256 @var{hash}
+The SHA-256 of the host key of an @code{sftp} or @code{scp} server, in base64
+as @command{ssh-keygen -l} prints it, with or without @samp{SHA256:}.  A host
+key that matches is trusted, whatever @file{known_hosts} says; one that does
+not is refused, even with @option{-k}.
 @item --cacert @var{file}
 PEM trust bundle used to verify the peer.
 @item --http1.0
@@ -339,6 +351,12 @@ Too many redirects.
 The server closed before sending any data.
 @item 61
 The content encoding could not be decoded.
+@item 9
+The SFTP server would not let the user read the file.
+@item 60
+The host key of an @code{sftp} or @code{scp} server is not trusted: it is
+not in @file{known_hosts}, it differs from the one there, or it does not
+match @option{--hostpubsha256}.
 @item 67
 Authentication failed.
 @item 68
@@ -355,9 +373,59 @@ TFTP unknown transfer.
 TFTP file already exists.
 @item 74
 TFTP no such user.
+@item 78
+The file does not exist on the @code{sftp} or @code{scp} server.
+@item 79
+The @code{sftp} or @code{scp} server could not do what was asked.
 @item 81
 The operation could not be started.
 @end table
+
+@node SFTP and SCP
+@chapter SFTP and SCP
+
+@example
+twist sftp://user@@host/path/to/file
+twist scp://user@@host/~/file
+@end example
+
+twist downloads one file over SSH.  @code{scp://} and @code{sftp://} are the
+same transfer, which uses the SFTP subsystem of the server: twist does not
+implement the old SCP protocol, as OpenSSH's own @command{scp} has not since
+version 9.0.  A server with no SFTP subsystem fails with an error that says
+so.  The path is absolute, except that @samp{/~/} begins in the directory
+the server puts the user in.  An @code{scp} URL does not expand wildcards.
+Uploads and directory listings are not implemented yet.
+
+@subheading Logging in
+
+A private key is used if there is one: the file named by @option{--key}, or
+else @file{~/.ssh/id_ed25519}, @file{id_ecdsa} and @file{id_rsa} in that
+order.  Then a password, from @option{-u} or the URL.  The key files twist reads are OpenSSH's,
+PEM and PKCS#8, and PuTTY's version 3.  @strong{A passphrase-protected key in
+the OpenSSH format, which is what @command{ssh-keygen} writes by default,
+cannot be used}, because its key derivation is not in libgcrypt and twist
+does not take it from anywhere else.  Use an unencrypted key, or one
+converted with @command{ssh-keygen -p -m PKCS8} and given its passphrase
+with @option{--pass}.  There is no ssh-agent support yet.
+
+@subheading The host key
+
+The host key is checked against @file{~/.ssh/known_hosts}, as the curl tool
+does.  A host that is not in the file, or whose key differs from the one in
+it, fails the transfer (status 60); there is no way to accept a new host
+key by asking.  Add it with @command{ssh-keyscan}, connect once with
+@command{ssh}, or give its fingerprint with @option{--hostpubsha256}.
+@option{-k} turns the check off.  A host known by one kind of key is asked
+for that kind, so it cannot answer with another.
+
+The library takes the same from @code{TWISTOPT_SSH_KNOWNHOSTS},
+@code{TWISTOPT_SSH_HOST_PUBLIC_KEY_SHA256}, @code{TWISTOPT_SSLKEY} and
+@code{TWISTOPT_KEYPASSWD}.
+
+@subheading Requirements
+
+SSH comes from the foxtrot library, which needs libgcrypt 1.12.4 or later.
 
 @node GNU Free Documentation License
 @appendix GNU Free Documentation License

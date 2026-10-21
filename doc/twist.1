@@ -40,7 +40,8 @@ Several URLs leave the status of the last transfer, unless
 .B \-\-fail\-early
 stops at the first failure.
 .PP
-HTTP, file, FTP, mail, MQTT, LDAP, WebSocket, Gopher, DICT, and TFTP
+HTTP, file, FTP, mail, MQTT, LDAP, WebSocket, Gopher, DICT, TFTP,
+and the download of one file over SFTP and SCP
 are implemented.  A scheme that is recognised but not implemented
 exits 1.
 .SH OPTIONS
@@ -164,6 +165,11 @@ Reset by
 .TP
 .B \-k, \-\-insecure
 Accept the option.  The TLS engine still checks the trust store.
+For sftp and scp it skips the
+.I known_hosts
+check; a fingerprint given with
+.B \-\-hostpubsha256
+is still checked.
 .TP
 .BI \-x ", " \-\-proxy " url"
 Proxy.  Use
@@ -267,6 +273,21 @@ given, it is presented.
 .BI \-\-key " file"
 Private key for
 .BR \-\-cert .
+For sftp and scp, the private key to log in with.
+.TP
+.BI \-\-pass " phrase"
+Passphrase for the private key file, for the formats twist can decrypt.
+A passphrase-protected key in the OpenSSH format cannot be used.
+.TP
+.BI \-\-hostpubsha256 " hash"
+The SHA-256 of the host key of an sftp or scp server, in base64 as
+.B ssh-keygen \-l
+prints it, with or without
+.BR SHA256: .
+A host key that matches is trusted, whatever
+.I known_hosts
+says; one that does not is refused, even with
+.BR \-k .
 .TP
 .BI \-\-cacert " file"
 PEM trust bundle used to verify the peer.
@@ -436,6 +457,15 @@ The server closed before sending any data.
 .B 61
 The content encoding could not be decoded.
 .TP
+.B 9
+The SFTP server would not let the user read the file.
+.TP
+.B 60
+The host key of an sftp or scp server is not trusted: it is not in
+.IR known_hosts ,
+it differs from the one there, or it does not match
+.BR \-\-hostpubsha256 .
+.TP
 .B 67
 Authentication failed.
 .TP
@@ -459,6 +489,12 @@ TFTP file already exists.
 .TQ
 .B 74
 TFTP no such user.
+.TP
+.B 78
+The file does not exist on the sftp or scp server.
+.TQ
+.B 79
+The sftp or scp server could not do what was asked.
 .TP
 .B 81
 The operation could not be started.

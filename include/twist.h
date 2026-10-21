@@ -161,7 +161,18 @@ enum twist_opt
      NULL does not advertise or decode.  */
   TWISTOPT_ACCEPT_ENCODING = 44,
   /* Compress the request body.  "gzip" or "deflate".  Empty clears it.  */
-  TWISTOPT_CONTENT_ENCODING = 45
+  TWISTOPT_CONTENT_ENCODING = 45,
+  /* known_hosts file for sftp and scp.  Empty or unset: ~/.ssh/known_hosts.
+     TWISTOPT_SSL_VERIFYPEER 0 skips the check.  */
+  TWISTOPT_SSH_KNOWNHOSTS = 46,
+  /* Base64 SHA-256 of the host key of an sftp or scp server, as ssh-keygen
+     -l prints it (with or without "SHA256:" and the padding).  A key that
+     matches is trusted, whatever known_hosts says; one that does not is
+     refused, even with TWISTOPT_SSL_VERIFYPEER 0.  Empty clears it.  */
+  TWISTOPT_SSH_HOST_PUBLIC_KEY_SHA256 = 47,
+  /* Passphrase for the private key file (TWISTOPT_SSLKEY serves sftp and
+     scp too).  Empty clears it.  */
+  TWISTOPT_KEYPASSWD = 48
 };
 
 enum twist_dns_transport

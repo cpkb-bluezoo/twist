@@ -192,10 +192,15 @@ usage (void)
          stdout);
   fputs (_("      --content-encoding C  gzip or deflate the request body\n"),
          stdout);
-  fputs (_("  -k, --insecure          accepted; certificates are still checked\n"),
+  fputs (_("  -k, --insecure          accepted; certificates are still checked;\n"
+           "                          sftp and scp skip the known_hosts check\n"),
          stdout);
   fputs (_("  -E, --cert FILE         client certificate (PEM)\n"), stdout);
-  fputs (_("      --key FILE          private key for --cert (PEM)\n"), stdout);
+  fputs (_("      --key FILE          private key for --cert (PEM), or for sftp and scp\n"),
+         stdout);
+  fputs (_("      --pass PHRASE       passphrase for the private key file\n"), stdout);
+  fputs (_("      --hostpubsha256 H   SHA-256 of the sftp or scp host key (base64)\n"),
+         stdout);
   fputs (_("      --cacert FILE       CA trust bundle (PEM)\n"), stdout);
   fputs (_("  -x, --proxy URL         proxy (http:// or socks5://)\n"), stdout);
   fputs (_("  -A, --user-agent NAME   User-Agent\n"), stdout);
@@ -1157,6 +1162,8 @@ main (int argc, char **argv)
     { "insecure", no_argument, NULL, 'k' },
     { "cert", required_argument, NULL, 'E' },
     { "key", required_argument, NULL, 15 },
+    { "pass", required_argument, NULL, 32 },
+    { "hostpubsha256", required_argument, NULL, 33 },
     { "cacert", required_argument, NULL, 16 },
     { "proxy", required_argument, NULL, 'x' },
     { "user-agent", required_argument, NULL, 'A' },
@@ -1351,6 +1358,13 @@ main (int argc, char **argv)
           break;
         case 16:
           twist_easy_setopt (op->easy, TWISTOPT_CAINFO, optarg);
+          break;
+        case 32:
+          twist_easy_setopt (op->easy, TWISTOPT_KEYPASSWD, optarg);
+          break;
+        case 33:
+          twist_easy_setopt (op->easy, TWISTOPT_SSH_HOST_PUBLIC_KEY_SHA256,
+                             optarg);
           break;
         case 'x':
           twist_easy_setopt (op->easy, TWISTOPT_PROXY, optarg);

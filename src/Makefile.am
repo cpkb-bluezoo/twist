@@ -101,6 +101,9 @@ libtwist_la_SOURCES = \
   gopher/gopher.c \
   dict/dict.c \
   tftp/tftp.c \
+  ssh/hostkey.c \
+  ssh/sftp.c \
+  ssh/ssh-int.h \
   ssh/ssh.c \
   tls/identity.c \
   tls/quic.c \

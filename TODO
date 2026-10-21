@@ -4,12 +4,19 @@ Twist TODO List
   [ ] TELNET
   [ ] RTSP
   [ ] SCP/SFTP, one handler over foxtrot (../foxtrot).  scp:// runs over
-      SFTP; there is no SCP wire protocol.  foxtrot is ready for FIDO
-      keys on the client side; twist supplies the token I/O (libfido2,
-      optional, on the storage pool).  Needs in twist: an ssh-agent
-      client (on the loop), known_hosts checking as curl does it
-      (~/.ssh/known_hosts, -k skips, no accept-new), and options for
-      all of them.  Requires libgcrypt >= 1.12.4.
+      SFTP; there is no SCP wire protocol.  Done: logging in with a key
+      file or a password, known_hosts as curl does it (~/.ssh/known_hosts,
+      -k skips, no accept-new), a pinned fingerprint, and downloading one
+      file.  Still to do:
+        - upload (-T), resume (-C and -r), and a directory listing for a
+          URL ending in /
+        - an ssh-agent client (on the loop)
+        - FIDO keys: foxtrot is ready; twist supplies the token I/O
+          (libfido2, optional, on the storage pool)
+        - keyboard-interactive login
+        - move the reads of the key files and known_hosts to the storage
+          pool (they block the loop for a moment now)
+      Requires libgcrypt >= 1.12.4.
   [ ] Passphrase-protected OpenSSH-format private keys.  Blocked on
       bcrypt-pbkdf being available in libgcrypt; it is deliberately not
       taken from anywhere else.  ssh-agent is the workaround.

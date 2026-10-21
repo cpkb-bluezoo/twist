@@ -94,6 +94,13 @@ easy_clear (struct twist_easy *easy)
   free (easy->accept_encoding);
   free (easy->content_encoding);
   free (easy->cainfo);
+  free (easy->ssh_knownhosts);
+  free (easy->ssh_hostpubsha256);
+  if (easy->keypasswd != NULL)
+    {
+      memset (easy->keypasswd, 0, strlen (easy->keypasswd));
+      free (easy->keypasswd);
+    }
   free (easy->sslcert);
   free (easy->sslkey);
   free (easy->effective_url);
@@ -201,6 +208,20 @@ twist_easy_setopt (twist_easy *easy, int opt, ...)
       break;
     case TWISTOPT_CAINFO:
       replace (&easy->cainfo, va_arg (ap, const char *));
+      break;
+    case TWISTOPT_SSH_KNOWNHOSTS:
+    case TWISTOPT_SSH_HOST_PUBLIC_KEY_SHA256:
+    case TWISTOPT_KEYPASSWD:
+      {
+        const char *s = va_arg (ap, const char *);
+        char **slot = opt == TWISTOPT_SSH_KNOWNHOSTS ? &easy->ssh_knownhosts
+          : opt == TWISTOPT_KEYPASSWD ? &easy->keypasswd
+          : &easy->ssh_hostpubsha256;
+
+        if (s != NULL && s[0] == 0)
+          s = NULL;
+        replace (slot, s);
+      }
       break;
     case TWISTOPT_SSLCERT:
       {

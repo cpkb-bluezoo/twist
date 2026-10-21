@@ -99,6 +99,9 @@ struct twist_easy
   char *cainfo;
   char *sslcert;
   char *sslkey;
+  char *ssh_knownhosts;
+  char *ssh_hostpubsha256;
+  char *keypasswd;
   long timeout_ms;
   long connect_timeout_ms;
   char *proxy;

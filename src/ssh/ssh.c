@@ -21,10 +21,9 @@
 #endif
 
 #include "gettext.h"
-#include "twist-int.h"
+#include "ssh/ssh-int.h"
 
 #include <foxtrot/crypto.h>
-#include <foxtrot/session.h>
 #include <foxtrot/status.h>
 
 #include <stdint.h>
@@ -35,53 +34,27 @@
 /* scp and sftp: an SSH session from foxtrot on a TCP endpoint.  foxtrot
    does no I/O.  Bytes from the endpoint go to gf_session_receive, the
    session's write callback goes to the endpoint, and the session's one
-   deadline is kept on a loop timer.
-
-   Stage 1: connect and run the key exchange.  The host key is trusted
-   only when peer verification is turned off, because known_hosts is not
-   read yet.  When the exchange is complete the transfer ends with
-   TWIST_ERR_UNSUPPORTED, since authentication and the transfers are not
-   written yet.  */
-
-struct twist_ssh
-{
-  struct twist_easy *easy;
-  struct twist_mail_link link;
-  struct twist_endpoint *ep;
-  struct twist_timer *timer;
-  gf_session *session;
-  gf_session_config config;
-  gf_session_events events;
-  char *user;
-  /* In-process driving: where output goes without an endpoint, and the
-     clock when there is no loop.  */
-  int (*sink) (void *user, const uint8_t *data, size_t len);
-  void *sink_user;
-  uint64_t clock_us;
-  int kex_done;
-  int ending;
-  int finished;
-  int pending_err;
-};
+   deadline is kept on a loop timer.  Once the user is authenticated the
+   transfer is sftp.c's; scp:// is the same transfer over SFTP, as OpenSSH's
+   own scp has been since 9.0.  */
 
 static void ssh_complete (struct twist_ssh *s, int err);
+static void ssh_arm (struct twist_ssh *s);
 
-static uint64_t
-ssh_now_us (const struct twist_ssh *s)
+uint64_t
+twist_ssh_now_us (const struct twist_ssh *s)
 {
   if (s->easy->loop != NULL)
     return twist_loop_now (s->easy->loop) * 1000u;
   return s->clock_us;
 }
 
-/* Replace the detail message of the transfer with TEXT unless a more
-   specific one was already given.  */
-static void
-ssh_detail (struct twist_ssh *s, const char *text)
+void
+twist_ssh_detail (struct twist_ssh *s, const char *detail)
 {
   if (twist_easy_error (s->easy) != NULL)
     return;
-  twist_easy_set_error (s->easy, twist_strdup (text));
+  twist_easy_set_error (s->easy, twist_strdup (detail));
 }
 
 static int
@@ -115,7 +88,7 @@ ssh_fail_status (struct twist_ssh *s, int status)
   if (s->finished)
     return;
   snprintf (buf, sizeof buf, "SSH: %s", gf_strerror (status));
-  ssh_detail (s, buf);
+  twist_ssh_detail (s, buf);
   ssh_complete (s, s->pending_err != TWIST_OK ? s->pending_err
                                               : ssh_map_status (status));
 }
@@ -132,6 +105,52 @@ ssh_complete (struct twist_ssh *s, int err)
       s->timer = NULL;
     }
   twist_easy_finish (s->easy, err);
+}
+
+static void
+ssh_end (struct twist_ssh *s, int err)
+{
+  /* The disconnect raises the closed event, which must not decide the
+     result.  */
+  if (s->session != NULL && !s->ending
+      && gf_session_phase (s->session) != GF_PHASE_CLOSED)
+    {
+      s->ending = 1;
+      gf_session_disconnect (s->session, twist_ssh_now_us (s),
+                             GF_DISCONNECT_BY_APPLICATION, "done");
+    }
+  ssh_complete (s, err);
+}
+
+void
+twist_ssh_finish (struct twist_ssh *s, int err)
+{
+  if (s == NULL || twist_ssh_done (s))
+    return;
+  if (s->depth > 0)
+    {
+      s->end_pending = 1;
+      s->end_err = err;
+      return;
+    }
+  ssh_end (s, err);
+}
+
+/* Back from a call into the session: a finish asked for inside it, or the
+   failure it reported, ends the transfer.  A finish asked for wins.  */
+static void
+ssh_after (struct twist_ssh *s, int rc)
+{
+  if (s->end_pending && !s->finished)
+    {
+      int err = s->end_err;
+
+      s->end_pending = 0;
+      ssh_end (s, err);
+    }
+  else if (rc != GF_OK)
+    ssh_fail_status (s, rc);
+  ssh_arm (s);
 }
 
 static void
@@ -163,32 +182,6 @@ ssh_arm (struct twist_ssh *s)
   twist_loop_schedule (s->easy->loop, ms, ssh_on_timer, s, &s->timer);
 }
 
-/* Once the key exchange is done there is nothing more to do yet: say
-   goodbye and report that the rest is not written.  Runs outside the
-   session's callbacks, which must not disconnect.  */
-static void
-ssh_after (struct twist_ssh *s)
-{
-  const gf_conn_info *info;
-  char buf[256];
-
-  if (s->finished || !s->kex_done)
-    return;
-  info = gf_session_info (s->session);
-  snprintf (buf, sizeof buf,
-            _("SSH key exchange with %.*s completed; authentication is not "
-              "implemented yet"),
-            info != NULL ? (int) info->peer_software.len : 0,
-            info != NULL ? (const char *) info->peer_software.data : "");
-  ssh_detail (s, buf);
-  /* The disconnect raises the closed event, which must not decide the
-     result.  */
-  s->ending = 1;
-  gf_session_disconnect (s->session, ssh_now_us (s),
-                         GF_DISCONNECT_BY_APPLICATION, "done");
-  ssh_complete (s, TWIST_ERR_UNSUPPORTED);
-}
-
 static int
 ssh_write (void *user, const uint8_t *data, size_t len)
 {
@@ -201,29 +194,18 @@ ssh_write (void *user, const uint8_t *data, size_t len)
   return twist_endpoint_send (s->ep, data, len) != TWIST_OK;
 }
 
-/* The server's host key.  known_hosts is not read yet, so the key is
-   trusted only if the user turned verification off.  */
+/* Nothing is left to try.  */
 static int
-ssh_host_key (void *user, const gf_key *key)
+ssh_auth_failed (void *user)
 {
   struct twist_ssh *s = user;
+  char buf[320];
 
-  (void) key;
-  if (!s->easy->verifypeer)
-    return 0;
-  s->pending_err = TWIST_ERR_HOSTKEY;
-  ssh_detail (s, _("the host key cannot be checked yet (known_hosts is not "
-                   "read); skip the check with -k"));
-  return 1;
-}
-
-static int
-ssh_established (void *user, const gf_conn_info *info)
-{
-  struct twist_ssh *s = user;
-
-  (void) info;
-  s->kex_done = 1;
+  snprintf (buf, sizeof buf, "%s", _("permission denied: the server accepted "
+                                     "none of the ways offered"));
+  twist_ssh_auth_hint (s, buf, sizeof buf);
+  twist_ssh_detail (s, buf);
+  twist_ssh_finish (s, TWIST_ERR_AUTH);
   return 0;
 }
 
@@ -234,12 +216,32 @@ ssh_closed (void *user, int error, uint32_t reason, gf_slice text)
 
   (void) reason;
   (void) text;
-  if (s->finished || s->ending)
+  if (twist_ssh_done (s) || s->ending)
     return;
   if (error != 0)
     ssh_fail_status (s, error);
   else
     ssh_complete (s, TWIST_ERR_CLOSED);
+}
+
+static const char *
+ssh_user_name (const struct twist_easy *easy)
+{
+  if (easy->username != NULL && easy->username[0] != 0)
+    return easy->username;
+  if (easy->url->user != NULL)
+    return easy->url->user;
+  return "";
+}
+
+static const char *
+ssh_password (const struct twist_easy *easy)
+{
+  if (easy->password != NULL && easy->password[0] != 0)
+    return easy->password;
+  if (easy->url->password != NULL && easy->url->password[0] != 0)
+    return easy->url->password;
+  return NULL;
 }
 
 int
@@ -251,29 +253,48 @@ twist_ssh_start (struct twist_ssh *s)
     return TWIST_ERR_INVAL;
   if (gf_crypto_init () != GF_OK)
     {
-      ssh_detail (s, _("SSH needs libgcrypt 1.12.4 or later, and the one in "
-                       "use is older or unusable"));
+      twist_ssh_detail (s, _("SSH needs libgcrypt 1.12.4 or later, and the "
+                             "one in use is older or unusable"));
       return TWIST_ERR_UNSUPPORTED;
+    }
+  if (s->user[0] == 0)
+    {
+      twist_ssh_detail (s, _("no user name for SSH; give one in the URL or "
+                             "with --user"));
+      return TWIST_ERR_AUTH;
     }
   memset (&s->config, 0, sizeof s->config);
   memset (&s->events, 0, sizeof s->events);
+  /* Files are read here, once, before the first byte goes out.  */
+  rc = twist_ssh_trust_load (s);
+  if (rc == TWIST_OK)
+    rc = twist_ssh_keys_load (s);
+  if (rc != TWIST_OK)
+    return rc;
   s->config.conn.software = "twist_" TWIST_VERSION_STRING;
   s->config.client_auth.user = s->user;
+  s->config.client_auth.keys = s->nkeys > 0 ? s->key_ptrs : NULL;
+  s->config.client_auth.nkeys = s->nkeys;
+  s->config.client_auth.password = s->password;
   s->events.user = s;
   s->events.write = ssh_write;
-  s->events.host_key = ssh_host_key;
-  s->events.established = ssh_established;
+  s->events.host_key = twist_ssh_host_key;
+  s->events.authenticated = twist_sftp_authenticated;
+  s->events.auth_failed = ssh_auth_failed;
+  s->events.channel_confirmed = twist_sftp_confirmed;
+  s->events.channel_failed = twist_sftp_channel_failed;
+  s->events.channel_request_reply = twist_sftp_request_reply;
+  s->events.channel_closed = twist_sftp_channel_closed;
   s->events.closed = ssh_closed;
   rc = gf_session_client_new (&s->session, &s->config, &s->events);
   if (rc != GF_OK)
     return rc == GF_ERR_NOMEM ? TWIST_ERR_NOMEM : TWIST_ERR_UNSUPPORTED;
-  rc = gf_session_start (s->session, ssh_now_us (s));
+  s->depth++;
+  rc = gf_session_start (s->session, twist_ssh_now_us (s));
+  s->depth--;
+  ssh_after (s, rc);
   if (rc != GF_OK)
-    {
-      ssh_fail_status (s, rc);
-      return s->easy->result != TWIST_OK ? s->easy->result : TWIST_ERR_PROTOCOL;
-    }
-  ssh_arm (s);
+    return s->easy->result != TWIST_OK ? s->easy->result : TWIST_ERR_PROTOCOL;
   return TWIST_OK;
 }
 
@@ -284,11 +305,10 @@ twist_ssh_receive (struct twist_ssh *s, const uint8_t *data, size_t len)
 
   if (s == NULL || s->session == NULL || s->finished)
     return len;
-  rc = gf_session_receive (s->session, ssh_now_us (s), data, len);
-  if (rc != GF_OK)
-    ssh_fail_status (s, rc);
-  ssh_after (s);
-  ssh_arm (s);
+  s->depth++;
+  rc = gf_session_receive (s->session, twist_ssh_now_us (s), data, len);
+  s->depth--;
+  ssh_after (s, rc);
   return len;
 }
 
@@ -299,11 +319,10 @@ twist_ssh_timeout (struct twist_ssh *s)
 
   if (s == NULL || s->session == NULL || s->finished)
     return;
-  rc = gf_session_on_timeout (s->session, ssh_now_us (s));
-  if (rc != GF_OK)
-    ssh_fail_status (s, rc);
-  ssh_after (s);
-  ssh_arm (s);
+  s->depth++;
+  rc = gf_session_on_timeout (s->session, twist_ssh_now_us (s));
+  s->depth--;
+  ssh_after (s, rc);
 }
 
 uint64_t
@@ -404,26 +423,26 @@ twist_ssh_free (void *p)
   if (s->timer != NULL)
     twist_timer_cancel (s->timer);
   twist_mail_link_close (&s->link);
+  /* The session owns the SFTP client, so it goes first.  */
   if (s->session != NULL)
     gf_session_free (s->session);
+  twist_sftp_free (s->get);
+  twist_ssh_keys_free (s);
+  gf_knownhosts_free (s->known);
   free (s->user);
+  if (s->password != NULL)
+    {
+      memset (s->password, 0, strlen (s->password));
+      free (s->password);
+    }
   free (s);
-}
-
-static const char *
-ssh_user_name (const struct twist_easy *easy)
-{
-  if (easy->username != NULL && easy->username[0] != 0)
-    return easy->username;
-  if (easy->url->user != NULL)
-    return easy->url->user;
-  return "";
 }
 
 struct twist_ssh *
 twist_ssh_new (struct twist_easy *easy, int live)
 {
   struct twist_ssh *s;
+  const char *pw;
 
   (void) live;
   if (easy == NULL || easy->url == NULL)
@@ -433,8 +452,12 @@ twist_ssh_new (struct twist_easy *easy, int live)
     return NULL;
   s->easy = easy;
   s->user = twist_strdup (ssh_user_name (easy));
-  if (s->user == NULL)
+  pw = ssh_password (easy);
+  if (pw != NULL)
+    s->password = twist_strdup (pw);
+  if (s->user == NULL || (pw != NULL && s->password == NULL))
     {
+      free (s->user);
       free (s);
       return NULL;
     }
