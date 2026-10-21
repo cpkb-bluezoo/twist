@@ -83,6 +83,11 @@ typedef size_t (*twist_write_callback) (char *ptr, size_t size, size_t nmemb,
                                         void *userdata);
 typedef size_t (*twist_read_callback) (char *ptr, size_t size, size_t nmemb,
                                        void *userdata);
+/* A read callback returns the number of bytes it stored, and 0 at the end of
+   the data.  Returning this instead says the data cannot be read; the
+   transfer fails, where 0 would be taken as the end and send a short file as
+   if it were whole.  sftp and scp honour it.  */
+#define TWIST_READFUNC_ABORT ((size_t) 0x10000000)
 
 typedef struct twist_easy twist_easy;
 typedef struct twist_multi twist_multi;

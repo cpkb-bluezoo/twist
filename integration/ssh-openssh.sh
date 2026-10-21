@@ -518,5 +518,33 @@ if [ "$(cat "$work/o3")" = small ] && [ $n -eq 2 ]; then
 fi
 check "$ok" "a failed URL ends its connection, the next logs in again (logins $n, exit $rc)"
 
+# 16. An upload is sent as it is read, not after all of it has been read: with
+# the input held open, the first of it is on the server already.  Input that
+# cannot be read is an error (26), not the end of the file.
+rm -f "$work/srv/stream.bin" "$work/fifo"
+mkfifo "$work/fifo"
+t -k --key "$work/userkey" -T - "sftp://$user@$base$work/srv/stream.bin" \
+  < "$work/fifo" &
+twist_pid=$!
+exec 7> "$work/fifo"
+head -c 100000 /dev/zero >&7
+i=0
+while [ ! -s "$work/srv/stream.bin" ] && [ $i -lt 30 ]; do sleep 0.1; i=$((i + 1)); done
+sofar=$(wc -c < "$work/srv/stream.bin" 2>/dev/null || echo 0)
+head -c 50000 /dev/zero >&7
+exec 7>&-
+wait $twist_pid
+rc=$?
+ok=
+[ $sofar -gt 0 ] && [ $rc -eq 0 ] \
+  && [ "$(wc -c < "$work/srv/stream.bin")" -eq 150000 ] && ok=ok
+check "$ok" "an upload is sent while it is still being read (had $sofar, exit $rc)"
+rm -f "$work/fifo"
+
+t -k --key "$work/userkey" -T "$work" "sftp://$user@$base$work/srv/dirsrc" \
+  2> "$work/err"
+rc=$?
+check "$([ $rc -eq 26 ] && echo ok)" "input that cannot be read gives 26 (got $rc)"
+
 [ $fail -eq 0 ] || exit 1
 exit 0

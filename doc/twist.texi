@@ -137,8 +137,10 @@ Append @option{-d} to the query string instead of sending a request
 body.
 @item -T @var{file}
 @itemx --upload-file @var{file}
-Upload @var{file} with PUT.  @code{-} reads standard input.  The file
-is read before the transfer starts.
+Upload @var{file} with PUT.  @code{-} reads standard input.  For
+@code{sftp} and @code{scp} the file is sent as it is read, so a large file or
+a pipe is not held in memory.  For other schemes it is read before the
+transfer starts.
 @item -I
 @itemx --head
 Fetch headers only.
@@ -444,7 +446,10 @@ slash, exits 78 too, and one that may not be listed exits 9.  A range or
 @option{-T @var{file}} uploads a file.  The remote file is created, with mode
 0644 as curl does, and truncated if it is there.  When the URL names a
 directory (it ends in @samp{/}) the file gets the name of the local file, as
-with curl.  Data given with @option{-d} is uploaded the same way.
+with curl.  Data given with @option{-d} is uploaded the same way.  If the
+file cannot be read part way, the transfer fails with status 26; the remote
+file is left as far as it got, as with curl.  A pipe is read as it delivers
+data, and twist does not do anything else while it waits for the next of it.
 
 @option{-C} continues a transfer that stopped.  An upload does not send what
 the server has, and writes on at that offset of the remote file without

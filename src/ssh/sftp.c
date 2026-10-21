@@ -792,6 +792,7 @@ fill_chunk (struct twist_sftp_xfer *g)
       g->src_eof = 1;
       return 0;
     }
+  /* TWIST_READFUNC_ABORT, or more than there was room for.  */
   if (n > SFTP_CHUNK)
     return -1;
   g->chunk_len = n;

@@ -32,6 +32,7 @@
 #include <string.h>
 #include <termios.h>
 
+#include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -889,6 +890,33 @@ is_ssh_url (const char *url)
   return strncmp (url, "sftp://", 7) == 0 || strncmp (url, "scp://", 6) == 0;
 }
 
+/* The file being uploaded, for the schemes that take it as it is read.  */
+struct cli_upload
+{
+  int fd;
+  int failed;			/* A read failed.  */
+};
+
+/* Read straight from the descriptor: what a pipe has is what is given, and
+   the transfer does not wait for a whole buffer of it.  A read that fails is
+   not the end of the data.  */
+static size_t
+read_upload (char *ptr, size_t size, size_t nmemb, void *user)
+{
+  struct cli_upload *u = user;
+  ssize_t n;
+
+  do
+    n = read (u->fd, ptr, size * nmemb);
+  while (n < 0 && errno == EINTR);
+  if (n < 0)
+    {
+      u->failed = 1;
+      return TWIST_READFUNC_ABORT;
+    }
+  return (size_t) n;
+}
+
 /* URL with the name of FILE added, if URL names a directory (it ends in a
    slash, or has no path) and no more than that: sftp://host/dir/ becomes
    sftp://host/dir/FILE.  The name is percent-encoded.  NULL if URL needs
@@ -954,6 +982,8 @@ run_one (twist_easy *easy, struct cli_op *op, const char *url,
   FILE *body = stdout;
   FILE *dump = NULL;
   struct cli_bytes up;
+  struct cli_upload ustream = { -1, 0 };
+  int streaming = 0;
   char *payload = NULL;
   size_t payload_n = 0;
   static char empty_body[] = "";
@@ -1064,7 +1094,29 @@ run_one (twist_easy *easy, struct cli_op *op, const char *url,
     }
   else if (op->dump_header != NULL)
     dump = stdout;
-  if (upload != NULL)
+  if (upload != NULL && is_ssh_url (url))
+    {
+      /* Sent as it is read, so that a large file, or a pipe, is not held in
+         memory first.  */
+      ustream.fd = strcmp (upload, "-") == 0 ? STDIN_FILENO
+                   : open (upload, O_RDONLY);
+      if (ustream.fd < 0)
+        {
+          char msg[256];
+
+          snprintf (msg, sizeof msg, _("could not read %s"), upload);
+          diag_code (26, msg);
+          if (body != stdout)
+            fclose (body);
+          if (dump != NULL && dump != stdout)
+            fclose (dump);
+          return 26;
+        }
+      streaming = 1;
+      if (method == NULL)
+        method = "PUT";
+    }
+  else if (upload != NULL)
     {
       if (read_named (upload, &up, 0) != TWIST_OK)
         {
@@ -1098,6 +1150,8 @@ run_one (twist_easy *easy, struct cli_op *op, const char *url,
       if (joined == NULL)
         {
           free (up.p);
+          if (streaming && ustream.fd != STDIN_FILENO)
+            close (ustream.fd);
           if (body != stdout)
             fclose (body);
           if (dump != NULL && dump != stdout)
@@ -1112,6 +1166,10 @@ run_one (twist_easy *easy, struct cli_op *op, const char *url,
       query_url = joined;
       use_url = query_url;
       payload = NULL;
+      /* The data goes in the URL; nothing is uploaded.  */
+      if (streaming && ustream.fd != STDIN_FILENO)
+        close (ustream.fd);
+      streaming = 0;
     }
   hdrs.body = body;
   hdrs.dump = dump;
@@ -1128,6 +1186,9 @@ run_one (twist_easy *easy, struct cli_op *op, const char *url,
   twist_easy_setopt (easy, TWISTOPT_CUSTOMREQUEST, method);
   twist_easy_setopt (easy, TWISTOPT_NOBODY, op->head ? 1L : 0L);
   twist_easy_setopt (easy, TWISTOPT_POSTFIELDS, payload);
+  twist_easy_setopt (easy, TWISTOPT_READFUNCTION,
+                     streaming ? read_upload : NULL);
+  twist_easy_setopt (easy, TWISTOPT_READDATA, streaming ? &ustream : NULL);
   if (payload != NULL)
     twist_easy_setopt (easy, TWISTOPT_POSTFIELDSIZE, (long) payload_n);
   twist_easy_setopt (easy, TWISTOPT_HTTPHEADER,
@@ -1158,9 +1219,23 @@ run_one (twist_easy *easy, struct cli_op *op, const char *url,
     fflush (body);
   if (dump != NULL && dump != stdout)
     fclose (dump);
+  if (streaming && ustream.fd != STDIN_FILENO)
+    close (ustream.fd);
   code = cli_status (rc, use_url);
   if (easy->proto_status != 0)
     code = easy->proto_status;
+  if (ustream.failed)
+    {
+      char msg[256];
+
+      snprintf (msg, sizeof msg, _("could not read %s"), upload);
+      diag_code (26, msg);
+      emit_writeout (op->writeout, easy, 26);
+      free (up.p);
+      free (query_url);
+      free (named_url);
+      return 26;
+    }
   if ((body_short || hdrs.short_write) && (code == 0 || code == 42))
     code = 23;
   if (code != 0)

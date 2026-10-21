@@ -1451,6 +1451,49 @@ test_upload_errors (void)
   server_free (&sv);
 }
 
+/* A source that gives some data and then fails to read: an end of file would
+   leave a short file that looks whole, so the callback says it failed.  */
+static size_t
+flaky_read (char *ptr, size_t size, size_t nmemb, void *user)
+{
+  int *calls = user;
+
+  (void) size;
+  (void) nmemb;
+  if ((*calls)++ == 0)
+    {
+      memset (ptr, 'x', 5000);
+      return 5000;
+    }
+  return TWIST_READFUNC_ABORT;
+}
+
+static void
+test_upload_read_error (void)
+{
+  struct server sv;
+  struct world w;
+  struct twist_easy *easy;
+  struct setup su = SETUP ("sftp://alice@127.0.0.1/up.bin", 0, "secret");
+  int calls = 0;
+
+  su.upload = content;
+  su.upload_len = sizeof content;
+  su.streamed = 1;
+  check (server_new (&sv) == 0, "server");
+  easy = start (&w, &sv, &su);
+  easy->read_cb = flaky_read;
+  easy->read_data = &calls;
+  check (twist_ssh_start (w.ssh) == TWIST_OK, "start");
+  pump (&w, easy, 65536);
+  check (easy->done && easy->result == TWIST_ERR_ABORTED && calls >= 2,
+         "a read that fails ends the upload with an error");
+  check (!sv.closed_handle || sv.up_len <= 5000,
+         "no more than was read was sent");
+  twist_easy_cleanup (easy);
+  server_free (&sv);
+}
+
 /* Download from an offset, and the checks that go with it.  */
 static void
 test_download_resume (void)
@@ -3389,6 +3432,7 @@ main (void)
   test_upload_empty_and_replace ();
   test_upload_resume ();
   test_upload_errors ();
+  test_upload_read_error ();
   test_download_resume ();
   test_ranges ();
   test_listing ();
