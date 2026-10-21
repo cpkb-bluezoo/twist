@@ -31,6 +31,9 @@ Twist TODO List
         - statvfs, and the other commands the sftp tool has, as -Q
           commands; --create-file-mode and the directory mode.
         - quote commands for scp URLs (curl has none either).
+        - --limit-rate for the other protocols: the pacer is in
+          src/engine/rate.c; only the SFTP pumps use it.  Until then the
+          command line refuses the option for other URLs.
         - certificates are found only as KEY-cert.pub beside a key file;
           there is no option to name a certificate elsewhere (ssh's
           CertificateFile).

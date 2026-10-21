@@ -66,6 +66,7 @@ libtwist_la_SOURCES = \
   engine/easy.c \
   engine/multi.c \
   engine/pool.c \
+  engine/rate.c \
   engine/proxy.c \
   engine/scheme.c \
   engine/share.c \

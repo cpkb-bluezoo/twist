@@ -76,6 +76,7 @@ struct cli_op
   struct twist_slist *quote;
   struct twist_slist *postquote;
   int ftp_create_dirs;
+  uint64_t limit_rate;		/* Bytes a second; 0: none.  */
   char *mail_from;
   char *output_dir;
   int create_dirs;
@@ -231,6 +232,8 @@ usage (void)
            "                          it with a - before it; a * lets it fail\n"),
          stdout);
   fputs (_("      --ftp-create-dirs   make the directories of an sftp upload\n"),
+         stdout);
+  fputs (_("      --limit-rate SPEED  keep to SPEED bytes a second, with k, M, G (sftp, scp)\n"),
          stdout);
   fputs (_("  -b, --cookie DATA       Cookie header data\n"), stdout);
   fputs (_("      --oauth2-bearer T   Bearer token\n"), stdout);
@@ -533,6 +536,54 @@ add_urlencode (struct cli_op *op, const char *text)
     rc = op_add_bytes (op, enc.p != NULL ? enc.p : "", enc.n, 1);
   free (enc.p);
   return rc;
+}
+
+/* A speed as curl takes it: digits, and a suffix that multiplies by a power
+   of 1024 (k, m, g, t, p), in either case.  No fractions, no sign.  */
+static int
+parse_rate (const char *s, uint64_t *out)
+{
+  uint64_t v = 0;
+  int shift = 0;
+
+  if (*s < '0' || *s > '9')
+    return -1;
+  for (; *s >= '0' && *s <= '9'; s++)
+    {
+      unsigned d = (unsigned) (*s - '0');
+
+      if (v > (UINT64_MAX - d) / 10)
+        return -1;
+      v = v * 10 + d;
+    }
+  switch (*s)
+    {
+    case 0:
+      break;
+    case 'k': case 'K':
+      shift = 10;
+      break;
+    case 'm': case 'M':
+      shift = 20;
+      break;
+    case 'g': case 'G':
+      shift = 30;
+      break;
+    case 't': case 'T':
+      shift = 40;
+      break;
+    case 'p': case 'P':
+      shift = 50;
+      break;
+    default:
+      return -1;
+    }
+  if (*s != 0 && s[1] != 0)
+    return -1;
+  if (shift > 0 && v > (UINT64_MAX >> shift))
+    return -1;
+  *out = v << shift;
+  return 0;
 }
 
 static int
@@ -1035,6 +1086,14 @@ run_one (twist_easy *easy, struct cli_op *op, const char *url,
       free (out_path);
       return rc;
     }
+  if (op->limit_rate != 0 && !is_ssh_url (url))
+    {
+      /* Nothing else keeps to a rate yet, and a limit that is not kept is
+         worse than none.  */
+      diag_code (2, _("--limit-rate works for sftp and scp only"));
+      free (out_path);
+      return 2;
+    }
   if (op->resume_set)
     {
       int sends = upload != NULL || (op->has_data && !op->get);
@@ -1205,6 +1264,8 @@ run_one (twist_easy *easy, struct cli_op *op, const char *url,
                      op->headers != NULL ? op->headers : NULL);
   twist_easy_setopt (easy, TWISTOPT_MAIL_FROM, op->mail_from);
   twist_easy_setopt (easy, TWISTOPT_MAIL_RCPT, op->rcpts);
+  twist_easy_setopt (easy, TWISTOPT_MAX_RECV_SPEED_LARGE, op->limit_rate);
+  twist_easy_setopt (easy, TWISTOPT_MAX_SEND_SPEED_LARGE, op->limit_rate);
   /* Only an sftp URL takes them; to any other they mean nothing, as with
      curl, so a command line of several kinds of URL works.  */
   twist_easy_setopt (easy, TWISTOPT_QUOTE,
@@ -1403,6 +1464,7 @@ main (int argc, char **argv)
     { "list-only", no_argument, NULL, 'l' },
     { "quote", required_argument, NULL, 'Q' },
     { "ftp-create-dirs", no_argument, NULL, 34 },
+    { "limit-rate", required_argument, NULL, 35 },
     { "cookie", required_argument, NULL, 'b' },
     { "oauth2-bearer", required_argument, NULL, 29 },
     { "max-time", required_argument, NULL, 'm' },
@@ -1601,6 +1663,14 @@ main (int argc, char **argv)
           break;
         case 34:
           op->ftp_create_dirs = 1;
+          break;
+        case 35:
+          if (parse_rate (optarg, &op->limit_rate) != 0)
+            {
+              diag (_("numerical parameter expected"));
+              suggest ();
+              status = 2;
+            }
           break;
         case 'Q':
           /* A dash before it says after the transfer.  A plus is the FTP

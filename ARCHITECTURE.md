@@ -370,6 +370,15 @@ Host keys are checked against `~/.ssh/known_hosts` by default, as the
 curl tool does. A key that is missing or changed fails the transfer, there
 is no accept-new mode, and turning off peer verification (`-k`) skips the
 check. A pinned SHA-256 of the host key is the other way to trust a host.
+A rate limit (`src/engine/rate.c`) is a pacer: a chunk may go when the bytes
+before it have been earned at the limit since the transfer's first chunk, so the
+transfer is ahead by at most one chunk, and the chunk is made no bigger than
+half a second of the limit. The SFTP pumps ask before they issue a read or fill
+a write; when the answer is to wait, a loop timer calls the pump again, and the
+call is made between `twist_ssh_enter` and `twist_ssh_leave` like any call into
+the session from the loop. Only SFTP asks so far; the command line refuses
+`--limit-rate` for other URLs rather than ignore it.
+
 Quote commands (`-Q`) and the directories of an upload are requests of the
 SFTP client run in sequence: each is sent when the one before has been
 answered, tagged so that its answer is told from the transfer's. The command

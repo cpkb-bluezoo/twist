@@ -688,5 +688,46 @@ rc=$?
 check "$([ $rc -eq 0 ] && [ -f "$work/srv/qa/qb/g.txt" ] && echo ok)" \
   "and goes on when they are there (exit $rc)"
 
+# 19. --limit-rate.  The file is 700 KB; at 500K a second it takes about 1.4
+# seconds (the last chunk goes at 1.37), where unlimited it takes a few
+# hundredths.  The limit holds for either direction, and the figure is read as
+# curl reads it.
+ms () { echo $(( $(date +%s%N) / 1000000 )); }
+t0=$(ms)
+t -k --key "$work/userkey" -o /dev/null "sftp://$user@$base$work/srv/data.bin"
+fast=$(( $(ms) - t0 ))
+t0=$(ms)
+t -k --key "$work/userkey" --limit-rate 500K -o "$work/out" \
+  "sftp://$user@$base$work/srv/data.bin"
+rc=$?
+took=$(( $(ms) - t0 ))
+ok=
+[ $rc -eq 0 ] && cmp -s "$work/out" "$work/srv/data.bin" && [ $took -ge 1100 ] \
+  && [ $took -lt 4000 ] && [ $fast -lt $took ] && ok=ok
+check "$ok" "a download at 500K takes about 1.4 s (took $took ms; unlimited $fast ms; exit $rc)"
+
+t0=$(ms)
+t -k --key "$work/userkey" --limit-rate 500K -T "$work/srv/data.bin" \
+  "sftp://$user@$base$work/srv/limited.bin"
+rc=$?
+took=$(( $(ms) - t0 ))
+ok=
+[ $rc -eq 0 ] && cmp -s "$work/srv/limited.bin" "$work/srv/data.bin" \
+  && [ $took -ge 1100 ] && [ $took -lt 4000 ] && ok=ok
+check "$ok" "an upload at 500K takes about 1.4 s (took $took ms; exit $rc)"
+
+for bad in 1.5M abc -5 5x ""; do
+  t -k --key "$work/userkey" --limit-rate "$bad" -o /dev/null "sftp://$user@$base$work/srv/small.txt" 2>/dev/null
+  rc=$?
+  check "$([ $rc -eq 2 ] && echo ok)" "--limit-rate '$bad' is refused (exit $rc)"
+done
+t0=$(ms)
+t -k --key "$work/userkey" --limit-rate 0 -o /dev/null "sftp://$user@$base$work/srv/data.bin"
+rc=$?
+check "$([ $rc -eq 0 ] && [ $(( $(ms) - t0 )) -lt 1000 ] && echo ok)" "--limit-rate 0 is no limit (exit $rc)"
+t -k --limit-rate 1M -o /dev/null "http://127.0.0.1:1/x" 2>/dev/null
+rc=$?
+check "$([ $rc -eq 2 ] && echo ok)" "a scheme that cannot keep to it is refused (exit $rc)"
+
 [ $fail -eq 0 ] || exit 1
 exit 0

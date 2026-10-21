@@ -472,6 +472,19 @@ ssh_established (void *user, const gf_conn_info *info)
   return 0;
 }
 
+void
+twist_ssh_enter (struct twist_ssh *s)
+{
+  s->depth++;
+}
+
+void
+twist_ssh_leave (struct twist_ssh *s)
+{
+  s->depth--;
+  ssh_after (s, GF_OK);
+}
+
 /* The agent's answer, or its failure, for the session.  They come from the
    loop and not from inside a call into the session, so the session may act
    on them and call back; see depth.  */

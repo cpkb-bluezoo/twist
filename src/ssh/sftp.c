@@ -136,6 +136,14 @@ struct twist_sftp_xfer
   /* Requests the client took and the server has not answered.  */
   unsigned inflight;
 
+  /* The rate limit, if there is one: the pacer, how much to ask for or send
+     at a time, and the timer that wakes the pump when the next chunk is
+     due.  */
+  struct twist_rate rate;
+  size_t chunk_max;
+  struct twist_timer *pace_timer;
+  void (*pace_pump) (struct twist_sftp_xfer *g);
+
   /* Quote commands: the next to run, whether the list is the one for after
      the transfer, and the one under way with the step it is at (a command
      that changes part of the attributes reads them first).  */
@@ -174,6 +182,8 @@ twist_sftp_free (struct twist_sftp_xfer *g)
       free (g->slots);
       g->slots = n;
     }
+  if (g->pace_timer != NULL)
+    twist_timer_cancel (g->pace_timer);
   free (g->path);
   twist_quote_clear (&g->q);
   free (g);
@@ -198,6 +208,8 @@ twist_sftp_recycle (struct twist_sftp_xfer *g)
       free (g->slots);
       g->slots = n;
     }
+  if (g->pace_timer != NULL)
+    twist_timer_cancel (g->pace_timer);
   free (g->path);
   twist_quote_clear (&g->q);
   memset (g, 0, sizeof *g);
@@ -550,6 +562,46 @@ drop_slot (struct twist_sftp_xfer *g, struct slot *sl)
   g->used--;
 }
 
+/* ---- keeping to a rate ---- */
+
+static void
+pace_fire (void *user)
+{
+  struct twist_sftp_xfer *g = user;
+
+  g->pace_timer = NULL;
+  /* From the loop, not from inside the session: what the pump asks of the
+     session is done when it is back.  */
+  twist_ssh_enter (g->ssh);
+  g->pace_pump (g);
+  twist_ssh_leave (g->ssh);
+}
+
+/* 1 if the next chunk must wait, and PUMP will be called when it is due.
+   Without a loop, as when driven in-process, there is nothing to wake it,
+   so nothing waits.  */
+static int
+pace (struct twist_sftp_xfer *g, void (*pump) (struct twist_sftp_xfer *))
+{
+  struct twist_easy *e = g->ssh->easy;
+  uint64_t now, wait;
+
+  if (g->rate.limit == 0 || e->loop == NULL)
+    return 0;
+  if (g->pace_timer != NULL)
+    return 1;
+  now = twist_ssh_now_us (g->ssh) / 1000;
+  wait = twist_rate_wait (&g->rate, now, g->chunk_max);
+  if (wait == 0)
+    return 0;
+  /* An hour at most; the pump asks again when it wakes.  */
+  if (wait > 3600000)
+    wait = 3600000;
+  g->pace_pump = pump;
+  twist_loop_schedule (e->loop, now + wait, pace_fire, g, &g->pace_timer);
+  return 1;
+}
+
 /* Send what is waiting to go, then new chunks while there is room.  */
 static void
 pump_reads (struct twist_sftp_xfer *g)
@@ -576,7 +628,7 @@ pump_reads (struct twist_sftp_xfer *g)
     }
   while (g->used < SFTP_WINDOW)
     {
-      uint32_t want = SFTP_CHUNK;
+      uint32_t want = (uint32_t) g->chunk_max;
 
       if (g->has_end)
         {
@@ -585,6 +637,8 @@ pump_reads (struct twist_sftp_xfer *g)
           if (g->end - g->next_req < want)
             want = (uint32_t) (g->end - g->next_req);
         }
+      if (pace (g, pump_reads))
+        return;
       sl = add_slot (g, g->next_req, want);
       if (sl == NULL)
         {
@@ -608,6 +662,7 @@ pump_reads (struct twist_sftp_xfer *g)
         }
       sl->sent = 1;
       g->next_req += want;
+      twist_rate_note (&g->rate, want);
     }
 }
 
@@ -802,21 +857,21 @@ fill_chunk (struct twist_sftp_xfer *g)
           return 0;
         }
       n = total - g->src_pos;
-      if (n > SFTP_CHUNK)
-        n = SFTP_CHUNK;
+      if (n > g->chunk_max)
+        n = g->chunk_max;
       memcpy (g->chunk, e->postfields + g->src_pos, n);
       g->src_pos += n;
       g->chunk_len = n;
       return 1;
     }
-  n = e->read_cb ((char *) g->chunk, 1, SFTP_CHUNK, e->read_data);
+  n = e->read_cb ((char *) g->chunk, 1, g->chunk_max, e->read_data);
   if (n == 0)
     {
       g->src_eof = 1;
       return 0;
     }
-  /* TWIST_READFUNC_ABORT, or more than there was room for.  */
-  if (n > SFTP_CHUNK)
+  /* TWIST_READFUNC_ABORT, or more than was asked for.  */
+  if (n > g->chunk_max)
     return -1;
   g->chunk_len = n;
   return 1;
@@ -861,6 +916,10 @@ pump_writes (struct twist_sftp_xfer *g)
     {
       int rc;
 
+      /* Before the source is read: reading may wait, and a chunk that is
+         not due is not wanted yet.  */
+      if (g->chunk_len == 0 && !g->src_eof && pace (g, pump_writes))
+        return;
       have = fill_chunk (g);
       if (have < 0)
         {
@@ -887,6 +946,7 @@ pump_writes (struct twist_sftp_xfer *g)
           return;
         }
       g->put_off += g->chunk_len;
+      twist_rate_note (&g->rate, g->chunk_len);
       g->chunk_len = 0;
       g->outstanding++;
     }
@@ -1557,6 +1617,9 @@ begin (struct twist_sftp_xfer *g)
   int rc;
 
   g->put = s->easy->postfields != NULL || s->easy->read_cb != NULL;
+  twist_rate_init (&g->rate, g->put ? s->easy->max_send_speed
+                                    : s->easy->max_recv_speed);
+  g->chunk_max = twist_rate_chunk (&g->rate, SFTP_CHUNK);
   rc = file_path (s, g->put, &g->path, &g->list);
   if (rc == TWIST_OK)
     rc = plan (g);

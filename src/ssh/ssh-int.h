@@ -160,6 +160,10 @@ void twist_ssh_maybe_begin (struct twist_ssh *s);
 void twist_ssh_sign_answer (struct twist_ssh *s, const uint8_t *sig, size_t len);
 void twist_ssh_sign_failed (struct twist_ssh *s);
 uint64_t twist_ssh_now_us (const struct twist_ssh *s);
+/* A call into the session made from the loop, such as a timer's, is made
+   between these, so that a finish it asks for waits until the call is back.  */
+void twist_ssh_enter (struct twist_ssh *s);
+void twist_ssh_leave (struct twist_ssh *s);
 /* Keep DETAIL as the message of the transfer unless one is already set.  */
 void twist_ssh_detail (struct twist_ssh *s, const char *detail);
 /* Say goodbye and end the transfer with ERR.  */

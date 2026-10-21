@@ -126,6 +126,7 @@ struct server
   unsigned nops;
   char made[4][128];		/* Directories that mkdir made.  */
   unsigned nmade;
+  uint32_t max_read_len;	/* The most any read asked for.  */
   unsigned cert_probes;		/* Certificates offered, and signed with.  */
   unsigned cert_logins;
   /* Answer the reads just past the end at once, which the client needs, and
@@ -531,6 +532,8 @@ sv_sftp_request (void *user, const gf_sftp_request *req)
 
         if (sv->reads++ == 0)
           sv->first_read = req->offset;
+        if (req->length > sv->max_read_len)
+          sv->max_read_len = req->length;
         if (!is_u && sv->late_eof && sv->nheld < 64
             && req->offset >= sv->filelen + 65536)
           {
@@ -3594,6 +3597,7 @@ struct tcp_server
   size_t up_len;		/* What was uploaded, on any of them.  */
   unsigned up_sum;
   int late_eof;			/* Set on each server it makes.  */
+  uint32_t max_read;		/* The most a read asked for, on any.  */
 };
 
 static void
@@ -3643,11 +3647,14 @@ sum_of (const uint8_t *p, size_t n)
 static void
 ts_note_upload (struct tcp_server *ts, const struct server *sv)
 {
-  if (sv->up_len == 0)
-    return;
   pthread_mutex_lock (&ts->mu);
-  ts->up_len = sv->up_len;
-  ts->up_sum = sum_of (sv->up, sv->up_len);
+  if (sv->max_read_len > ts->max_read)
+    ts->max_read = sv->max_read_len;
+  if (sv->up_len != 0)
+    {
+      ts->up_len = sv->up_len;
+      ts->up_sum = sum_of (sv->up, sv->up_len);
+    }
   pthread_mutex_unlock (&ts->mu);
 }
 
@@ -4124,6 +4131,110 @@ test_reuse_concurrent (void)
   ts_stop (&ts);
 }
 
+/* ---- rate limits ---- */
+
+static double
+seconds (void)
+{
+  struct timespec t;
+
+  clock_gettime (CLOCK_MONOTONIC, &t);
+  return (double) t.tv_sec + (double) t.tv_nsec / 1e9;
+}
+
+/* A limit is on the average over the transfer, so 100000 bytes at 100000 a
+   second take about a second: the last chunk goes at 0.98 s.  No limit takes
+   a few milliseconds on a loopback.  */
+static void
+test_limits (void)
+{
+  struct tcp_server ts;
+  struct twist_multi *multi;
+  struct twist_easy *down, *up, *both;
+  double t0, took;
+  size_t len;
+  unsigned sum;
+
+  check (ts_start (&ts) == 0, "server");
+  multi = twist_multi_init ();
+
+  down = tcp_easy (0, "secret", NULL);
+  t0 = seconds ();
+  check (tcp_get (multi, down, &ts, "sftp", "/data.bin") == TWIST_OK
+         && got_data (), "unlimited");
+  took = seconds () - t0;
+  check (took < 0.6, "an unlimited download is quick");
+
+  twist_easy_setopt (down, TWISTOPT_MAX_RECV_SPEED_LARGE, (uint64_t) 100000);
+  t0 = seconds ();
+  check (tcp_get (multi, down, &ts, "sftp", "/data.bin") == TWIST_OK
+         && got_data (), "limited download");
+  took = seconds () - t0;
+  check (took >= 0.85 && took < 2.5, "a download keeps to the limit");
+  if (took < 0.85 || took >= 2.5)
+    fprintf (stderr, "  took %.2f s\n", took);
+
+  /* A limit on sending does not slow a download.  */
+  both = tcp_easy (0, "secret", NULL);
+  twist_easy_setopt (both, TWISTOPT_MAX_SEND_SPEED_LARGE, (uint64_t) 1000);
+  t0 = seconds ();
+  check (tcp_get (multi, both, &ts, "sftp", "/data.bin") == TWIST_OK
+         && got_data (), "a send limit and a download");
+  check (seconds () - t0 < 0.6, "is not slowed by the send limit");
+
+  up = tcp_easy (0, "secret", NULL);
+  twist_easy_setopt (up, TWISTOPT_POSTFIELDS, (char *) content);
+  twist_easy_setopt (up, TWISTOPT_POSTFIELDSIZE, (long) sizeof content);
+  twist_easy_setopt (up, TWISTOPT_MAX_SEND_SPEED_LARGE, (uint64_t) 100000);
+  t0 = seconds ();
+  check (tcp_get (multi, up, &ts, "sftp", "/up.bin") == TWIST_OK,
+         "limited upload");
+  took = seconds () - t0;
+  ts_uploaded (&ts, &len, &sum);
+  check (len == sizeof content && sum == sum_of (content, sizeof content),
+         "the upload arrived whole");
+  check (took >= 0.85 && took < 2.5, "an upload keeps to the limit");
+  if (took < 0.85 || took >= 2.5)
+    fprintf (stderr, "  took %.2f s\n", took);
+
+  twist_easy_cleanup (down);
+  twist_easy_cleanup (both);
+  twist_easy_cleanup (up);
+  twist_multi_cleanup (multi);
+  ts_stop (&ts);
+}
+
+/* A slow limit means small requests, so that a transfer does not go in
+   lumps: at 2000 a second the reads are of 1000.  */
+static void
+test_limit_chunks (void)
+{
+  struct tcp_server ts;
+  struct twist_multi *multi;
+  struct twist_easy *easy;
+  double t0, took;
+
+  check (ts_start (&ts) == 0, "server");
+  multi = twist_multi_init ();
+  easy = tcp_easy (0, "secret", NULL);
+  twist_easy_setopt (easy, TWISTOPT_RANGE, "0-3999");
+  twist_easy_setopt (easy, TWISTOPT_MAX_RECV_SPEED_LARGE, (uint64_t) 2000);
+  t0 = seconds ();
+  check (tcp_get (multi, easy, &ts, "sftp", "/data.bin") == TWIST_OK
+         && got_len == 4000 && memcmp (got, content, 4000) == 0,
+         "four thousand bytes at two thousand a second");
+  took = seconds () - t0;
+  check (took >= 1.3 && took < 3.5, "take about two seconds");
+  if (took < 1.3 || took >= 3.5)
+    fprintf (stderr, "  took %.2f s\n", took);
+  pthread_mutex_lock (&ts.mu);
+  check (ts.max_read > 0 && ts.max_read <= 1000, "in requests of 1000");
+  pthread_mutex_unlock (&ts.mu);
+  twist_easy_cleanup (easy);
+  twist_multi_cleanup (multi);
+  ts_stop (&ts);
+}
+
 /* A transfer that goes away while its job is queued or running: the job
    finishes by itself and frees what it made.  Whichever happens first, the
    result must not be touched; valgrind finds it if it is.  */
@@ -4227,7 +4338,7 @@ main (void)
   test_off_the_loop ();
   test_off_the_loop_errors ();
   test_abandoned_job ();
-  alarm (120);
+  alarm (180);
   test_reuse_basic ();
   test_reuse_mixed ();
   test_reuse_terms ();
@@ -4235,6 +4346,8 @@ main (void)
   test_reuse_after_error ();
   test_reuse_unanswered ();
   test_reuse_concurrent ();
+  test_limits ();
+  test_limit_chunks ();
   rmdir (home);
   return tests_finish ();
 }

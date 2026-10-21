@@ -538,6 +538,26 @@ int twist_origin_http_minor (struct twist_easy *easy, const char *host);
 void twist_origin_set_http_minor (struct twist_easy *easy, const char *host,
                                   int minor);
 
+/* Keeping a transfer to a rate on average.  The first question about a
+   transfer starts its clock.  A chunk may go when everything before it has
+   been earned, so a transfer is ahead by at most one chunk, and the chunk is
+   made small when the limit is.  */
+struct twist_rate
+{
+  uint64_t limit;		/* Bytes a second; 0: none.  */
+  uint64_t start_ms;
+  uint64_t bytes;		/* Counted so far.  */
+  int started;
+};
+
+void twist_rate_init (struct twist_rate *r, uint64_t limit);
+/* Milliseconds to wait before another N bytes may go; 0: now.  */
+uint64_t twist_rate_wait (struct twist_rate *r, uint64_t now_ms, size_t n);
+void twist_rate_note (struct twist_rate *r, uint64_t n);
+/* How much to ask for or send at a time: MAX, or half a second's worth of the
+   limit if that is less, and at least 1.  */
+size_t twist_rate_chunk (const struct twist_rate *r, size_t max);
+
 struct twist_pool;
 struct twist_pool *twist_pool_new (void);
 void twist_pool_free (struct twist_pool *pool);

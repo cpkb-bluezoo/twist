@@ -218,6 +218,13 @@ rename, rm and rmdir.
 A command that fails exits 21.
 For sftp only.
 .TP
+.BI \-\-limit\-rate " speed"
+Keep to
+.I speed
+bytes a second on average, for downloads and uploads.
+A whole number with an optional suffix k, m, g, t or p (1024 times the one before).
+For sftp and scp; other URLs are refused.
+.TP
 .B \-\-ftp\-create\-dirs
 Make the directories an sftp upload needs.
 .TP

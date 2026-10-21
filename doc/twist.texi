@@ -204,6 +204,13 @@ Run an SFTP command on the server before the transfer, or after a successful
 one if @var{command} begins with @samp{-}.  A @samp{*} before it lets the
 server refuse it without ending the transfer.  May be given many times.  For
 @code{sftp} URLs only; other URLs ignore it (@pxref{SFTP and SCP}).
+@item --limit-rate @var{speed}
+Keep to @var{speed} bytes a second, for downloads and uploads, for
+@code{sftp} and @code{scp}.  The speed is a whole number with an optional
+suffix: @samp{k}, @samp{m}, @samp{g}, @samp{t} or @samp{p}, in either case,
+each 1024 times the one before (@samp{200K}, @samp{3m}).  @samp{0} is no
+limit.  Other kinds of URL do not keep to a rate yet, and are refused with
+status 2 rather than ignoring the limit.
 @item --ftp-create-dirs
 Make the directories an @code{sftp} upload needs, with mode 0755.
 @item -C @var{offset}
@@ -520,6 +527,17 @@ status 78 if it is not there.  That is a way to run commands alone.
 @option{--ftp-create-dirs} makes the directories of the path of an upload
 that are not there, from the top, and tries again; a directory that is there
 is left, and if making them does not help the error is the upload's.
+
+@subheading Rate limits
+
+@option{--limit-rate} limits the average over the transfer, as curl's does.
+A chunk is sent or asked for when the bytes before it have been earned at the
+limit, so the transfer is ahead by at most one chunk.  A chunk is 32 KiB, or
+half a second's worth of the limit when that is less, so a slow limit gives
+small requests and not lumps; at 1000 bytes a second the requests are of 500
+bytes.  The time spent waiting for a slow disk or a slow pipe is time, so
+it counts.  The library takes @code{TWISTOPT_MAX_RECV_SPEED_LARGE} and
+@code{TWISTOPT_MAX_SEND_SPEED_LARGE} for the two directions.
 
 @subheading Logging in
 
