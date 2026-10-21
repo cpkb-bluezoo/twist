@@ -19,7 +19,10 @@ Twist TODO List
           token I/O (libfido2, optional, on the storage pool).  Keys
           held by an ssh-agent already work, with the agent doing the
           token I/O.
-        - keyboard-interactive login
+        - keyboard-interactive questions that need a person, such as a
+          one-time code: twist answers only a single hidden question
+          with the password, as curl does.  A prompt on the terminal
+          would need a way for the application to be asked.
       Requires libgcrypt >= 1.12.4.
   [ ] Passphrase-protected OpenSSH-format private keys.  Blocked on
       bcrypt-pbkdf being available in libgcrypt; it is deliberately not

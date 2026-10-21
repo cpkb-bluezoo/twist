@@ -853,36 +853,6 @@ write_response (struct twist_sftp_xfer *g, const gf_sftp_response *r)
 
 /* ---- listing ---- */
 
-/* Copy IN to OUT with the control characters, and the UTF-8 form of the C1
-   ones, made ?.  OUT has room for N bytes.  Returns how many were written.  */
-static size_t
-sanitize (uint8_t *out, const uint8_t *in, size_t n)
-{
-  size_t i = 0, o = 0;
-
-  while (i < n)
-    {
-      uint8_t c = in[i];
-
-      if (c < 0x20 || c == 0x7f)
-        {
-          out[o++] = '?';
-          i++;
-        }
-      else if (c == 0xc2 && i + 1 < n && in[i + 1] >= 0x80 && in[i + 1] <= 0x9f)
-        {
-          out[o++] = '?';
-          i += 2;
-        }
-      else
-        {
-          out[o++] = c;
-          i++;
-        }
-    }
-  return o;
-}
-
 static void
 ask_more_names (struct twist_sftp_xfer *g)
 {
@@ -908,7 +878,7 @@ write_entry (struct twist_sftp_xfer *g, const gf_sftp_name *name)
       fail (g, TWIST_ERR_NOMEM, NULL);
       return 0;
     }
-  n = sanitize (line, text.data, text.len);
+  n = twist_ssh_sanitize (line, text.data, text.len);
   line[n++] = '\n';
   if (e->write_cb != NULL
       && twist_write_bytes (e->write_cb, e->write_data, line, n) < n)

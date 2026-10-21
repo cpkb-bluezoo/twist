@@ -244,6 +244,93 @@ ssh_password (const struct twist_easy *easy)
   return NULL;
 }
 
+size_t
+twist_ssh_sanitize (uint8_t *out, const uint8_t *in, size_t n)
+{
+  size_t i = 0, o = 0;
+
+  while (i < n)
+    {
+      uint8_t c = in[i];
+
+      if (c < 0x20 || c == 0x7f)
+        {
+          out[o++] = '?';
+          i++;
+        }
+      else if (c == 0xc2 && i + 1 < n && in[i + 1] >= 0x80 && in[i + 1] <= 0x9f)
+        {
+          out[o++] = '?';
+          i += 2;
+        }
+      else
+        {
+          out[o++] = c;
+          i++;
+        }
+    }
+  return o;
+}
+
+/* Keyboard-interactive: the server asks questions, and twist has a password.
+   It answers one question that is not shown as it is typed with the
+   password, as curl does.  Anything else gets empty answers, so that the
+   password is not given to a question that might not be asking for it: a
+   code, a second question, a name.  Then the method fails, and the others
+   are tried.  The count of answers has to be the count of questions, and a
+   nonzero return would end the session, so there is always an answer.  */
+static void
+kbdint_note (struct twist_ssh *s, size_t nprompts, const gf_slice *prompts)
+{
+  char note[sizeof s->kbdint_note];
+
+  if (s->kbdint_note[0] != 0)
+    return;
+  if (nprompts != 1)
+    {
+      snprintf (note, sizeof note,
+                _("the server asked more than one question, and twist can "
+                  "answer only a password"));
+    }
+  else
+    {
+      uint8_t clean[128];
+      size_t n = prompts[0].len > 60 ? 60 : prompts[0].len, m;
+
+      /* Not in the middle of a UTF-8 character.  */
+      while (n > 0 && n < prompts[0].len && (prompts[0].data[n] & 0xc0) == 0x80)
+        n--;
+      m = twist_ssh_sanitize (clean, prompts[0].data, n);
+      while (m > 0 && (clean[m - 1] == ' ' || clean[m - 1] == ':'))
+        m--;
+      clean[m] = 0;
+      snprintf (note, sizeof note,
+                _("the server asked \"%s\", which is not a password"),
+                (const char *) clean);
+    }
+  snprintf (s->kbdint_note, sizeof s->kbdint_note, "%s", note);
+}
+
+static int
+ssh_auth_kbdint (void *user, gf_slice name, gf_slice instruction,
+                 size_t nprompts, const gf_slice *prompts, const int *echo)
+{
+  struct twist_ssh *s = user;
+  const char *answers[GF_AUTH_MAX_PROMPTS];
+  size_t i;
+
+  (void) name;
+  (void) instruction;
+  for (i = 0; i < nprompts && i < GF_AUTH_MAX_PROMPTS; i++)
+    answers[i] = "";
+  if (nprompts == 1 && !echo[0] && s->password != NULL)
+    answers[0] = s->password;
+  else
+    kbdint_note (s, nprompts, prompts);
+  gf_session_auth_kbdint_respond (s->session, nprompts, answers);
+  return 0;
+}
+
 /* The agent is asked to sign for a key it holds.  */
 static int
 ssh_auth_sign (void *user, const gf_key *key, enum gf_sigalg alg,
@@ -333,6 +420,10 @@ twist_ssh_begin (struct twist_ssh *s)
   s->events.host_key = twist_ssh_host_key;
   s->events.established = ssh_established;
   s->events.auth_sign = ssh_auth_sign;
+  /* With no password there is nothing to answer a question with, so the
+     method is not tried.  */
+  if (s->password != NULL)
+    s->events.auth_kbdint = ssh_auth_kbdint;
   s->events.authenticated = twist_sftp_authenticated;
   s->events.auth_failed = ssh_auth_failed;
   s->events.channel_confirmed = twist_sftp_confirmed;

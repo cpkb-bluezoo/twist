@@ -474,6 +474,17 @@ and nothing else is asked.  Otherwise the keys in an @command{ssh-agent}, in
 the agent's order, then @file{~/.ssh/id_ed25519}, @file{id_ecdsa} and
 @file{id_rsa}.  Then a password, from @option{-u} or the URL.
 
+A server may ask for the password as a question (keyboard-interactive login,
+usual with PAM) and not as a password.  twist answers when the server asks
+one question that is not shown as it is typed, and the answer is the
+password, as curl does.  Anything else, such as a verification code or
+several questions, is answered with nothing, so the password is not given to
+a question that might not be asking for it; the other ways are then tried, and
+if they fail too the message says what was asked.  With no password, the
+method is not tried.  A server that offers both a password and questions is
+asked the question first, so a wrong password can count as two failed
+attempts, as it does for @command{ssh}.
+
 The agent is the one named by the environment variable @env{SSH_AUTH_SOCK}.
 twist asks it what it holds and to sign; the private keys never reach twist.
 This includes keys that are protected by a passphrase, restricted to certain

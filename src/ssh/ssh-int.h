@@ -70,6 +70,7 @@ struct twist_ssh
   int begun;
   struct ssh_agent *agent;
   char agent_note[240];
+  char kbdint_note[240];
   unsigned agent_timeout_ms;	/* For the identities; 0: 10 seconds.  */
   gf_knownhosts *known;
   enum gf_sigalg algs[SSH_MAX_ALGS];
@@ -107,6 +108,12 @@ twist_ssh_done (const struct twist_ssh *s)
 }
 
 /* ssh.c */
+/* Copy IN to OUT with the control characters, and the UTF-8 form of the C1
+   ones, made ?.  Anything the server sends that is shown, or written to the
+   application's output, goes through this: it is not trusted with a terminal
+   or with the line structure of the output.  OUT has room for N bytes.
+   Returns how many were written.  */
+size_t twist_ssh_sanitize (uint8_t *out, const uint8_t *in, size_t n);
 /* Make the session from what the job loaded and start it.  */
 int twist_ssh_begin (struct twist_ssh *s);
 /* Start the session if everything it waits for has come, once.  An error

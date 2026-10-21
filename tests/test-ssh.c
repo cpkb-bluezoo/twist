@@ -101,6 +101,12 @@ struct server
   size_t nalso;
   char offered[16][64];
   unsigned noffered;
+  /* Keyboard-interactive: what it asks, and what it was told.  */
+  int kbd_mode;
+  int kbd_stage;
+  unsigned kbd_requests;
+  size_t kbd_answers;		/* How many answers the last round had.  */
+  size_t kbd_first_len;		/* The length of the first.  */
   /* The directory being listed.  */
   const struct dent *dents;
   size_t ndents, dpos;
@@ -138,6 +144,69 @@ sv_write (void *user, const uint8_t *data, size_t len)
   return pipe_write (&sv->out, data, len);
 }
 
+/* ---- keyboard-interactive, from the server ---- */
+
+enum
+{
+  KBD_NONE = 0,
+  KBD_PASSWORD,			/* One hidden prompt.  */
+  KBD_TWO,			/* Two hidden prompts: a password and a code.  */
+  KBD_ECHOED,			/* One prompt that is shown as typed.  */
+  KBD_INFO_FIRST,		/* A round with no prompt, then a password.  */
+  KBD_HOSTILE			/* An echoed prompt full of control characters.  */
+};
+
+static int
+sv_kbd_prompt (struct server *sv)
+{
+  static const int hidden[2] = { 0, 0 };
+  static const int shown[1] = { 1 };
+  static const char *const password[1] = { "Password: " };
+  static const char *const two[2] = { "Password: ", "Verification code: " };
+  static const char *const user[1] = { "Username: " };
+  static const char *const hostile[1] = { "Code:\033[31m\nDELETE ALL\r" };
+
+  switch (sv->kbd_mode)
+    {
+    case KBD_PASSWORD:
+      return gf_session_auth_kbdint_prompt (sv->s, "", "", 1, password, hidden);
+    case KBD_TWO:
+      return gf_session_auth_kbdint_prompt (sv->s, "", "", 2, two, hidden);
+    case KBD_ECHOED:
+      return gf_session_auth_kbdint_prompt (sv->s, "", "", 1, user, shown);
+    case KBD_HOSTILE:
+      return gf_session_auth_kbdint_prompt (sv->s, "", "", 1, hostile, shown);
+    case KBD_INFO_FIRST:
+      if (sv->kbd_stage == 0)
+        return gf_session_auth_kbdint_prompt (sv->s, "info", "welcome", 0,
+                                              NULL, NULL);
+      return gf_session_auth_kbdint_prompt (sv->s, "", "", 1, password, hidden);
+    default:
+      return gf_session_auth_reject (sv->s, 0);
+    }
+}
+
+static int
+sv_kbd_response (void *user, const gf_slice *responses, size_t n)
+{
+  struct server *sv = user;
+
+  sv->kbd_answers = n;
+  sv->kbd_first_len = n > 0 ? responses[0].len : 0;
+  if (sv->kbd_mode == KBD_INFO_FIRST && sv->kbd_stage == 0)
+    {
+      sv->kbd_stage = 1;
+      return sv_kbd_prompt (sv) != GF_OK;
+    }
+  if ((sv->kbd_mode == KBD_PASSWORD || sv->kbd_mode == KBD_INFO_FIRST)
+      && n == 1 && sv->password != NULL && responses[0].len == strlen (sv->password)
+      && memcmp (responses[0].data, sv->password, responses[0].len) == 0)
+    return gf_session_auth_accept (sv->s) != GF_OK;
+  return gf_session_auth_reject (sv->s, 0) != GF_OK;
+}
+
+static unsigned next_server_methods;	/* For the next server; then reset.  */
+
 static int
 sv_auth_request (void *user, const gf_auth_request *req)
 {
@@ -146,6 +215,12 @@ sv_auth_request (void *user, const gf_auth_request *req)
 
   if (req->user.len != 5 || memcmp (req->user.data, "alice", 5) != 0)
     return gf_session_auth_reject (sv->s, 0) != GF_OK;
+  if (req->method == GF_AUTH_KBDINT)
+    {
+      sv->kbd_requests++;
+      sv->kbd_stage = 0;
+      return sv_kbd_prompt (sv) != GF_OK;
+    }
   if (req->method == GF_AUTH_PASSWORD && sv->password != NULL)
     ok = req->password.len == strlen (sv->password)
          && memcmp (req->password.data, sv->password, req->password.len) == 0;
@@ -461,8 +536,12 @@ server_new (struct server *sv)
   cfg.conn.software = "testd_1";
   cfg.conn.host_keys = &sv->host;
   cfg.conn.nhost_keys = 1;
-  cfg.server_auth.methods = GF_AUTH_PASSWORD | GF_AUTH_PUBLICKEY;
+  cfg.server_auth.methods = next_server_methods != 0
+                            ? next_server_methods
+                            : GF_AUTH_PASSWORD | GF_AUTH_PUBLICKEY;
+  next_server_methods = 0;
   ev.user = sv;
+  ev.auth_kbdint_response = sv_kbd_response;
   ev.write = sv_write;
   ev.auth_request = sv_auth_request;
   ev.channel_open = sv_channel_open;
@@ -2363,6 +2442,115 @@ test_agent_abandoned (void)
   check (1, "abandoned while the agent was asked");
 }
 
+/* ---- keyboard-interactive, from the client ---- */
+
+static void
+kbd_case (unsigned methods, int mode, const char *client_password,
+          const char *server_password, int expect_ok, unsigned requests,
+          const char *what)
+{
+  struct server sv;
+  struct world w;
+  struct twist_easy *easy;
+  struct setup su = SETUP ("sftp://alice@127.0.0.1/data.bin", 0, NULL);
+
+  next_server_methods = methods;
+  check (server_new (&sv) == 0, "server");
+  sv.kbd_mode = mode;
+  sv.password = server_password;
+  su.password = client_password;
+  easy = run (&w, &sv, &su);
+  check (easy->done && (expect_ok ? easy->result == TWIST_OK
+                                  : easy->result == TWIST_ERR_AUTH), what);
+  check (sv.kbd_requests == requests, "the method was tried as often as it should be");
+  twist_easy_cleanup (easy);
+  server_free (&sv);
+}
+
+/* A server that asks for the password as a question, and not as the
+   password method, is answered with the password.  curl does the same.  */
+/* The cases that need the state of a test are separate from those that are
+   one call of kbd_case, so the large frames are never nested.  */
+static void
+test_kbdint_more (void)
+{
+  struct server sv;
+  struct world w;
+  struct twist_easy *easy;
+  struct setup su = SETUP ("sftp://alice@127.0.0.1/data.bin", 0, "secret");
+  const unsigned kbd_only = GF_AUTH_PUBLICKEY | GF_AUTH_KBDINT;
+  const unsigned both = GF_AUTH_PUBLICKEY | GF_AUTH_KBDINT | GF_AUTH_PASSWORD;
+
+  /* Two questions: the password is not given to either.  The password
+     method is still there.  */
+  next_server_methods = both;
+  check (server_new (&sv) == 0, "server");
+  sv.kbd_mode = KBD_TWO;
+  easy = run (&w, &sv, &su);
+  check (easy->done && easy->result == TWIST_OK, "two questions: the password method works");
+  check (sv.kbd_answers == 2 && sv.kbd_first_len == 0,
+         "and the questions were answered with nothing");
+  twist_easy_cleanup (easy);
+  server_free (&sv);
+
+  /* With nothing else, the failure says what was asked.  */
+  next_server_methods = kbd_only;
+  check (server_new (&sv) == 0, "server");
+  sv.kbd_mode = KBD_TWO;
+  easy = run (&w, &sv, &su);
+  check (easy->done && easy->result == TWIST_ERR_AUTH
+         && detail_has (easy, "keyboard-interactive")
+         && detail_has (easy, "more than one"), "two questions, nothing else");
+  check (sv.kbd_first_len == 0, "the password was not sent");
+  twist_easy_cleanup (easy);
+  server_free (&sv);
+
+  /* A question that is shown as it is typed is not a password.  */
+  next_server_methods = kbd_only;
+  check (server_new (&sv) == 0, "server");
+  sv.kbd_mode = KBD_ECHOED;
+  easy = run (&w, &sv, &su);
+  check (easy->done && easy->result == TWIST_ERR_AUTH
+         && detail_has (easy, "Username") && sv.kbd_first_len == 0,
+         "a question that is not hidden gets no password, and is named");
+  twist_easy_cleanup (easy);
+  server_free (&sv);
+
+  /* What a server calls a question is not trusted with the terminal.  */
+  next_server_methods = kbd_only;
+  check (server_new (&sv) == 0, "server");
+  sv.kbd_mode = KBD_HOSTILE;
+  easy = run (&w, &sv, &su);
+  check (easy->done && easy->result == TWIST_ERR_AUTH
+         && detail_has (easy, "Code:") && !detail_has (easy, "\033")
+         && !detail_has (easy, "\n") && !detail_has (easy, "\r"),
+         "the question is shown without its control characters");
+  twist_easy_cleanup (easy);
+  server_free (&sv);
+}
+
+static void
+test_kbdint (void)
+{
+  const unsigned kbd_only = GF_AUTH_PUBLICKEY | GF_AUTH_KBDINT;
+  const unsigned both = GF_AUTH_PUBLICKEY | GF_AUTH_KBDINT | GF_AUTH_PASSWORD;
+
+  kbd_case (kbd_only, KBD_PASSWORD, "secret", "secret", 1, 1,
+            "a password given to a question");
+  kbd_case (kbd_only, KBD_PASSWORD, "wrong", "secret", 0, 1,
+            "a wrong password to a question");
+  /* With nothing to answer it, the method is not tried.  */
+  kbd_case (kbd_only, KBD_PASSWORD, NULL, "secret", 0, 0,
+            "no password: no question asked");
+  /* A round with nothing to answer comes first.  */
+  kbd_case (kbd_only, KBD_INFO_FIRST, "secret", "secret", 1, 1,
+            "a round with no question, then the password");
+  /* When the server offers both, the question is first.  */
+  kbd_case (both, KBD_PASSWORD, "secret", "secret", 1, 1,
+            "both offered: the question is answered");
+  test_kbdint_more ();
+}
+
 /* A peer that is not SSH-2.  */
 static void
 test_bad_peer (void)
@@ -2624,6 +2812,7 @@ main (void)
   test_no_subsystem ();
   test_auth ();
   test_url_credentials ();
+  test_kbdint ();
   test_host_key ();
   test_bad_peer ();
   test_timeout ();

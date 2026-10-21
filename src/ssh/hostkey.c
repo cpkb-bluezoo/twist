@@ -532,4 +532,8 @@ twist_ssh_auth_hint (struct twist_ssh *s, char *buf, size_t cap)
   used = strlen (buf);
   if (s->agent_note[0] != 0 && used + 1 < cap)
     snprintf (buf + used, cap - used, _(" (ssh-agent: %s)"), s->agent_note);
+  used = strlen (buf);
+  if (s->kbdint_note[0] != 0 && used + 1 < cap)
+    snprintf (buf + used, cap - used, _(" (keyboard-interactive: %s)"),
+              s->kbdint_note);
 }
