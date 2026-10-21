@@ -79,6 +79,9 @@ struct cli_op
   int resume_auto;
   long long resume_off;
   twist_easy *easy;
+  /* The loop the URLs of the operation share, so that a connection one
+     leaves is there for the next.  */
+  struct twist_multi *multi;
   struct cli_op *next;
 };
 
@@ -1143,7 +1146,8 @@ run_one (twist_easy *easy, struct cli_op *op, const char *url,
       twist_easy_setopt (easy, TWISTOPT_HEADERFUNCTION, NULL);
       twist_easy_setopt (easy, TWISTOPT_HEADERDATA, NULL);
     }
-  rc = twist_easy_perform (easy);
+  rc = op->multi != NULL ? twist_easy_perform_in (op->multi, easy)
+                         : twist_easy_perform (easy);
   finish_headers (&hdrs);
   if (body != stdout)
     {
@@ -1187,6 +1191,8 @@ run_op (struct cli_op *op)
     }
   out = op->outputs;
   up = op->uploads;
+  /* If there is none, each URL has a loop of its own.  */
+  op->multi = twist_multi_init ();
   for (url = op->urls; url != NULL; url = url->next)
     {
       const char *output = NULL;
@@ -1206,8 +1212,10 @@ run_op (struct cli_op *op)
         }
       status = run_one (op->easy, op, url->text, output, remote, upload);
       if (status != 0 && fail_early)
-        return status;
+        break;
     }
+  twist_multi_cleanup (op->multi);
+  op->multi = NULL;
   return status;
 }
 

@@ -102,7 +102,7 @@ PasswordAuthentication no
 KbdInteractiveAuthentication no
 PubkeyAuthentication yes
 Subsystem sftp $subsystem
-LogLevel ERROR
+LogLevel INFO
 EOF
   "$SSHD" -f "$work/sshd_config" -E "$work/sshd.log" && break
   port=
@@ -473,6 +473,50 @@ if command -v ssh-agent >/dev/null 2>&1 && command -v ssh-add >/dev/null 2>&1 \
 else
   echo "ssh-openssh: no ssh-agent, or the work directory is too long for its socket; skipping the agent checks" >&2
 fi
+
+# 15. The URLs of one command line are fetched on one connection: sshd sees
+# one login for all of them.  A transfer that fails ends its connection, so
+# the next URL logs in again.  OpenSSH sends the client a few messages of its
+# own after login; a connection that is kept must survive them.
+printf '[127.0.0.1]:%s %s\n' "$port" "$hostpub" > "$work/home/.ssh/known_hosts"
+logins ()
+{
+  grep -c 'Accepted publickey' "$work/sshd.log"
+}
+before=$(logins)
+rm -f "$work/o1" "$work/o2" "$work/o3" "$work/o4"
+t --key "$work/userkey" \
+  -o "$work/o1" "sftp://$user@$base$work/srv/data.bin" \
+  -o "$work/o2" "sftp://$user@$base$work/srv/small.txt" \
+  -o "$work/o3" "scp://$user@$base$work/srv/small.txt" \
+  -o "$work/o4" "sftp://$user@$base$work/srv/empty"
+rc=$?
+sleep 0.3
+n=$(( $(logins) - before ))
+ok=
+if [ $rc -eq 0 ] && cmp -s "$work/o1" "$work/srv/data.bin" \
+   && [ "$(cat "$work/o2")" = small ] && [ "$(cat "$work/o3")" = small ] \
+   && [ ! -s "$work/o4" ] && [ $n -eq 1 ]; then
+  ok=ok
+fi
+check "$ok" "four URLs, one login (logins $n, exit $rc)"
+
+# A URL that fails in the middle: its connection is not kept, and the one
+# after it logs in again and works.
+before=$(logins)
+rm -f "$work/o1" "$work/o2"
+t --key "$work/userkey" \
+  -o "$work/o1" "sftp://$user@$base$work/srv/small.txt" \
+  -o "$work/o2" "sftp://$user@$base$work/srv/missing" \
+  -o "$work/o3" "sftp://$user@$base$work/srv/small.txt"
+rc=$?
+sleep 0.3
+n=$(( $(logins) - before ))
+ok=
+if [ "$(cat "$work/o3")" = small ] && [ $n -eq 2 ]; then
+  ok=ok
+fi
+check "$ok" "a failed URL ends its connection, the next logs in again (logins $n, exit $rc)"
 
 [ $fail -eq 0 ] || exit 1
 exit 0

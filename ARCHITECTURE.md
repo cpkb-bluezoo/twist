@@ -402,6 +402,27 @@ derivation. The job works on a copy of what it needs and touches nothing of
 the transfer, which may be gone before it is done. The loop adopts the
 result, or drops it if the transfer is gone; the transfer never waits for it.
 
+A session that a transfer leaves logged in, with its SFTP channel open and no
+request outstanding, is kept for the next URL. The whole handler is parked
+in the connection pool, which already holds HTTP connections: the pool keeps
+the TCP connection and owns the handler as a payload, and a server that
+sends or closes anything while it is parked makes the pool discard both. The
+key is the loop, the host, the port, the user, and a SHA-256 of the options
+that make the session what it is (password, key and its passphrase,
+known_hosts, a pin, the agent, and whether the host key is checked), so that a
+handle with other terms cannot borrow a login made under looser ones; a
+session made with -k is not used for a transfer that verifies. Only a
+successful transfer parks, and only with nothing in flight: foxtrot's
+`gf_sftp_client_pending` is the bytes queued for sending, not the requests
+unanswered, so twist counts those itself, and a late answer that reached the
+next transfer would carry a tag for a transfer already freed. Taking the
+handler out of the pool binds it to the new handle (its easy pointer, its
+link, its total-time timer) and starts at the request for the file; the
+channel and client are the old ones. The agent connection is closed when the
+session is parked, since it was only for logging in. The command line keeps
+one multi handle for the URLs of an operation (`twist_easy_perform_in`), so
+that it is there to find; `twist_easy_perform` still makes one for each call.
+
 foxtrot needs libgcrypt 1.12.4 or later (earlier ones abort on some Ed25519
 keys a peer can send), which twist accepts as a dependency.
 

@@ -8,8 +8,26 @@ Twist TODO List
       file or a password, known_hosts as curl does it (~/.ssh/known_hosts,
       -k skips, no accept-new), a pinned fingerprint, downloading and
       uploading one file, resuming either way (-C), ranges (-r),
-      directory listings, and keys in an ssh-agent.
+      directory listings, keys in an ssh-agent, keyboard-interactive login
+      with the password, and one connection for the URLs of a command
+      line.
       Still to do:
+        - a transfer that fails, even for a missing file, closes its
+          connection, so the next URL logs in again.  An SFTP status
+          that leaves the channel sound could keep it.
+        - a parked connection that the server closed an instant before
+          it is taken fails the transfer with "closed" and does not retry
+          on a new one, as curl does.  The command line runs the loop
+          once before each URL, which catches closes that have already
+          arrived; the window left is a race.
+        - nothing parked is sent a disconnect when it is dropped (idle
+          for two minutes, or at exit); the TCP connection just closes.
+        - no way to forbid reuse: curl has CURLOPT_FORBID_REUSE, and
+          twist has neither that nor a tool option for it.
+        - ask foxtrot for the number of requests outstanding in an SFTP
+          client.  gf_sftp_client_pending is the bytes queued, so twist
+          counts its own (sftp.c sent () and inflight).
+        - connections through a proxy are not kept.
         - -Q and --quote commands, --ftp-create-dirs for uploads
         - -l for ftp URLs, which would send NLST; it only affects sftp
           now
@@ -24,6 +42,12 @@ Twist TODO List
           with the password, as curl does.  A prompt on the terminal
           would need a way for the application to be asked.
       Requires libgcrypt >= 1.12.4.
+  [ ] The HTTP pool's key is the loop, scheme, host, port and proxy; it has
+      nothing of the TLS settings (verification, CA, client certificate,
+      pinning).  A multi handle or share whose handles differ in them can
+      use a connection made under others.  The SSH key hashes its
+      equivalents (see ssh_pool_key in src/ssh/ssh.c).  The command line is
+      unaffected because one operation has one set of options.
   [ ] Passphrase-protected OpenSSH-format private keys.  Blocked on
       bcrypt-pbkdf being available in libgcrypt; it is deliberately not
       taken from anywhere else.  An ssh-agent holding the key is the

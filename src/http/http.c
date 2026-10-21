@@ -206,11 +206,7 @@ twist_session_free_all (struct twist_multi *multi)
 static struct twist_pool *
 http_pool (struct twist_http *h)
 {
-  if (h->easy != NULL && h->easy->share != NULL && h->easy->share->pool != NULL)
-    return h->easy->share->pool;
-  if (h->easy != NULL && h->easy->multi != NULL)
-    return h->easy->multi->pool;
-  return NULL;
+  return twist_easy_pool (h->easy);
 }
 
 static int

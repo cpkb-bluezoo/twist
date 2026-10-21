@@ -40,6 +40,10 @@
 
 static void ssh_complete (struct twist_ssh *s, int err);
 static void ssh_arm (struct twist_ssh *s);
+static void ssh_after (struct twist_ssh *s, int rc);
+static const char *ssh_user_name (const struct twist_easy *easy);
+static const char *ssh_password (const struct twist_easy *easy);
+static const struct twist_protocol_handler ssh_handler;
 
 uint64_t
 twist_ssh_now_us (const struct twist_ssh *s)
@@ -107,9 +111,129 @@ ssh_complete (struct twist_ssh *s, int err)
   twist_easy_finish (s->easy, err);
 }
 
+/* ---- keeping the session for the next URL ----
+
+   A transfer that ends well leaves a session that is logged in, with an SFTP
+   channel open and nothing in it.  Logging in is most of the cost of a
+   transfer, so the session is parked in the pool, and the next URL for the
+   same host, user and terms takes it.  The terms are what the session was
+   made under: a session that was allowed in with another password, or
+   without checking the host key, is not one that this URL's options would
+   have produced.  So the key holds a hash of every option that decides who
+   we are or whom we trust.  */
+
+static void
+terms_add (uint8_t **buf, size_t *len, size_t *cap, const char *s)
+{
+  size_t n = s != NULL ? strlen (s) + 1 : 0;
+
+  if (*len + n + 8 > *cap)
+    {
+      size_t want = (*cap + n + 8) * 2;
+      uint8_t *grown = realloc (*buf, want);
+
+      if (grown == NULL)
+        {
+          *len = (size_t) -1;
+          return;
+        }
+      *buf = grown;
+      *cap = want;
+    }
+  /* A length and a byte for presence, so that fields cannot run together and
+     an empty string is not an absent one.  */
+  (*buf)[(*len)++] = s != NULL;
+  (*buf)[(*len)++] = (uint8_t) (n >> 24);
+  (*buf)[(*len)++] = (uint8_t) (n >> 16);
+  (*buf)[(*len)++] = (uint8_t) (n >> 8);
+  (*buf)[(*len)++] = (uint8_t) n;
+  if (n > 0)
+    memcpy (*buf + *len, s, n);
+  *len += n;
+}
+
+static int
+ssh_pool_key (struct twist_easy *e, char *key, size_t cap)
+{
+  uint8_t *buf = NULL, d[32];
+  size_t len = 0, bcap = 0, i;
+  char hex[65];
+  const char *agent = e->ssh_agent_socket;
+  int port;
+
+  if (e->url == NULL || e->url->host == NULL || e->loop == NULL)
+    return TWIST_ERR_INVAL;
+  if (agent == NULL)
+    agent = getenv ("SSH_AUTH_SOCK");
+  terms_add (&buf, &len, &bcap, ssh_password (e));
+  terms_add (&buf, &len, &bcap, e->sslkey);
+  terms_add (&buf, &len, &bcap, e->keypasswd);
+  terms_add (&buf, &len, &bcap, e->ssh_knownhosts);
+  terms_add (&buf, &len, &bcap, e->ssh_hostpubsha256);
+  terms_add (&buf, &len, &bcap, agent);
+  terms_add (&buf, &len, &bcap, e->verifypeer ? "verify" : "no-verify");
+  if (len == (size_t) -1 || twist_sha256 (buf, len, d) != TWIST_OK)
+    {
+      free (buf);
+      return TWIST_ERR_NOMEM;
+    }
+  if (buf != NULL)
+    memset (buf, 0, len);
+  free (buf);
+  for (i = 0; i < 32; i++)
+    snprintf (hex + 2 * i, 3, "%02x", d[i]);
+  port = e->url->port > 0 ? e->url->port : twist_url_default_port ("sftp");
+  return snprintf (key, cap, "ssh|%p|%s|%d|%s|%s", (void *) e->loop,
+                   e->url->host, port, ssh_user_name (e), hex) < (int) cap
+         ? TWIST_OK : TWIST_ERR_NOMEM;
+}
+
+/* Keep the session, if it can be kept.  It can when it is logged in on a
+   connection of its own, the channel has nothing in it, and there is a pool
+   to keep it in.  On success the pool has it, and the transfer is no longer
+   its owner.  */
+static int
+ssh_park (struct twist_ssh *s)
+{
+  struct twist_easy *e = s->easy;
+  struct twist_pool *pool;
+  struct twist_connection *conn;
+  char key[1024];
+
+  if (s->sink != NULL || s->ep == NULL || s->link.conn == NULL
+      || s->link.proxy != NULL || s->ending || s->session == NULL
+      || gf_session_phase (s->session) != GF_PHASE_READY
+      || !twist_sftp_idle (s->sftp))
+    return 0;
+  pool = twist_easy_pool (e);
+  if (pool == NULL || ssh_pool_key (e, key, sizeof key) != TWIST_OK)
+    return 0;
+  /* A pool that is not the handle's own outlives its loop.  */
+  if (e->multi != NULL)
+    twist_multi_note_pool (e->multi, pool);
+  conn = twist_mail_link_detach (&s->link);
+  if (twist_pool_put_payload (pool, key, conn, s, twist_ssh_free) != TWIST_OK)
+    {
+      s->link.conn = conn;
+      return 0;
+    }
+  /* The pool has the session.  The agent was for logging in.  */
+  twist_sftp_recycle (s->sftp);
+  twist_ssh_agent_free (s);
+  s->ep = NULL;
+  e->xfer = NULL;
+  e->xfer_free = NULL;
+  return 1;
+}
+
 static void
 ssh_end (struct twist_ssh *s, int err)
 {
+  if (err == TWIST_OK && ssh_park (s))
+    {
+      ssh_complete (s, err);
+      return;
+    }
   /* The disconnect raises the closed event, which must not decide the
      result.  */
   if (s->session != NULL && !s->ending
@@ -673,12 +797,51 @@ twist_ssh_new (struct twist_easy *easy, int live)
   return s;
 }
 
+/* A session that an earlier transfer kept, for this one, if there is one
+   that was made under the same terms.  It is taken whole, and goes straight
+   to the file.  */
+static struct twist_ssh *
+ssh_resume (struct twist_easy *easy)
+{
+  struct twist_pool *pool = twist_easy_pool (easy);
+  struct twist_connection *conn = NULL;
+  struct twist_ssh *s = NULL;
+  char key[1024];
+  int rc;
+
+  if (pool == NULL || easy->proxy != NULL
+      || ssh_pool_key (easy, key, sizeof key) != TWIST_OK)
+    return NULL;
+  if (twist_pool_take_payload (pool, key, &conn, (void **) &s) != TWIST_OK
+      || conn == NULL || s == NULL)
+    return NULL;
+  s->easy = easy;
+  easy->xfer = s;
+  easy->xfer_free = twist_ssh_free;
+  s->finished = s->ending = s->pending_err = 0;
+  s->depth = s->end_pending = s->end_err = 0;
+  s->read_paused = 0;
+  s->ep = twist_connection_endpoint (conn);
+  twist_mail_link_attach (&s->link, easy, conn);
+  /* Back in the session as a callback is: what it asks of the session is
+     done when it is back.  */
+  s->depth++;
+  rc = twist_sftp_next (s);
+  if (rc != TWIST_OK)
+    twist_ssh_finish (s, rc);
+  s->depth--;
+  ssh_after (s, GF_OK);
+  return s;
+}
+
 int
 twist_ssh_attach (struct twist_easy *easy)
 {
   struct twist_ssh *s;
   int rc;
 
+  if (ssh_resume (easy) != NULL)
+    return easy->done ? easy->result : TWIST_OK;
   s = twist_ssh_new (easy, 1);
   if (s == NULL)
     return TWIST_ERR_NOMEM;

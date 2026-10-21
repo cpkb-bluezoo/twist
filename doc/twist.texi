@@ -522,6 +522,23 @@ The library takes the same from @code{TWISTOPT_SSH_KNOWNHOSTS},
 @code{TWISTOPT_SSH_HOST_PUBLIC_KEY_SHA256}, @code{TWISTOPT_SSLKEY} and
 @code{TWISTOPT_KEYPASSWD}.
 
+@subheading Several URLs
+
+URLs for the same server on one command line are fetched on one connection:
+the key exchange and the login happen once, and the SFTP channel stays open.
+@code{sftp://} and @code{scp://} share it.  A connection is used again only
+for the same host, port and user, and only when everything that decides who
+you are or whom twist trusts is the same: the password, the key and its
+passphrase, the known_hosts file, a pinned fingerprint, the agent, and whether
+the host key is checked at all.  A session that was made with @option{-k}
+is never used for a transfer that checks the host key.  A transfer that
+fails closes its connection, and the next URL logs in again.  A connection
+that is idle for two minutes, or that the server closes, is dropped.
+
+With the library, the connections are kept in the multi handle (or the share)
+that the transfers run on.  @code{twist_easy_perform} makes a multi handle of
+its own for each call, so it keeps nothing for the next one.
+
 @subheading Requirements
 
 SSH comes from the foxtrot library, which needs libgcrypt 1.12.4 or later.

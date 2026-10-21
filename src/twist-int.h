@@ -544,6 +544,18 @@ int twist_pool_put (struct twist_pool *pool, const char *key,
                     struct twist_connection *conn);
 int twist_pool_put_idle (struct twist_pool *pool, const char *key,
                          struct twist_connection *conn, uint64_t now_ms);
+int twist_pool_take_payload (struct twist_pool *pool, const char *key,
+                             struct twist_connection **out, void **payload);
+int twist_pool_put_idle_payload (struct twist_pool *pool, const char *key,
+                                 struct twist_connection *conn,
+                                 uint64_t now_ms, void *payload,
+                                 void (*payload_free) (void *));
+int twist_pool_put_payload (struct twist_pool *pool, const char *key,
+                            struct twist_connection *conn, void *payload,
+                            void (*payload_free) (void *));
+/* The pool a transfer parks its connection in and looks for one in: its
+   share's, else its multi handle's.  NULL for a handle on neither.  */
+struct twist_pool *twist_easy_pool (struct twist_easy *easy);
 void twist_pool_expire (struct twist_pool *pool, uint64_t now_ms);
 void twist_pool_set_lock (struct twist_pool *pool, int enabled);
 size_t twist_pool_count (struct twist_pool *pool);
@@ -795,6 +807,13 @@ int twist_mail_link_open (struct twist_mail_link *link, struct twist_easy *easy,
                           const struct twist_protocol_handler *handler,
                           void *user, void (*fail) (void *user, int err));
 void twist_mail_link_close (struct twist_mail_link *link);
+/* Give up the connection without closing it, to keep it for another
+   transfer.  The timer for this one is cancelled.  */
+struct twist_connection *twist_mail_link_detach (struct twist_mail_link *link);
+/* Take CONN back for EASY's transfer: the handler and the timer.  */
+void twist_mail_link_attach (struct twist_mail_link *link,
+                             struct twist_easy *easy,
+                             struct twist_connection *conn);
 
 struct twist_smtp;
 struct twist_smtp *twist_smtp_new (struct twist_easy *easy, int live);
@@ -940,6 +959,9 @@ void twist_i18n_init (void);
 
 void twist_easy_set_error (struct twist_easy *easy, char *msg);
 int twist_easy_finish (struct twist_easy *easy, int result);
+/* As twist_easy_perform, on MULTI, which the caller keeps: what a transfer
+   leaves in it, such as a connection, is there for the next.  */
+int twist_easy_perform_in (struct twist_multi *multi, struct twist_easy *easy);
 void twist_easy_release_transfer (struct twist_easy *easy);
 int twist_transfer_start (struct twist_easy *easy);
 

@@ -128,9 +128,22 @@ struct twist_sftp_xfer
   uint8_t chunk[SFTP_CHUNK];	/* Read from the source, not yet sent.  */
   size_t chunk_len;
   unsigned outstanding;		/* Writes not yet answered.  */
+
+  /* Requests the client took and the server has not answered.  */
+  unsigned inflight;
 };
 
 static void fail (struct twist_sftp_xfer *g, int err, const char *detail);
+
+/* A request the client accepted will be answered once.  foxtrot does not say
+   how many are out, and a session can be kept only when none is.  */
+static int
+sent (struct twist_sftp_xfer *g, int rc)
+{
+  if (rc == GF_OK)
+    g->inflight++;
+  return rc;
+}
 
 void
 twist_sftp_free (struct twist_sftp_xfer *g)
@@ -147,6 +160,44 @@ twist_sftp_free (struct twist_sftp_xfer *g)
     }
   free (g->path);
   free (g);
+}
+
+/* The transfer is over and the channel is not: forget the transfer and keep
+   the SFTP client, so that the next URL on this session starts at the
+   request for the file.  */
+void
+twist_sftp_recycle (struct twist_sftp_xfer *g)
+{
+  struct twist_ssh *ssh = g->ssh;
+  gf_sftp_client *client = g->client;
+  uint32_t chan = g->chan;
+  int have_chan = g->have_chan;
+
+  while (g->slots != NULL)
+    {
+      struct slot *n = g->slots->next;
+
+      free (g->slots->data);
+      free (g->slots);
+      g->slots = n;
+    }
+  free (g->path);
+  memset (g, 0, sizeof *g);
+  g->ssh = ssh;
+  g->client = client;
+  g->chan = chan;
+  g->have_chan = have_chan;
+}
+
+/* Nothing of a transfer is in the channel: every request was answered, none
+   is waiting to be sent, and the client is ready for the next.  Only then can
+   the session be kept.  */
+int
+twist_sftp_idle (const struct twist_sftp_xfer *g)
+{
+  return g != NULL && g->client != NULL && g->have_chan
+         && gf_sftp_client_is_ready (g->client)
+         && g->inflight == 0 && gf_sftp_client_pending (g->client) == 0;
 }
 
 /* ---- the path ---- */
@@ -438,7 +489,7 @@ close_file (struct twist_sftp_xfer *g)
   if (g->closing)
     return;
   g->closing = 1;
-  if (gf_sftp_client_close (g->client, g->handle, g->hlen, TAG_CLOSE, NULL)
+  if (sent (g, gf_sftp_client_close (g->client, g->handle, g->hlen, TAG_CLOSE, NULL))
       != GF_OK)
     fail (g, TWIST_ERR_PROTOCOL, _("the SFTP close failed"));
 }
@@ -489,8 +540,8 @@ pump_reads (struct twist_sftp_xfer *g)
     {
       if (sl->sent)
         continue;
-      rc = gf_sftp_client_read (g->client, g->handle, g->hlen, sl->offset,
-                                sl->want, sl, NULL);
+      rc = sent (g, gf_sftp_client_read (g->client, g->handle, g->hlen, sl->offset,
+                                sl->want, sl, NULL));
       if (rc == GF_ERR_AGAIN)
         return;
       if (rc != GF_OK)
@@ -517,8 +568,8 @@ pump_reads (struct twist_sftp_xfer *g)
           fail (g, TWIST_ERR_NOMEM, NULL);
           return;
         }
-      rc = gf_sftp_client_read (g->client, g->handle, g->hlen, sl->offset,
-                                sl->want, sl, NULL);
+      rc = sent (g, gf_sftp_client_read (g->client, g->handle, g->hlen, sl->offset,
+                                sl->want, sl, NULL));
       if (rc == GF_ERR_AGAIN)
         {
           drop_slot (g, sl);
@@ -794,10 +845,10 @@ pump_writes (struct twist_sftp_xfer *g)
         }
       if (have == 0)
         break;
-      rc = gf_sftp_client_write (g->client, g->handle, g->hlen, g->put_off,
+      rc = sent (g, gf_sftp_client_write (g->client, g->handle, g->hlen, g->put_off,
                                  g->chunk, g->chunk_len,
                                  (void *) (uintptr_t) (TAG_WRITE
-                                                       + g->chunk_len), NULL);
+                                                       + g->chunk_len), NULL));
       if (rc == GF_ERR_AGAIN)
         {
           /* The chunk is kept for the next try.  With nothing outstanding
@@ -856,7 +907,7 @@ write_response (struct twist_sftp_xfer *g, const gf_sftp_response *r)
 static void
 ask_more_names (struct twist_sftp_xfer *g)
 {
-  if (gf_sftp_client_readdir (g->client, g->handle, g->hlen, TAG_READDIR, NULL)
+  if (sent (g, gf_sftp_client_readdir (g->client, g->handle, g->hlen, TAG_READDIR, NULL))
       != GF_OK)
     fail (g, TWIST_ERR_PROTOCOL, _("the SFTP request failed"));
 }
@@ -941,7 +992,7 @@ open_file (struct twist_sftp_xfer *g)
 
   if (g->list)
     {
-      if (gf_sftp_client_opendir (g->client, g->path, TAG_OPEN, NULL) != GF_OK)
+      if (sent (g, gf_sftp_client_opendir (g->client, g->path, TAG_OPEN, NULL)) != GF_OK)
         fail (g, TWIST_ERR_PROTOCOL, _("the SFTP open failed"));
       return;
     }
@@ -954,7 +1005,7 @@ open_file (struct twist_sftp_xfer *g)
       attrs.flags = GF_FILEXFER_ATTR_PERMISSIONS;
       attrs.permissions = NEW_FILE_MODE;
     }
-  if (gf_sftp_client_open (g->client, g->path, flags, &attrs, TAG_OPEN, NULL)
+  if (sent (g, gf_sftp_client_open (g->client, g->path, flags, &attrs, TAG_OPEN, NULL))
       != GF_OK)
     fail (g, TWIST_ERR_PROTOCOL, _("the SFTP open failed"));
 }
@@ -963,7 +1014,7 @@ open_file (struct twist_sftp_xfer *g)
 static void
 size_of_remote (struct twist_sftp_xfer *g)
 {
-  if (gf_sftp_client_stat (g->client, g->path, TAG_STAT, NULL) != GF_OK)
+  if (sent (g, gf_sftp_client_stat (g->client, g->path, TAG_STAT, NULL)) != GF_OK)
     fail (g, TWIST_ERR_PROTOCOL, _("the SFTP request failed"));
 }
 
@@ -1013,6 +1064,8 @@ sftp_response (void *user, const gf_sftp_response *r)
 {
   struct twist_sftp_xfer *g = user;
 
+  if (g->inflight > 0)
+    g->inflight--;
   if (twist_ssh_done (g->ssh))
     return 0;
   if (r->tag == TAG_OPEN)
@@ -1039,8 +1092,8 @@ sftp_response (void *user, const gf_sftp_response *r)
         begin_writes (g);
       else if (g->check_resume || g->suffix)
         {
-          if (gf_sftp_client_fstat (g->client, g->handle, g->hlen, TAG_FSTAT,
-                                    NULL) != GF_OK)
+          if (sent (g, gf_sftp_client_fstat (g->client, g->handle, g->hlen, TAG_FSTAT,
+                                    NULL)) != GF_OK)
             fail (g, TWIST_ERR_PROTOCOL, _("the SFTP request failed"));
         }
       else
@@ -1100,6 +1153,37 @@ sftp_disconnect (void *user, int status)
 
 /* ---- the channel ---- */
 
+/* What the URL and the options ask for, as a plan for G.  */
+static int
+begin (struct twist_sftp_xfer *g)
+{
+  struct twist_ssh *s = g->ssh;
+  int rc;
+
+  g->put = s->easy->postfields != NULL || s->easy->read_cb != NULL;
+  rc = file_path (s, g->put, &g->path, &g->list);
+  if (rc == TWIST_OK)
+    rc = plan (g);
+  return rc;
+}
+
+/* The session is kept and has a new transfer: the channel and the client are
+   there, so go straight to the file.  */
+int
+twist_sftp_next (struct twist_ssh *s)
+{
+  struct twist_sftp_xfer *g = s->sftp;
+  int rc;
+
+  if (!twist_sftp_idle (g))
+    return TWIST_ERR_PROTOCOL;
+  rc = begin (g);
+  if (rc != TWIST_OK)
+    return rc;
+  sftp_ready (g);
+  return TWIST_OK;
+}
+
 int
 twist_sftp_authenticated (void *user, gf_slice username)
 {
@@ -1116,10 +1200,7 @@ twist_sftp_authenticated (void *user, gf_slice username)
     }
   g->ssh = s;
   s->sftp = g;
-  g->put = s->easy->postfields != NULL || s->easy->read_cb != NULL;
-  rc = file_path (s, g->put, &g->path, &g->list);
-  if (rc == TWIST_OK)
-    rc = plan (g);
+  rc = begin (g);
   if (rc != TWIST_OK)
     {
       twist_ssh_finish (s, rc);

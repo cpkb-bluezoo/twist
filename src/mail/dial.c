@@ -41,6 +41,16 @@ on_timeout (void *user)
     link->fail (link->user, TWIST_ERR_TIMEOUT);
 }
 
+static void
+arm_timeout (struct twist_mail_link *link)
+{
+  if (link->easy->timeout_ms > 0)
+    twist_loop_schedule (link->easy->loop,
+                         twist_loop_now (link->easy->loop)
+                         + (uint64_t) link->easy->timeout_ms,
+                         on_timeout, link, &link->timer);
+}
+
 static int
 dial_tcp (struct twist_mail_link *link, const struct twist_dns_addr *addr)
 {
@@ -143,10 +153,7 @@ twist_mail_link_open (struct twist_mail_link *link, struct twist_easy *easy,
   free (phost);
   if (link->dial_host == NULL)
     return TWIST_ERR_NOMEM;
-  if (easy->timeout_ms > 0)
-    twist_loop_schedule (easy->loop,
-                         twist_loop_now (easy->loop) + (uint64_t) easy->timeout_ms,
-                         on_timeout, link, &link->timer);
+  arm_timeout (link);
   {
     int rc = twist_dns_resolve_easy (easy, link->dial_host, on_resolved, link);
 
@@ -154,6 +161,31 @@ twist_mail_link_open (struct twist_mail_link *link, struct twist_easy *easy,
       return rc;
   }
   return TWIST_OK;
+}
+
+struct twist_connection *
+twist_mail_link_detach (struct twist_mail_link *link)
+{
+  struct twist_connection *c = link->conn;
+
+  if (link->timer != NULL)
+    {
+      twist_timer_cancel (link->timer);
+      link->timer = NULL;
+    }
+  link->conn = NULL;
+  return c;
+}
+
+void
+twist_mail_link_attach (struct twist_mail_link *link, struct twist_easy *easy,
+                        struct twist_connection *conn)
+{
+  link->easy = easy;
+  link->conn = conn;
+  twist_connection_endpoint (conn)->user_data = link->user;
+  twist_connection_set_handler (conn, link->handler);
+  arm_timeout (link);
 }
 
 void

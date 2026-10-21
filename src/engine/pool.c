@@ -36,6 +36,10 @@ struct twist_pool_slot
   struct twist_connection *conn;
   struct twist_loop *loop;
   struct twist_timer *timer;
+  /* What the connection belongs to, when it is more than a connection: an
+     SSH session.  The slot owns it until it is taken.  */
+  void *payload;
+  void (*payload_free) (void *payload);
   uint64_t idle_at;
   int queued;
   int discarded;
@@ -158,6 +162,8 @@ slot_discard (struct twist_pool *pool, struct twist_pool_slot *s)
       twist_connection_set_handler (conn, NULL);
       twist_connection_free (conn);
     }
+  if (s->payload_free != NULL)
+    s->payload_free (s->payload);
   free (s->key);
   free (s);
 }
@@ -253,10 +259,21 @@ int
 twist_pool_take (struct twist_pool *pool, const char *key,
                  struct twist_connection **out)
 {
+  return twist_pool_take_payload (pool, key, out, NULL);
+}
+
+/* As twist_pool_take; what the connection was parked with comes back in
+   *PAYLOAD, and is the caller's.  */
+int
+twist_pool_take_payload (struct twist_pool *pool, const char *key,
+                         struct twist_connection **out, void **payload)
+{
   struct twist_pool_slot **pp;
 
   if (out != NULL)
     *out = NULL;
+  if (payload != NULL)
+    *payload = NULL;
   if (pool == NULL || key == NULL)
     return TWIST_ERR_INVAL;
   pool_lock (pool);
@@ -276,7 +293,10 @@ twist_pool_take (struct twist_pool *pool, const char *key,
           }
         if (out != NULL)
           *out = s->conn;
+        if (payload != NULL)
+          *payload = s->payload;
         s->conn = NULL;
+        s->payload_free = NULL;
         s->discarded = 1;
         free (s->key);
         free (s);
@@ -289,6 +309,14 @@ twist_pool_take (struct twist_pool *pool, const char *key,
 int
 twist_pool_put_idle (struct twist_pool *pool, const char *key,
                      struct twist_connection *conn, uint64_t now_ms)
+{
+  return twist_pool_put_idle_payload (pool, key, conn, now_ms, NULL, NULL);
+}
+
+int
+twist_pool_put_idle_payload (struct twist_pool *pool, const char *key,
+                             struct twist_connection *conn, uint64_t now_ms,
+                             void *payload, void (*payload_free) (void *))
 {
   struct twist_pool_slot *s;
   struct twist_endpoint *ep;
@@ -309,6 +337,8 @@ twist_pool_put_idle (struct twist_pool *pool, const char *key,
       return TWIST_ERR_NOMEM;
     }
   s->conn = conn;
+  s->payload = payload;
+  s->payload_free = payload_free;
   s->loop = loop;
   s->idle_at = now_ms;
   s->pool = pool;
@@ -384,6 +414,25 @@ twist_pool_put (struct twist_pool *pool, const char *key,
   if (loop != NULL)
     now = twist_loop_now (loop);
   return twist_pool_put_idle (pool, key, conn, now);
+}
+
+/* Park CONN with PAYLOAD, which PAYLOAD_FREE frees if the connection is
+   discarded.  The pool owns both on success; on failure the caller keeps
+   both.  */
+int
+twist_pool_put_payload (struct twist_pool *pool, const char *key,
+                        struct twist_connection *conn, void *payload,
+                        void (*payload_free) (void *))
+{
+  struct twist_loop *loop = NULL;
+  uint64_t now = 0;
+
+  if (conn != NULL)
+    loop = twist_endpoint_loop (twist_connection_endpoint (conn));
+  if (loop != NULL)
+    now = twist_loop_now (loop);
+  return twist_pool_put_idle_payload (pool, key, conn, now, payload,
+                                      payload_free);
 }
 
 void

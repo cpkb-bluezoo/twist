@@ -57,6 +57,16 @@ twist_easy_init (void)
   return easy;
 }
 
+struct twist_pool *
+twist_easy_pool (struct twist_easy *easy)
+{
+  if (easy != NULL && easy->share != NULL && easy->share->pool != NULL)
+    return easy->share->pool;
+  if (easy != NULL && easy->multi != NULL)
+    return easy->multi->pool;
+  return NULL;
+}
+
 /* Release the state of the transfer.  It owns the connection, which is
    released against the loop, so this must happen while the loop is alive:
    when the handle leaves its multi, not when the handle is cleaned up.  */
@@ -476,24 +486,23 @@ twist_transfer_start (struct twist_easy *easy)
   return rc;
 }
 
+/* Run EASY to its end on MULTI, which is left as it is for the next one: its
+   loop, its pool of connections, its names.  */
 int
-twist_easy_perform (twist_easy *easy)
+twist_easy_perform_in (struct twist_multi *multi, twist_easy *easy)
 {
-  struct twist_multi *multi;
   int rc;
   int running = 0;
 
-  if (easy == NULL)
+  if (multi == NULL || easy == NULL || easy->multi != NULL)
     return TWIST_ERR_INVAL;
-  if (easy->multi != NULL)
-    return TWIST_ERR_INVAL;
-  multi = twist_multi_init ();
-  if (multi == NULL)
-    return TWIST_ERR_NOMEM;
+  /* Let the loop see what happened to the connections kept since the last
+     transfer, so that one the server has closed is not taken.  */
+  twist_multi_perform (multi, &running);
   rc = twist_multi_add_handle (multi, easy);
   if (rc != TWIST_OK)
     {
-      twist_multi_cleanup (multi);
+      twist_multi_remove_handle (multi, easy);
       return rc;
     }
   while (!easy->done)
@@ -514,6 +523,25 @@ twist_easy_perform (twist_easy *easy)
     }
   rc = easy->result;
   twist_multi_remove_handle (multi, easy);
+  /* Nobody reads the completion messages of a handle run this way.  */
+  multi->n_done = multi->done_off = 0;
+  return rc;
+}
+
+int
+twist_easy_perform (twist_easy *easy)
+{
+  struct twist_multi *multi;
+  int rc;
+
+  if (easy == NULL)
+    return TWIST_ERR_INVAL;
+  if (easy->multi != NULL)
+    return TWIST_ERR_INVAL;
+  multi = twist_multi_init ();
+  if (multi == NULL)
+    return TWIST_ERR_NOMEM;
+  rc = twist_easy_perform_in (multi, easy);
   twist_multi_cleanup (multi);
   return rc;
 }

@@ -33,8 +33,11 @@
 #include <foxtrot/sftp.h>
 #include <foxtrot/status.h>
 
+#include <arpa/inet.h>
 #include <errno.h>
+#include <netinet/in.h>
 #include <poll.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -72,6 +75,7 @@ struct server
   struct pipe out;
   gf_session *s;
   gf_key *host;
+  int host_shared;		/* The key is another server's; not freed.  */
   gf_key *authorized;		/* The user key the server accepts.  */
   const char *password;		/* The password it accepts, or NULL.  */
   int refuse_sftp;		/* Answer no to the subsystem request.  */
@@ -112,6 +116,13 @@ struct server
   size_t ndents, dpos;
   unsigned batch;		/* Entries to a READDIR answer.  */
   unsigned readdirs;
+  /* Answer the reads just past the end at once, which the client needs, and
+     hold those far past it until the file is closed: a server may answer in
+     any order.  */
+  int late_eof;
+  uint32_t held[64];
+  size_t nheld;
+  int release_held;		/* Answer them now: the close was answered.  */
 };
 
 static uint64_t now_us = 1000000;
@@ -206,6 +217,8 @@ sv_kbd_response (void *user, const gf_slice *responses, size_t n)
 }
 
 static unsigned next_server_methods;	/* For the next server; then reset.  */
+/* When set, every server has this host key: one server, met again.  */
+static gf_key *shared_host;
 
 static int
 sv_auth_request (void *user, const gf_auth_request *req)
@@ -426,6 +439,12 @@ sv_sftp_request (void *user, const gf_sftp_request *req)
 
         if (sv->reads++ == 0)
           sv->first_read = req->offset;
+        if (!is_u && sv->late_eof && sv->nheld < 64
+            && req->offset >= sv->filelen + 65536)
+          {
+            sv->held[sv->nheld++] = req->id;
+            return 0;
+          }
         if (is_u || req->offset >= sv->filelen)
           return gf_sftp_server_status (sv->sftp, req->id, GF_FX_EOF,
                                         "") != GF_OK;
@@ -481,11 +500,23 @@ sv_sftp_request (void *user, const gf_sftp_request *req)
                                     "") != GF_OK;
     case GF_FXP_CLOSE:
       sv->closed_handle = 1;
+      sv->release_held = sv->nheld > 0;
       return gf_sftp_server_status (sv->sftp, req->id, GF_FX_OK, "") != GF_OK;
     default:
       return gf_sftp_server_status (sv->sftp, req->id, GF_FX_OP_UNSUPPORTED,
                                     "") != GF_OK;
     }
+}
+
+/* The answers held back, sent after the close's.  */
+static void
+sv_release_held (struct server *sv)
+{
+  sv->release_held = 0;
+  while (sv->nheld > 0)
+    if (gf_sftp_server_status (sv->sftp, sv->held[--sv->nheld], GF_FX_EOF, "")
+        != GF_OK)
+      return;
 }
 
 static int
@@ -527,8 +558,14 @@ server_new (struct server *sv)
   memset (sv, 0, sizeof *sv);
   memset (&cfg, 0, sizeof cfg);
   memset (&ev, 0, sizeof ev);
-  if (gf_key_generate (&sv->host, GF_KEY_ED25519, 0) != GF_OK
-      || gf_key_generate (&sv->authorized, GF_KEY_ED25519, 0) != GF_OK)
+  if (shared_host != NULL)
+    {
+      sv->host = shared_host;
+      sv->host_shared = 1;
+    }
+  else if (gf_key_generate (&sv->host, GF_KEY_ED25519, 0) != GF_OK)
+    return -1;
+  if (gf_key_generate (&sv->authorized, GF_KEY_ED25519, 0) != GF_OK)
     return -1;
   sv->password = "secret";
   sv->file = content;
@@ -561,7 +598,8 @@ server_free (struct server *sv)
     gf_key_free (sv->also[i]);
   free (sv->up);
   gf_session_free (sv->s);
-  gf_key_free (sv->host);
+  if (!sv->host_shared)
+    gf_key_free (sv->host);
   gf_key_free (sv->authorized);
 }
 
@@ -2726,6 +2764,559 @@ test_off_the_loop_errors (void)
   server_free (&sv);
 }
 
+/* ---- a server on a socket, for the connections that are kept ---- */
+
+#define TS_CONNS 8
+
+struct ts_conn
+{
+  int fd;
+  struct server *sv;
+};
+
+struct tcp_server
+{
+  int lfd, port;
+  pthread_t thread;
+  volatile int stop;
+  gf_key *host;
+  struct ts_conn conns[TS_CONNS];
+  pthread_mutex_t mu;
+  unsigned accepted;		/* Connections made to it.  */
+  int hang_up;			/* Asked to close every connection.  */
+  size_t up_len;		/* What was uploaded, on any of them.  */
+  unsigned up_sum;
+  int late_eof;			/* Set on each server it makes.  */
+};
+
+static void
+ts_close (struct ts_conn *c)
+{
+  if (c->fd < 0)
+    return;
+  close (c->fd);
+  c->fd = -1;
+  server_free (c->sv);
+  free (c->sv);
+  c->sv = NULL;
+}
+
+static void
+ts_flush (struct ts_conn *c)
+{
+  struct pipe *out = &c->sv->out;
+  size_t off = 0;
+
+  while (off < out->len)
+    {
+      ssize_t n = send (c->fd, out->data + off, out->len - off, MSG_NOSIGNAL);
+
+      if (n <= 0)
+        {
+          if (n < 0 && errno == EINTR)
+            continue;
+          break;
+        }
+      off += (size_t) n;
+    }
+  out->len = 0;
+}
+
+static unsigned
+sum_of (const uint8_t *p, size_t n)
+{
+  unsigned sum = 0;
+  size_t i;
+
+  for (i = 0; i < n; i++)
+    sum = sum * 31 + p[i];
+  return sum;
+}
+
+static void
+ts_note_upload (struct tcp_server *ts, const struct server *sv)
+{
+  if (sv->up_len == 0)
+    return;
+  pthread_mutex_lock (&ts->mu);
+  ts->up_len = sv->up_len;
+  ts->up_sum = sum_of (sv->up, sv->up_len);
+  pthread_mutex_unlock (&ts->mu);
+}
+
+static void *
+ts_serve (void *arg)
+{
+  struct tcp_server *ts = arg;
+  static uint8_t buf[65536];
+
+  while (!ts->stop)
+    {
+      struct pollfd fds[TS_CONNS + 1];
+      int which[TS_CONNS + 1];
+      int n = 0, i, hang;
+
+      fds[n].fd = ts->lfd;
+      fds[n].events = POLLIN;
+      which[n++] = -1;
+      for (i = 0; i < TS_CONNS; i++)
+        if (ts->conns[i].fd >= 0)
+          {
+            fds[n].fd = ts->conns[i].fd;
+            fds[n].events = POLLIN;
+            which[n++] = i;
+          }
+      poll (fds, (nfds_t) n, 10);
+      pthread_mutex_lock (&ts->mu);
+      hang = ts->hang_up;
+      pthread_mutex_unlock (&ts->mu);
+      if (hang)
+        {
+          for (i = 0; i < TS_CONNS; i++)
+            ts_close (&ts->conns[i]);
+          pthread_mutex_lock (&ts->mu);
+          ts->hang_up = 0;
+          pthread_mutex_unlock (&ts->mu);
+          continue;
+        }
+      for (i = 0; i < n; i++)
+        {
+          struct ts_conn *c;
+          ssize_t nread;
+
+          if (!(fds[i].revents & (POLLIN | POLLHUP | POLLERR)))
+            continue;
+          if (which[i] < 0)
+            {
+              int fd = accept (ts->lfd, NULL, NULL), k;
+
+              if (fd < 0)
+                continue;
+              for (k = 0; k < TS_CONNS && ts->conns[k].fd >= 0; k++)
+                ;
+              if (k == TS_CONNS)
+                {
+                  close (fd);
+                  continue;
+                }
+              c = &ts->conns[k];
+              c->sv = calloc (1, sizeof *c->sv);
+              if (c->sv == NULL || server_new (c->sv) != 0)
+                {
+                  free (c->sv);
+                  c->sv = NULL;
+                  close (fd);
+                  continue;
+                }
+              c->fd = fd;
+              c->sv->late_eof = ts->late_eof;
+              pthread_mutex_lock (&ts->mu);
+              ts->accepted++;
+              pthread_mutex_unlock (&ts->mu);
+              ts_flush (c);
+              continue;
+            }
+          c = &ts->conns[which[i]];
+          nread = read (c->fd, buf, sizeof buf);
+          if (nread <= 0)
+            {
+              ts_close (c);
+              continue;
+            }
+          gf_session_receive (c->sv->s, now_us, buf, (size_t) nread);
+          ts_flush (c);
+          if (c->sv->release_held)
+            {
+              /* Later, and in a segment of their own.  */
+              struct timespec late = { 0, 150000000 };
+
+              nanosleep (&late, NULL);
+              sv_release_held (c->sv);
+              ts_flush (c);
+            }
+          ts_note_upload (ts, c->sv);
+          if (c->sv->closed)
+            ts_close (c);
+        }
+    }
+  return NULL;
+}
+
+static int
+ts_start (struct tcp_server *ts)
+{
+  struct sockaddr_in sin;
+  socklen_t len = sizeof sin;
+  int i, one = 1;
+
+  memset (ts, 0, sizeof *ts);
+  for (i = 0; i < TS_CONNS; i++)
+    ts->conns[i].fd = -1;
+  pthread_mutex_init (&ts->mu, NULL);
+  if (gf_key_generate (&ts->host, GF_KEY_ED25519, 0) != GF_OK)
+    return -1;
+  ts->lfd = socket (AF_INET, SOCK_STREAM, 0);
+  if (ts->lfd < 0)
+    return -1;
+  setsockopt (ts->lfd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+  memset (&sin, 0, sizeof sin);
+  sin.sin_family = AF_INET;
+  sin.sin_addr.s_addr = htonl (INADDR_LOOPBACK);
+  if (bind (ts->lfd, (struct sockaddr *) &sin, sizeof sin) != 0
+      || listen (ts->lfd, 8) != 0
+      || getsockname (ts->lfd, (struct sockaddr *) &sin, &len) != 0)
+    return -1;
+  ts->port = ntohs (sin.sin_port);
+  shared_host = ts->host;
+  return pthread_create (&ts->thread, NULL, ts_serve, ts) == 0 ? 0 : -1;
+}
+
+static void
+ts_stop (struct tcp_server *ts)
+{
+  int i;
+
+  ts->stop = 1;
+  pthread_join (ts->thread, NULL);
+  for (i = 0; i < TS_CONNS; i++)
+    ts_close (&ts->conns[i]);
+  close (ts->lfd);
+  shared_host = NULL;
+  gf_key_free (ts->host);
+  pthread_mutex_destroy (&ts->mu);
+}
+
+static unsigned
+ts_accepted (struct tcp_server *ts)
+{
+  unsigned n;
+
+  pthread_mutex_lock (&ts->mu);
+  n = ts->accepted;
+  pthread_mutex_unlock (&ts->mu);
+  return n;
+}
+
+/* The server closes everything it holds, and the call returns when it has.  */
+static void
+ts_hang_up (struct tcp_server *ts)
+{
+  struct timespec nap = { 0, 2000000 };
+  int i, again = 1;
+
+  pthread_mutex_lock (&ts->mu);
+  ts->hang_up = 1;
+  pthread_mutex_unlock (&ts->mu);
+  for (i = 0; i < 2000 && again; i++)
+    {
+      pthread_mutex_lock (&ts->mu);
+      again = ts->hang_up;
+      pthread_mutex_unlock (&ts->mu);
+      if (again)
+        nanosleep (&nap, NULL);
+    }
+}
+
+static void
+ts_uploaded (struct tcp_server *ts, size_t *len, unsigned *sum)
+{
+  pthread_mutex_lock (&ts->mu);
+  *len = ts->up_len;
+  *sum = ts->up_sum;
+  pthread_mutex_unlock (&ts->mu);
+}
+
+/* A handle that logs in as alice with PASSWORD, with the host key checked
+   against KNOWN_HOSTS (VERIFY) or not.  */
+static struct twist_easy *
+tcp_easy (int verify, const char *password, const char *known_hosts)
+{
+  struct twist_easy *easy = twist_easy_init ();
+
+  check (easy != NULL, "easy");
+  twist_easy_setopt (easy, TWISTOPT_SSL_VERIFYPEER, verify ? 1L : 0L);
+  twist_easy_setopt (easy, TWISTOPT_PASSWORD, password);
+  if (known_hosts != NULL)
+    twist_easy_setopt (easy, TWISTOPT_SSH_KNOWNHOSTS, known_hosts);
+  twist_easy_setopt (easy, TWISTOPT_SSH_AGENT_SOCKET, "");
+  twist_easy_setopt (easy, TWISTOPT_WRITEFUNCTION, collect);
+  return easy;
+}
+
+/* Fetch a URL on the server with EASY, in MULTI, as a command line with two
+   URLs would: the same handle and the same loop each time.  */
+static int
+tcp_get (struct twist_multi *multi, struct twist_easy *easy,
+         const struct tcp_server *ts, const char *scheme, const char *path)
+{
+  char url[200];
+
+  snprintf (url, sizeof url, "%s://alice@127.0.0.1:%d%s", scheme, ts->port,
+            path);
+  twist_easy_setopt (easy, TWISTOPT_URL, url);
+  got_len = 0;
+  return twist_easy_perform_in (multi, easy);
+}
+
+static int
+got_data (void)
+{
+  return got_len == sizeof content && memcmp (got, content, got_len) == 0;
+}
+
+/* The second URL on a host is fetched on the connection the first made: the
+   key exchange, the login and the SFTP channel happen once.  */
+static void
+test_reuse_basic (void)
+{
+  struct tcp_server ts;
+  struct twist_multi *multi;
+  struct twist_easy *easy;
+  char kh[300], line[300];
+  size_t n = 0;
+
+  check (ts_start (&ts) == 0, "server");
+  snprintf (kh, sizeof kh, "%s/known_hosts", home);
+  check (gf_knownhosts_format (line, sizeof line, &n, "127.0.0.1",
+                               (unsigned) ts.port, ts.host, 0) == GF_OK,
+         "known_hosts line");
+  write_file (kh, line, n, 0600);
+  multi = twist_multi_init ();
+  easy = tcp_easy (1, "secret", kh);
+  check (tcp_get (multi, easy, &ts, "sftp", "/data.bin") == TWIST_OK
+         && got_data (), "the first file");
+  check (ts_accepted (&ts) == 1, "one connection");
+  check (twist_pool_count (multi->pool) == 1, "the session is kept");
+  check (tcp_get (multi, easy, &ts, "sftp", "/data.bin") == TWIST_OK
+         && got_data (), "the second file");
+  check (ts_accepted (&ts) == 1, "the second file used the same connection");
+  check (twist_pool_count (multi->pool) == 1, "and it is kept again");
+  /* scp:// and sftp:// are the same transfer, so the same session.  */
+  check (tcp_get (multi, easy, &ts, "scp", "/data.bin") == TWIST_OK
+         && got_data (), "scp after sftp");
+  check (ts_accepted (&ts) == 1, "scp used it too");
+  twist_easy_cleanup (easy);
+  twist_multi_cleanup (multi);
+  ts_stop (&ts);
+  unlink (kh);
+}
+
+/* An upload and a download on one session, and a listing.  */
+static void
+test_reuse_mixed (void)
+{
+  struct tcp_server ts;
+  struct twist_multi *multi;
+  struct twist_easy *down, *up;
+  static uint8_t body[30000];
+  size_t i, len;
+  unsigned sum;
+
+  check (ts_start (&ts) == 0, "server");
+  for (i = 0; i < sizeof body; i++)
+    body[i] = (uint8_t) (i * 3 + 1);
+  multi = twist_multi_init ();
+  down = tcp_easy (0, "secret", NULL);
+  up = tcp_easy (0, "secret", NULL);
+  twist_easy_setopt (up, TWISTOPT_POSTFIELDS, (char *) body);
+  twist_easy_setopt (up, TWISTOPT_POSTFIELDSIZE, (long) sizeof body);
+  check (tcp_get (multi, down, &ts, "sftp", "/data.bin") == TWIST_OK
+         && got_data (), "download");
+  check (tcp_get (multi, up, &ts, "sftp", "/up.bin") == TWIST_OK, "upload");
+  ts_uploaded (&ts, &len, &sum);
+  check (len == sizeof body && sum == sum_of (body, sizeof body),
+         "the upload arrived whole");
+  check (tcp_get (multi, down, &ts, "sftp", "/dir/") == TWIST_OK
+         && got_len > 0, "a listing");
+  check (tcp_get (multi, down, &ts, "sftp", "/data.bin") == TWIST_OK
+         && got_data (), "a download after all that");
+  check (ts_accepted (&ts) == 1, "all of it on one connection");
+  twist_easy_cleanup (down);
+  twist_easy_cleanup (up);
+  twist_multi_cleanup (multi);
+  ts_stop (&ts);
+}
+
+/* What a session was logged in with is part of what it is.  A handle with
+   another password, or one that checks the host key where the last did
+   not, gets a connection of its own and is held to its own terms.  */
+static void
+test_reuse_terms (void)
+{
+  struct tcp_server ts;
+  struct twist_multi *multi;
+  struct twist_easy *lax, *wrong, *strict, *pinned;
+  char kh[300], fp[64];
+  unsigned before;
+
+  check (ts_start (&ts) == 0, "server");
+  snprintf (kh, sizeof kh, "%s/known_hosts", home);
+  write_file (kh, "", 0, 0600);
+  multi = twist_multi_init ();
+  /* The same file as the strict handle names below, so that whether the
+     host key is checked is all that tells them apart.  */
+  lax = tcp_easy (0, "secret", kh);
+  check (tcp_get (multi, lax, &ts, "sftp", "/data.bin") == TWIST_OK
+         && got_data (), "logged in without checking the host key");
+  check (twist_pool_count (multi->pool) == 1, "kept");
+
+  /* A password that is wrong must be tried, not borrowed from the session.  */
+  wrong = tcp_easy (0, "not-the-password", NULL);
+  check (tcp_get (multi, wrong, &ts, "sftp", "/data.bin") == TWIST_ERR_AUTH
+         && got_len == 0, "another password is not let in by the first");
+  check (ts_accepted (&ts) == 2, "it made its own connection");
+
+  /* The host is not in known_hosts: the earlier session must not stand in
+     for the check.  */
+  strict = tcp_easy (1, "secret", kh);
+  check (tcp_get (multi, strict, &ts, "sftp", "/data.bin") == TWIST_ERR_HOSTKEY
+         && got_len == 0, "checking the host key is not skipped");
+  check (ts_accepted (&ts) == 3, "and it made its own connection");
+
+  /* A pin that is not the server's, with the check off, still fails.  */
+  pinned = tcp_easy (0, "secret", NULL);
+  twist_easy_setopt (pinned, TWISTOPT_SSH_HOST_PUBLIC_KEY_SHA256,
+                     "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
+  check (tcp_get (multi, pinned, &ts, "sftp", "/data.bin") == TWIST_ERR_HOSTKEY
+         && got_len == 0, "a wrong pin is not skipped");
+  /* The right one is accepted, on a connection of its own.  */
+  gf_key_fingerprint (ts.host, fp, sizeof fp);
+  twist_easy_setopt (pinned, TWISTOPT_SSH_HOST_PUBLIC_KEY_SHA256, fp + 7);
+  check (tcp_get (multi, pinned, &ts, "sftp", "/data.bin") == TWIST_OK
+         && got_data (), "the right pin");
+  /* The first handle still has its session.  */
+  before = ts_accepted (&ts);
+  check (tcp_get (multi, lax, &ts, "sftp", "/data.bin") == TWIST_OK
+         && got_data (), "the first handle again");
+  check (ts_accepted (&ts) == before, "on the connection it had");
+  twist_easy_cleanup (lax);
+  twist_easy_cleanup (wrong);
+  twist_easy_cleanup (strict);
+  twist_easy_cleanup (pinned);
+  twist_multi_cleanup (multi);
+  ts_stop (&ts);
+  unlink (kh);
+}
+
+/* A server that hangs up on an idle connection: the next URL gets a new one
+   and succeeds.  */
+static void
+test_reuse_hung_up (void)
+{
+  struct tcp_server ts;
+  struct twist_multi *multi;
+  struct twist_easy *easy;
+  struct timespec nap = { 0, 50000000 };
+
+  check (ts_start (&ts) == 0, "server");
+  multi = twist_multi_init ();
+  easy = tcp_easy (0, "secret", NULL);
+  check (tcp_get (multi, easy, &ts, "sftp", "/data.bin") == TWIST_OK
+         && got_data (), "first");
+  ts_hang_up (&ts);
+  /* Give the close time to reach us.  */
+  nanosleep (&nap, NULL);
+  check (tcp_get (multi, easy, &ts, "sftp", "/data.bin") == TWIST_OK
+         && got_data (), "after the server hung up");
+  check (ts_accepted (&ts) == 2, "on a new connection");
+  twist_easy_cleanup (easy);
+  twist_multi_cleanup (multi);
+  ts_stop (&ts);
+}
+
+/* A server that answers the close before it has answered every read: the
+   answers still to come would reach whoever has the connection next, so the
+   session is not kept, and the next URL gets one that is clean.  */
+static void
+test_reuse_unanswered (void)
+{
+  struct tcp_server ts;
+  struct twist_multi *multi;
+  struct twist_easy *easy;
+
+  check (ts_start (&ts) == 0, "server");
+  ts.late_eof = 1;
+  multi = twist_multi_init ();
+  easy = tcp_easy (0, "secret", NULL);
+  check (tcp_get (multi, easy, &ts, "sftp", "/data.bin") == TWIST_OK
+         && got_data (), "the first");
+  check (twist_pool_count (multi->pool) == 0,
+         "a session with requests unanswered is not kept");
+  check (tcp_get (multi, easy, &ts, "sftp", "/data.bin") == TWIST_OK
+         && got_data (), "the second");
+  check (ts_accepted (&ts) == 2, "on a connection of its own");
+  twist_easy_cleanup (easy);
+  twist_multi_cleanup (multi);
+  ts_stop (&ts);
+}
+
+/* After a transfer that failed, the next one works.  */
+static void
+test_reuse_after_error (void)
+{
+  struct tcp_server ts;
+  struct twist_multi *multi;
+  struct twist_easy *easy;
+
+  check (ts_start (&ts) == 0, "server");
+  multi = twist_multi_init ();
+  easy = tcp_easy (0, "secret", NULL);
+  check (tcp_get (multi, easy, &ts, "sftp", "/data.bin") == TWIST_OK, "ok");
+  check (tcp_get (multi, easy, &ts, "sftp", "/missing") != TWIST_OK,
+         "a file that is not there");
+  check (tcp_get (multi, easy, &ts, "sftp", "/data.bin") == TWIST_OK
+         && got_data (), "and then one that is");
+  twist_easy_cleanup (easy);
+  twist_multi_cleanup (multi);
+  ts_stop (&ts);
+}
+
+/* Two transfers at once cannot share a session; each makes one, and both
+   are kept for later.  */
+static void
+test_reuse_concurrent (void)
+{
+  struct tcp_server ts;
+  struct twist_multi *multi;
+  struct twist_easy *a, *b;
+  char url[200];
+  int running = 1, i;
+
+  check (ts_start (&ts) == 0, "server");
+  multi = twist_multi_init ();
+  a = tcp_easy (0, "secret", NULL);
+  b = tcp_easy (0, "secret", NULL);
+  snprintf (url, sizeof url, "sftp://alice@127.0.0.1:%d/data.bin", ts.port);
+  twist_easy_setopt (a, TWISTOPT_URL, url);
+  twist_easy_setopt (b, TWISTOPT_URL, url);
+  got_len = 0;
+  check (twist_multi_add_handle (multi, a) == TWIST_OK
+         && twist_multi_add_handle (multi, b) == TWIST_OK, "both added");
+  /* The loop does not wait when nothing is ready, so bound it by time.  */
+  for (i = 0; i < 10000 && running > 0; i++)
+    {
+      struct timespec nap = { 0, 1000000 };
+
+      twist_loop_run_once (multi->loop);
+      twist_multi_perform (multi, &running);
+      if (running > 0)
+        nanosleep (&nap, NULL);
+    }
+  check (a->done && b->done && a->result == TWIST_OK && b->result == TWIST_OK,
+         "both finished");
+  check (ts_accepted (&ts) == 2, "two connections");
+  twist_multi_remove_handle (multi, a);
+  twist_multi_remove_handle (multi, b);
+  check (twist_pool_count (multi->pool) == 2, "both kept");
+  check (tcp_get (multi, a, &ts, "sftp", "/data.bin") == TWIST_OK
+         && got_data (), "a third");
+  check (ts_accepted (&ts) == 2, "used one of them");
+  twist_easy_cleanup (a);
+  twist_easy_cleanup (b);
+  twist_multi_cleanup (multi);
+  ts_stop (&ts);
+}
+
 /* A transfer that goes away while its job is queued or running: the job
    finishes by itself and frees what it made.  Whichever happens first, the
    result must not be touched; valgrind finds it if it is.  */
@@ -2820,6 +3411,14 @@ main (void)
   test_off_the_loop ();
   test_off_the_loop_errors ();
   test_abandoned_job ();
+  alarm (120);
+  test_reuse_basic ();
+  test_reuse_mixed ();
+  test_reuse_terms ();
+  test_reuse_hung_up ();
+  test_reuse_after_error ();
+  test_reuse_unanswered ();
+  test_reuse_concurrent ();
   rmdir (home);
   return tests_finish ();
 }
