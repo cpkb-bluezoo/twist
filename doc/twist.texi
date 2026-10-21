@@ -490,6 +490,17 @@ method is not tried.  A server that offers both a password and questions is
 asked the question first, so a wrong password can count as two failed
 attempts, as it does for @command{ssh}.
 
+A key may have an OpenSSH user certificate, as @command{ssh} finds it: the
+file of the key with @file{-cert.pub} added (@file{~/.ssh/id_ed25519-cert.pub},
+or @file{key-cert.pub} for @option{--key key}).  The certificate is offered
+before the key, which is still offered after it.  A certificate that cannot
+be used is not offered, because the server only says that it refused: if the
+login then fails the message says that the certificate has expired, is not yet
+good, is not for the key, or does not name the user.  Certificates in an agent
+need nothing from twist: @command{ssh-add} loads them with the key.  twist
+does not check who signed a certificate; the server decides which CAs it
+trusts.
+
 The agent is the one named by the environment variable @env{SSH_AUTH_SOCK}.
 twist asks it what it holds and to sign; the private keys never reach twist.
 This includes keys that are protected by a passphrase, restricted to certain

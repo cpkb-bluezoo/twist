@@ -28,6 +28,9 @@ Twist TODO List
           client.  gf_sftp_client_pending is the bytes queued, so twist
           counts its own (sftp.c sent () and inflight).
         - connections through a proxy are not kept.
+        - certificates are found only as KEY-cert.pub beside a key file;
+          there is no option to name a certificate elsewhere (ssh's
+          CertificateFile).
         - -Q and --quote commands, --ftp-create-dirs for uploads
         - -l for ftp URLs, which would send NLST; it only affects sftp
           now

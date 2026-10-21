@@ -34,7 +34,7 @@
 
    One struct twist_ssh is the handler; the others hang from it.  */
 
-#define SSH_MAX_KEYS 4
+#define SSH_MAX_KEYS 8
 #define SSH_MAX_ALGS 16
 
 struct twist_sftp_xfer;
@@ -63,6 +63,8 @@ struct twist_ssh
   /* Default key files that were not offered because the library cannot
      decrypt them.  */
   unsigned keys_skipped;
+  /* A certificate that was found beside a key and not used, and why.  */
+  char cert_note[240];
   /* The session starts when the files are loaded and the agent has said
      what it holds (or was not asked, or failed); whichever is last starts it. */
   int load_ready;

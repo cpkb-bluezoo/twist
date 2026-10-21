@@ -23,6 +23,7 @@
 #include "gettext.h"
 #include "ssh/ssh-int.h"
 
+#include <foxtrot/key.h>
 #include <foxtrot/keyfmt.h>
 #include <foxtrot/status.h>
 
@@ -58,6 +59,7 @@ struct twist_ssh_load
   char *home;
   char *keyfile;		/* Named, or NULL for the usual ones.  */
   char *passphrase;
+  char *user;			/* For the principals of a certificate.  */
   char host[256];
   unsigned port;
   /* Out.  */
@@ -70,6 +72,7 @@ struct twist_ssh_load
   gf_key *keys[SSH_MAX_KEYS];
   size_t nkeys;
   unsigned skipped;
+  char cert_note[240];
 };
 
 static void
@@ -82,6 +85,7 @@ load_free (struct twist_ssh_load *l)
   free (l->knownhosts);
   free (l->home);
   free (l->keyfile);
+  free (l->user);
   if (l->passphrase != NULL)
     {
       memset (l->passphrase, 0, strlen (l->passphrase));
@@ -246,6 +250,68 @@ add_key (struct twist_ssh_load *l, gf_key *key)
   l->keys[l->nkeys++] = key;
 }
 
+
+/* The certificate beside the private key at PATH, if there is one: PATH with
+   -cert.pub added, as ssh looks for it.  A certificate that is there and good
+   is offered before the plain key.  One that is not good is left out and
+   said so, since the server will not say why it refused: the plain key is
+   still offered, and may be the one the server knows.  KEY is added in any
+   case.  */
+static void
+add_key_with_certificate (struct twist_ssh_load *l, gf_key *key,
+                          const char *path)
+{
+  char cpath[1100];
+  char *text;
+  size_t n = 0;
+  gf_key *cert = NULL, *both = NULL;
+  const char *why = NULL;
+
+  if (snprintf (cpath, sizeof cpath, "%s-cert.pub", path) >= (int) sizeof cpath
+      || (text = read_file (cpath, &n)) == NULL)
+    {
+      add_key (l, key);
+      return;
+    }
+  /* The reason is for the first certificate that is no good.  */
+  if (l->cert_note[0] != 0)
+    {
+      free (text);
+      add_key (l, key);
+      return;
+    }
+  if (gf_key_from_text (&cert, text, n, NULL) != GF_OK
+      || !gf_key_is_certificate (cert))
+    snprintf (l->cert_note, sizeof l->cert_note,
+              _("%s is not a usable certificate"), cpath);
+  else if (gf_key_with_certificate (key, cert, &both) != GF_OK)
+    snprintf (l->cert_note, sizeof l->cert_note,
+              _("the certificate in %s is not for this key"), cpath);
+  else if (gf_cert_check (cert, GF_CERT_USER, (uint64_t) time (NULL), &why)
+           != GF_OK)
+    {
+      snprintf (l->cert_note, sizeof l->cert_note,
+                _("the certificate in %s cannot be used: %s"), cpath,
+                why != NULL ? why : "");
+      gf_key_free (both);
+      both = NULL;
+    }
+  else if (l->user != NULL
+           && !gf_cert_has_principal (cert, l->user, strlen (l->user), 0))
+    {
+      snprintf (l->cert_note, sizeof l->cert_note,
+                _("the certificate in %s is not for the user %s"), cpath,
+                l->user);
+      gf_key_free (both);
+      both = NULL;
+    }
+  free (text);
+  gf_key_free (cert);
+  if (both != NULL)
+    add_key (l, both);
+  add_key (l, key);
+}
+
 static void
 load_keys (struct twist_ssh_load *l)
 {
@@ -262,7 +328,7 @@ load_keys (struct twist_ssh_load *l)
       rc = load_private_key (&key, l->keyfile, l->passphrase, &openssh);
       if (rc == GF_OK && gf_key_has_private (key))
         {
-          add_key (l, key);
+          add_key_with_certificate (l, key, l->keyfile);
           return;
         }
       gf_key_free (key);
@@ -304,7 +370,7 @@ load_keys (struct twist_ssh_load *l)
       key = NULL;
       rc = load_private_key (&key, path, l->passphrase, &openssh);
       if (rc == GF_OK)
-        add_key (l, key);
+        add_key_with_certificate (l, key, path);
       else if (rc != GF_ERR_INVAL)
         {
           /* There, but not usable: say so if nothing else works.  */
@@ -351,6 +417,7 @@ load_done (void *user, int err)
       s->nkeys = l->nkeys;
       l->nkeys = 0;
       s->keys_skipped = l->skipped;
+      memcpy (s->cert_note, l->cert_note, sizeof s->cert_note);
       s->load_thread = l->thread;
       s->load_thread_set = 1;
       if (!twist_ssh_done (s) && l->err != TWIST_OK)
@@ -390,12 +457,14 @@ twist_ssh_load_start (struct twist_ssh *s)
   l->home = have_home ? twist_strdup (home) : NULL;
   l->keyfile = copy_or_null (e->sslkey);
   l->passphrase = copy_or_null (e->keypasswd);
+  l->user = copy_or_null (s->user);
   host_name (e->url, l->host, sizeof l->host);
   l->port = (unsigned) e->url->port;
   if ((e->ssh_knownhosts != NULL && l->knownhosts == NULL)
       || (have_home && l->home == NULL)
       || (e->sslkey != NULL && l->keyfile == NULL)
-      || (e->keypasswd != NULL && l->passphrase == NULL))
+      || (e->keypasswd != NULL && l->passphrase == NULL)
+      || (s->user != NULL && l->user == NULL))
     {
       load_free (l);
       return TWIST_ERR_NOMEM;
@@ -529,6 +598,9 @@ twist_ssh_auth_hint (struct twist_ssh *s, char *buf, size_t cap)
            && used + 1 < cap)
     snprintf (buf + used, cap - used,
               _(" (no private key or password was available)"));
+  used = strlen (buf);
+  if (s->cert_note[0] != 0 && used + 1 < cap)
+    snprintf (buf + used, cap - used, " (%s)", s->cert_note);
   used = strlen (buf);
   if (s->agent_note[0] != 0 && used + 1 < cap)
     snprintf (buf + used, cap - used, _(" (ssh-agent: %s)"), s->agent_note);

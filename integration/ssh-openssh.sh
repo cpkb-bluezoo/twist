@@ -74,6 +74,12 @@ ssh-keygen -q -t ed25519 -N '' -f "$work/userkey" || skip "ssh-keygen failed"
 ssh-keygen -q -t ed25519 -N '' -f "$work/otherkey" || skip "ssh-keygen failed"
 cp "$work/userkey.pub" "$work/authorized_keys"
 chmod 600 "$work/authorized_keys"
+# A CA the server trusts, and a key the server does not know, only through a
+# certificate from the CA.
+ssh-keygen -q -t ed25519 -N '' -f "$work/ca" || skip "ssh-keygen failed"
+ssh-keygen -q -t ed25519 -N '' -f "$work/certkey" || skip "ssh-keygen failed"
+ssh-keygen -q -s "$work/ca" -I twist-test -n "$(id -un)" -V -5m:+1h \
+  "$work/certkey.pub" 2>/dev/null || skip "ssh-keygen cannot sign a certificate"
 
 # A file big enough for many reads and a rekey-free transfer.
 dd if=/dev/urandom of="$work/srv/data.bin" bs=1024 count=700 2>/dev/null
@@ -101,6 +107,7 @@ UsePAM no
 PasswordAuthentication no
 KbdInteractiveAuthentication no
 PubkeyAuthentication yes
+TrustedUserCAKeys $work/ca.pub
 Subsystem sftp $subsystem
 LogLevel INFO
 EOF
@@ -453,6 +460,16 @@ if command -v ssh-agent >/dev/null 2>&1 && command -v ssh-add >/dev/null 2>&1 \
   [ $rc -eq 0 ] && [ "$(cat "$work/out")" = small ]
   check "$([ $? -eq 0 ] && echo ok)" "a key restricted to a destination (exit $rc)"
 
+  # A certificate in the agent: ssh-add loads KEY-cert.pub with the key, and the
+  # server knows this key only through the certificate.
+  agent ssh-add -D -q
+  agent ssh-add -q "$work/certkey" 2>/dev/null
+  rm -f "$work/out"
+  agent t -k -o "$work/out" "$url"
+  rc=$?
+  [ $rc -eq 0 ] && [ "$(cat "$work/out")" = small ]
+  check "$([ $? -eq 0 ] && echo ok)" "a certificate held by the agent (exit $rc)"
+
   # No agent where SSH_AUTH_SOCK says.  Not fatal in itself: a key file works,
   # and with nothing else the failure names the agent.
   ( SSH_AUTH_SOCK="$work/nothing-here.sock"; export SSH_AUTH_SOCK
@@ -545,6 +562,45 @@ t -k --key "$work/userkey" -T "$work" "sftp://$user@$base$work/srv/dirsrc" \
   2> "$work/err"
 rc=$?
 check "$([ $rc -eq 26 ] && echo ok)" "input that cannot be read gives 26 (got $rc)"
+
+# 17. User certificates.  A key with a certificate beside it (KEY-cert.pub, as
+# ssh finds it) is offered with the certificate; this key is not in
+# authorized_keys, so the login works only if the server accepts the
+# certificate.  A certificate that is no good is said to be, since the server
+# only refuses.
+rm -f "$work/out"
+t -k --key "$work/certkey" -o "$work/out" "sftp://$user@$base$work/srv/small.txt"
+rc=$?
+[ $rc -eq 0 ] && [ "$(cat "$work/out")" = small ]
+check "$([ $? -eq 0 ] && echo ok)" "login with a certificate (exit $rc)"
+
+cp "$work/certkey" "$work/home/.ssh/id_ed25519"
+cp "$work/certkey-cert.pub" "$work/home/.ssh/id_ed25519-cert.pub"
+chmod 600 "$work/home/.ssh/id_ed25519"
+rm -f "$work/out"
+t -k -o "$work/out" "sftp://$user@$base$work/srv/small.txt"
+rc=$?
+[ $rc -eq 0 ] && [ "$(cat "$work/out")" = small ]
+check "$([ $? -eq 0 ] && echo ok)" "a certificate beside the usual key file (exit $rc)"
+rm -f "$work/home/.ssh/id_ed25519" "$work/home/.ssh/id_ed25519-cert.pub"
+
+cp "$work/certkey" "$work/oldkey"
+cp "$work/certkey.pub" "$work/oldkey.pub"
+ssh-keygen -q -s "$work/ca" -I twist-old -n "$user" -V -2h:-1h "$work/oldkey.pub" \
+  2>/dev/null
+t -k --key "$work/oldkey" -o /dev/null "sftp://$user@$base$work/srv/small.txt" \
+  2> "$work/err"
+rc=$?
+check "$([ $rc -eq 67 ] && grep -q 'expired' "$work/err" && echo ok)" \
+  "an expired certificate gives 67 and says so (exit $rc)"
+
+ssh-keygen -q -s "$work/ca" -I twist-bob -n nobody-here -V -5m:+1h \
+  "$work/oldkey.pub" 2>/dev/null
+t -k --key "$work/oldkey" -o /dev/null "sftp://$user@$base$work/srv/small.txt" \
+  2> "$work/err"
+rc=$?
+check "$([ $rc -eq 67 ] && grep -q 'not for the user' "$work/err" && echo ok)" \
+  "a certificate for another user gives 67 and says so (exit $rc)"
 
 [ $fail -eq 0 ] || exit 1
 exit 0

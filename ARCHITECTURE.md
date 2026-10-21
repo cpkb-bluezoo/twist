@@ -370,6 +370,12 @@ Host keys are checked against `~/.ssh/known_hosts` by default, as the
 curl tool does. A key that is missing or changed fails the transfer, there
 is no accept-new mode, and turning off peer verification (`-k`) skips the
 check. A pinned SHA-256 of the host key is the other way to trust a host.
+A key file may have a certificate beside it (`KEY-cert.pub`, as ssh finds it).
+The job that reads the key reads that too, pairs it with the key
+(`gf_key_with_certificate`), checks its dates and that it names the user, and
+offers the certificate before the plain key. One that fails a check is left
+out and the reason is kept for the error message, since a server only refuses;
+the plain key is still offered. Which CAs to trust is the server's business.
 The ssh-agent is a Unix socket opened as an endpoint on the loop, with the
 protocol (framing, requests, replies, and the session-bind that tells the
 agent which server this is) in foxtrot, which does no I/O. The session needs

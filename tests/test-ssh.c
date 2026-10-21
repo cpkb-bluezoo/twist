@@ -116,6 +116,8 @@ struct server
   size_t ndents, dpos;
   unsigned batch;		/* Entries to a READDIR answer.  */
   unsigned readdirs;
+  unsigned cert_probes;		/* Certificates offered, and signed with.  */
+  unsigned cert_logins;
   /* Answer the reads just past the end at once, which the client needs, and
      hold those far past it until the file is closed: a server may answer in
      any order.  */
@@ -219,6 +221,15 @@ sv_kbd_response (void *user, const gf_slice *responses, size_t n)
 static unsigned next_server_methods;	/* For the next server; then reset.  */
 /* When set, every server has this host key: one server, met again.  */
 static gf_key *shared_host;
+/* When set, every server trusts this CA for user certificates.  */
+static const gf_key *trusted_ca;
+
+static uint64_t
+sv_unix_time (void *user)
+{
+  (void) user;
+  return (uint64_t) time (NULL);
+}
 
 static int
 sv_auth_request (void *user, const gf_auth_request *req)
@@ -241,6 +252,17 @@ sv_auth_request (void *user, const gf_auth_request *req)
     {
       int known = sv->authorized != NULL && gf_key_equal (req->key, sv->authorized);
       size_t i;
+
+      /* A certificate got here only if the machine found it good: a trusted
+         CA, its dates, the user among its principals.  */
+      if (req->certificate)
+        {
+          known = 1;
+          if (req->has_signature)
+            sv->cert_logins++;
+          else
+            sv->cert_probes++;
+        }
 
       for (i = 0; i < sv->nalso; i++)
         if (gf_key_equal (req->key, sv->also[i]))
@@ -577,6 +599,15 @@ server_new (struct server *sv)
                             ? next_server_methods
                             : GF_AUTH_PASSWORD | GF_AUTH_PUBLICKEY;
   next_server_methods = 0;
+  if (trusted_ca != NULL)
+    {
+      static const gf_key *cas[1];
+
+      cas[0] = trusted_ca;
+      cfg.server_auth.trusted_user_cas = cas;
+      cfg.server_auth.ntrusted_user_cas = 1;
+    }
+  ev.unix_time = sv_unix_time;
   ev.user = sv;
   ev.auth_kbdint_response = sv_kbd_response;
   ev.write = sv_write;
@@ -1086,6 +1117,149 @@ test_auth (void)
   server_free (&sv);
   unlink (keyfile);
   rmdir (ssh_dir);
+}
+
+/* ---- user certificates ---- */
+
+/* A certificate by CA for KEY, for the user PRINCIPAL, good from AFTER to
+   BEFORE (seconds from now), written as the .pub line to PATH.  */
+static void
+write_cert (const gf_key *ca, const gf_key *key, const char *principal,
+            long after, long before, const char *path)
+{
+  gf_cert_spec spec;
+  const char *names[1];
+  gf_key *cert = NULL;
+  char line[2048];
+  size_t n = 0;
+  uint64_t now = (uint64_t) time (NULL);
+
+  names[0] = principal;
+  memset (&spec, 0, sizeof spec);
+  spec.type = GF_CERT_USER;
+  spec.serial = 7;
+  spec.key_id = "test";
+  spec.principals = names;
+  spec.nprincipals = 1;
+  spec.valid_after = now + (uint64_t) after;
+  spec.valid_before = now + (uint64_t) before;
+  spec.allow = GF_CERT_ALLOW_ALL;
+  check (gf_cert_sign (&cert, ca, key, &spec, 0) == GF_OK, "sign a cert");
+  check (gf_key_to_text (cert, line, sizeof line, &n) == GF_OK, "cert text");
+  line[n++] = '\n';
+  write_file (path, line, n, 0644);
+  gf_key_free (cert);
+}
+
+static void
+write_private (const gf_key *key, const char *path)
+{
+  char text[4096];
+  size_t n = 0;
+
+  check (gf_key_to_openssh_private (key, text, sizeof text, &n) == GF_OK,
+         "private key text");
+  write_file (path, text, n, 0600);
+}
+
+/* The server trusts a CA and does not know the user's key.  One thing about
+   the certificate varies in each case: if it is right the login works, and
+   if not it does not, and the message says why when twist can tell.  */
+static void
+cert_case (const char *what, const gf_key *ca, const gf_key *signer,
+           const gf_key *for_key, const char *principal, long after,
+           long before, int want_ok, const char *want_note, int known_plain,
+           int usual_path)
+{
+  struct server sv;
+  struct world w;
+  struct twist_easy *easy;
+  struct setup su = SETUP ("sftp://alice@127.0.0.1/data.bin", 0, NULL);
+  gf_key *user = NULL;
+  char ssh_dir[300], keyfile[400], certfile[420];
+
+  check (gf_key_generate (&user, GF_KEY_ED25519, 0) == GF_OK, "user key");
+  trusted_ca = ca;
+  check (server_new (&sv) == 0, "server");
+  trusted_ca = NULL;
+  sv.password = NULL;
+  if (known_plain)
+    sv.also[sv.nalso++] = user;
+  snprintf (ssh_dir, sizeof ssh_dir, "%s/.ssh", home);
+  mkdir (ssh_dir, 0700);
+  if (usual_path)
+    snprintf (keyfile, sizeof keyfile, "%s/id_ed25519", ssh_dir);
+  else
+    snprintf (keyfile, sizeof keyfile, "%s/mykey", home);
+  snprintf (certfile, sizeof certfile, "%s-cert.pub", keyfile);
+  write_private (user, keyfile);
+  if (principal != NULL)
+    write_cert (signer != NULL ? signer : ca, for_key != NULL ? for_key : user,
+                principal, after, before, certfile);
+  if (!usual_path)
+    su.keyfile = keyfile;
+  easy = run (&w, &sv, &su);
+  if (want_ok)
+    check (easy->done && easy->result == TWIST_OK && got_len == sizeof content,
+           what);
+  else
+    check (easy->done && easy->result == TWIST_ERR_AUTH && got_len == 0,
+           what);
+  if (want_note != NULL)
+    {
+      check (detail_has (easy, want_note), what);
+      if (!detail_has (easy, want_note))
+        fprintf (stderr, "  message: %s\n", twist_easy_error (easy));
+    }
+  if (want_ok && !known_plain)
+    {
+      check (sv.cert_logins == 1, "logged in with the certificate");
+      check (sv.noffered == 1 && sv.cert_probes == 1,
+             "only the certificate was offered, so it comes first");
+    }
+  twist_easy_cleanup (easy);
+  if (known_plain)
+    sv.nalso = 0;
+  server_free (&sv);
+  gf_key_free (user);
+  unlink (keyfile);
+  unlink (certfile);
+  rmdir (ssh_dir);
+}
+
+static void
+test_certificates (void)
+{
+  gf_key *ca = NULL, *other_ca = NULL, *stranger = NULL;
+
+  check (gf_key_generate (&ca, GF_KEY_ED25519, 0) == GF_OK, "ca");
+  check (gf_key_generate (&other_ca, GF_KEY_ED25519, 0) == GF_OK, "ca 2");
+  check (gf_key_generate (&stranger, GF_KEY_ED25519, 0) == GF_OK, "key 2");
+
+  /*        what, ca, signer, for-key, principal, from, to, ok, note,
+            plain-known, usual-path  */
+  cert_case ("a certificate beside the named key", ca, NULL, NULL, "alice",
+             -3600, 3600, 1, NULL, 0, 0);
+  cert_case ("a certificate beside the usual key", ca, NULL, NULL, "alice",
+             -3600, 3600, 1, NULL, 0, 1);
+  cert_case ("no certificate: the key alone is not let in", ca, NULL, NULL,
+             NULL, 0, 0, 0, NULL, 0, 0);
+  cert_case ("a certificate from a CA the server does not trust", ca,
+             other_ca, NULL, "alice", -3600, 3600, 0, NULL, 0, 0);
+  cert_case ("an expired certificate is said to be", ca, NULL, NULL, "alice",
+             -7200, -3600, 0, "expired", 0, 0);
+  cert_case ("a certificate not yet good is said to be", ca, NULL, NULL,
+             "alice", 3600, 7200, 0, "not yet", 0, 0);
+  cert_case ("a certificate for another user is said to be", ca, NULL, NULL,
+             "bob", -3600, 3600, 0, "not for the user alice", 0, 0);
+  cert_case ("a certificate for another key is said to be", ca, NULL,
+             stranger, "alice", -3600, 3600, 0, "not for this key", 0, 0);
+  /* The key the server knows still works when the certificate is no good.  */
+  cert_case ("a bad certificate does not stop the key", ca, NULL, stranger,
+             "alice", -3600, 3600, 1, NULL, 1, 0);
+  gf_key_free (ca);
+  gf_key_free (other_ca);
+  gf_key_free (stranger);
 }
 
 /* The user name and password in the URL are percent-encoded, and the server
@@ -3448,6 +3622,7 @@ main (void)
   test_auth ();
   test_url_credentials ();
   test_kbdint ();
+  test_certificates ();
   test_host_key ();
   test_bad_peer ();
   test_timeout ();
