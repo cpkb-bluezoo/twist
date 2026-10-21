@@ -104,6 +104,9 @@ struct twist_easy
   char *keypasswd;
   long long resume_from;
   int dirlistonly;
+  struct twist_slist *quote;	/* Borrowed: the caller's.  */
+  struct twist_slist *postquote;
+  int create_missing_dirs;
   char *ssh_agent_socket;
   long timeout_ms;
   long connect_timeout_ms;

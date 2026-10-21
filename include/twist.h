@@ -60,7 +60,8 @@ enum twist_error
   TWIST_ERR_ENCODING = 17,
   TWIST_ERR_HOSTKEY = 18,
   TWIST_ERR_RANGE = 19,
-  TWIST_ERR_RESUME = 20
+  TWIST_ERR_RESUME = 20,
+  TWIST_ERR_QUOTE = 21
 };
 
 const char *twist_strerror (int err);
@@ -192,7 +193,18 @@ enum twist_opt
   /* The ssh-agent socket for sftp and scp.  Unset: the one named by the
      environment variable SSH_AUTH_SOCK.  An empty string: no agent.  An
      explicit private key (TWISTOPT_SSLKEY) is used alone, without the agent.  */
-  TWISTOPT_SSH_AGENT_SOCKET = 51
+  TWISTOPT_SSH_AGENT_SOCKET = 51,
+  /* Commands for an sftp server, as a twist_slist the caller keeps.  QUOTE
+     runs before the transfer and POSTQUOTE after one that succeeded.  Each
+     is a command line as the curl tool takes it: chmod, chown, chgrp, atime,
+     mtime, ln, symlink, mkdir, pwd, rename, rm, rmdir.  A "*" before it lets
+     the server refuse it without ending the transfer.  A command that fails
+     ends the transfer with TWIST_ERR_QUOTE.  Used with an sftp URL only.  */
+  TWISTOPT_QUOTE = 52,
+  TWISTOPT_POSTQUOTE = 53,
+  /* An upload to a path whose directories are not there makes them (mode
+     0755) and goes on.  A long, 0 or 1.  For sftp.  */
+  TWISTOPT_CREATE_MISSING_DIRS = 54
 };
 
 enum twist_dns_transport

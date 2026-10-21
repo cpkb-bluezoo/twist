@@ -602,5 +602,91 @@ rc=$?
 check "$([ $rc -eq 67 ] && grep -q 'not for the user' "$work/err" && echo ok)" \
   "a certificate for another user gives 67 and says so (exit $rc)"
 
+# 18. Quote commands (-Q) and --ftp-create-dirs, for sftp.  Before the
+# transfer, or after with a dash; * lets the server refuse; a failure is 21.
+q="sftp://$user@$base$work/srv/small.txt"
+rm -rf "$work/srv/qdir" "$work/srv/qdir2" "$work/srv/qa" "$work/srv/qb"
+rm -f "$work/out"
+t -k --key "$work/userkey" -Q "mkdir $work/srv/qdir" -Q "-rename $work/srv/qdir $work/srv/qdir2" \
+  -o "$work/out" "$q"
+rc=$?
+ok=
+[ $rc -eq 0 ] && [ "$(cat "$work/out")" = small ] && [ -d "$work/srv/qdir2" ] \
+  && [ ! -d "$work/srv/qdir" ] && ok=ok
+check "$ok" "a command before the transfer and one after (exit $rc)"
+
+t -k --key "$work/userkey" -Q "rm $work/srv/nonexistent" -o "$work/out" "$q" 2> "$work/err"
+rc=$?
+check "$([ $rc -eq 21 ] && grep -q 'rm command failed' "$work/err" && echo ok)" \
+  "a command the server refuses gives 21 (exit $rc)"
+t -k --key "$work/userkey" -Q "*rm $work/srv/nonexistent" -o "$work/out" "$q"
+rc=$?
+check "$([ $rc -eq 0 ] && echo ok)" "* goes on after a refusal (exit $rc)"
+t -k --key "$work/userkey" -Q "frobnicate" -o "$work/out" "$q" 2> "$work/err"
+rc=$?
+check "$([ $rc -eq 21 ] && grep -q 'Unknown SFTP command' "$work/err" && echo ok)" \
+  "a command that is not one gives 21 (exit $rc)"
+t -k --key "$work/userkey" -Q "+pwd" -o "$work/out" "$q" 2> "$work/err"
+rc=$?
+check "$([ $rc -eq 2 ] && echo ok)" "a + before a command is refused (exit $rc)"
+
+printf 'x\n' > "$work/srv/target.txt"
+rm -f "$work/srv/lnk" "$work/srv/with space.txt" "$work/srv/moved name.txt"
+t -k --key "$work/userkey" -I \
+  -Q "ln $work/srv/target.txt $work/srv/lnk" \
+  -Q "chmod 600 $work/srv/target.txt" \
+  -Q "chown $(id -u) $work/srv/target.txt" \
+  -Q "chgrp $(id -g) $work/srv/target.txt" \
+  -Q "mtime \"Thu, 02 Jan 2020 10:00:00 GMT\" $work/srv/target.txt" \
+  -Q "atime \"Thu, 02 Jan 2020 11:00:00 GMT\" $work/srv/target.txt" \
+  -Q "mkdir \"$work/srv/with space.txt\"" \
+  -Q "rename \"$work/srv/with space.txt\" \"$work/srv/moved name.txt\"" \
+  -Q "rmdir \"$work/srv/moved name.txt\"" \
+  "sftp://$user@$base$work/srv/target.txt" > "$work/out" 2> "$work/err"
+rc=$?
+ok=
+[ $rc -eq 0 ] && [ ! -s "$work/out" ] && [ "$(readlink "$work/srv/lnk")" = "$work/srv/target.txt" ] \
+  && [ "$(stat -c %a "$work/srv/target.txt")" = 600 ] \
+  && [ "$(stat -c %Y "$work/srv/target.txt")" = 1577959200 ] \
+  && [ "$(stat -c %X "$work/srv/target.txt")" = 1577962800 ] \
+  && [ ! -e "$work/srv/with space.txt" ] && [ ! -e "$work/srv/moved name.txt" ] && ok=ok
+check "$ok" "ln, chmod, chown, chgrp, mtime, atime, mkdir, rename and rmdir with -I (exit $rc)"
+[ -n "$ok" ] || { cat "$work/err" >&2; stat -c '%a %Y %X' "$work/srv/target.txt" >&2; }
+
+t -k --key "$work/userkey" -I -Q "mkdir $work/srv/headq" \
+  "sftp://$user@$base$work/srv/missing" 2> "$work/err"
+rc=$?
+check "$([ $rc -eq 78 ] && echo ok)" "-I for a file that is not there gives 78 (exit $rc)"
+
+t -k --key "$work/userkey" -Q pwd -D "$work/hdr" -o /dev/null "$q"
+rc=$?
+check "$([ $rc -eq 0 ] && grep -q '^257 ".*" is current directory\.' "$work/hdr" && echo ok)" \
+  "pwd goes to the header output (exit $rc)"
+
+# scp does not take them, as with curl.
+t -k --key "$work/userkey" -Q "mkdir $work/srv/qscp" -o /dev/null \
+  "scp://$user@$base$work/srv/small.txt"
+rc=$?
+check "$([ $rc -eq 0 ] && [ ! -e "$work/srv/qscp" ] && echo ok)" "scp ignores -Q (exit $rc)"
+
+# --ftp-create-dirs
+printf 'deep\n' > "$work/deep.txt"
+t -k --key "$work/userkey" -T "$work/deep.txt" "sftp://$user@$base$work/srv/qa/qb/f.txt"
+rc=$?
+check "$([ $rc -eq 25 ] && [ ! -e "$work/srv/qa" ] && echo ok)" \
+  "an upload into missing directories fails without the option (exit $rc)"
+t -k --key "$work/userkey" --ftp-create-dirs -T "$work/deep.txt" \
+  "sftp://$user@$base$work/srv/qa/qb/f.txt"
+rc=$?
+ok=
+[ $rc -eq 0 ] && [ "$(cat "$work/srv/qa/qb/f.txt")" = deep ] \
+  && [ "$(stat -c %a "$work/srv/qa")" = 755 ] && [ "$(stat -c %a "$work/srv/qa/qb")" = 755 ] && ok=ok
+check "$ok" "--ftp-create-dirs makes them, mode 755 (exit $rc)"
+t -k --key "$work/userkey" --ftp-create-dirs -T "$work/deep.txt" \
+  "sftp://$user@$base$work/srv/qa/qb/g.txt"
+rc=$?
+check "$([ $rc -eq 0 ] && [ -f "$work/srv/qa/qb/g.txt" ] && echo ok)" \
+  "and goes on when they are there (exit $rc)"
+
 [ $fail -eq 0 ] || exit 1
 exit 0

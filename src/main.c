@@ -73,6 +73,9 @@ struct cli_op
   char *writeout;
   struct twist_slist *headers;
   struct twist_slist *rcpts;
+  struct twist_slist *quote;
+  struct twist_slist *postquote;
+  int ftp_create_dirs;
   char *mail_from;
   char *output_dir;
   int create_dirs;
@@ -155,6 +158,8 @@ cli_status (int err, const char *url)
       return 33;
     case TWIST_ERR_RESUME:
       return 36;
+    case TWIST_ERR_QUOTE:
+      return 21;
     case TWIST_ERR_HOSTKEY:
       return 60;
     case TWIST_ERR_ENCODING:
@@ -221,6 +226,11 @@ usage (void)
   fputs (_("  -C, --continue-at N     resume at byte N, or - to find it (sftp and scp)\n"),
          stdout);
   fputs (_("  -l, --list-only         list names only, for a directory (sftp)\n"),
+         stdout);
+  fputs (_("  -Q, --quote CMD         run an sftp command before the transfer, or after\n"
+           "                          it with a - before it; a * lets it fail\n"),
+         stdout);
+  fputs (_("      --ftp-create-dirs   make the directories of an sftp upload\n"),
          stdout);
   fputs (_("  -b, --cookie DATA       Cookie header data\n"), stdout);
   fputs (_("      --oauth2-bearer T   Bearer token\n"), stdout);
@@ -1195,6 +1205,16 @@ run_one (twist_easy *easy, struct cli_op *op, const char *url,
                      op->headers != NULL ? op->headers : NULL);
   twist_easy_setopt (easy, TWISTOPT_MAIL_FROM, op->mail_from);
   twist_easy_setopt (easy, TWISTOPT_MAIL_RCPT, op->rcpts);
+  /* Only an sftp URL takes them; to any other they mean nothing, as with
+     curl, so a command line of several kinds of URL works.  */
+  twist_easy_setopt (easy, TWISTOPT_QUOTE,
+                     strncmp (use_url, "sftp://", 7) == 0 ? op->quote : NULL);
+  twist_easy_setopt (easy, TWISTOPT_POSTQUOTE,
+                     strncmp (use_url, "sftp://", 7) == 0 ? op->postquote
+                     : NULL);
+  twist_easy_setopt (easy, TWISTOPT_CREATE_MISSING_DIRS,
+                     op->ftp_create_dirs && strncmp (use_url, "sftp://", 7) == 0
+                     ? 1L : 0L);
   twist_easy_setopt (easy, TWISTOPT_WRITEFUNCTION, write_body);
   twist_easy_setopt (easy, TWISTOPT_WRITEDATA, body);
   if (op->include || dump != NULL)
@@ -1321,6 +1341,8 @@ free_op (struct cli_op *op)
   free (op->output_dir);
   twist_slist_free_all (op->headers);
   twist_slist_free_all (op->rcpts);
+  twist_slist_free_all (op->quote);
+  twist_slist_free_all (op->postquote);
   twist_easy_cleanup (op->easy);
   free (op);
 }
@@ -1379,6 +1401,8 @@ main (int argc, char **argv)
     { "range", required_argument, NULL, 'r' },
     { "continue-at", required_argument, NULL, 'C' },
     { "list-only", no_argument, NULL, 'l' },
+    { "quote", required_argument, NULL, 'Q' },
+    { "ftp-create-dirs", no_argument, NULL, 34 },
     { "cookie", required_argument, NULL, 'b' },
     { "oauth2-bearer", required_argument, NULL, 29 },
     { "max-time", required_argument, NULL, 'm' },
@@ -1458,7 +1482,7 @@ main (int argc, char **argv)
           continue;
         }
       c = getopt_long (argc, argv,
-                       "+:o:X:H:d:Lkx:A:u:Iw:fE:hm:e:r:b:sSOT:GgiD:qC:l",
+                       "+:o:X:H:d:Lkx:A:u:Iw:fE:hm:e:r:b:sSOT:GgiD:qC:lQ:",
                        longs, NULL);
       if (c == -1)
         break;
@@ -1574,6 +1598,31 @@ main (int argc, char **argv)
         case 33:
           twist_easy_setopt (op->easy, TWISTOPT_SSH_HOST_PUBLIC_KEY_SHA256,
                              optarg);
+          break;
+        case 34:
+          op->ftp_create_dirs = 1;
+          break;
+        case 'Q':
+          /* A dash before it says after the transfer.  A plus is the FTP
+             form that runs it in the directory; there is no FTP here yet, and
+             ignoring it would be a surprise.  */
+          if (optarg[0] == '+')
+            {
+              diag_code (2, _("--quote: a command cannot start with +"));
+              status = 2;
+            }
+          else if (optarg[0] == '-')
+            {
+              op->postquote = twist_slist_append (op->postquote, optarg + 1);
+              if (op->postquote == NULL)
+                status = 27;
+            }
+          else
+            {
+              op->quote = twist_slist_append (op->quote, optarg);
+              if (op->quote == NULL)
+                status = 27;
+            }
           break;
         case 'x':
           twist_easy_setopt (op->easy, TWISTOPT_PROXY, optarg);

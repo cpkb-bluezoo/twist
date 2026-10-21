@@ -4,5 +4,6 @@ src/file/file.c
 src/http/http.c
 src/ssh/agent.c
 src/ssh/hostkey.c
+src/ssh/quote.c
 src/ssh/sftp.c
 src/ssh/ssh.c

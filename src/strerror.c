@@ -70,6 +70,8 @@ twist_strerror (int err)
       return _("the range cannot be delivered");
     case TWIST_ERR_RESUME:
       return _("the transfer cannot be resumed");
+    case TWIST_ERR_QUOTE:
+      return _("a quote command failed");
     default:
       return _("unknown error");
     }

@@ -103,6 +103,7 @@ libtwist_la_SOURCES = \
   tftp/tftp.c \
   ssh/agent.c \
   ssh/hostkey.c \
+  ssh/quote.c \
   ssh/sftp.c \
   ssh/ssh-int.h \
   ssh/ssh.c \

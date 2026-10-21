@@ -73,9 +73,13 @@
 #define TAG_STAT ((void *) 3)
 #define TAG_FSTAT ((void *) 4)
 #define TAG_READDIR ((void *) 5)
+#define TAG_QUOTE ((void *) 6)
+#define TAG_PROBE ((void *) 7)
+#define TAG_MKDIR ((void *) 8)
 #define TAG_WRITE 16u
 
 #define NEW_FILE_MODE 0644
+#define NEW_DIR_MODE 0755
 
 struct slot
 {
@@ -131,6 +135,18 @@ struct twist_sftp_xfer
 
   /* Requests the client took and the server has not answered.  */
   unsigned inflight;
+
+  /* Quote commands: the next to run, whether the list is the one for after
+     the transfer, and the one under way with the step it is at (a command
+     that changes part of the attributes reads them first).  */
+  const struct twist_slist *qnext;
+  int qpost;
+  struct twist_quote q;
+  int q_step;
+  /* Making the directories of an upload: where in the path the next one
+     ends, and whether that has been done.  */
+  size_t mk_pos;
+  int dirs_tried;
 };
 
 static void fail (struct twist_sftp_xfer *g, int err, const char *detail);
@@ -159,6 +175,7 @@ twist_sftp_free (struct twist_sftp_xfer *g)
       g->slots = n;
     }
   free (g->path);
+  twist_quote_clear (&g->q);
   free (g);
 }
 
@@ -182,6 +199,7 @@ twist_sftp_recycle (struct twist_sftp_xfer *g)
       g->slots = n;
     }
   free (g->path);
+  twist_quote_clear (&g->q);
   memset (g, 0, sizeof *g);
   g->ssh = ssh;
   g->client = client;
@@ -375,6 +393,11 @@ plan (struct twist_sftp_xfer *g)
   struct twist_easy *e = g->ssh->easy;
   long long resume = e->resume_from;
 
+  if (e->nobody && g->put && !g->list)
+    {
+      twist_ssh_detail (g->ssh, _("-I does not apply to an upload"));
+      return TWIST_ERR_INVAL;
+    }
   if (g->list)
     {
       if (e->range != NULL || resume != 0)
@@ -1060,6 +1083,331 @@ remote_size (struct twist_sftp_xfer *g, const gf_sftp_response *r)
   open_file (g);
 }
 
+/* ---- the end of a transfer, and what comes before and after ---- */
+
+static void start_transfer (struct twist_sftp_xfer *g);
+static void quote_start (struct twist_sftp_xfer *g, int post);
+
+/* The file is closed.  The commands for after come next, and then the
+   transfer is over.  */
+static void
+transfer_done (struct twist_sftp_xfer *g)
+{
+  if (!g->qpost && g->ssh->easy->postquote != NULL)
+    quote_start (g, 1);
+  else
+    twist_ssh_finish (g->ssh, TWIST_OK);
+}
+
+/* ---- making the directories of an upload ---- */
+
+/* The directories above the file, one at a time from the top, then the open
+   again.  Each is made with mode 0755; a failure is not looked at, since a
+   directory that is there already is refused as well, and the open says
+   whether it all worked.  */
+static void
+make_next_dir (struct twist_sftp_xfer *g)
+{
+  const char *p = g->path;
+  gf_sftp_attrs attrs;
+  char *dir;
+  const char *slash;
+
+  for (;;)
+    {
+      slash = strchr (p + g->mk_pos, '/');
+      if (slash == NULL)
+        {
+          open_file (g);
+          return;
+        }
+      g->mk_pos = (size_t) (slash - p) + 1;
+      /* A leading slash, or two in a row, name nothing to make.  */
+      if (slash != p && slash[-1] != '/')
+        break;
+    }
+  dir = malloc ((size_t) (slash - p) + 1);
+  if (dir == NULL)
+    {
+      fail (g, TWIST_ERR_NOMEM, NULL);
+      return;
+    }
+  memcpy (dir, p, (size_t) (slash - p));
+  dir[slash - p] = 0;
+  memset (&attrs, 0, sizeof attrs);
+  attrs.flags = GF_FILEXFER_ATTR_PERMISSIONS;
+  attrs.permissions = NEW_DIR_MODE;
+  if (sent (g, gf_sftp_client_mkdir (g->client, dir, &attrs, TAG_MKDIR, NULL))
+      != GF_OK)
+    fail (g, TWIST_ERR_PROTOCOL, _("the SFTP request failed"));
+  free (dir);
+}
+
+/* ---- quote commands ---- */
+
+static void quote_next (struct twist_sftp_xfer *g);
+
+static void
+quote_fail (struct twist_sftp_xfer *g, const char *msg)
+{
+  g->ssh->easy->proto_status = 21;
+  fail (g, TWIST_ERR_QUOTE, msg);
+}
+
+/* The name a command has in a message: ln is symlink to the server.  */
+static const char *
+quote_name (enum twist_quote_cmd cmd)
+{
+  switch (cmd)
+    {
+    case TWIST_Q_MKDIR:
+      return "mkdir";
+    case TWIST_Q_PWD:
+      return "pwd";
+    case TWIST_Q_RENAME:
+      return "rename";
+    case TWIST_Q_RM:
+      return "rm";
+    case TWIST_Q_RMDIR:
+      return "rmdir";
+    case TWIST_Q_SYMLINK:
+      return "symlink";
+    case TWIST_Q_CHMOD:
+      return "chmod";
+    case TWIST_Q_CHOWN:
+      return "chown";
+    case TWIST_Q_CHGRP:
+      return "chgrp";
+    case TWIST_Q_ATIME:
+      return "atime";
+    default:
+      return "mtime";
+    }
+}
+
+/* Send the request a command is, or the first of two.  */
+static int
+quote_issue (struct twist_sftp_xfer *g)
+{
+  struct twist_quote *q = &g->q;
+  gf_sftp_attrs attrs;
+  gf_sftp_client *c = g->client;
+  int rc;
+
+  memset (&attrs, 0, sizeof attrs);
+  switch (q->cmd)
+    {
+    case TWIST_Q_MKDIR:
+      attrs.flags = GF_FILEXFER_ATTR_PERMISSIONS;
+      attrs.permissions = NEW_DIR_MODE;
+      rc = gf_sftp_client_mkdir (c, q->a, &attrs, TAG_QUOTE, NULL);
+      break;
+    case TWIST_Q_RM:
+      rc = gf_sftp_client_remove (c, q->a, TAG_QUOTE, NULL);
+      break;
+    case TWIST_Q_RMDIR:
+      rc = gf_sftp_client_rmdir (c, q->a, TAG_QUOTE, NULL);
+      break;
+    case TWIST_Q_RENAME:
+      rc = gf_sftp_client_rename (c, q->a, q->b, TAG_QUOTE, NULL);
+      break;
+    case TWIST_Q_SYMLINK:
+      /* ln SOURCE TARGET: TARGET is the link, and SOURCE what it points to.  */
+      rc = gf_sftp_client_symlink (c, q->b, q->a, TAG_QUOTE, NULL);
+      break;
+    case TWIST_Q_PWD:
+      rc = gf_sftp_client_realpath (c, ".", TAG_QUOTE, NULL);
+      break;
+    case TWIST_Q_CHMOD:
+      attrs.flags = GF_FILEXFER_ATTR_PERMISSIONS;
+      attrs.permissions = q->num;
+      rc = gf_sftp_client_setstat (c, q->a, &attrs, TAG_QUOTE, NULL);
+      break;
+    default:
+      /* The owner and the group go together on the wire, and so do the two
+         times.  Ask what the file has, so as to change one and keep the
+         other.  */
+      rc = gf_sftp_client_stat (c, q->a, TAG_QUOTE, NULL);
+      break;
+    }
+  return sent (g, rc);
+}
+
+/* What the server's answer was, in words.  */
+static void
+quote_status_failure (struct twist_sftp_xfer *g, const gf_sftp_response *r)
+{
+  char msg[512];
+  const char *what;
+  const char *cmd = quote_name (g->q.cmd);
+
+  switch (r->status)
+    {
+    case GF_FX_NO_SUCH_FILE:
+      what = _("no such file");
+      break;
+    case GF_FX_PERMISSION_DENIED:
+      what = _("permission denied");
+      break;
+    default:
+      what = _("the server could not do it");
+      break;
+    }
+  snprintf (msg, sizeof msg, _("%s command failed: %s%s%.*s%s"), cmd, what,
+            r->message.len > 0 ? " (" : "", (int) r->message.len,
+            r->message.data != NULL ? (const char *) r->message.data : "",
+            r->message.len > 0 ? ")" : "");
+  quote_fail (g, msg);
+}
+
+/* The stat that came first has answered: set what the command sets.  */
+static void
+quote_set (struct twist_sftp_xfer *g, const gf_sftp_response *r)
+{
+  struct twist_quote *q = &g->q;
+  gf_sftp_attrs attrs;
+  int owner = q->cmd == TWIST_Q_CHOWN || q->cmd == TWIST_Q_CHGRP;
+  uint32_t need = owner ? GF_FILEXFER_ATTR_UIDGID : GF_FILEXFER_ATTR_ACMODTIME;
+
+  if (!(r->attrs.flags & need))
+    {
+      quote_fail (g, owner ? _("the server does not say who owns the file")
+                  : _("the server does not say the times of the file"));
+      return;
+    }
+  memset (&attrs, 0, sizeof attrs);
+  attrs.flags = need;
+  attrs.uid = r->attrs.uid;
+  attrs.gid = r->attrs.gid;
+  attrs.atime = r->attrs.atime;
+  attrs.mtime = r->attrs.mtime;
+  if (q->cmd == TWIST_Q_CHOWN)
+    attrs.uid = q->num;
+  else if (q->cmd == TWIST_Q_CHGRP)
+    attrs.gid = q->num;
+  else if (q->cmd == TWIST_Q_ATIME)
+    attrs.atime = (uint32_t) q->when;
+  else
+    attrs.mtime = (uint32_t) q->when;
+  g->q_step = 1;
+  if (sent (g, gf_sftp_client_setstat (g->client, q->a, &attrs, TAG_QUOTE,
+                                       NULL)) != GF_OK)
+    fail (g, TWIST_ERR_PROTOCOL, _("the SFTP request failed"));
+}
+
+/* pwd: the server's current directory, said as an FTP server says it, to the
+   header callback.  The server's text is not trusted with the application's
+   output.  */
+static void
+quote_pwd (struct twist_sftp_xfer *g, const gf_sftp_response *r)
+{
+  struct twist_easy *e = g->ssh->easy;
+  gf_sftp_response copy = *r;
+  gf_sftp_name name;
+
+  if (e->header_cb == NULL)
+    return;
+  if (r->type == GF_FXP_NAME && gf_sftp_response_next_name (&copy, &name)
+      && name.filename.len < 4096)
+    {
+      uint8_t clean[4096];
+      size_t n = twist_ssh_sanitize (clean, name.filename.data,
+                                     name.filename.len);
+      char *line = malloc (n + 64);
+
+      if (line == NULL)
+        return;
+      n = (size_t) snprintf (line, n + 64, "257 \"%.*s\" is current directory.\n",
+                             (int) n, (const char *) clean);
+      e->header_cb (line, 1, n, e->header_data);
+      free (line);
+    }
+}
+
+static void
+quote_response (struct twist_sftp_xfer *g, const gf_sftp_response *r)
+{
+  int ok;
+
+  if (g->q.cmd == TWIST_Q_PWD)
+    ok = r->type == GF_FXP_NAME;
+  else if (g->q_step == 0 && (g->q.cmd == TWIST_Q_CHOWN
+                              || g->q.cmd == TWIST_Q_CHGRP
+                              || g->q.cmd == TWIST_Q_ATIME
+                              || g->q.cmd == TWIST_Q_MTIME))
+    ok = r->type == GF_FXP_ATTRS;
+  else
+    ok = r->type == GF_FXP_STATUS && r->status == GF_FX_OK;
+  if (!ok)
+    {
+      if (!g->q.ignore)
+        {
+          if (r->type == GF_FXP_STATUS)
+            quote_status_failure (g, r);
+          else
+            quote_fail (g, _("an unexpected SFTP answer"));
+          return;
+        }
+      quote_next (g);
+      return;
+    }
+  if (g->q.cmd == TWIST_Q_PWD)
+    quote_pwd (g, r);
+  else if (g->q_step == 0 && (g->q.cmd == TWIST_Q_CHOWN
+                              || g->q.cmd == TWIST_Q_CHGRP
+                              || g->q.cmd == TWIST_Q_ATIME
+                              || g->q.cmd == TWIST_Q_MTIME))
+    {
+      quote_set (g, r);
+      return;
+    }
+  quote_next (g);
+}
+
+/* All the commands of one list have run.  */
+static void
+quote_end (struct twist_sftp_xfer *g)
+{
+  if (g->qpost)
+    twist_ssh_finish (g->ssh, TWIST_OK);
+  else
+    start_transfer (g);
+}
+
+static void
+quote_next (struct twist_sftp_xfer *g)
+{
+  char err[200];
+
+  if (twist_ssh_done (g->ssh))
+    return;
+  if (g->qnext == NULL)
+    {
+      quote_end (g);
+      return;
+    }
+  twist_quote_clear (&g->q);
+  if (twist_quote_parse (g->qnext->data, &g->q, err, sizeof err) != TWIST_OK)
+    {
+      quote_fail (g, err);
+      return;
+    }
+  g->qnext = g->qnext->next;
+  g->q_step = 0;
+  if (quote_issue (g) != GF_OK)
+    fail (g, TWIST_ERR_PROTOCOL, _("the SFTP request failed"));
+}
+
+static void
+quote_start (struct twist_sftp_xfer *g, int post)
+{
+  struct twist_easy *e = g->ssh->easy;
+
+  g->qpost = post;
+  g->qnext = post ? e->postquote : e->quote;
+  quote_next (g);
+}
+
 static int
 sftp_response (void *user, const gf_sftp_response *r)
 {
@@ -1073,7 +1421,14 @@ sftp_response (void *user, const gf_sftp_response *r)
     {
       if (r->type != GF_FXP_HANDLE)
         {
-          if (r->type == GF_FXP_STATUS)
+          if (r->type == GF_FXP_STATUS && r->status == GF_FX_NO_SUCH_FILE
+              && g->put && !g->dirs_tried
+              && g->ssh->easy->create_missing_dirs)
+            {
+              g->dirs_tried = 1;
+              make_next_dir (g);
+            }
+          else if (r->type == GF_FXP_STATUS)
             fail_status (g, r);
           else
             fail (g, TWIST_ERR_PROTOCOL, _("an unexpected SFTP answer"));
@@ -1113,7 +1468,29 @@ sftp_response (void *user, const gf_sftp_response *r)
     }
   if (r->tag == TAG_CLOSE)
     {
-      twist_ssh_finish (g->ssh, TWIST_OK);
+      transfer_done (g);
+      return 0;
+    }
+  if (r->tag == TAG_QUOTE)
+    {
+      quote_response (g, r);
+      return 0;
+    }
+  if (r->tag == TAG_PROBE)
+    {
+      if (r->type == GF_FXP_ATTRS)
+        transfer_done (g);
+      else if (r->type == GF_FXP_STATUS)
+        fail_status (g, r);
+      else
+        fail (g, TWIST_ERR_PROTOCOL, _("an unexpected SFTP answer"));
+      return 0;
+    }
+  if (r->tag == TAG_MKDIR)
+    {
+      /* Whether it was made does not matter: a directory that is there
+         already is refused too.  The open says if it worked.  */
+      make_next_dir (g);
       return 0;
     }
   if (r->tag == TAG_READDIR)
@@ -1128,15 +1505,33 @@ sftp_response (void *user, const gf_sftp_response *r)
   return 0;
 }
 
+/* The commands for before are done, or there were none.  */
+static void
+start_transfer (struct twist_sftp_xfer *g)
+{
+  struct twist_easy *e = g->ssh->easy;
+
+  if (e->nobody)
+    {
+      /* No body: the commands, and a look at the file.  */
+      if (g->list)
+        transfer_done (g);
+      else if (sent (g, gf_sftp_client_stat (g->client, g->path, TAG_PROBE,
+                                             NULL)) != GF_OK)
+        fail (g, TWIST_ERR_PROTOCOL, _("the SFTP request failed"));
+    }
+  else if (g->put && (g->auto_resume || g->skip > 0))
+    size_of_remote (g);
+  else
+    open_file (g);
+}
+
 static int
 sftp_ready (void *user)
 {
   struct twist_sftp_xfer *g = user;
 
-  if (g->put && (g->auto_resume || g->skip > 0))
-    size_of_remote (g);
-  else
-    open_file (g);
+  quote_start (g, 0);
   return 0;
 }
 

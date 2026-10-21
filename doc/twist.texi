@@ -198,6 +198,14 @@ Byte range.  For @code{sftp} and @code{scp} it is @samp{@var{first}-@var{last}},
 @itemx --list-only
 List the names only, one to a line, not the server's long form, when the URL
 names a directory.  For @code{sftp} (@pxref{SFTP and SCP}).
+@item -Q @var{command}
+@itemx --quote @var{command}
+Run an SFTP command on the server before the transfer, or after a successful
+one if @var{command} begins with @samp{-}.  A @samp{*} before it lets the
+server refuse it without ending the transfer.  May be given many times.  For
+@code{sftp} URLs only; other URLs ignore it (@pxref{SFTP and SCP}).
+@item --ftp-create-dirs
+Make the directories an @code{sftp} upload needs, with mode 0755.
 @item -C @var{offset}
 @itemx --continue-at @var{offset}
 Resume at byte @var{offset}, for @code{sftp} and @code{scp}.  Use @samp{-} to
@@ -464,6 +472,54 @@ The size of the remote file is asked for only when it is needed: to check a
 download resume, to find the start of @samp{-50}, or to resume an upload.
 A server that does not say how big a file is cannot do the last, nor
 @samp{-50}.
+
+@subheading Commands and missing directories
+
+@option{-Q @var{command}} runs a command on the server before the transfer,
+and @option{-Q -@var{command}} after it, if it succeeded.  An @code{sftp} URL
+takes them; an @code{scp} URL, like any other kind, ignores them.  They run
+one at a time, in the order given, and the first the server refuses ends the
+transfer with status 21 and a message that says which command and why.  A
+@samp{*} before a command (@samp{-Q '*rm old'}) lets the server refuse it.  A
+command twist cannot read is an error even then.  A @samp{+} before a command
+is refused: it is the form for FTP.
+
+The commands are the ones the curl tool has.  The command is the word up to
+the first space, in any case; a name may be in double quotes to hold spaces,
+with @samp{\"} and @samp{\\} for a quote and a backslash in it.  Single quotes
+mean nothing.  A relative name is the server's to place, in the user's
+directory.
+
+@table @code
+@item chmod @var{mode} @var{file}
+The mode is octal.
+@item chown @var{uid} @var{file}
+@itemx chgrp @var{gid} @var{file}
+A number.  The other of the two is kept as it is.
+@item mtime @var{date} @var{file}
+@itemx atime @var{date} @var{file}
+The date is one parameter, so in quotes: @samp{"Thu, 02 Jan 2020 10:00:00
+GMT"}, with or without the day of the week, a zone as @samp{GMT} or
+@samp{+0100} (none: local time), or as @code{asctime} writes it.  The other
+time is kept as it is.
+@item ln @var{source} @var{link}
+@itemx symlink @var{source} @var{link}
+Make @var{link} a symbolic link to @var{source}.
+@item mkdir @var{dir}
+@itemx rmdir @var{dir}
+@itemx rm @var{file}
+@itemx rename @var{from} @var{to}
+As the names say.  @code{mkdir} makes a directory with mode 0755.
+@item pwd
+The server's current directory (its home), written to the header output
+(@option{-D}, @option{-i}) as @samp{257 "/home/me" is current directory.}
+@end table
+
+@option{-I} runs the commands and looks at the file, and transfers nothing:
+status 78 if it is not there.  That is a way to run commands alone.
+@option{--ftp-create-dirs} makes the directories of the path of an upload
+that are not there, from the top, and tries again; a directory that is there
+is left, and if making them does not help the error is the upload's.
 
 @subheading Logging in
 

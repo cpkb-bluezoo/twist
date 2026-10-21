@@ -370,6 +370,17 @@ Host keys are checked against `~/.ssh/known_hosts` by default, as the
 curl tool does. A key that is missing or changed fails the transfer, there
 is no accept-new mode, and turning off peer verification (`-k`) skips the
 check. A pinned SHA-256 of the host key is the other way to trust a host.
+Quote commands (`-Q`) and the directories of an upload are requests of the
+SFTP client run in sequence: each is sent when the one before has been
+answered, tagged so that its answer is told from the transfer's. The command
+lines are read by `quote.c` as the curl tool reads them, and a command that
+changes only half of a pair of attributes (the owner or the group, the access
+or modification time) asks for the file's first and sends both. Commands for
+before run when the SFTP client is ready, those for after on the answer to the
+close of the file, so a transfer that fails runs none. Making directories for
+an upload happens on the open's NO_SUCH_FILE: each directory from the top is
+made without looking at the answer, and the open is tried once more.
+
 A key file may have a certificate beside it (`KEY-cert.pub`, as ssh finds it).
 The job that reads the key reads that too, pairs it with the key
 (`gf_key_with_certificate`), checks its dates and that it names the user, and

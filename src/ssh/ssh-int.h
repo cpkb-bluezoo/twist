@@ -109,6 +109,40 @@ twist_ssh_done (const struct twist_ssh *s)
   return s->finished || s->end_pending;
 }
 
+/* quote.c: the commands of --quote for sftp.  */
+enum twist_quote_cmd
+{
+  TWIST_Q_ATIME = 1,
+  TWIST_Q_MTIME,
+  TWIST_Q_CHGRP,
+  TWIST_Q_CHMOD,
+  TWIST_Q_CHOWN,
+  TWIST_Q_SYMLINK,		/* ln and symlink */
+  TWIST_Q_MKDIR,
+  TWIST_Q_PWD,
+  TWIST_Q_RENAME,
+  TWIST_Q_RM,
+  TWIST_Q_RMDIR
+};
+
+struct twist_quote
+{
+  enum twist_quote_cmd cmd;
+  int ignore;			/* An error from the server is not an error.  */
+  char *a, *b;			/* The paths: the file; or from and to.  */
+  uint32_t num;			/* The mode, owner or group.  */
+  int64_t when;			/* The time for atime and mtime.  */
+};
+
+/* Read TEXT, one command.  On failure ERR holds the reason, Q holds nothing,
+   and TWIST_ERR_INVAL is returned.  */
+int twist_quote_parse (const char *text, struct twist_quote *q, char *err,
+                       size_t cap);
+void twist_quote_clear (struct twist_quote *q);
+/* A date as HTTP writes one, and the two other forms of it; seconds since
+   1970, in what SFTP can hold.  */
+int twist_quote_date (const char *s, int64_t *out);
+
 /* ssh.c */
 /* Copy IN to OUT with the control characters, and the UTF-8 form of the C1
    ones, made ?.  Anything the server sends that is shown, or written to the

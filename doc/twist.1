@@ -206,6 +206,21 @@ List the names only, one to a line, not the server's long form, when the URL
 names a directory.
 For sftp.
 .TP
+.BI \-Q ", " \-\-quote " command"
+Run an SFTP command on the server before the transfer, or after a successful
+one if the command begins with
+.BR \- .
+A
+.B *
+before it lets the server refuse it.
+The commands are chmod, chown, chgrp, atime, mtime, ln, symlink, mkdir, pwd,
+rename, rm and rmdir.
+A command that fails exits 21.
+For sftp only.
+.TP
+.B \-\-ftp\-create\-dirs
+Make the directories an sftp upload needs.
+.TP
 .BI \-C ", " \-\-continue\-at " offset"
 Resume at byte
 .IR offset ,

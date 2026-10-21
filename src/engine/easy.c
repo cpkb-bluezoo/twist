@@ -229,6 +229,15 @@ twist_easy_setopt (twist_easy *easy, int opt, ...)
     case TWISTOPT_DIRLISTONLY:
       easy->dirlistonly = va_arg (ap, long) != 0;
       break;
+    case TWISTOPT_QUOTE:
+      easy->quote = va_arg (ap, struct twist_slist *);
+      break;
+    case TWISTOPT_POSTQUOTE:
+      easy->postquote = va_arg (ap, struct twist_slist *);
+      break;
+    case TWISTOPT_CREATE_MISSING_DIRS:
+      easy->create_missing_dirs = va_arg (ap, long) != 0;
+      break;
     case TWISTOPT_SSH_KNOWNHOSTS:
     case TWISTOPT_SSH_HOST_PUBLIC_KEY_SHA256:
     case TWISTOPT_KEYPASSWD:

@@ -116,6 +116,16 @@ struct server
   size_t ndents, dpos;
   unsigned batch;		/* Entries to a READDIR answer.  */
   unsigned readdirs;
+  /* What the requests other than reads and writes were, in order.  */
+  struct
+  {
+    char what[12];
+    char a[96], b[96];
+    gf_sftp_attrs attrs;
+  } ops[24];
+  unsigned nops;
+  char made[4][128];		/* Directories that mkdir made.  */
+  unsigned nmade;
   unsigned cert_probes;		/* Certificates offered, and signed with.  */
   unsigned cert_logins;
   /* Answer the reads just past the end at once, which the client needs, and
@@ -310,10 +320,69 @@ sv_attrs_size (struct server *sv, uint32_t id, uint64_t size)
   memset (&a, 0, sizeof a);
   if (!sv->hide_size)
     {
-      a.flags = GF_FILEXFER_ATTR_SIZE;
+      a.flags = GF_FILEXFER_ATTR_SIZE | GF_FILEXFER_ATTR_UIDGID
+                | GF_FILEXFER_ATTR_PERMISSIONS | GF_FILEXFER_ATTR_ACMODTIME;
       a.size = size;
+      a.uid = 1000;
+      a.gid = 100;
+      a.permissions = 0100644;
+      a.atime = 111;
+      a.mtime = 222;
     }
   return gf_sftp_server_attrs (sv->sftp, id, &a) != GF_OK;
+}
+
+static void
+log_op (struct server *sv, const char *what, const char *a, const char *b,
+        const gf_sftp_attrs *attrs)
+{
+  if (sv->nops >= sizeof sv->ops / sizeof sv->ops[0])
+    return;
+  snprintf (sv->ops[sv->nops].what, sizeof sv->ops[0].what, "%s", what);
+  snprintf (sv->ops[sv->nops].a, sizeof sv->ops[0].a, "%s", a);
+  snprintf (sv->ops[sv->nops].b, sizeof sv->ops[0].b, "%s", b);
+  if (attrs != NULL)
+    sv->ops[sv->nops].attrs = *attrs;
+  sv->nops++;
+}
+
+static int
+dir_exists (const struct server *sv, const char *p)
+{
+  unsigned i;
+
+  if (strcmp (p, "/dir") == 0)
+    return 1;
+  for (i = 0; i < sv->nmade; i++)
+    if (strcmp (sv->made[i], p) == 0)
+      return 1;
+  return 0;
+}
+
+/* A place to upload up.bin to: its directories all exist.  */
+static int
+up_place (const struct server *sv, const char *p)
+{
+  const char *slash = strrchr (p, '/');
+  char dir[96];
+  char *cut;
+
+  if (is_up (p))
+    return 1;
+  if (slash == NULL || strcmp (slash, "/up.bin") != 0 || slash == p)
+    return 0;
+  snprintf (dir, sizeof dir, "%.*s", (int) (slash - p), p);
+  /* Every directory above must be there.  */
+  for (cut = dir + 1; (cut = strchr (cut, '/')) != NULL; cut++)
+    {
+      char save = *cut;
+
+      *cut = 0;
+      if (!dir_exists (sv, dir))
+        return 0;
+      *cut = save;
+    }
+  return dir_exists (sv, dir);
 }
 
 
@@ -432,10 +501,11 @@ sv_sftp_request (void *user, const gf_sftp_request *req)
     {
     case GF_FXP_OPEN:
       snprintf (sv->opened, sizeof sv->opened, "%s", path);
+      log_op (sv, "open", path, "", NULL);
       if (is_data (path) && !(req->pflags & GF_FXF_WRITE))
         return gf_sftp_server_handle (sv->sftp, req->id, fh,
                                       sizeof fh) != GF_OK;
-      if (is_up (path) && (req->pflags & GF_FXF_WRITE))
+      if (up_place (sv, path) && (req->pflags & GF_FXF_WRITE))
         {
           if (!sv->up_exists && !(req->pflags & GF_FXF_CREAT))
             return gf_sftp_server_status (sv->sftp, req->id,
@@ -514,13 +584,62 @@ sv_sftp_request (void *user, const gf_sftp_request *req)
     case GF_FXP_FSTAT:
       return sv_attrs_size (sv, req->id, is_u ? sv->up_len : sv->filelen);
     case GF_FXP_STAT:
+      log_op (sv, "stat", path, "", NULL);
       if (is_data (path))
         return sv_attrs_size (sv, req->id, sv->filelen);
       if (is_up (path) && sv->up_exists)
         return sv_attrs_size (sv, req->id, sv->up_len);
       return gf_sftp_server_status (sv->sftp, req->id, GF_FX_NO_SUCH_FILE,
                                     "") != GF_OK;
+    case GF_FXP_MKDIR:
+      log_op (sv, "mkdir", path, "", &req->attrs);
+      if (dir_exists (sv, path) || strcmp (path, "/bad") == 0
+          || sv->nmade >= 4)
+        return gf_sftp_server_status (sv->sftp, req->id, GF_FX_FAILURE,
+                                      "Failure") != GF_OK;
+      snprintf (sv->made[sv->nmade++], sizeof sv->made[0], "%s", path);
+      return gf_sftp_server_status (sv->sftp, req->id, GF_FX_OK, "") != GF_OK;
+    case GF_FXP_REMOVE:
+    case GF_FXP_RMDIR:
+      log_op (sv, req->type == GF_FXP_REMOVE ? "remove" : "rmdir", path, "",
+              NULL);
+      if (strcmp (path, "/gone") == 0)
+        return gf_sftp_server_status (sv->sftp, req->id, GF_FX_NO_SUCH_FILE,
+                                      "") != GF_OK;
+      if (strcmp (path, "/denied") == 0)
+        return gf_sftp_server_status (sv->sftp, req->id,
+                                      GF_FX_PERMISSION_DENIED, "") != GF_OK;
+      return gf_sftp_server_status (sv->sftp, req->id, GF_FX_OK, "") != GF_OK;
+    case GF_FXP_RENAME:
+    case GF_FXP_SYMLINK:
+      {
+        char second[96];
+
+        snprintf (second, sizeof second, "%.*s", (int) req->path2.len,
+                  (const char *) req->path2.data);
+        log_op (sv, req->type == GF_FXP_RENAME ? "rename" : "symlink", path,
+                second, NULL);
+        return gf_sftp_server_status (sv->sftp, req->id, GF_FX_OK, "")
+               != GF_OK;
+      }
+    case GF_FXP_SETSTAT:
+      log_op (sv, "setstat", path, "", &req->attrs);
+      if (strcmp (path, "/denied") == 0)
+        return gf_sftp_server_status (sv->sftp, req->id,
+                                      GF_FX_PERMISSION_DENIED, "") != GF_OK;
+      return gf_sftp_server_status (sv->sftp, req->id, GF_FX_OK, "") != GF_OK;
+    case GF_FXP_REALPATH:
+      {
+        gf_sftp_name name;
+
+        log_op (sv, "realpath", path, "", NULL);
+        memset (&name, 0, sizeof name);
+        name.filename.data = (const uint8_t *) "/home/alice";
+        name.filename.len = 11;
+        return gf_sftp_server_names (sv->sftp, req->id, 1, &name) != GF_OK;
+      }
     case GF_FXP_CLOSE:
+      log_op (sv, "close", "", "", NULL);
       sv->closed_handle = 1;
       sv->release_held = sv->nheld > 0;
       return gf_sftp_server_status (sv->sftp, req->id, GF_FX_OK, "") != GF_OK;
@@ -794,12 +913,17 @@ struct setup
   struct twist_multi *multi;	/* Run on a real loop.  */
   const char *agent;		/* The agent socket option.  */
   unsigned agent_timeout_ms;
+  struct twist_slist *quote, *postquote;
+  int create_dirs;		/* Make missing directories for an upload.  */
+  int nobody;			/* -I.  */
+  int headers;			/* Collect what goes to the header callback.  */
 };
 
 /* Every field, so that none is forgotten: URL, whether to check the host key,
    and the password; the rest is for the test to set.  */
 #define SETUP(url, verify, pw) \
-  { (url), (verify), (pw), NULL, NULL, NULL, 0, NULL, 0, 0, 0, NULL, 0, NULL, NULL, 0 }
+  { (url), (verify), (pw), NULL, NULL, NULL, 0, NULL, 0, 0, 0, NULL, 0, NULL, NULL, 0, \
+    NULL, NULL, 0, 0, 0 }
 
 /* The read callback for a streamed upload: it hands out the data in pieces
    of an awkward size.  */
@@ -820,6 +944,8 @@ feed (char *ptr, size_t size, size_t nmemb, void *user)
   feed_pos += n;
   return n;
 }
+
+static size_t header_collect (char *ptr, size_t size, size_t nmemb, void *user);
 
 static struct twist_easy *
 start (struct world *w, struct server *sv, const struct setup *su)
@@ -857,6 +983,16 @@ start (struct world *w, struct server *sv, const struct setup *su)
     twist_easy_setopt (easy, TWISTOPT_RANGE, su->range);
   if (su->list_only)
     twist_easy_setopt (easy, TWISTOPT_DIRLISTONLY, 1L);
+  if (su->quote != NULL)
+    twist_easy_setopt (easy, TWISTOPT_QUOTE, su->quote);
+  if (su->postquote != NULL)
+    twist_easy_setopt (easy, TWISTOPT_POSTQUOTE, su->postquote);
+  if (su->create_dirs)
+    twist_easy_setopt (easy, TWISTOPT_CREATE_MISSING_DIRS, 1L);
+  if (su->nobody)
+    twist_easy_setopt (easy, TWISTOPT_NOBODY, 1L);
+  if (su->headers)
+    twist_easy_setopt (easy, TWISTOPT_HEADERFUNCTION, header_collect);
   w->sv = sv;
   w->c2s.len = 0;
   if (su->agent != NULL)
@@ -1621,6 +1757,460 @@ test_upload_errors (void)
   easy = run (&w, &sv, &su);
   check (easy->done && easy->result == TWIST_ERR_INVAL
          && detail_has (easy, "range does not apply"), "a range and an upload");
+  twist_easy_cleanup (easy);
+  server_free (&sv);
+}
+
+/* ---- quote commands and missing directories ---- */
+
+static char hdr_text[1024];
+static size_t hdr_len;
+
+static size_t
+header_collect (char *ptr, size_t size, size_t nmemb, void *user)
+{
+  size_t n = size * nmemb;
+
+  (void) user;
+  if (hdr_len + n < sizeof hdr_text)
+    {
+      memcpy (hdr_text + hdr_len, ptr, n);
+      hdr_len += n;
+      hdr_text[hdr_len] = 0;
+    }
+  return n;
+}
+
+/* What the server was asked, in order, as "what a b|what a b".  */
+static const char *
+ops_text (const struct server *sv)
+{
+  static char out[2048];
+  unsigned i;
+
+  out[0] = 0;
+  for (i = 0; i < sv->nops; i++)
+    {
+      size_t used = strlen (out);
+
+      snprintf (out + used, sizeof out - used, "%s%s%s%s%s%s", i ? "|" : "",
+                sv->ops[i].what, sv->ops[i].a[0] ? " " : "", sv->ops[i].a,
+                sv->ops[i].b[0] ? " " : "", sv->ops[i].b);
+    }
+  return out;
+}
+
+static struct twist_slist *
+commands (const char *a, const char *b, const char *c)
+{
+  struct twist_slist *l = NULL;
+
+  if (a != NULL)
+    l = twist_slist_append (l, a);
+  if (b != NULL)
+    l = twist_slist_append (l, b);
+  if (c != NULL)
+    l = twist_slist_append (l, c);
+  return l;
+}
+
+/* One transfer with quote commands; the caller looks at what became of it.  */
+static struct twist_easy *
+quote_run (struct world *w, struct server *sv, struct setup *su,
+           struct twist_slist *pre, struct twist_slist *post)
+{
+  su->quote = pre;
+  su->postquote = post;
+  hdr_len = 0;
+  hdr_text[0] = 0;
+  return run (w, sv, su);
+}
+
+static int
+op_is (const struct server *sv, unsigned i, const char *what, const char *a,
+       const char *b)
+{
+  return i < sv->nops && strcmp (sv->ops[i].what, what) == 0
+         && strcmp (sv->ops[i].a, a) == 0 && strcmp (sv->ops[i].b, b) == 0;
+}
+
+static void
+test_quote_order (void)
+{
+  struct server sv;
+  struct world w;
+  struct twist_easy *easy;
+  struct setup su = SETUP ("sftp://alice@127.0.0.1/data.bin", 0, "secret");
+  struct twist_slist *pre, *post;
+
+  /* Before the transfer.  */
+  check (server_new (&sv) == 0, "server");
+  pre = commands ("mkdir /newdir", NULL, NULL);
+  easy = quote_run (&w, &sv, &su, pre, NULL);
+  check (easy->done && easy->result == TWIST_OK && got_len == sizeof content,
+         "a quote command before the transfer");
+  check (strcmp (ops_text (&sv), "mkdir /newdir|open /data.bin|close") == 0,
+         "it ran first");
+  twist_easy_cleanup (easy);
+  server_free (&sv);
+  twist_slist_free_all (pre);
+
+  /* After it.  */
+  check (server_new (&sv) == 0, "server 2");
+  post = commands ("rm /old", NULL, NULL);
+  easy = quote_run (&w, &sv, &su, NULL, post);
+  check (easy->done && easy->result == TWIST_OK && got_len == sizeof content,
+         "a quote command after the transfer");
+  check (strcmp (ops_text (&sv), "open /data.bin|close|remove /old") == 0,
+         "it ran last");
+  twist_easy_cleanup (easy);
+  server_free (&sv);
+  twist_slist_free_all (post);
+
+  /* Both, in order.  */
+  check (server_new (&sv) == 0, "server 3");
+  pre = commands ("mkdir /a", "rename /a /b", NULL);
+  post = commands ("rmdir /b", NULL, NULL);
+  easy = quote_run (&w, &sv, &su, pre, post);
+  check (easy->done && easy->result == TWIST_OK, "both");
+  check (strcmp (ops_text (&sv), "mkdir /a|rename /a /b|open /data.bin|close"
+                 "|rmdir /b") == 0, "in the order given, one at a time");
+  twist_easy_cleanup (easy);
+  server_free (&sv);
+  twist_slist_free_all (pre);
+  twist_slist_free_all (post);
+}
+
+static void
+test_quote_failures (void)
+{
+  struct server sv;
+  struct world w;
+  struct twist_easy *easy;
+  struct setup su = SETUP ("sftp://alice@127.0.0.1/data.bin", 0, "secret");
+  struct twist_slist *pre, *post;
+
+  /* The server refuses: the transfer is not made.  */
+  check (server_new (&sv) == 0, "server");
+  pre = commands ("rm /gone", NULL, NULL);
+  easy = quote_run (&w, &sv, &su, pre, NULL);
+  check (easy->done && easy->result == TWIST_ERR_QUOTE && got_len == 0
+         && easy->proto_status == 21, "a quote command that fails");
+  check (detail_has (easy, "rm command failed")
+         && detail_has (easy, "no such file"), "and says which and why");
+  check (strcmp (ops_text (&sv), "remove /gone") == 0,
+         "nothing is transferred after it");
+  twist_easy_cleanup (easy);
+  server_free (&sv);
+  twist_slist_free_all (pre);
+
+  /* * goes on.  */
+  check (server_new (&sv) == 0, "server 2");
+  pre = commands ("*rm /gone", "mkdir /after", NULL);
+  easy = quote_run (&w, &sv, &su, pre, NULL);
+  check (easy->done && easy->result == TWIST_OK && got_len == sizeof content,
+         "* goes on after a failure");
+  check (strcmp (ops_text (&sv), "remove /gone|mkdir /after|open /data.bin"
+                 "|close") == 0, "with the rest");
+  twist_easy_cleanup (easy);
+  server_free (&sv);
+  twist_slist_free_all (pre);
+
+  /* A permission is told from a missing file.  */
+  check (server_new (&sv) == 0, "server 3");
+  pre = commands ("rm /denied", NULL, NULL);
+  easy = quote_run (&w, &sv, &su, pre, NULL);
+  check (easy->done && easy->result == TWIST_ERR_QUOTE
+         && detail_has (easy, "permission denied"), "permission denied");
+  twist_easy_cleanup (easy);
+  server_free (&sv);
+  twist_slist_free_all (pre);
+
+  /* After the transfer: it was made, and the command failed.  */
+  check (server_new (&sv) == 0, "server 4");
+  post = commands ("rm /gone", NULL, NULL);
+  easy = quote_run (&w, &sv, &su, NULL, post);
+  check (easy->done && easy->result == TWIST_ERR_QUOTE
+         && got_len == sizeof content && easy->proto_status == 21,
+         "a quote command after the transfer that fails");
+  twist_easy_cleanup (easy);
+  server_free (&sv);
+  twist_slist_free_all (post);
+
+  /* A transfer that fails does not run them.  */
+  check (server_new (&sv) == 0, "server 5");
+  su.url = "sftp://alice@127.0.0.1/missing";
+  post = commands ("rm /old", NULL, NULL);
+  easy = quote_run (&w, &sv, &su, NULL, post);
+  check (easy->done && easy->result == TWIST_ERR_FILE
+         && easy->proto_status == 78, "a transfer that fails");
+  check (strcmp (ops_text (&sv), "open /missing") == 0,
+         "does not run the commands after it");
+  twist_easy_cleanup (easy);
+  server_free (&sv);
+  twist_slist_free_all (post);
+  su.url = "sftp://alice@127.0.0.1/data.bin";
+
+  /* A command that cannot be read ends it before anything is sent, with * as
+     well.  */
+  check (server_new (&sv) == 0, "server 6");
+  pre = commands ("*frob x", NULL, NULL);
+  easy = quote_run (&w, &sv, &su, pre, NULL);
+  check (easy->done && easy->result == TWIST_ERR_QUOTE
+         && detail_has (easy, "Unknown SFTP command") && sv.nops == 0
+         && got_len == 0, "a command that cannot be read");
+  twist_easy_cleanup (easy);
+  server_free (&sv);
+  twist_slist_free_all (pre);
+}
+
+static void
+test_quote_commands (void)
+{
+  struct server sv;
+  struct world w;
+  struct twist_easy *easy;
+  struct setup su = SETUP ("sftp://alice@127.0.0.1/data.bin", 0, "secret");
+  struct twist_slist *pre;
+
+  check (server_new (&sv) == 0, "server 2");
+  pre = commands ("chmod 600 /data.bin", NULL, NULL);
+  easy = quote_run (&w, &sv, &su, pre, NULL);
+  check (easy->done && easy->result == TWIST_OK
+         && op_is (&sv, 0, "setstat", "/data.bin", "")
+         && sv.ops[0].attrs.flags == GF_FILEXFER_ATTR_PERMISSIONS
+         && sv.ops[0].attrs.permissions == 0600, "chmod sets the mode only");
+  twist_easy_cleanup (easy);
+  server_free (&sv);
+  twist_slist_free_all (pre);
+
+  /* The owner and group go together on the wire; the one not named is kept.  */
+  check (server_new (&sv) == 0, "server 3");
+  pre = commands ("chown 5 /data.bin", NULL, NULL);
+  easy = quote_run (&w, &sv, &su, pre, NULL);
+  check (easy->done && easy->result == TWIST_OK
+         && op_is (&sv, 0, "stat", "/data.bin", "")
+         && op_is (&sv, 1, "setstat", "/data.bin", "")
+         && sv.ops[1].attrs.flags == GF_FILEXFER_ATTR_UIDGID
+         && sv.ops[1].attrs.uid == 5 && sv.ops[1].attrs.gid == 100,
+         "chown keeps the group");
+  twist_easy_cleanup (easy);
+  server_free (&sv);
+  twist_slist_free_all (pre);
+
+  check (server_new (&sv) == 0, "server 4");
+  pre = commands ("chgrp 7 /data.bin", NULL, NULL);
+  easy = quote_run (&w, &sv, &su, pre, NULL);
+  check (easy->done && easy->result == TWIST_OK
+         && sv.ops[1].attrs.uid == 1000 && sv.ops[1].attrs.gid == 7,
+         "chgrp keeps the owner");
+  twist_easy_cleanup (easy);
+  server_free (&sv);
+  twist_slist_free_all (pre);
+
+  check (server_new (&sv) == 0, "server 5");
+  pre = commands ("mtime \"Thu, 02 Jan 2020 10:00:00 GMT\" /data.bin",
+                  "atime \"Thu, 02 Jan 2020 11:00:00 GMT\" /data.bin", NULL);
+  easy = quote_run (&w, &sv, &su, pre, NULL);
+  check (easy->done && easy->result == TWIST_OK
+         && sv.ops[1].attrs.flags == GF_FILEXFER_ATTR_ACMODTIME
+         && sv.ops[1].attrs.mtime == 1577959200 && sv.ops[1].attrs.atime == 111
+         && sv.ops[3].attrs.atime == 1577962800 && sv.ops[3].attrs.mtime == 222,
+         "mtime keeps the access time and atime the modification time");
+  twist_easy_cleanup (easy);
+  server_free (&sv);
+  twist_slist_free_all (pre);
+
+  check (server_new (&sv) == 0, "server 6");
+  pre = commands ("ln /target /linkname", NULL, NULL);
+  easy = quote_run (&w, &sv, &su, pre, NULL);
+  check (easy->done && easy->result == TWIST_OK
+         && op_is (&sv, 0, "symlink", "/linkname", "/target"),
+         "ln makes the second a link to the first");
+  twist_easy_cleanup (easy);
+  server_free (&sv);
+  twist_slist_free_all (pre);
+
+  /* A path with a space needs quotes.  */
+  check (server_new (&sv) == 0, "server 7");
+  pre = commands ("rename \"/a b\" \"/c d\"", NULL, NULL);
+  easy = quote_run (&w, &sv, &su, pre, NULL);
+  check (easy->done && easy->result == TWIST_OK
+         && op_is (&sv, 0, "rename", "/a b", "/c d"), "quoted paths");
+  twist_easy_cleanup (easy);
+  server_free (&sv);
+  twist_slist_free_all (pre);
+}
+
+/* pwd writes the server's words to the header callback, as curl does.  */
+static void
+test_quote_pwd (void)
+{
+  struct server sv;
+  struct world w;
+  struct twist_easy *easy;
+  struct setup su = SETUP ("sftp://alice@127.0.0.1/data.bin", 0, "secret");
+  struct twist_slist *pre;
+
+  su.headers = 1;
+  check (server_new (&sv) == 0, "server");
+  pre = commands ("pwd", NULL, NULL);
+  easy = quote_run (&w, &sv, &su, pre, NULL);
+  check (easy->done && easy->result == TWIST_OK
+         && strcmp (hdr_text, "257 \"/home/alice\" is current directory.\n")
+            == 0, "pwd is said as a header");
+  check (strcmp (ops_text (&sv), "realpath .|open /data.bin|close") == 0,
+         "it asks for the real path of .");
+  check (got_len == sizeof content, "and the file is still fetched");
+  twist_easy_cleanup (easy);
+  server_free (&sv);
+  twist_slist_free_all (pre);
+}
+
+/* -I: only the quote commands, and the file must be there.  */
+static void
+test_quote_only (void)
+{
+  struct server sv;
+  struct world w;
+  struct twist_easy *easy;
+  struct setup su = SETUP ("sftp://alice@127.0.0.1/data.bin", 0, "secret");
+  struct twist_slist *pre, *post;
+
+  su.nobody = 1;
+  check (server_new (&sv) == 0, "server");
+  pre = commands ("mkdir /q", NULL, NULL);
+  post = commands ("rm /old", NULL, NULL);
+  easy = quote_run (&w, &sv, &su, pre, post);
+  check (easy->done && easy->result == TWIST_OK && got_len == 0,
+         "no body: only the commands");
+  check (strcmp (ops_text (&sv), "mkdir /q|stat /data.bin|remove /old") == 0,
+         "the file is looked for, between them");
+  twist_easy_cleanup (easy);
+  server_free (&sv);
+  twist_slist_free_all (pre);
+  twist_slist_free_all (post);
+
+  check (server_new (&sv) == 0, "server 2");
+  su.url = "sftp://alice@127.0.0.1/missing";
+  easy = quote_run (&w, &sv, &su, NULL, NULL);
+  check (easy->done && easy->result == TWIST_ERR_FILE
+         && easy->proto_status == 78, "no body for a file that is not there");
+  twist_easy_cleanup (easy);
+  server_free (&sv);
+
+  /* A directory: nothing to look at.  */
+  check (server_new (&sv) == 0, "server 3");
+  su.url = "sftp://alice@127.0.0.1/dir/";
+  pre = commands ("mkdir /q", NULL, NULL);
+  easy = quote_run (&w, &sv, &su, pre, NULL);
+  check (easy->done && easy->result == TWIST_OK && got_len == 0
+         && strcmp (ops_text (&sv), "mkdir /q") == 0, "a directory with -I");
+  twist_easy_cleanup (easy);
+  server_free (&sv);
+  twist_slist_free_all (pre);
+}
+
+/* Commands go with a listing and an upload too.  */
+static void
+test_quote_with_list_and_upload (void)
+{
+  struct server sv;
+  struct world w;
+  struct twist_easy *easy;
+  struct setup su = SETUP ("sftp://alice@127.0.0.1/dir/", 0, "secret");
+  struct twist_slist *pre, *post;
+
+  check (server_new (&sv) == 0, "server");
+  pre = commands ("mkdir /q", NULL, NULL);
+  easy = quote_run (&w, &sv, &su, pre, NULL);
+  check (easy->done && easy->result == TWIST_OK && got_len > 0
+         && op_is (&sv, 0, "mkdir", "/q", ""), "before a listing");
+  twist_easy_cleanup (easy);
+  server_free (&sv);
+  twist_slist_free_all (pre);
+
+  su.url = "sftp://alice@127.0.0.1/up.bin";
+  su.upload = content;
+  su.upload_len = sizeof content;
+  check (server_new (&sv) == 0, "server 2");
+  post = commands ("rename /up.bin /done.bin", NULL, NULL);
+  easy = quote_run (&w, &sv, &su, NULL, post);
+  check (easy->done && easy->result == TWIST_OK
+         && uploaded_is (&sv, content, sizeof content), "an upload");
+  check (op_is (&sv, sv.nops - 1, "rename", "/up.bin", "/done.bin"),
+         "and a command after it");
+  twist_easy_cleanup (easy);
+  server_free (&sv);
+  twist_slist_free_all (post);
+}
+
+static void
+test_create_dirs (void)
+{
+  struct server sv;
+  struct world w;
+  struct twist_easy *easy;
+  struct setup su = SETUP ("sftp://alice@127.0.0.1/newa/newb/up.bin", 0,
+                           "secret");
+
+  su.upload = content;
+  su.upload_len = sizeof content;
+
+  /* Without the option the upload fails, as before.  */
+  check (server_new (&sv) == 0, "server");
+  easy = run (&w, &sv, &su);
+  check (easy->done && easy->result == TWIST_ERR_FILE
+         && easy->proto_status == 25
+         && strcmp (ops_text (&sv), "open /newa/newb/up.bin") == 0,
+         "a missing directory is an error");
+  twist_easy_cleanup (easy);
+  server_free (&sv);
+
+  /* With it, the directories are made and the open is tried again.  */
+  su.create_dirs = 1;
+  check (server_new (&sv) == 0, "server 2");
+  easy = run (&w, &sv, &su);
+  check (easy->done && easy->result == TWIST_OK
+         && uploaded_is (&sv, content, sizeof content), "the directories made");
+  check (strcmp (ops_text (&sv), "open /newa/newb/up.bin|mkdir /newa"
+                 "|mkdir /newa/newb|open /newa/newb/up.bin|close") == 0,
+         "each one, from the top, then the open again");
+  check (sv.ops[1].attrs.flags == GF_FILEXFER_ATTR_PERMISSIONS
+         && sv.ops[1].attrs.permissions == 0755, "with mode 0755");
+  twist_easy_cleanup (easy);
+  server_free (&sv);
+
+  /* One that is there already: its mkdir fails and that is not an error.  */
+  su.url = "sftp://alice@127.0.0.1/dir/sub/up.bin";
+  check (server_new (&sv) == 0, "server 3");
+  easy = run (&w, &sv, &su);
+  check (easy->done && easy->result == TWIST_OK
+         && strcmp (ops_text (&sv), "open /dir/sub/up.bin|mkdir /dir"
+                    "|mkdir /dir/sub|open /dir/sub/up.bin|close") == 0,
+         "a directory that exists is not made again");
+  twist_easy_cleanup (easy);
+  server_free (&sv);
+
+  /* Where making them does not help, the error is the open's, once.  */
+  su.url = "sftp://alice@127.0.0.1/bad/up.bin";
+  check (server_new (&sv) == 0, "server 4");
+  easy = run (&w, &sv, &su);
+  check (easy->done && easy->result == TWIST_ERR_FILE
+         && easy->proto_status == 25
+         && strcmp (ops_text (&sv), "open /bad/up.bin|mkdir /bad"
+                    "|open /bad/up.bin") == 0, "the open is tried once more");
+  twist_easy_cleanup (easy);
+  server_free (&sv);
+
+  /* A download is not helped by it.  */
+  su.url = "sftp://alice@127.0.0.1/nodir/data.bin";
+  su.upload = NULL;
+  check (server_new (&sv) == 0, "server 5");
+  easy = run (&w, &sv, &su);
+  check (easy->done && easy->result == TWIST_ERR_FILE
+         && strcmp (ops_text (&sv), "open /nodir/data.bin") == 0,
+         "a download does not make directories");
   twist_easy_cleanup (easy);
   server_free (&sv);
 }
@@ -3607,6 +4197,13 @@ main (void)
   test_upload_resume ();
   test_upload_errors ();
   test_upload_read_error ();
+  test_quote_order ();
+  test_quote_failures ();
+  test_quote_commands ();
+  test_quote_pwd ();
+  test_quote_only ();
+  test_quote_with_list_and_upload ();
+  test_create_dirs ();
   test_download_resume ();
   test_ranges ();
   test_listing ();
