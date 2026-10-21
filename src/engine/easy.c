@@ -57,13 +57,25 @@ twist_easy_init (void)
   return easy;
 }
 
+/* Release the state of the transfer.  It owns the connection, which is
+   released against the loop, so this must happen while the loop is alive:
+   when the handle leaves its multi, not when the handle is cleaned up.  */
+void
+twist_easy_release_transfer (struct twist_easy *easy)
+{
+  void *xfer = easy->xfer;
+  void (*xfer_free) (void *) = easy->xfer_free;
+
+  easy->xfer = NULL;
+  easy->xfer_free = NULL;
+  if (xfer_free != NULL && xfer != NULL)
+    xfer_free (xfer);
+}
+
 static void
 easy_clear (struct twist_easy *easy)
 {
-  if (easy->xfer_free != NULL && easy->xfer != NULL)
-    easy->xfer_free (easy->xfer);
-  easy->xfer = NULL;
-  easy->xfer_free = NULL;
+  twist_easy_release_transfer (easy);
   free (easy->url_string);
   twist_url_free_int (easy->url);
   free (easy->method);

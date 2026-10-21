@@ -92,6 +92,10 @@ twist_multi_cleanup (twist_multi *multi)
 
   if (multi == NULL)
     return;
+  /* Transfer state releases its connection against the loop and the pool,
+     so it goes first, while both are alive.  */
+  for (i = 0; i < multi->n_easies; i++)
+    twist_easy_release_transfer (multi->easies[i]);
   for (i = 0; i < multi->n_easies; i++)
     {
       multi->easies[i]->multi = NULL;
@@ -142,6 +146,7 @@ twist_multi_remove_handle (twist_multi *multi, twist_easy *easy)
   for (i = 0; i < multi->n_easies; i++)
     if (multi->easies[i] == easy)
       {
+        twist_easy_release_transfer (easy);
         multi->easies[i] = multi->easies[multi->n_easies - 1];
         multi->n_easies--;
         easy->multi = NULL;

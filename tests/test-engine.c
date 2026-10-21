@@ -23,9 +23,15 @@
 #include "check.h"
 #include "twist-int.h"
 
+#include <arpa/inet.h>
+#include <fcntl.h>
+#include <netinet/in.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
+#include <time.h>
+#include <unistd.h>
 
 static void
 test_url (void)
@@ -247,6 +253,104 @@ test_multi_perform (void)
   twist_multi_cleanup (multi);
 }
 
+/* A TCP listener on the loopback that never answers.  A transfer to it
+   ends by its own timeout with the connection still open.  */
+static int
+listen_loopback (int *port)
+{
+  struct sockaddr_in sin;
+  socklen_t len = sizeof sin;
+  int fd = socket (AF_INET, SOCK_STREAM, 0);
+
+  if (fd < 0)
+    return -1;
+  memset (&sin, 0, sizeof sin);
+  sin.sin_family = AF_INET;
+  sin.sin_addr.s_addr = htonl (INADDR_LOOPBACK);
+  if (bind (fd, (struct sockaddr *) &sin, sizeof sin) != 0
+      || listen (fd, 4) != 0
+      || getsockname (fd, (struct sockaddr *) &sin, &len) != 0)
+    {
+      close (fd);
+      return -1;
+    }
+  fcntl (fd, F_SETFL, O_NONBLOCK);
+  *port = ntohs (sin.sin_port);
+  return fd;
+}
+
+static twist_easy *
+timeout_easy (int port)
+{
+  twist_easy *easy = twist_easy_init ();
+  char url[64];
+
+  snprintf (url, sizeof url, "mqtt://127.0.0.1:%d/x", port);
+  twist_easy_setopt (easy, TWISTOPT_URL, url);
+  twist_easy_setopt (easy, TWISTOPT_TIMEOUT_MS, 200L);
+  return easy;
+}
+
+/* The state of a transfer owns its connection, and the connection is
+   released against the loop.  So the state must be released when the easy
+   handle leaves the loop, not later with the handle: by then the loop is
+   gone and the release reads freed memory.  */
+static void
+test_release_transfer (void)
+{
+  int port = 0;
+  int fd = listen_loopback (&port);
+  int peer;
+  twist_easy *easy;
+  twist_multi *multi;
+  struct timespec nap = { 0, 5000000 };
+  int running = 1;
+  int i;
+
+  check (fd >= 0, "loopback listener");
+  if (fd < 0)
+    return;
+
+  /* twist_easy_perform ends the transfer with the connection open.  */
+  easy = timeout_easy (port);
+  check (twist_easy_perform (easy) != TWIST_OK, "perform times out");
+  peer = accept (fd, NULL, NULL);
+  check (peer >= 0, "the connection was open");
+  if (peer >= 0)
+    close (peer);
+  check (easy->xfer == NULL, "perform releases the transfer state");
+  twist_easy_cleanup (easy);
+
+  /* The same through a multi handle that is removed.  */
+  multi = twist_multi_init ();
+  easy = timeout_easy (port);
+  check (twist_multi_add_handle (multi, easy) == TWIST_OK, "add handle");
+  for (i = 0; i < 400 && running > 0; i++)
+    {
+      twist_multi_perform (multi, &running);
+      nanosleep (&nap, NULL);
+    }
+  check (running == 0 && easy->done, "multi transfer ended");
+  check (twist_multi_remove_handle (multi, easy) == TWIST_OK, "remove handle");
+  check (easy->xfer == NULL, "remove releases the transfer state");
+  twist_multi_cleanup (multi);
+  twist_easy_cleanup (easy);
+
+  /* Handles still in the multi when it is cleaned up.  */
+  multi = twist_multi_init ();
+  easy = timeout_easy (port);
+  check (twist_multi_add_handle (multi, easy) == TWIST_OK, "add handle 2");
+  for (i = 0; i < 400 && running > 0; i++)
+    {
+      twist_multi_perform (multi, &running);
+      nanosleep (&nap, NULL);
+    }
+  twist_multi_cleanup (multi);
+  check (easy->xfer == NULL, "multi cleanup releases the transfer state");
+  twist_easy_cleanup (easy);
+  close (fd);
+}
+
 int
 main (void)
 {
@@ -255,5 +359,6 @@ main (void)
   test_proxy ();
   test_conn_pool ();
   test_multi_perform ();
+  test_release_transfer ();
   return tests_finish ();
 }
