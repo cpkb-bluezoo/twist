@@ -32,3 +32,26 @@ Twist TODO List
       exit 77 when the peer is absent.  A podman lab is one candidate
       and is not chosen yet.
   [ ] io_uring poll backend
+  [ ] Threads and the storage pool.  Found by an audit of the queue, the
+      pool and the file handler; none is fixed, and none has been seen
+      to fail.  Look at each.
+        - storage.c finish_job: if posting the completion to the loop
+          fails (an allocation failure), it calls done() on the worker
+          thread.  done() is meant to run on the loop, and the handlers
+          that use it (the SSH key and known_hosts load) touch the
+          transfer, so this is a race.  It needs another way to hand the
+          failure back, or a completion that cannot fail to post.
+        - file.c file_work: if the final post to the loop fails, the
+          worker calls twist_easy_finish itself, a call into the multi
+          handle's state from another thread.  The same fix as above
+          would cover it.
+        - file.c file_free: releasing a transfer waits for the worker,
+          which can be in the middle of a read.  On a slow or hung disk
+          the loop's thread blocks for that read.  Acceptable for a
+          transfer that was let go of; not for one that must be
+          cancelled quickly.
+        - storage.c twist_storage_set_inline: with it on (nothing turns
+          it on now), the file handler runs its worker on the loop's
+          thread and deadlocks on any file over four chunks, because
+          nothing acknowledges them.  Remove inline mode, or make the
+          handler refuse it.
