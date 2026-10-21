@@ -135,7 +135,9 @@ Building
   make
   make check
 
-quickstep must already be installed, so that pkg-config can see
-quickstep.pc.  zlib is required.  No dependency other than quickstep,
-zlib, and GNU readline is added without explicit approval.  Readline
-links into the twist program only.
+quickstep and foxtrot must already be installed, so that pkg-config can
+see quickstep.pc and foxtrot.pc.  foxtrot needs libgcrypt 1.12.4 or later
+and configure checks the pkg-config version, the header and the library
+the loader gives a program.  zlib is required.  No dependency other than
+quickstep, foxtrot (and so libgcrypt), zlib, and GNU readline is added
+without explicit approval.  Readline links into the twist program only.

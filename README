@@ -12,6 +12,9 @@ Dependencies
 ------------
 
   - quickstep, installed so that pkg-config can see quickstep.pc
+  - foxtrot, the SSH engine, installed so that pkg-config can see foxtrot.pc
+  - libgcrypt 1.12.4 or later, which foxtrot needs, and which the loader
+    must find ahead of any older system copy (configure checks this)
   - zlib
   - GNU readline, for the twist program only
 
@@ -30,6 +33,8 @@ If quickstep is installed under a prefix pkg-config does not search,
 pass that prefix:
 
   ./configure --with-quickstep=/prefix
+
+The same applies to foxtrot, with --with-foxtrot=/prefix.
 
 See INSTALL for the GNU build instructions, and TODO for what is
 not yet implemented.

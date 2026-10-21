@@ -16,6 +16,8 @@ To build Twist, you need:
 Dependencies:
 
   - **quickstep** - QUIC and TLS library (source in ../quickstep)
+  - **foxtrot** - SSH engine (source in ../foxtrot), which needs
+    **libgcrypt** 1.12.4 or later
   - **GNU readline** - For interactive input
 
 Building

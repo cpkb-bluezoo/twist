@@ -78,7 +78,13 @@ PKG_CHECK_MODULES([QUICKSTEP], [quickstep], [],
   [AC_MSG_ERROR([quickstep is not installed.  pkg-config must see quickstep.pc])])
 
 dnl foxtrot is the SSH engine under scp and sftp, installed beside quickstep.
-dnl It needs libgcrypt 1.12.4 or later, which it checks when it starts.
+dnl It needs libgcrypt 1.12.4 or later and refuses to start with an older
+dnl one: before 1.12.3 a peer can make libgcrypt abort the process with an
+dnl awkward Ed25519 key, and before 1.12.4 its ECDH does not check the peer's
+dnl point.  The check is made three times because each fails differently:
+dnl what pkg-config reports, the header the compiler finds first, and the
+dnl library the loader gives a program (no RPATH is set, so that depends on
+dnl the system's search order, and an older system copy can win).
 AC_ARG_WITH([foxtrot],
   [AS_HELP_STRING([--with-foxtrot=PREFIX],
      [installation prefix of foxtrot])],
@@ -96,6 +102,30 @@ AS_IF([test "x$with_foxtrot" != xyes],
       export PKG_CONFIG_PATH])])
 PKG_CHECK_MODULES([FOXTROT], [foxtrot], [],
   [AC_MSG_ERROR([foxtrot is not installed.  pkg-config must see foxtrot.pc])])
+PKG_CHECK_MODULES([LIBGCRYPT], [libgcrypt >= 1.12.4], [],
+  [AC_MSG_ERROR([libgcrypt 1.12.4 or later is required by foxtrot.  Install it, for example under /usr/local, and make pkg-config see it])])
+tw_save_CPPFLAGS=$CPPFLAGS
+tw_save_LIBS=$LIBS
+CPPFLAGS="$CPPFLAGS $LIBGCRYPT_CFLAGS"
+LIBS="$LIBS $LIBGCRYPT_LIBS"
+AC_MSG_CHECKING([that the libgcrypt header is 1.12.4 or later])
+AC_COMPILE_IFELSE([AC_LANG_PROGRAM([[#include <gcrypt.h>
+#if GCRYPT_VERSION_NUMBER < 0x010c04
+# error libgcrypt is older than 1.12.4
+#endif
+]], [[]])],
+  [AC_MSG_RESULT([yes])],
+  [AC_MSG_RESULT([no])
+   AC_MSG_ERROR([the first gcrypt.h found is older than 1.12.4.  An older copy in /usr/include is ahead of the one pkg-config reports])])
+AC_MSG_CHECKING([that the libgcrypt the loader finds is 1.12.4 or later])
+AC_RUN_IFELSE([AC_LANG_PROGRAM([[#include <gcrypt.h>]],
+  [[return gcry_check_version ("1.12.4") == NULL;]])],
+  [AC_MSG_RESULT([yes])],
+  [AC_MSG_RESULT([no])
+   AC_MSG_ERROR([a program linked with libgcrypt loads a version older than 1.12.4 here.  The system's copy is found before the new one: put the new libdir ahead of it in /etc/ld.so.conf.d and run ldconfig, or remove the old copy from the search path])],
+  [AC_MSG_RESULT([cross compiling, not checked])])
+CPPFLAGS=$tw_save_CPPFLAGS
+LIBS=$tw_save_LIBS
 
 AC_CHECK_HEADER([zlib.h], [], [AC_MSG_ERROR([zlib.h is required])])
 tw_save_LIBS=$LIBS
