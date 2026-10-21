@@ -119,6 +119,7 @@ struct twist_easy
   char *range;
   char *referer;
   char *cookie;
+  char *proxy_userpwd;
   char *mail_from;
   struct twist_slist *mail_rcpt;
   char *doh_url;
@@ -600,7 +601,13 @@ enum twist_proxy_kind
   TWIST_PROXY_SOCKS5
 };
 
-int twist_proxy_parse (const char *s, int *kind, char **host, int *port);
+/* Read a proxy URL: http://, socks5:// or socks5h:// (a name is given to the
+   proxy to resolve in either case), with an optional user and password, which
+   are returned decoded, and an optional port.  The scheme alone is not enough
+   to be taken for a proxy of another kind: https and socks4 are refused
+   (TWIST_ERR_UNSUPPORTED).  USER and PASS are NULL, or a string to free.  */
+int twist_proxy_parse (const char *s, int *kind, char **host, int *port,
+                       char **user, char **pass);
 struct twist_proxy *twist_proxy_new (int kind, const char *host, int port,
                                      const struct twist_protocol_handler *inner);
 void twist_proxy_free (struct twist_proxy *proxy);
@@ -608,8 +615,24 @@ void twist_proxy_set_target (struct twist_proxy *proxy, const char *host,
                              int port);
 void twist_proxy_set_user (struct twist_proxy *proxy, void *user);
 int twist_proxy_opening (struct twist_proxy *proxy, uint8_t **out, size_t *len);
+/* The proxy is given what arrived.  *USED is how much of it was the proxy's
+   own; the rest, such as the first bytes of an SSH server that came with the
+   proxy's reply, belongs to the tunnel.  *READY is set when the tunnel is
+   open.  A refusal is TWIST_ERR_PROXY, and twist_proxy_error says why.  */
 int twist_proxy_feed (struct twist_proxy *proxy, const uint8_t *data,
-                      size_t len, int *ready);
+                      size_t len, size_t *used, int *ready);
+/* The reason for a refusal, and the status the curl tool gives it (56 for a
+   CONNECT, 97 for SOCKS); NULL if there has been none.  */
+const char *twist_proxy_error (const struct twist_proxy *proxy, int *status);
+void twist_proxy_set_credentials (struct twist_proxy *proxy, const char *user,
+                                  const char *pass);
+/* The transfer a refusal is reported to.  */
+void twist_proxy_set_easy (struct twist_proxy *proxy, struct twist_easy *easy);
+/* Everything a transfer tells a new proxy: where to report, and who to be.
+   USER and PASS are from the proxy's URL; without a user, the transfer's
+   TWISTOPT_PROXYUSERPWD is used.  */
+void twist_proxy_configure (struct twist_proxy *proxy, struct twist_easy *easy,
+                            const char *user, const char *pass);
 int twist_proxy_is_ready (const struct twist_proxy *proxy);
 const struct twist_protocol_handler *twist_proxy_handler (struct twist_proxy *p);
 

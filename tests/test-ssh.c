@@ -36,6 +36,7 @@
 #include <arpa/inet.h>
 #include <errno.h>
 #include <ifaddrs.h>
+#include <netdb.h>
 #include <net/if.h>
 #include <netinet/in.h>
 #include <poll.h>
@@ -4461,6 +4462,770 @@ test_ipv6_known_hosts (void)
 }
 
 
+/* ---- proxies ---- */
+
+/* An HTTP CONNECT or a SOCKS5 proxy on the loopback, in front of whatever the
+   transfer asks for.  It records what it was asked, and can be told to refuse,
+   to want credentials, to send a long reply, or to send the server's first
+   bytes in the same write as its own reply.  */
+
+enum
+{
+  PX_HTTP_KIND = 0,
+  PX_SOCKS_KIND
+};
+
+struct px
+{
+  int lfd, port, kind;
+  pthread_t thread;
+  volatile int stop;
+  int coalesce;			/* The server's first bytes with the reply.  */
+  int refuse_http;		/* Answer CONNECT with this status.  */
+  int refuse_socks;		/* Answer the request with this code.  */
+  int bigheader;		/* A reply of three thousand bytes of header.  */
+  const char *user, *pass;	/* Wanted, or NULL.  */
+  pthread_mutex_t mu;
+  unsigned connects;		/* Tunnels opened.  */
+  char target[320];		/* What the last was asked for.  */
+  int atyp;			/* SOCKS: the address type.  */
+  unsigned active;		/* Threads at work.  */
+};
+
+struct px_conn
+{
+  struct px *px;
+  int fd;
+};
+
+static int
+px_read_exact (int fd, uint8_t *buf, size_t n)
+{
+  size_t have = 0;
+
+  while (have < n)
+    {
+      ssize_t r = read (fd, buf + have, n - have);
+
+      if (r <= 0)
+        return -1;
+      have += (size_t) r;
+    }
+  return 0;
+}
+
+static int
+px_upstream (const char *host, const char *port)
+{
+  struct addrinfo hints, *res, *a;
+  int fd = -1;
+
+  memset (&hints, 0, sizeof hints);
+  hints.ai_socktype = SOCK_STREAM;
+  hints.ai_flags = AI_NUMERICHOST | AI_NUMERICSERV;
+  if (getaddrinfo (host, port, &hints, &res) != 0)
+    return -1;
+  for (a = res; a != NULL && fd < 0; a = a->ai_next)
+    {
+      int s = socket (a->ai_family, a->ai_socktype, a->ai_protocol);
+
+      if (s >= 0 && connect (s, a->ai_addr, a->ai_addrlen) == 0)
+        fd = s;
+      else if (s >= 0)
+        close (s);
+    }
+  freeaddrinfo (res);
+  return fd;
+}
+
+/* Copy both ways until one end closes or the proxy is stopped.  */
+static void
+px_relay (struct px *px, int a, int b)
+{
+  uint8_t buf[16384];
+
+  while (!px->stop)
+    {
+      struct pollfd f[2] = { { a, POLLIN, 0 }, { b, POLLIN, 0 } };
+      int i;
+
+      if (poll (f, 2, 100) <= 0)
+        continue;
+      for (i = 0; i < 2; i++)
+        if (f[i].revents & (POLLIN | POLLHUP | POLLERR))
+          {
+            ssize_t r = read (f[i].fd, buf, sizeof buf);
+
+            if (r <= 0)
+              return;
+            if (send (i == 0 ? b : a, buf, (size_t) r, MSG_NOSIGNAL) < 0)
+              return;
+          }
+    }
+}
+
+/* The server's first bytes, if it sends any soon, to go with the reply.  */
+static size_t
+px_first_bytes (int up, uint8_t *buf, size_t cap)
+{
+  struct pollfd f = { up, POLLIN, 0 };
+
+  if (poll (&f, 1, 1000) > 0)
+    {
+      ssize_t r = read (up, buf, cap);
+
+      if (r > 0)
+        return (size_t) r;
+    }
+  return 0;
+}
+
+static void
+px_note (struct px *px, const char *target, int atyp)
+{
+  pthread_mutex_lock (&px->mu);
+  snprintf (px->target, sizeof px->target, "%s", target);
+  px->atyp = atyp;
+  pthread_mutex_unlock (&px->mu);
+}
+
+static void
+px_http (struct px *px, int fd)
+{
+  char req[8192];
+  size_t n = 0;
+  char host[256], port[16], line[200];
+  char *sp, *colon;
+  uint8_t first[4096];
+  size_t nfirst = 0;
+  int up;
+  char reply[4096];
+  size_t rl;
+
+  while (n < sizeof req - 1)
+    {
+      ssize_t r = read (fd, req + n, 1);
+
+      if (r <= 0)
+        return;
+      n += 1;
+      if (n >= 4 && memcmp (req + n - 4, "\r\n\r\n", 4) == 0)
+        break;
+    }
+  req[n] = 0;
+  if (strncmp (req, "CONNECT ", 8) != 0)
+    return;
+  sp = strchr (req + 8, ' ');
+  if (sp == NULL)
+    return;
+  snprintf (line, sizeof line, "%.*s", (int) (sp - req - 8), req + 8);
+  px_note (px, line, 0);
+  if (px->refuse_http != 0)
+    {
+      rl = (size_t) snprintf (reply, sizeof reply, "HTTP/1.1 %d No\r\n"
+                              "Content-Length: 0\r\n\r\n", px->refuse_http);
+      send (fd, reply, rl, MSG_NOSIGNAL);
+      return;
+    }
+  if (px->user != NULL)
+    {
+      char cred[200], want[300];
+      const char *h = strstr (req, "\r\nProxy-Authorization: Basic ");
+      static const char b64[] =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+      size_t i, o = 0, cl;
+
+      snprintf (cred, sizeof cred, "%s:%s", px->user, px->pass);
+      cl = strlen (cred);
+      for (i = 0; i < cl; i += 3)
+        {
+          uint32_t v = (uint32_t) (uint8_t) cred[i] << 16;
+
+          if (i + 1 < cl)
+            v |= (uint32_t) (uint8_t) cred[i + 1] << 8;
+          if (i + 2 < cl)
+            v |= (uint8_t) cred[i + 2];
+          want[o++] = b64[(v >> 18) & 63];
+          want[o++] = b64[(v >> 12) & 63];
+          want[o++] = i + 1 < cl ? b64[(v >> 6) & 63] : '=';
+          want[o++] = i + 2 < cl ? b64[v & 63] : '=';
+        }
+      want[o] = 0;
+      if (h == NULL || strncmp (h + 29, want, o) != 0 || h[29 + o] != '\r')
+        {
+          static const char no[] = "HTTP/1.1 407 Proxy Authentication "
+            "Required\r\nProxy-Authenticate: Basic realm=\"x\"\r\n"
+            "Content-Length: 0\r\n\r\n";
+
+          send (fd, no, sizeof no - 1, MSG_NOSIGNAL);
+          return;
+        }
+    }
+  colon = strrchr (line, ':');
+  if (colon == NULL)
+    return;
+  snprintf (port, sizeof port, "%s", colon + 1);
+  *colon = 0;
+  snprintf (host, sizeof host, "%s", line[0] == '[' ? line + 1 : line);
+  if (host[0] != 0 && host[strlen (host) - 1] == ']')
+    host[strlen (host) - 1] = 0;
+  up = px_upstream (host, port);
+  if (up < 0)
+    {
+      static const char bad[] = "HTTP/1.1 502 Bad Gateway\r\n"
+        "Content-Length: 0\r\n\r\n";
+
+      send (fd, bad, sizeof bad - 1, MSG_NOSIGNAL);
+      return;
+    }
+  rl = (size_t) snprintf (reply, sizeof reply,
+                          "HTTP/1.1 200 Connection established\r\n");
+  if (px->bigheader)
+    {
+      memcpy (reply + rl, "X-Pad: ", 7);
+      rl += 7;
+      memset (reply + rl, 'a', 3000);
+      rl += 3000;
+      memcpy (reply + rl, "\r\n", 2);
+      rl += 2;
+    }
+  memcpy (reply + rl, "\r\n", 2);
+  rl += 2;
+  if (px->coalesce)
+    nfirst = px_first_bytes (up, first, sizeof first);
+  pthread_mutex_lock (&px->mu);
+  px->connects++;
+  pthread_mutex_unlock (&px->mu);
+  /* One write: the reply and the server's banner together.  */
+  memcpy (reply + rl, first, nfirst);
+  send (fd, reply, rl + nfirst, MSG_NOSIGNAL);
+  px_relay (px, fd, up);
+  close (up);
+}
+
+static void
+px_socks (struct px *px, int fd)
+{
+  uint8_t g[2], methods[256], req[300], reply[10 + 4096];
+  char host[260], port[16], target[300];
+  int atyp, up, have_pw = 0;
+  size_t i, nfirst = 0, alen;
+  uint8_t first[4096];
+
+  if (px_read_exact (fd, g, 2) != 0 || g[0] != 5
+      || px_read_exact (fd, methods, g[1]) != 0)
+    return;
+  for (i = 0; i < g[1]; i++)
+    if (methods[i] == 2)
+      have_pw = 1;
+  if (px->user != NULL)
+    {
+      uint8_t a[2], u[256], pl, p[256];
+
+      if (!have_pw)
+        {
+          send (fd, "\x05\xff", 2, MSG_NOSIGNAL);
+          return;
+        }
+      send (fd, "\x05\x02", 2, MSG_NOSIGNAL);
+      if (px_read_exact (fd, a, 2) != 0 || px_read_exact (fd, u, a[1]) != 0
+          || px_read_exact (fd, &pl, 1) != 0 || px_read_exact (fd, p, pl) != 0)
+        return;
+      if (a[1] != strlen (px->user) || memcmp (u, px->user, a[1]) != 0
+          || pl != strlen (px->pass) || memcmp (p, px->pass, pl) != 0)
+        {
+          send (fd, "\x01\x01", 2, MSG_NOSIGNAL);
+          return;
+        }
+      send (fd, "\x01\x00", 2, MSG_NOSIGNAL);
+    }
+  else
+    send (fd, "\x05\x00", 2, MSG_NOSIGNAL);
+  if (px_read_exact (fd, req, 4) != 0)
+    return;
+  atyp = req[3];
+  if (atyp == 1)
+    {
+      if (px_read_exact (fd, req + 4, 6) != 0)
+        return;
+      inet_ntop (AF_INET, req + 4, host, sizeof host);
+      snprintf (port, sizeof port, "%u", (req[8] << 8) | req[9]);
+    }
+  else if (atyp == 4)
+    {
+      if (px_read_exact (fd, req + 4, 18) != 0)
+        return;
+      inet_ntop (AF_INET6, req + 4, host, sizeof host);
+      snprintf (port, sizeof port, "%u", (req[20] << 8) | req[21]);
+    }
+  else if (atyp == 3)
+    {
+      if (px_read_exact (fd, req + 4, 1) != 0)
+        return;
+      alen = req[4];
+      if (px_read_exact (fd, req + 5, alen + 2) != 0)
+        return;
+      snprintf (host, sizeof host, "%.*s", (int) alen, (char *) req + 5);
+      snprintf (port, sizeof port, "%u", (req[5 + alen] << 8) | req[6 + alen]);
+    }
+  else
+    return;
+  snprintf (target, sizeof target, "%s:%s", host, port);
+  px_note (px, target, atyp);
+  memset (reply, 0, 10);
+  reply[0] = 5;
+  reply[3] = 1;
+  if (px->refuse_socks != 0)
+    {
+      reply[1] = (uint8_t) px->refuse_socks;
+      send (fd, reply, 10, MSG_NOSIGNAL);
+      return;
+    }
+  up = px_upstream (host, port);
+  if (up < 0)
+    {
+      reply[1] = 4;
+      send (fd, reply, 10, MSG_NOSIGNAL);
+      return;
+    }
+  if (px->coalesce)
+    nfirst = px_first_bytes (up, first, sizeof first);
+  pthread_mutex_lock (&px->mu);
+  px->connects++;
+  pthread_mutex_unlock (&px->mu);
+  memcpy (reply + 10, first, nfirst);
+  send (fd, reply, 10 + nfirst, MSG_NOSIGNAL);
+  px_relay (px, fd, up);
+  close (up);
+}
+
+static void *
+px_serve_conn (void *arg)
+{
+  struct px_conn *c = arg;
+
+  if (c->px->kind == PX_HTTP_KIND)
+    px_http (c->px, c->fd);
+  else
+    px_socks (c->px, c->fd);
+  close (c->fd);
+  pthread_mutex_lock (&c->px->mu);
+  c->px->active--;
+  pthread_mutex_unlock (&c->px->mu);
+  free (c);
+  return NULL;
+}
+
+static void *
+px_serve (void *arg)
+{
+  struct px *px = arg;
+
+  while (!px->stop)
+    {
+      struct pollfd f = { px->lfd, POLLIN, 0 };
+      struct px_conn *c;
+      pthread_t t;
+      int fd;
+
+      if (poll (&f, 1, 50) <= 0)
+        continue;
+      fd = accept (px->lfd, NULL, NULL);
+      if (fd < 0)
+        continue;
+      c = malloc (sizeof *c);
+      if (c == NULL)
+        {
+          close (fd);
+          continue;
+        }
+      c->px = px;
+      c->fd = fd;
+      pthread_mutex_lock (&px->mu);
+      px->active++;
+      pthread_mutex_unlock (&px->mu);
+      if (pthread_create (&t, NULL, px_serve_conn, c) != 0)
+        {
+          pthread_mutex_lock (&px->mu);
+          px->active--;
+          pthread_mutex_unlock (&px->mu);
+          close (fd);
+          free (c);
+        }
+      else
+        pthread_detach (t);
+    }
+  return NULL;
+}
+
+static int
+px_start (struct px *px, int kind)
+{
+  struct sockaddr_in sin;
+  socklen_t len = sizeof sin;
+  int one = 1;
+
+  memset (px, 0, sizeof *px);
+  px->kind = kind;
+  pthread_mutex_init (&px->mu, NULL);
+  px->lfd = socket (AF_INET, SOCK_STREAM, 0);
+  if (px->lfd < 0)
+    return -1;
+  setsockopt (px->lfd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+  memset (&sin, 0, sizeof sin);
+  sin.sin_family = AF_INET;
+  sin.sin_addr.s_addr = htonl (INADDR_LOOPBACK);
+  if (bind (px->lfd, (struct sockaddr *) &sin, sizeof sin) != 0
+      || listen (px->lfd, 8) != 0
+      || getsockname (px->lfd, (struct sockaddr *) &sin, &len) != 0)
+    return -1;
+  px->port = ntohs (sin.sin_port);
+  return pthread_create (&px->thread, NULL, px_serve, px) == 0 ? 0 : -1;
+}
+
+static void
+px_stop (struct px *px)
+{
+  int i;
+
+  px->stop = 1;
+  pthread_join (px->thread, NULL);
+  for (i = 0; i < 100; i++)
+    {
+      struct timespec nap = { 0, 30000000 };
+      unsigned a;
+
+      pthread_mutex_lock (&px->mu);
+      a = px->active;
+      pthread_mutex_unlock (&px->mu);
+      if (a == 0)
+        break;
+      nanosleep (&nap, NULL);
+    }
+  close (px->lfd);
+  pthread_mutex_destroy (&px->mu);
+}
+
+static unsigned
+px_connects (struct px *px)
+{
+  unsigned n;
+
+  pthread_mutex_lock (&px->mu);
+  n = px->connects;
+  pthread_mutex_unlock (&px->mu);
+  return n;
+}
+
+static void
+px_target (struct px *px, char *out, size_t cap, int *atyp)
+{
+  pthread_mutex_lock (&px->mu);
+  snprintf (out, cap, "%s", px->target);
+  *atyp = px->atyp;
+  pthread_mutex_unlock (&px->mu);
+}
+
+/* The URL of a proxy of this kind on this port, with credentials if wanted.  */
+static void
+px_url (const struct px *px, const char *userinfo, char *out, size_t cap)
+{
+  snprintf (out, cap, "%s://%s%s127.0.0.1:%d",
+            px->kind == PX_HTTP_KIND ? "http" : "socks5",
+            userinfo != NULL ? userinfo : "", userinfo != NULL ? "@" : "",
+            px->port);
+}
+
+static struct twist_easy *
+proxied_easy (const char *proxy_url)
+{
+  struct twist_easy *easy = tcp_easy (0, "secret", NULL);
+
+  twist_easy_setopt (easy, TWISTOPT_PROXY, proxy_url);
+  return easy;
+}
+
+static void
+test_proxy_kind (int kind)
+{
+  const char *name = kind == PX_HTTP_KIND ? "http" : "socks5";
+  struct tcp_server ts;
+  struct px px;
+  struct twist_multi *multi;
+  struct twist_easy *easy;
+  char url[200], what[100], target[320], want[160];
+  int atyp;
+
+  check (ts_start (&ts) == 0 && px_start (&px, kind) == 0, "servers");
+  multi = twist_multi_init ();
+  px_url (&px, NULL, url, sizeof url);
+
+  /* A download through the proxy, and what the proxy was asked for.  */
+  easy = proxied_easy (url);
+  snprintf (what, sizeof what, "%s: a download through the proxy", name);
+  check (tcp_get (multi, easy, &ts, "sftp", "/data.bin") == TWIST_OK
+         && got_data (), what);
+  px_target (&px, target, sizeof target, &atyp);
+  snprintf (want, sizeof want, "127.0.0.1:%d", ts.port);
+  check (strcmp (target, want) == 0
+         && (kind == PX_HTTP_KIND || atyp == 1),
+         "the proxy was asked for the server, as an address");
+  check (ts_accepted (&ts) == 1 && px_connects (&px) == 1, "one tunnel");
+
+  /* The next URL uses the tunnel.  */
+  snprintf (what, sizeof what, "%s: the next URL uses the same tunnel", name);
+  check (tcp_get (multi, easy, &ts, "sftp", "/data.bin") == TWIST_OK
+         && got_data () && ts_accepted (&ts) == 1 && px_connects (&px) == 1,
+         what);
+
+  /* Without the proxy it is another connection; a session made through one
+     proxy is not another's.  */
+  {
+    struct twist_easy *direct = tcp_easy (0, "secret", NULL);
+
+    check (tcp_get (multi, direct, &ts, "sftp", "/data.bin") == TWIST_OK
+           && ts_accepted (&ts) == 2 && px_connects (&px) == 1,
+           "a transfer without the proxy does not take the tunnel");
+    twist_easy_cleanup (direct);
+  }
+  twist_easy_cleanup (easy);
+  twist_multi_cleanup (multi);
+  px_stop (&px);
+  ts_stop (&ts);
+}
+
+/* The server speaks first.  Its banner comes in the same write as the
+   proxy's reply, and must not be lost.  */
+static void
+test_proxy_banner_with_reply (int kind)
+{
+  struct tcp_server ts;
+  struct px px;
+  struct twist_multi *multi;
+  struct twist_easy *easy;
+  char url[200], what[100];
+
+  check (ts_start (&ts) == 0 && px_start (&px, kind) == 0, "servers");
+  px.coalesce = 1;
+  multi = twist_multi_init ();
+  px_url (&px, NULL, url, sizeof url);
+  easy = proxied_easy (url);
+  snprintf (what, sizeof what, "%s: the banner that comes with the reply",
+            kind == PX_HTTP_KIND ? "http" : "socks5");
+  check (tcp_get (multi, easy, &ts, "sftp", "/data.bin") == TWIST_OK
+         && got_data (), what);
+  twist_easy_cleanup (easy);
+  twist_multi_cleanup (multi);
+  px_stop (&px);
+  ts_stop (&ts);
+}
+
+static void
+test_proxy_refusals (void)
+{
+  struct tcp_server ts;
+  struct px px;
+  struct twist_multi *multi;
+  struct twist_easy *easy;
+  char url[200];
+
+  /* CONNECT refused: curl's words, and its status.  */
+  check (ts_start (&ts) == 0 && px_start (&px, PX_HTTP_KIND) == 0, "servers");
+  px.refuse_http = 403;
+  multi = twist_multi_init ();
+  px_url (&px, NULL, url, sizeof url);
+  easy = proxied_easy (url);
+  check (tcp_get (multi, easy, &ts, "sftp", "/data.bin") == TWIST_ERR_PROXY
+         && easy->proto_status == 56
+         && detail_has (easy, "CONNECT tunnel failed, response 403")
+         && got_len == 0 && ts_accepted (&ts) == 0, "a CONNECT that is refused");
+  twist_easy_cleanup (easy);
+  twist_multi_cleanup (multi);
+  px_stop (&px);
+
+  /* A proxy that cannot reach the server.  */
+  check (px_start (&px, PX_HTTP_KIND) == 0, "proxy");
+  multi = twist_multi_init ();
+  px_url (&px, NULL, url, sizeof url);
+  easy = proxied_easy (url);
+  twist_easy_setopt (easy, TWISTOPT_URL, "sftp://alice@127.0.0.1:1/x");
+  check (twist_easy_perform_in (multi, easy) == TWIST_ERR_PROXY
+         && detail_has (easy, "response 502"), "a server the proxy cannot reach");
+  twist_easy_cleanup (easy);
+  twist_multi_cleanup (multi);
+  px_stop (&px);
+
+  /* SOCKS refused.  */
+  check (px_start (&px, PX_SOCKS_KIND) == 0, "socks proxy");
+  px.refuse_socks = 5;
+  multi = twist_multi_init ();
+  px_url (&px, NULL, url, sizeof url);
+  easy = proxied_easy (url);
+  check (tcp_get (multi, easy, &ts, "sftp", "/data.bin") == TWIST_ERR_PROXY
+         && easy->proto_status == 97
+         && detail_has (easy, "Can't complete SOCKS5 connection to 127.0.0.1. (5)")
+         && ts_accepted (&ts) == 0, "a SOCKS request that is refused");
+  twist_easy_cleanup (easy);
+  twist_multi_cleanup (multi);
+  px_stop (&px);
+
+  /* No proxy there at all.  */
+  multi = twist_multi_init ();
+  easy = proxied_easy ("http://127.0.0.1:1");
+  check (tcp_get (multi, easy, &ts, "sftp", "/data.bin") == TWIST_ERR_CONNECT,
+         "no proxy listening");
+  twist_easy_cleanup (easy);
+  twist_multi_cleanup (multi);
+
+  /* Kinds that are not spoken.  */
+  multi = twist_multi_init ();
+  easy = proxied_easy ("socks4://127.0.0.1:1080");
+  check (tcp_get (multi, easy, &ts, "sftp", "/data.bin") == TWIST_ERR_UNSUPPORTED
+         && detail_has (easy, "not supported"), "a SOCKS4 proxy is refused");
+  twist_easy_cleanup (easy);
+  easy = proxied_easy ("https://127.0.0.1:3128");
+  check (tcp_get (multi, easy, &ts, "sftp", "/data.bin") == TWIST_ERR_UNSUPPORTED,
+         "an https proxy is refused, not spoken to in the clear");
+  twist_easy_cleanup (easy);
+  twist_multi_cleanup (multi);
+  ts_stop (&ts);
+}
+
+static void
+test_proxy_credentials (int kind)
+{
+  const char *name = kind == PX_HTTP_KIND ? "http" : "socks5";
+  struct tcp_server ts;
+  struct px px;
+  struct twist_multi *multi;
+  struct twist_easy *easy;
+  char url[200], what[120];
+  unsigned before;
+  const char *none_msg = kind == PX_HTTP_KIND
+    ? "response 407" : "No authentication method was acceptable.";
+  const char *bad_msg = kind == PX_HTTP_KIND
+    ? "response 407" : "User was rejected by the SOCKS5 server (1 1).";
+
+  check (ts_start (&ts) == 0 && px_start (&px, kind) == 0, "servers");
+  px.user = "pxuser";
+  px.pass = "px:pass";
+  multi = twist_multi_init ();
+
+  px_url (&px, NULL, url, sizeof url);
+  easy = proxied_easy (url);
+  snprintf (what, sizeof what, "%s: a proxy that wants credentials, none given",
+            name);
+  check (tcp_get (multi, easy, &ts, "sftp", "/data.bin") == TWIST_ERR_PROXY
+         && detail_has (easy, none_msg), what);
+  twist_easy_cleanup (easy);
+
+  px_url (&px, "pxuser:px%3Apass", url, sizeof url);
+  easy = proxied_easy (url);
+  snprintf (what, sizeof what, "%s: credentials in the proxy's URL", name);
+  check (tcp_get (multi, easy, &ts, "sftp", "/data.bin") == TWIST_OK
+         && got_data (), what);
+  twist_easy_cleanup (easy);
+
+  px_url (&px, NULL, url, sizeof url);
+  easy = proxied_easy (url);
+  twist_easy_setopt (easy, TWISTOPT_PROXYUSERPWD, "pxuser:px:pass");
+  snprintf (what, sizeof what, "%s: credentials from the option", name);
+  check (tcp_get (multi, easy, &ts, "sftp", "/data.bin") == TWIST_OK
+         && got_data (), what);
+  /* The tunnel is kept; credentials that are wrong are not let through it.  */
+  twist_easy_setopt (easy, TWISTOPT_PROXYUSERPWD, "pxuser:wrong");
+  snprintf (what, sizeof what, "%s: other credentials do not take the tunnel",
+            name);
+  before = ts_accepted (&ts);
+  check (tcp_get (multi, easy, &ts, "sftp", "/data.bin") == TWIST_ERR_PROXY
+         && detail_has (easy, bad_msg) && ts_accepted (&ts) == before, what);
+  twist_easy_cleanup (easy);
+
+  px_url (&px, "pxuser:wrong", url, sizeof url);
+  easy = proxied_easy (url);
+  snprintf (what, sizeof what, "%s: wrong credentials", name);
+  check (tcp_get (multi, easy, &ts, "sftp", "/data.bin") == TWIST_ERR_PROXY
+         && detail_has (easy, bad_msg), what);
+  twist_easy_cleanup (easy);
+  twist_multi_cleanup (multi);
+  px_stop (&px);
+  ts_stop (&ts);
+  (void) none_msg;
+}
+
+/* A reply with a great deal of header in it.  */
+static void
+test_proxy_long_reply (void)
+{
+  struct tcp_server ts;
+  struct px px;
+  struct twist_multi *multi;
+  struct twist_easy *easy;
+  char url[200];
+
+  check (ts_start (&ts) == 0 && px_start (&px, PX_HTTP_KIND) == 0, "servers");
+  px.bigheader = 1;
+  px.coalesce = 1;
+  multi = twist_multi_init ();
+  px_url (&px, NULL, url, sizeof url);
+  easy = proxied_easy (url);
+  check (tcp_get (multi, easy, &ts, "sftp", "/data.bin") == TWIST_OK
+         && got_data (), "a reply of three thousand bytes, and the banner");
+  twist_easy_cleanup (easy);
+  twist_multi_cleanup (multi);
+  px_stop (&px);
+  ts_stop (&ts);
+}
+
+/* An IPv6 server behind each kind of proxy: brackets in CONNECT, an address of
+   the right kind in SOCKS.  */
+static void
+test_proxy_ipv6 (int kind)
+{
+  struct tcp_server ts;
+  struct px px;
+  struct twist_multi *multi;
+  struct twist_easy *easy;
+  char url[200], target[320], want[160];
+  int atyp;
+
+  if (ts_start_on (&ts, TS_V6) != 0)
+    return;
+  check (px_start (&px, kind) == 0, "proxy");
+  multi = twist_multi_init ();
+  px_url (&px, NULL, url, sizeof url);
+  easy = proxied_easy (url);
+  check (tcp_get (multi, easy, &ts, "sftp", "/data.bin") == TWIST_OK
+         && got_data (), "an IPv6 server through a proxy");
+  px_target (&px, target, sizeof target, &atyp);
+  if (kind == PX_HTTP_KIND)
+    snprintf (want, sizeof want, "[::1]:%d", ts.port);
+  else
+    snprintf (want, sizeof want, "::1:%d", ts.port);
+  check (strcmp (target, want) == 0 && (kind == PX_HTTP_KIND || atyp == 4),
+         kind == PX_HTTP_KIND ? "CONNECT [::1]:port"
+                              : "SOCKS asked for an IPv6 address");
+  twist_easy_cleanup (easy);
+  twist_multi_cleanup (multi);
+  px_stop (&px);
+  ts_stop (&ts);
+}
+
+static void
+test_proxies (void)
+{
+  test_proxy_kind (PX_HTTP_KIND);
+  test_proxy_kind (PX_SOCKS_KIND);
+  test_proxy_banner_with_reply (PX_HTTP_KIND);
+  test_proxy_banner_with_reply (PX_SOCKS_KIND);
+  test_proxy_long_reply ();
+  test_proxy_refusals ();
+  test_proxy_credentials (PX_HTTP_KIND);
+  test_proxy_credentials (PX_SOCKS_KIND);
+  test_proxy_ipv6 (PX_HTTP_KIND);
+  test_proxy_ipv6 (PX_SOCKS_KIND);
+}
+
 /* A transfer that goes away while its job is queued or running: the job
    finishes by itself and frees what it made.  Whichever happens first, the
    result must not be touched; valgrind finds it if it is.  */
@@ -4564,7 +5329,7 @@ main (void)
   test_off_the_loop ();
   test_off_the_loop_errors ();
   test_abandoned_job ();
-  alarm (180);
+  alarm (240);
   test_reuse_basic ();
   test_reuse_mixed ();
   test_reuse_terms ();
@@ -4577,6 +5342,7 @@ main (void)
   test_ipv6_known_hosts ();
   test_ipv6_literal ();
   test_ipv6_zone ();
+  test_proxies ();
   rmdir (home);
   return tests_finish ();
 }

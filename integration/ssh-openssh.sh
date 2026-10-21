@@ -30,6 +30,7 @@
 # the user name.  HOME is a directory made here, so ~/.ssh is not read.
 
 TWIST=${TWIST:-../src/twist}
+here=$(cd "$(dirname "$0")" && pwd)
 SSHD=${SSHD:-/usr/sbin/sshd}
 
 skip ()
@@ -45,9 +46,11 @@ command -v ssh-keygen >/dev/null 2>&1 || skip "no ssh-keygen"
 work=$(mktemp -d "${TMPDIR:-/tmp}/twist-ssh.XXXXXX") || skip "no temp dir"
 sshd_pid=
 agent_pid=
+proxy_pid=
 cleanup ()
 {
   [ -n "$sshd_pid" ] && kill "$sshd_pid" 2>/dev/null
+  [ -n "$proxy_pid" ] && kill "$proxy_pid" 2>/dev/null
   [ -n "$agent_pid" ] && kill "$agent_pid" 2>/dev/null
   rm -rf "$work"
 }
@@ -774,6 +777,109 @@ if grep -q '^00000000000000000000000000000001 ' /proc/net/if_inet6 2>/dev/null; 
   check "$([ $rc -eq 7 ] && echo ok)" "an interface that is not there gives 7 (exit $rc)"
 else
   echo "ssh-openssh: no IPv6 loopback; skipping the IPv6 checks" >&2
+fi
+
+# 21. Proxies.  Through an HTTP CONNECT proxy and a SOCKS5 one, in front of the
+# real sshd.  The server speaks first, so the case that matters is its banner
+# arriving in the same write as the proxy's reply.  A refusal is 56 for
+# CONNECT and 97 for SOCKS, as with curl, and the URLs of one command line
+# share a tunnel.  Needs python3 for the proxy.
+start_proxy ()
+{
+  # kind, mode
+  [ -n "$proxy_pid" ] && kill "$proxy_pid" 2>/dev/null
+  rm -f "$work/pxport" "$work/pxlog"
+  : > "$work/pxlog"
+  python3 -I "$here/proxy-peer.py" "$1" "$2" "$work/pxport" "$work/pxlog" &
+  proxy_pid=$!
+  i=0
+  while [ ! -s "$work/pxport" ] && [ $i -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
+  pxport=$(cat "$work/pxport" 2>/dev/null)
+}
+if command -v python3 >/dev/null 2>&1; then
+  printf '[127.0.0.1]:%s %s\n' "$port" "$hostpub" > "$work/home/.ssh/known_hosts"
+  s1="sftp://$user@127.0.0.1:$port$work/srv/small.txt"
+  for kind in http socks; do
+    if [ $kind = http ]; then px=http; else px=socks5; fi
+    for mode in ok coalesce; do
+      start_proxy $kind $mode
+      rm -f "$work/out"
+      t --key "$work/userkey" -x "$px://127.0.0.1:$pxport" -o "$work/out" "$s1"
+      rc=$?
+      [ $rc -eq 0 ] && [ "$(cat "$work/out")" = small ]
+      check "$([ $? -eq 0 ] && echo ok)" "$kind proxy, $mode (exit $rc)"
+    done
+    # Two URLs, one tunnel, one login.
+    start_proxy $kind ok
+    before=$(logins)
+    t --key "$work/userkey" -x "$px://127.0.0.1:$pxport" \
+      -o "$work/o1" "$s1" -o "$work/o2" "sftp://$user@127.0.0.1:$port$work/srv/data.bin"
+    rc=$?
+    sleep 0.3
+    n=$(( $(logins) - before ))
+    c=$(grep -c CONNECT "$work/pxlog")
+    ok=
+    [ $rc -eq 0 ] && cmp -s "$work/o2" "$work/srv/data.bin" && [ $n -eq 1 ] \
+      && [ "$c" -eq 1 ] && ok=ok
+    check "$ok" "$kind proxy: two URLs, one tunnel, one login (logins $n, tunnels $c, exit $rc)"
+  done
+
+  start_proxy http bigheader
+  t --key "$work/userkey" -x "http://127.0.0.1:$pxport" -o /dev/null "$s1"
+  rc=$?
+  check "$([ $rc -eq 0 ] && echo ok)" "a CONNECT reply with a long header (exit $rc)"
+
+  start_proxy http 403
+  t --key "$work/userkey" -x "http://127.0.0.1:$pxport" -o /dev/null "$s1" 2> "$work/err"
+  rc=$?
+  check "$([ $rc -eq 56 ] && grep -q 'CONNECT tunnel failed, response 403' "$work/err" && echo ok)" \
+    "a CONNECT that is refused is 56 (exit $rc)"
+  start_proxy socks refuse
+  t --key "$work/userkey" -x "socks5://127.0.0.1:$pxport" -o /dev/null "$s1" 2> "$work/err"
+  rc=$?
+  check "$([ $rc -eq 97 ] && grep -q "Can't complete SOCKS5 connection" "$work/err" && echo ok)" \
+    "a SOCKS request that is refused is 97 (exit $rc)"
+
+  start_proxy http auth
+  t --key "$work/userkey" -x "http://127.0.0.1:$pxport" -o /dev/null "$s1" 2> "$work/err"
+  rc=$?
+  check "$([ $rc -eq 56 ] && grep -q 'response 407' "$work/err" && echo ok)" \
+    "a proxy that wants credentials: 56 without them (exit $rc)"
+  t --key "$work/userkey" -x "http://pxuser:pxpass@127.0.0.1:$pxport" -o /dev/null "$s1"
+  rc=$?
+  check "$([ $rc -eq 0 ] && echo ok)" "credentials in the proxy URL (exit $rc)"
+  t --key "$work/userkey" -x "http://127.0.0.1:$pxport" -U pxuser:pxpass -o /dev/null "$s1"
+  rc=$?
+  check "$([ $rc -eq 0 ] && echo ok)" "credentials with -U (exit $rc)"
+  start_proxy socks auth
+  t --key "$work/userkey" -x "socks5://127.0.0.1:$pxport" -o /dev/null "$s1" 2> "$work/err"
+  rc=$?
+  check "$([ $rc -eq 97 ] && echo ok)" "a SOCKS proxy that wants credentials: 97 without them (exit $rc)"
+  t --key "$work/userkey" -x "socks5://pxuser:pxpass@127.0.0.1:$pxport" -o /dev/null "$s1"
+  rc=$?
+  check "$([ $rc -eq 0 ] && echo ok)" "SOCKS credentials in the proxy URL (exit $rc)"
+  t --key "$work/userkey" -x "socks5://127.0.0.1:$pxport" -U pxuser:wrong -o /dev/null "$s1" 2> "$work/err"
+  rc=$?
+  check "$([ $rc -eq 97 ] && grep -q 'rejected' "$work/err" && echo ok)" "wrong SOCKS credentials: 97 (exit $rc)"
+
+  if grep -q '^00000000000000000000000000000001 ' /proc/net/if_inet6 2>/dev/null; then
+    start_proxy http ok
+    printf '[::1]:%s %s\n' "$port" "$hostpub" > "$work/home/.ssh/known_hosts"
+    t --key "$work/userkey" -x "http://127.0.0.1:$pxport" -o /dev/null \
+      "sftp://$user@[::1]:$port$work/srv/small.txt"
+    rc=$?
+    check "$([ $rc -eq 0 ] && grep -q "CONNECT \[::1\]:$port" "$work/pxlog" && echo ok)" \
+      "an IPv6 server through CONNECT has brackets (exit $rc)"
+  fi
+  t --key "$work/userkey" -x "socks4://127.0.0.1:1" -o /dev/null "$s1" 2> "$work/err"
+  rc=$?
+  check "$([ $rc -ne 0 ] && grep -q 'not supported' "$work/err" && echo ok)" \
+    "a SOCKS4 proxy is refused with a reason (exit $rc)"
+  t -k --key "$work/userkey" -x "http://127.0.0.1:1" -o /dev/null "$s1" 2>/dev/null
+  rc=$?
+  check "$([ $rc -eq 7 ] && echo ok)" "no proxy there is 7 (exit $rc)"
+else
+  echo "ssh-openssh: no python3; skipping the proxy checks" >&2
 fi
 
 [ $fail -eq 0 ] || exit 1

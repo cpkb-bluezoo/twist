@@ -97,6 +97,11 @@ easy_clear (struct twist_easy *easy)
   free (easy->range);
   free (easy->referer);
   free (easy->cookie);
+  if (easy->proxy_userpwd != NULL)
+    {
+      memset (easy->proxy_userpwd, 0, strlen (easy->proxy_userpwd));
+      free (easy->proxy_userpwd);
+    }
   free (easy->mail_from);
   free (easy->doh_url);
   free (easy->doq_url);
@@ -331,6 +336,13 @@ twist_easy_setopt (twist_easy *easy, int opt, ...)
       break;
     case TWISTOPT_COOKIE:
       replace (&easy->cookie, va_arg (ap, const char *));
+      break;
+    case TWISTOPT_PROXYUSERPWD:
+      {
+        const char *s = va_arg (ap, const char *);
+
+        replace (&easy->proxy_userpwd, s != NULL && s[0] != 0 ? s : NULL);
+      }
       break;
     case TWISTOPT_MAIL_FROM:
       replace (&easy->mail_from, va_arg (ap, const char *));

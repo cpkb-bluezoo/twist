@@ -172,6 +172,11 @@ ssh_pool_key (struct twist_easy *e, char *key, size_t cap)
   terms_add (&buf, &len, &bcap, e->ssh_hostpubsha256);
   terms_add (&buf, &len, &bcap, agent);
   terms_add (&buf, &len, &bcap, e->verifypeer ? "verify" : "no-verify");
+  /* A tunnel through one proxy is not one through another, or through the
+     same with other credentials: the proxy is part of who the server sees
+     and what let us in.  */
+  terms_add (&buf, &len, &bcap, e->proxy);
+  terms_add (&buf, &len, &bcap, e->proxy_userpwd);
   if (len == (size_t) -1 || twist_sha256 (buf, len, d) != TWIST_OK)
     {
       free (buf);
@@ -201,7 +206,7 @@ ssh_park (struct twist_ssh *s)
   char key[1024];
 
   if (s->sink != NULL || s->ep == NULL || s->link.conn == NULL
-      || s->link.proxy != NULL || s->ending || s->session == NULL
+      || s->ending || s->session == NULL
       || gf_session_phase (s->session) != GF_PHASE_READY
       || !twist_sftp_idle (s->sftp))
     return 0;
@@ -822,8 +827,7 @@ ssh_resume (struct twist_easy *easy)
   char key[1024];
   int rc;
 
-  if (pool == NULL || easy->proxy != NULL
-      || ssh_pool_key (easy, key, sizeof key) != TWIST_OK)
+  if (pool == NULL || ssh_pool_key (easy, key, sizeof key) != TWIST_OK)
     return NULL;
   if (twist_pool_take_payload (pool, key, &conn, (void **) &s) != TWIST_OK
       || conn == NULL || s == NULL)

@@ -175,7 +175,14 @@ is still checked.
 Proxy.  Use
 .I http://
 or
-.IR socks5:// .
+.IR socks5:// ,
+with
+.I user:password@
+before the host if the proxy wants them.
+https and socks4 proxies are refused.
+.TP
+.BI \-U ", " \-\-proxy\-user " user:password"
+The user name and password for the proxy, if its URL has none.
 .TP
 .BI \-A ", " \-\-user\-agent " name"
 User-Agent header.

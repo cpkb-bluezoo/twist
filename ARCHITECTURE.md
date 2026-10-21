@@ -323,8 +323,19 @@ The loop and the endpoint do not know which protocol they carry. A transfer
 
 The proxy wrapper is a protocol handler that runs before the scheme
 handler. When the tunnel is up it calls the inner handler's `connected`.
-HTTP CONNECT and SOCKS4/4a/5/5h are that wrapper. SOCKS is not copied
-into every protocol.
+HTTP CONNECT and SOCKS5 are that wrapper (SOCKS4 and an https proxy are
+refused, not guessed at). SOCKS is not copied into every protocol.
+
+The wrapper takes only the bytes that were the proxy's own: an SSH or SMTP
+server speaks first, so its banner can arrive in the same read as the reply, and
+`twist_proxy_feed` says how much of what it was given it used. The rest is
+offered again by the connection, and goes to the transfer. A refusal is
+reported to the transfer with the proxy's words (`CONNECT tunnel failed,
+response 403`, status 56; the SOCKS5 reasons, status 97) through
+`twist_proxy_set_easy`, and the transfer gets an error. Credentials come from
+the proxy's URL or `TWISTOPT_PROXYUSERPWD`. An SSH session through a proxy is
+kept in the pool like any other, under a key that holds the proxy and its
+credentials; once the tunnel is open the proxy is out of the path.
 
 The connection cache is keyed by scheme, authority, proxy, TLS identity
 and loop. Idle endpoints are never migrated.

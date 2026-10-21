@@ -20,6 +20,7 @@
 # include <config.h>
 #endif
 
+#include "gettext.h"
 #include "twist-int.h"
 
 #include <arpa/inet.h>
@@ -122,7 +123,7 @@ twist_mail_link_open (struct twist_mail_link *link, struct twist_easy *easy,
   struct twist_url *url;
   const char *dial;
   int kind = TWIST_PROXY_NONE;
-  char *phost = NULL;
+  char *phost = NULL, *puser = NULL, *ppass = NULL;
   int pport = 0;
 
   if (link == NULL || easy == NULL || easy->url == NULL || easy->loop == NULL
@@ -138,20 +139,39 @@ twist_mail_link_open (struct twist_mail_link *link, struct twist_easy *easy,
   dial = url->host;
   if (easy->proxy != NULL)
     {
-      if (twist_proxy_parse (easy->proxy, &kind, &phost, &pport) != TWIST_OK)
+      int rc = twist_proxy_parse (easy->proxy, &kind, &phost, &pport, &puser,
+                                  &ppass);
+
+      if (rc == TWIST_ERR_UNSUPPORTED)
+        {
+          twist_easy_set_error (easy, twist_strdup (_("this kind of proxy is "
+                                                      "not supported; use "
+                                                      "http:// or socks5://")));
+          return rc;
+        }
+      if (rc != TWIST_OK)
         return TWIST_ERR_URL;
       link->proxy = twist_proxy_new (kind, phost, pport, handler);
       if (link->proxy == NULL)
         {
           free (phost);
+          free (puser);
+          free (ppass);
           return TWIST_ERR_NOMEM;
         }
       twist_proxy_set_target (link->proxy, url->host, url->port);
+      twist_proxy_configure (link->proxy, easy, puser, ppass);
       dial = phost;
       link->dial_port = pport;
     }
   link->dial_host = twist_strdup (dial != NULL ? dial : "");
   free (phost);
+  free (puser);
+  if (ppass != NULL)
+    {
+      memset (ppass, 0, strlen (ppass));
+      free (ppass);
+    }
   if (link->dial_host == NULL)
     return TWIST_ERR_NOMEM;
   arm_timeout (link);

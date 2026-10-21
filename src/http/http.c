@@ -1434,7 +1434,7 @@ prepare_dial (struct twist_http *h)
   const char *dial = url->host;
   int port = url->port;
   int kind = TWIST_PROXY_NONE;
-  char *phost = NULL;
+  char *phost = NULL, *puser = NULL, *ppass = NULL;
   int pport = 0;
 
   if (h->https_port > 0 && !url->port_set)
@@ -1444,7 +1444,8 @@ prepare_dial (struct twist_http *h)
   h->proxy = NULL;
   if (h->mode != HTTP_H3 && easy->proxy != NULL)
     {
-      if (twist_proxy_parse (easy->proxy, &kind, &phost, &pport) != TWIST_OK)
+      if (twist_proxy_parse (easy->proxy, &kind, &phost, &pport, &puser,
+                             &ppass) != TWIST_OK)
         {
           free (phost);
           return TWIST_ERR_URL;
@@ -1459,7 +1460,10 @@ prepare_dial (struct twist_http *h)
         {
           h->proxy = twist_proxy_new (kind, phost, pport, &h->handler);
           if (h->proxy != NULL)
-            twist_proxy_set_target (h->proxy, url->host, url->port);
+            {
+              twist_proxy_set_target (h->proxy, url->host, url->port);
+              twist_proxy_configure (h->proxy, easy, puser, ppass);
+            }
         }
       else if (kind == TWIST_PROXY_HTTP)
         h->proxy = twist_proxy_new (kind, phost, pport, NULL);
@@ -1468,6 +1472,12 @@ prepare_dial (struct twist_http *h)
   h->dial_host = twist_strdup (dial != NULL ? dial : "");
   h->dial_port = port;
   free (phost);
+  free (puser);
+  if (ppass != NULL)
+    {
+      memset (ppass, 0, strlen (ppass));
+      free (ppass);
+    }
   return h->dial_host != NULL ? TWIST_OK : TWIST_ERR_NOMEM;
 }
 

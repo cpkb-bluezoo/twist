@@ -14,4 +14,4 @@ AM_TESTS_ENVIRONMENT = \
 TESTS = skip-network.sh ssh-openssh.sh
 check_SCRIPTS = skip-network.sh ssh-openssh.sh
 
-EXTRA_DIST = skip-network.sh ssh-openssh.sh
+EXTRA_DIST = skip-network.sh ssh-openssh.sh proxy-peer.py

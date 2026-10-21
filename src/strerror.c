@@ -72,6 +72,8 @@ twist_strerror (int err)
       return _("the transfer cannot be resumed");
     case TWIST_ERR_QUOTE:
       return _("a quote command failed");
+    case TWIST_ERR_PROXY:
+      return _("the proxy refused the connection");
     default:
       return _("unknown error");
     }

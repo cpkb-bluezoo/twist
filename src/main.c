@@ -161,6 +161,8 @@ cli_status (int err, const char *url)
       return 36;
     case TWIST_ERR_QUOTE:
       return 21;
+    case TWIST_ERR_PROXY:
+      return 97;
     case TWIST_ERR_HOSTKEY:
       return 60;
     case TWIST_ERR_ENCODING:
@@ -219,7 +221,8 @@ usage (void)
   fputs (_("      --hostpubsha256 H   SHA-256 of the sftp or scp host key (base64)\n"),
          stdout);
   fputs (_("      --cacert FILE       CA trust bundle (PEM)\n"), stdout);
-  fputs (_("  -x, --proxy URL         proxy (http:// or socks5://)\n"), stdout);
+  fputs (_("  -x, --proxy URL         proxy (http:// or socks5://), may hold user:password@\n"), stdout);
+  fputs (_("  -U, --proxy-user U:P    user and password for the proxy\n"), stdout);
   fputs (_("  -A, --user-agent NAME   User-Agent\n"), stdout);
   fputs (_("  -u, --user USER[:PASS]  user and password\n"), stdout);
   fputs (_("  -e, --referer URL       Referer header\n"), stdout);
@@ -1456,6 +1459,7 @@ main (int argc, char **argv)
     { "hostpubsha256", required_argument, NULL, 33 },
     { "cacert", required_argument, NULL, 16 },
     { "proxy", required_argument, NULL, 'x' },
+    { "proxy-user", required_argument, NULL, 'U' },
     { "user-agent", required_argument, NULL, 'A' },
     { "user", required_argument, NULL, 'u' },
     { "referer", required_argument, NULL, 'e' },
@@ -1544,7 +1548,7 @@ main (int argc, char **argv)
           continue;
         }
       c = getopt_long (argc, argv,
-                       "+:o:X:H:d:Lkx:A:u:Iw:fE:hm:e:r:b:sSOT:GgiD:qC:lQ:",
+                       "+:o:X:H:d:Lkx:A:u:Iw:fE:hm:e:r:b:sSOT:GgiD:qC:lQ:U:",
                        longs, NULL);
       if (c == -1)
         break;
@@ -1696,6 +1700,9 @@ main (int argc, char **argv)
           break;
         case 'x':
           twist_easy_setopt (op->easy, TWISTOPT_PROXY, optarg);
+          break;
+        case 'U':
+          twist_easy_setopt (op->easy, TWISTOPT_PROXYUSERPWD, optarg);
           break;
         case 'A':
           twist_easy_setopt (op->easy, TWISTOPT_USERAGENT, optarg);

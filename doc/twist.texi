@@ -177,7 +177,14 @@ configured trust store.  For @code{sftp} and @code{scp} it skips the
 @option{--hostpubsha256} is still checked.
 @item -x @var{url}
 @itemx --proxy @var{url}
-Proxy.  Use @code{http://} or @code{socks5://}.
+Proxy.  Use @code{http://} or @code{socks5://} (@code{socks5h://} is the same),
+with a port (the default is 8080 for HTTP and 1080 for SOCKS) and, if the proxy wants them, @samp{user:password@@} before the host,
+percent-encoded.  An IPv6 proxy is in brackets.  @code{https://} and
+@code{socks4://} proxies are refused.  For @code{sftp} and @code{scp}
+(@pxref{SFTP and SCP}) the proxy opens a tunnel.
+@item -U @var{user:password}
+@itemx --proxy-user @var{user:password}
+The user name and password for the proxy, if its URL has none.
 @item -A @var{name}
 @itemx --user-agent @var{name}
 User-Agent header.
@@ -479,6 +486,26 @@ The size of the remote file is asked for only when it is needed: to check a
 download resume, to find the start of @samp{-50}, or to resume an upload.
 A server that does not say how big a file is cannot do the last, nor
 @samp{-50}.
+
+@subheading Through a proxy
+
+@option{-x} opens a tunnel to the SSH server through an HTTP proxy
+(@code{CONNECT}) or a SOCKS5 proxy, and the SSH session goes through it.
+Credentials in the proxy's URL, or given with @option{-U}, are sent as Basic
+for HTTP and as a user name and password for SOCKS5.  A refusal is told in
+curl's words and with its status: 56 for a @code{CONNECT} that failed
+(@samp{CONNECT tunnel failed, response 403}), 97 for SOCKS5 (@samp{Can't
+complete SOCKS5 connection to host. (5)}); a proxy that is not there is 7.
+The server's banner may arrive in the same packet as the proxy's reply, and
+a proxy may say a good deal before it opens the tunnel; both are handled.
+
+The server is named to the proxy as the URL gives it: a name is sent as a name,
+and an IP address as an address (an IPv6 one in brackets for @code{CONNECT}).
+@code{socks5://} and @code{socks5h://} are the same: twist does not look the
+name up itself before giving it to a SOCKS5 proxy, as curl does for
+@code{socks5://}.  The tunnel is kept for the next URL as a connection is, but
+only for the same proxy with the same credentials: a login made through one
+proxy is not used by a transfer through another, or through none.
 
 @subheading IPv6 addresses
 

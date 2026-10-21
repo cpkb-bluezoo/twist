@@ -1,6 +1,8 @@
 src/strerror.c
 src/main.c
+src/engine/proxy.c
 src/file/file.c
+src/mail/dial.c
 src/http/http.c
 src/ssh/agent.c
 src/ssh/hostkey.c

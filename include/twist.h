@@ -61,7 +61,8 @@ enum twist_error
   TWIST_ERR_HOSTKEY = 18,
   TWIST_ERR_RANGE = 19,
   TWIST_ERR_RESUME = 20,
-  TWIST_ERR_QUOTE = 21
+  TWIST_ERR_QUOTE = 21,
+  TWIST_ERR_PROXY = 22
 };
 
 const char *twist_strerror (int err);
@@ -204,7 +205,11 @@ enum twist_opt
   TWISTOPT_POSTQUOTE = 53,
   /* An upload to a path whose directories are not there makes them (mode
      0755) and goes on.  A long, 0 or 1.  For sftp.  */
-  TWISTOPT_CREATE_MISSING_DIRS = 54
+  TWISTOPT_CREATE_MISSING_DIRS = 54,
+  /* "user:password" for the proxy (TWISTOPT_PROXY), if the proxy's URL has
+     none.  Used to open a tunnel (CONNECT, or SOCKS5), as Basic credentials
+     or the SOCKS5 user name and password.  Empty clears it.  */
+  TWISTOPT_PROXYUSERPWD = 55
 };
 
 enum twist_dns_transport

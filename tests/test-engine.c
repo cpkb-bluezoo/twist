@@ -280,43 +280,413 @@ test_scheme (void)
          "tftp");
 }
 
+/* What the proxy sends next, as a string of bytes; NULL if nothing.  */
+static uint8_t *
+px_next (struct twist_proxy *p, size_t *len)
+{
+  uint8_t *out = NULL;
+
+  *len = 0;
+  if (twist_proxy_opening (p, &out, len) != TWIST_OK)
+    return NULL;
+  return out;
+}
+
+static int
+px_feed (struct twist_proxy *p, const void *data, size_t n, size_t *used,
+         int *ready)
+{
+  *used = 0;
+  *ready = 0;
+  return twist_proxy_feed (p, data, n, used, ready);
+}
+
+static int
+has (const uint8_t *buf, size_t len, const char *text)
+{
+  size_t n = strlen (text), i;
+
+  for (i = 0; buf != NULL && i + n <= len; i++)
+    if (memcmp (buf + i, text, n) == 0)
+      return 1;
+  return 0;
+}
+
+/* HTTP CONNECT.  An SSH server speaks first, so what follows the proxy's
+   reply in the same read belongs to the tunnel: the proxy says how much of
+   what it was given was its own.  */
 static void
-test_proxy (void)
+test_proxy_http (void)
 {
   struct twist_proxy *p;
-  uint8_t *out = NULL;
-  size_t len = 0;
-  int ready = 0;
-  static const uint8_t http[] =
-    "HTTP/1.1 200 Connection Established\r\n\r\n";
-  static const uint8_t greet[] = { 5, 0 };
-  static const uint8_t reply[] = { 5, 0, 0, 1, 0, 0, 0, 0, 0, 0 };
+  uint8_t *out;
+  size_t len, used;
+  int ready, st = 0;
+  static const char ok[] = "HTTP/1.1 200 Connection Established\r\n\r\n";
+  char big[6000];
+  size_t i;
 
   p = twist_proxy_new (TWIST_PROXY_HTTP, "127.0.0.1", 8080, NULL);
   twist_proxy_set_target (p, "example.com", 443);
-  check (twist_proxy_opening (p, &out, &len) == TWIST_OK, "connect open");
-  check (out != NULL && memcmp (out, "CONNECT example.com:443", 23) == 0,
-         "connect line");
+  out = px_next (p, &len);
+  check (out != NULL && has (out, len, "CONNECT example.com:443 HTTP/1.1\r\n")
+         && has (out, len, "\r\nHost: example.com:443\r\n")
+         && !has (out, len, "Proxy-Authorization"), "connect line, no auth");
   free (out);
-  check (twist_proxy_feed (p, http, sizeof http - 1, &ready) == TWIST_OK
-         && ready == 1, "connect ready");
+  check (px_next (p, &len) == NULL, "nothing more to send while waiting");
+  check (px_feed (p, ok, sizeof ok - 1, &used, &ready) == TWIST_OK
+         && ready == 1 && used == sizeof ok - 1, "ready, all of it its own");
+  twist_proxy_free (p);
+
+  /* The server's banner in the same read.  */
+  p = twist_proxy_new (TWIST_PROXY_HTTP, "127.0.0.1", 8080, NULL);
+  twist_proxy_set_target (p, "h", 22);
+  free (px_next (p, &len));
+  {
+    char both[256];
+
+    snprintf (both, sizeof both, "%sSSH-2.0-OpenSSH_9\r\n", ok);
+    check (px_feed (p, both, strlen (both), &used, &ready) == TWIST_OK
+           && ready == 1 && used == sizeof ok - 1,
+           "the banner after the reply is not the proxy's");
+  }
+  twist_proxy_free (p);
+
+  /* The reply in pieces, a byte at a time: the count is of the last piece.  */
+  p = twist_proxy_new (TWIST_PROXY_HTTP, "127.0.0.1", 8080, NULL);
+  twist_proxy_set_target (p, "h", 22);
+  free (px_next (p, &len));
+  ready = 0;
+  for (i = 0; i < sizeof ok - 1 && !ready; i++)
+    {
+      char two[2] = { ok[i], 'S' };
+
+      /* One byte of the reply and one that is not: the second is the
+         tunnel's if the reply is over with the first.  */
+      check (px_feed (p, two, i + 1 < sizeof ok - 1 ? 1 : 2, &used, &ready)
+             == TWIST_OK, "piece");
+      if (ready)
+        check (used == 1, "the last byte of the reply, and not the next");
+    }
+  check (ready == 1, "ready after the last piece");
+  twist_proxy_free (p);
+
+  /* A long reply: a proxy may say a good deal.  */
+  p = twist_proxy_new (TWIST_PROXY_HTTP, "127.0.0.1", 8080, NULL);
+  twist_proxy_set_target (p, "h", 22);
+  free (px_next (p, &len));
+  snprintf (big, sizeof big, "HTTP/1.1 200 OK\r\nX-Pad: ");
+  len = strlen (big);
+  memset (big + len, 'a', 5000);
+  len += 5000;
+  memcpy (big + len, "\r\n\r\n", 4);
+  len += 4;
+  check (px_feed (p, big, len, &used, &ready) == TWIST_OK && ready == 1
+         && used == len, "a reply of five thousand bytes");
+  twist_proxy_free (p);
+
+  /* One that never ends is refused.  */
+  p = twist_proxy_new (TWIST_PROXY_HTTP, "127.0.0.1", 8080, NULL);
+  twist_proxy_set_target (p, "h", 22);
+  free (px_next (p, &len));
+  memset (big, 'a', sizeof big);
+  memcpy (big, "HTTP/1.1 200 ", 13);
+  for (i = 0; i < 4; i++)
+    if (px_feed (p, big, sizeof big, &used, &ready) != TWIST_OK)
+      break;
+  check (i < 4 && ready == 0, "a reply with no end is refused");
+  twist_proxy_free (p);
+
+  /* Statuses.  Any 2xx is a tunnel.  */
+  p = twist_proxy_new (TWIST_PROXY_HTTP, "127.0.0.1", 8080, NULL);
+  twist_proxy_set_target (p, "h", 22);
+  free (px_next (p, &len));
+  check (px_feed (p, "HTTP/1.0 204 No Content\r\n\r\n", 27, &used, &ready)
+         == TWIST_OK && ready == 1, "204 is a tunnel");
+  twist_proxy_free (p);
+
+  p = twist_proxy_new (TWIST_PROXY_HTTP, "127.0.0.1", 8080, NULL);
+  twist_proxy_set_target (p, "h", 22);
+  free (px_next (p, &len));
+  check (px_feed (p, "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n", 45,
+                  &used, &ready) == TWIST_ERR_PROXY && ready == 0,
+         "403 is refused");
+  {
+    const char *msg = twist_proxy_error (p, &st);
+
+    check (msg != NULL && strcmp (msg, "CONNECT tunnel failed, response 403")
+           == 0 && st == 56, "with curl's words and status");
+  }
+  check (px_feed (p, "x", 1, &used, &ready) == TWIST_ERR_PROXY,
+         "and it stays failed");
+  twist_proxy_free (p);
+
+  p = twist_proxy_new (TWIST_PROXY_HTTP, "127.0.0.1", 8080, NULL);
+  twist_proxy_set_target (p, "h", 22);
+  free (px_next (p, &len));
+  check (px_feed (p, "HTTP/1.1 407 Proxy Authentication Required\r\n\r\n", 46,
+                  &used, &ready) == TWIST_ERR_PROXY
+         && strstr (twist_proxy_error (p, &st), "response 407") != NULL,
+         "407 is refused");
+  twist_proxy_free (p);
+
+  p = twist_proxy_new (TWIST_PROXY_HTTP, "127.0.0.1", 8080, NULL);
+  twist_proxy_set_target (p, "h", 22);
+  free (px_next (p, &len));
+  check (px_feed (p, "SSH-2.0-nonsense\r\n\r\n", 20, &used, &ready)
+         == TWIST_ERR_PROXY, "what is not HTTP at all");
+  twist_proxy_free (p);
+
+  /* An IPv6 target is in brackets, or the line names nothing.  */
+  p = twist_proxy_new (TWIST_PROXY_HTTP, "127.0.0.1", 8080, NULL);
+  twist_proxy_set_target (p, "2001:db8::7", 22);
+  out = px_next (p, &len);
+  check (out != NULL && has (out, len, "CONNECT [2001:db8::7]:22 HTTP/1.1")
+         && has (out, len, "\r\nHost: [2001:db8::7]:22\r\n"),
+         "an IPv6 target has brackets");
+  free (out);
+  twist_proxy_free (p);
+
+  /* Credentials: Basic, of user:password.  */
+  p = twist_proxy_new (TWIST_PROXY_HTTP, "127.0.0.1", 8080, NULL);
+  twist_proxy_set_target (p, "h", 22);
+  twist_proxy_set_credentials (p, "pxuser", "px:pass");
+  out = px_next (p, &len);
+  check (out != NULL
+         && has (out, len, "\r\nProxy-Authorization: Basic "
+                 "cHh1c2VyOnB4OnBhc3M=\r\n"), "Basic credentials");
+  free (out);
+  twist_proxy_free (p);
+}
+
+static void
+test_proxy_socks (void)
+{
+  struct twist_proxy *p;
+  uint8_t *out;
+  size_t len, used;
+  int ready, st = 0;
+  static const uint8_t none[] = { 5, 0 };
+  static const uint8_t pw[] = { 5, 2 };
+  static const uint8_t refuse[] = { 5, 0xff };
+  static const uint8_t okay[] = { 5, 0, 0, 1, 0, 0, 0, 0, 0, 0 };
+
+  /* No credentials: only "no authentication" is offered.  */
+  p = twist_proxy_new (TWIST_PROXY_SOCKS5, "127.0.0.1", 1080, NULL);
+  twist_proxy_set_target (p, "example.com", 80);
+  out = px_next (p, &len);
+  check (out != NULL && len == 3 && out[0] == 5 && out[1] == 1 && out[2] == 0,
+         "greeting, no credentials");
+  free (out);
+  check (px_feed (p, none, 2, &used, &ready) == TWIST_OK && used == 2
+         && !ready, "method accepted");
+  out = px_next (p, &len);
+  check (out != NULL && len == 7 + 11 && out[0] == 5 && out[1] == 1
+         && out[3] == 3 && out[4] == 11 && memcmp (out + 5, "example.com", 11)
+         == 0 && out[16] == 0 && out[17] == 80, "a name is a domain name");
+  free (out);
+  check (px_feed (p, okay, sizeof okay, &used, &ready) == TWIST_OK && ready
+         && used == sizeof okay, "ready");
+  twist_proxy_free (p);
+
+  /* The reply and the server's banner in one read.  */
+  p = twist_proxy_new (TWIST_PROXY_SOCKS5, "127.0.0.1", 1080, NULL);
+  twist_proxy_set_target (p, "h", 22);
+  free (px_next (p, &len));
+  px_feed (p, none, 2, &used, &ready);
+  free (px_next (p, &len));
+  {
+    uint8_t both[64];
+
+    memcpy (both, okay, sizeof okay);
+    memcpy (both + sizeof okay, "SSH-2.0-x\r\n", 11);
+    check (px_feed (p, both, sizeof okay + 11, &used, &ready) == TWIST_OK
+           && ready && used == sizeof okay,
+           "the banner after the reply is not the proxy's");
+  }
+  twist_proxy_free (p);
+
+  /* A reply in pieces.  */
+  p = twist_proxy_new (TWIST_PROXY_SOCKS5, "127.0.0.1", 1080, NULL);
+  twist_proxy_set_target (p, "h", 22);
+  free (px_next (p, &len));
+  px_feed (p, none, 2, &used, &ready);
+  free (px_next (p, &len));
+  check (px_feed (p, okay, 3, &used, &ready) == TWIST_OK && !ready
+         && used == 3, "three bytes of the reply");
+  check (px_feed (p, okay + 3, 4, &used, &ready) == TWIST_OK && !ready,
+         "four more");
+  {
+    uint8_t tail[4] = { okay[7], okay[8], okay[9], 'S' };
+
+    check (px_feed (p, tail, sizeof tail, &used, &ready) == TWIST_OK && ready
+           && used == 3, "the end, and one that is not the proxy's");
+  }
+  twist_proxy_free (p);
+
+  /* Address types: the target as it is.  */
+  p = twist_proxy_new (TWIST_PROXY_SOCKS5, "127.0.0.1", 1080, NULL);
+  twist_proxy_set_target (p, "10.1.2.3", 22);
+  free (px_next (p, &len));
+  px_feed (p, none, 2, &used, &ready);
+  out = px_next (p, &len);
+  check (out != NULL && len == 10 && out[3] == 1 && out[4] == 10
+         && out[5] == 1 && out[6] == 2 && out[7] == 3 && out[8] == 0
+         && out[9] == 22, "an IPv4 address is one");
+  free (out);
   twist_proxy_free (p);
 
   p = twist_proxy_new (TWIST_PROXY_SOCKS5, "127.0.0.1", 1080, NULL);
-  twist_proxy_set_target (p, "example.com", 80);
-  out = NULL;
-  check (twist_proxy_opening (p, &out, &len) == TWIST_OK && len == 3
-         && out[0] == 5 && out[2] == 0, "socks greet");
+  twist_proxy_set_target (p, "2001:db8::1", 2222);
+  free (px_next (p, &len));
+  px_feed (p, none, 2, &used, &ready);
+  out = px_next (p, &len);
+  check (out != NULL && len == 22 && out[3] == 4 && out[4] == 0x20
+         && out[5] == 0x01 && out[19] == 1 && out[20] == 0x08
+         && out[21] == 0xae, "and an IPv6 address");
   free (out);
-  ready = 0;
-  check (twist_proxy_feed (p, greet, sizeof greet, &ready) == TWIST_OK, "socks");
-  out = NULL;
-  check (twist_proxy_opening (p, &out, &len) == TWIST_OK && out[0] == 5
-         && out[3] == 3, "socks req");
-  free (out);
-  check (twist_proxy_feed (p, reply, sizeof reply, &ready) == TWIST_OK
-         && ready == 1, "socks ready");
   twist_proxy_free (p);
+
+  /* A zone cannot be said to a proxy; the address is.  */
+  p = twist_proxy_new (TWIST_PROXY_SOCKS5, "127.0.0.1", 1080, NULL);
+  twist_proxy_set_target (p, "fe80::1%eth0", 22);
+  free (px_next (p, &len));
+  px_feed (p, none, 2, &used, &ready);
+  out = px_next (p, &len);
+  check (out != NULL && len == 22 && out[3] == 4 && out[4] == 0xfe
+         && out[19] == 1, "an address with a zone, without the zone");
+  free (out);
+  twist_proxy_free (p);
+
+  /* Username and password (RFC 1929).  */
+  p = twist_proxy_new (TWIST_PROXY_SOCKS5, "127.0.0.1", 1080, NULL);
+  twist_proxy_set_target (p, "h", 22);
+  twist_proxy_set_credentials (p, "pxuser", "pxpass");
+  out = px_next (p, &len);
+  check (out != NULL && len == 4 && out[1] == 2 && out[2] == 0 && out[3] == 2,
+         "greeting offers both with credentials");
+  free (out);
+  check (px_feed (p, pw, 2, &used, &ready) == TWIST_OK, "method 2");
+  out = px_next (p, &len);
+  check (out != NULL && len == 3 + 6 + 6 && out[0] == 1 && out[1] == 6
+         && memcmp (out + 2, "pxuser", 6) == 0 && out[8] == 6
+         && memcmp (out + 9, "pxpass", 6) == 0, "the credentials");
+  free (out);
+  check (px_next (p, &len) == NULL, "and nothing else while it waits");
+  check (px_feed (p, "\x01\x00", 2, &used, &ready) == TWIST_OK && used == 2,
+         "accepted");
+  out = px_next (p, &len);
+  check (out != NULL && len > 4 && out[1] == 1, "then the request");
+  free (out);
+  twist_proxy_free (p);
+
+  p = twist_proxy_new (TWIST_PROXY_SOCKS5, "127.0.0.1", 1080, NULL);
+  twist_proxy_set_target (p, "h", 22);
+  twist_proxy_set_credentials (p, "pxuser", "bad");
+  free (px_next (p, &len));
+  px_feed (p, pw, 2, &used, &ready);
+  free (px_next (p, &len));
+  check (px_feed (p, "\x01\x01", 2, &used, &ready) == TWIST_ERR_PROXY
+         && strcmp (twist_proxy_error (p, &st),
+                    "User was rejected by the SOCKS5 server (1 1).") == 0
+         && st == 97, "credentials refused");
+  twist_proxy_free (p);
+
+  /* A server that wants credentials when there are none.  */
+  p = twist_proxy_new (TWIST_PROXY_SOCKS5, "127.0.0.1", 1080, NULL);
+  twist_proxy_set_target (p, "h", 22);
+  free (px_next (p, &len));
+  check (px_feed (p, refuse, 2, &used, &ready) == TWIST_ERR_PROXY
+         && strcmp (twist_proxy_error (p, &st),
+                    "No authentication method was acceptable.") == 0
+         && st == 97, "no method it will do");
+  twist_proxy_free (p);
+
+  p = twist_proxy_new (TWIST_PROXY_SOCKS5, "127.0.0.1", 1080, NULL);
+  twist_proxy_set_target (p, "h", 22);
+  free (px_next (p, &len));
+  check (px_feed (p, pw, 2, &used, &ready) == TWIST_ERR_PROXY,
+         "a method that was not offered");
+  twist_proxy_free (p);
+
+  /* The request refused.  */
+  p = twist_proxy_new (TWIST_PROXY_SOCKS5, "127.0.0.1", 1080, NULL);
+  twist_proxy_set_target (p, "10.9.9.9", 22);
+  free (px_next (p, &len));
+  px_feed (p, none, 2, &used, &ready);
+  free (px_next (p, &len));
+  check (px_feed (p, "\x05\x05\x00\x01\x00\x00\x00\x00\x00\x00", 10, &used,
+                  &ready) == TWIST_ERR_PROXY
+         && strcmp (twist_proxy_error (p, &st),
+                    "Can't complete SOCKS5 connection to 10.9.9.9. (5)") == 0
+         && st == 97, "refused with its reason");
+  twist_proxy_free (p);
+
+  /* Bound addresses of the three kinds are skipped by length.  */
+  {
+    static const uint8_t v6[] = { 5, 0, 0, 4, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
+                                  11, 12, 13, 14, 15, 16, 0, 80, 'S' };
+    static const uint8_t nm[] = { 5, 0, 0, 3, 3, 'a', 'b', 'c', 0, 80, 'S' };
+
+    p = twist_proxy_new (TWIST_PROXY_SOCKS5, "127.0.0.1", 1080, NULL);
+    twist_proxy_set_target (p, "h", 22);
+    free (px_next (p, &len));
+    px_feed (p, none, 2, &used, &ready);
+    free (px_next (p, &len));
+    check (px_feed (p, v6, sizeof v6, &used, &ready) == TWIST_OK && ready
+           && used == sizeof v6 - 1, "a bound IPv6 address");
+    twist_proxy_free (p);
+    p = twist_proxy_new (TWIST_PROXY_SOCKS5, "127.0.0.1", 1080, NULL);
+    twist_proxy_set_target (p, "h", 22);
+    free (px_next (p, &len));
+    px_feed (p, none, 2, &used, &ready);
+    free (px_next (p, &len));
+    check (px_feed (p, nm, sizeof nm, &used, &ready) == TWIST_OK && ready
+           && used == sizeof nm - 1, "a bound name");
+    twist_proxy_free (p);
+  }
+}
+
+static void
+test_proxy_parse (void)
+{
+  int kind = 0, port = 0;
+  char *host = NULL, *user = NULL, *pass = NULL;
+
+#define PARSE(s) (free (host), free (user), free (pass), host = user = pass = NULL, \
+                  twist_proxy_parse ((s), &kind, &host, &port, &user, &pass))
+  check (PARSE ("http://proxy.example:3128") == TWIST_OK
+         && kind == TWIST_PROXY_HTTP && strcmp (host, "proxy.example") == 0
+         && port == 3128 && user == NULL && pass == NULL, "http");
+  check (PARSE ("proxy.example") == TWIST_OK && kind == TWIST_PROXY_HTTP
+         && port == 8080, "no scheme: http, 8080");
+  check (PARSE ("socks5://s:9050") == TWIST_OK && kind == TWIST_PROXY_SOCKS5
+         && port == 9050, "socks5");
+  check (PARSE ("socks5h://s") == TWIST_OK && kind == TWIST_PROXY_SOCKS5
+         && port == 1080, "socks5h, 1080");
+  check (PARSE ("http://u:p%40w@h:3128/") == TWIST_OK
+         && strcmp (user, "u") == 0 && strcmp (pass, "p@w") == 0
+         && strcmp (host, "h") == 0 && port == 3128, "credentials, decoded");
+  check (PARSE ("http://u@h") == TWIST_OK && strcmp (user, "u") == 0
+         && pass != NULL && pass[0] == 0, "a user and no password");
+  check (PARSE ("http://[::1]:3128") == TWIST_OK && strcmp (host, "::1") == 0
+         && port == 3128, "an IPv6 proxy with a port");
+  check (PARSE ("socks5://[fe80::1%25eth0]") == TWIST_OK
+         && strcmp (host, "fe80::1%eth0") == 0 && port == 1080,
+         "an IPv6 proxy without one");
+  check (PARSE ("http://u:p@[::1]:80") == TWIST_OK && strcmp (host, "::1") == 0
+         && strcmp (user, "u") == 0, "both");
+  check (PARSE ("https://h") == TWIST_ERR_UNSUPPORTED,
+         "an https proxy is not spoken to in the clear");
+  check (PARSE ("socks4://h") == TWIST_ERR_UNSUPPORTED, "socks4");
+  check (PARSE ("ftp://h") == TWIST_ERR_UNSUPPORTED, "another scheme");
+  check (PARSE ("http://") != TWIST_OK, "no host");
+  check (PARSE ("http://h:99999") != TWIST_OK, "a port that is too big");
+  check (PARSE ("http://h:abc") != TWIST_OK, "a port that is not one");
+  free (host);
+  free (user);
+  free (pass);
+#undef PARSE
 }
 
 static void
@@ -881,7 +1251,9 @@ main (void)
   test_url_ipv6 ();
   test_http_ipv6_host ();
   test_scheme ();
-  test_proxy ();
+  test_proxy_http ();
+  test_proxy_socks ();
+  test_proxy_parse ();
   test_conn_pool ();
   test_multi_perform ();
   test_release_transfer ();

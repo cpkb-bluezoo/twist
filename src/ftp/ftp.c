@@ -914,14 +914,15 @@ ftp_begin (struct twist_ftp *f)
   struct twist_url *url = easy->url;
   const char *dial;
   int kind = TWIST_PROXY_NONE;
-  char *phost = NULL;
+  char *phost = NULL, *puser = NULL, *ppass = NULL;
   int pport = 0;
 
   f->dial_port = url->port;
   dial = url->host;
   if (easy->proxy != NULL)
     {
-      if (twist_proxy_parse (easy->proxy, &kind, &phost, &pport) != TWIST_OK)
+      if (twist_proxy_parse (easy->proxy, &kind, &phost, &pport, &puser,
+                             &ppass) != TWIST_OK)
         {
           ftp_complete (f, TWIST_ERR_URL);
           return;
@@ -934,11 +935,18 @@ ftp_begin (struct twist_ftp *f)
           return;
         }
       twist_proxy_set_target (f->proxy, url->host, url->port);
+      twist_proxy_configure (f->proxy, easy, puser, ppass);
       dial = phost;
       f->dial_port = pport;
     }
   f->dial_host = twist_strdup (dial != NULL ? dial : "");
   free (phost);
+  free (puser);
+  if (ppass != NULL)
+    {
+      memset (ppass, 0, strlen (ppass));
+      free (ppass);
+    }
   if (f->dial_host == NULL)
     {
       ftp_complete (f, TWIST_ERR_NOMEM);
