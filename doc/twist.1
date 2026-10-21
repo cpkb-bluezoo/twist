@@ -40,10 +40,55 @@ Several URLs leave the status of the last transfer, unless
 .B \-\-fail\-early
 stops at the first failure.
 .PP
-HTTP, file, FTP, mail, MQTT, LDAP, WebSocket, Gopher, DICT, TFTP,
-and SFTP and SCP (a file to a URL, up or down, and directory listings for SFTP)
-are implemented.  A scheme that is recognised but not implemented
-exits 1.
+The schemes that are implemented are listed under
+.BR PROTOCOLS .
+.SH PROTOCOLS
+A URL scheme selects the protocol.  The scheme with an \fBs\fR is the same protocol inside TLS from the first byte; no scheme is upgraded to TLS after it starts.
+.TP
+.B dict
+Looks up a word with a DICT server: DEFINE, MATCH or SHOW, chosen by the URL path.  The reply is written until the server closes.
+.TP
+.B file
+Reads the local file named by the URL path.
+.TP
+.B ftp, ftps
+Downloads a file, or lists a directory when the URL path ends in a slash.  \fBftps\fR is TLS from the first byte (port 990); \fBftp\fR is never upgraded.
+.TP
+.B gopher, gophers
+Sends the selector from the URL and writes the reply until the server closes.
+.TP
+.B http, https
+HTTP/1.0, HTTP/1.1, HTTP/2 and HTTP/3, as the \fB\-\-http*\fR options and the server allow.
+.TP
+.B imap, imaps
+Fetches a message from a mailbox, or lists the mailboxes.
+.TP
+.B ldap, ldaps
+Binds and searches, and writes the result as LDIF.
+.TP
+.B mqtt, mqtts
+Subscribes to the topic in the URL path, or publishes \fB\-\-data\fR and disconnects.
+.TP
+.B pop3, pop3s
+Retrieves a message, or lists the messages in the maildrop.
+.TP
+.B scp, sftp
+Both run over SFTP on an SSH connection: a file up or down, and, for \fBsftp\fR, a directory listing.  There is no SCP wire protocol.  SSH provides the encryption, so there is no TLS variant.
+.TP
+.B smtp, smtps
+Sends a message to the server, from \fB\-\-mail\-from\fR to each \fB\-\-mail\-rcpt\fR.
+.TP
+.B tftp
+Reads a file, or uploads one with \fB\-\-data\fR or \fB\-T\fR.  It is a datagram protocol: no proxy is used.
+.TP
+.B ws, wss
+WebSocket, over HTTP/1, HTTP/2 or HTTP/3.  The payload bytes are written.
+.PP
+These schemes are recognised, but are not implemented, and exit 1:
+.B rtmp, rtmps,
+.B rtsp,
+.B smb, smbs,
+.B telnet.
 .SH VARIABLES
 A command line can set variables and use them in the parameters of options.
 .TP

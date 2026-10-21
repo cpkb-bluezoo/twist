@@ -40,6 +40,7 @@ Documentation License''.
 * Overview::
 * Library::
 * Invocation::
+* Protocols::
 * Variables::
 * URL globbing::
 * SFTP and SCP::
@@ -54,9 +55,10 @@ public interface is @code{twist_easy}, @code{twist_multi} and
 @code{twist_share}.  It is not a drop-in replacement for the
 @code{libcurl} ABI: names, constants and header files are Twist's own.
 
-HTTP is the scheme that is implemented.  Every other URL scheme that
-libcurl offers has a row in the scheme table, so a later handler can
-be added without changing the transfer engine.  TLS and QUIC come from
+The schemes that are implemented are listed under @ref{Protocols}.
+Every other URL scheme that libcurl offers has a row in the scheme
+table, so a later handler can be added without changing the transfer
+engine.  TLS and QUIC come from
 GNU Quickstep.  The reactor does not start a thread of its own.  A
 transfer's sockets stay on one loop, and QUIC is one UDP socket on
 that same loop.
@@ -447,6 +449,58 @@ The @code{sftp} or @code{scp} server could not do what was asked.
 @item 81
 The operation could not be started.
 @end table
+
+@node Protocols
+@chapter Protocols
+
+A URL scheme selects the protocol.  The scheme with an @samp{s} is the
+same protocol inside TLS from the first byte; no scheme is upgraded to
+TLS after it starts.
+
+@table @code
+@item dict
+Looks up a word with a DICT server: DEFINE, MATCH or SHOW, chosen by
+the URL path.  The reply is written until the server closes.
+@item file
+Reads the local file named by the URL path.
+@item ftp, ftps
+Downloads a file, or lists a directory when the URL path ends in a
+slash.  @code{ftps} is TLS from the first byte (port 990); @code{ftp}
+is never upgraded.
+@item gopher, gophers
+Sends the selector from the URL and writes the reply until the server
+closes.
+@item http, https
+HTTP/1.0, HTTP/1.1, HTTP/2 and HTTP/3, as the @option{--http*} options
+and the server allow.
+@item imap, imaps
+Fetches a message from a mailbox, or lists the mailboxes.
+@item ldap, ldaps
+Binds and searches, and writes the result as LDIF.
+@item mqtt, mqtts
+Subscribes to the topic in the URL path, or publishes @option{--data}
+and disconnects.
+@item pop3, pop3s
+Retrieves a message, or lists the messages in the maildrop.
+@item scp, sftp
+Both run over SFTP on an SSH connection: a file up or down and, for
+@code{sftp}, a directory listing.  There is no SCP wire protocol.  SSH
+provides the encryption, so there is no TLS variant.  See @ref{SFTP and
+SCP}.
+@item smtp, smtps
+Sends a message to the server, from @option{--mail-from} to each
+@option{--mail-rcpt}.
+@item tftp
+Reads a file, or uploads one with @option{--data} or @option{-T}.  It is
+a datagram protocol, so no proxy is used.
+@item ws, wss
+WebSocket, over HTTP/1, HTTP/2 or HTTP/3.  The payload bytes are
+written.
+@end table
+
+These schemes are recognised, but are not implemented, and exit 1:
+@code{rtmp}, @code{rtmps}, @code{rtsp}, @code{smb}, @code{smbs} and
+@code{telnet}.
 
 @node Variables
 @chapter Variables
