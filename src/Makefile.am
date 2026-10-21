@@ -116,3 +116,12 @@ libtwist_la_SOURCES = \
 
 twist_SOURCES = main.c
 twist_LDADD = libtwist.la $(READLINE_LIBS)
+
+## For fuzz/fuzz.sh, which compiles the library again with sanitizers and
+## instrumentation: what to compile, and with what.
+print-sources:
+	@echo $(libtwist_la_SOURCES)
+print-cflags:
+	@echo $(DEFS) $(DEFAULT_INCLUDES) $(AM_CPPFLAGS) $(CPPFLAGS) $(AM_CFLAGS)
+print-libs:
+	@echo $(libtwist_la_LIBADD) $(LIBS)

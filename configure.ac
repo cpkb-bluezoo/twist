@@ -169,5 +169,6 @@ AC_CONFIG_FILES([Makefile
                  doc/Makefile
                  tests/Makefile
                  integration/Makefile
+                 fuzz/Makefile
                  twist.pc])
 AC_OUTPUT

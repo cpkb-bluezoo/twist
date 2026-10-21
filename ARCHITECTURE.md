@@ -381,6 +381,19 @@ Host keys are checked against `~/.ssh/known_hosts` by default, as the
 curl tool does. A key that is missing or changed fails the transfer, there
 is no accept-new mode, and turning off peer verification (`-k`) skips the
 check. A pinned SHA-256 of the host key is the other way to trust a host.
+Fuzzing (`fuzz/`) rebuilds the library with AddressSanitizer, UBSan and edge
+coverage (gcc's `trace-pc`, which calls a function at each basic block) and
+links each harness with `fuzz/engine.c`, a coverage-guided fuzzer of about 600
+lines: a bitmap of edges, a corpus of the inputs that reached a new one,
+mutations (bits, bytes, interesting values, blocks, splices, dictionary
+tokens), an alarm for hangs, and the sanitizers set to abort so that the input
+that did it is saved. A harness feeds the parser in pieces of any size, with a
+fresh exact-size copy for each call so that a read past the end is found, and
+frees everything, so that the leak check (every few hundred runs) is exact.
+The first pass found a signed overflow in the HTTP/2 flow-control windows, a
+read past the QPACK static table, and in HPACK a table that counted entries
+and not bytes, no handling of size updates, and leaks on error paths.
+
 Variables (`src/engine/vars.c`) are the curl tool's. `--variable` defines a name
 in a table of byte strings (to ten megabytes), from text, a file, or the
 environment. For each long option that takes a parameter the command line adds

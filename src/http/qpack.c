@@ -120,6 +120,7 @@ twist_qpack_decode (const uint8_t *data, size_t len, struct twist_h1_events *ev)
       char *value = NULL;
       const char *nptr;
       const char *vptr;
+      int rc = TWIST_ERR_PROTOCOL;
 
       if (b & 0x80)
         {
@@ -142,18 +143,22 @@ twist_qpack_decode (const uint8_t *data, size_t len, struct twist_h1_events *ev)
               int stat = (b & 0x10) != 0;
               if (qpack_int (data, len, &off, 4, &idx) <= 0)
                 return TWIST_ERR_PROTOCOL;
-              if (!stat)
+              /* Only the static table is understood, and it ends.  */
+              if (!stat || idx >= (sizeof twist_qpack_static_tab
+                                   / sizeof twist_qpack_static_tab[0]))
                 return TWIST_ERR_PROTOCOL;
               name = twist_strdup (twist_qpack_static_tab[idx].name);
+              if (name == NULL)
+                return TWIST_ERR_NOMEM;
             }
           else
             {
               off++;
               if (qpack_string (data, len, &off, &name) <= 0)
-                return TWIST_ERR_PROTOCOL;
+                goto fail;
             }
           if (qpack_string (data, len, &off, &value) <= 0)
-            return TWIST_ERR_PROTOCOL;
+            goto fail;
           nptr = name;
           vptr = value;
         }
@@ -161,9 +166,9 @@ twist_qpack_decode (const uint8_t *data, size_t len, struct twist_h1_events *ev)
         {
           off++;
           if (qpack_string (data, len, &off, &name) <= 0)
-            return TWIST_ERR_PROTOCOL;
+            goto fail;
           if (qpack_string (data, len, &off, &value) <= 0)
-            return TWIST_ERR_PROTOCOL;
+            goto fail;
           nptr = name;
           vptr = value;
         }
@@ -171,6 +176,12 @@ twist_qpack_decode (const uint8_t *data, size_t len, struct twist_h1_events *ev)
         ev->header (ev->user, nptr, strlen (nptr), vptr, strlen (vptr));
       free (name);
       free (value);
+      continue;
+    fail:
+      /* Whatever was made for this line is not leaked.  */
+      free (name);
+      free (value);
+      return rc;
     }
   return TWIST_OK;
 }

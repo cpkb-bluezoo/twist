@@ -72,6 +72,13 @@ Twist TODO List
       bcrypt-pbkdf being available in libgcrypt; it is deliberately not
       taken from anywhere else.  An ssh-agent holding the key is the
       workaround, and works.
+  [ ] Fuzzing covers the parsers in the library (see HACKING).  Not reached:
+      the command line's own parsing (main.c: options, the speed and time
+      arguments, --write-out), which is static there; the DNS cache and
+      resolver state machines; the SFTP engine's use of foxtrot, which could
+      be driven by a fuzzed server session; the Set-Cookie/HSTS persistence;
+      and the file scheme.  A fuzzer of a whole transfer, with a scripted peer
+      on a socketpair, would reach the connection and handler glue.
   [ ] URL globbing is done for URLs and for -o names (#N).  curl also globs
       the file given to -T ({a,b} there, with #N in the URL), and --output-dir
       does not take #N.  Neither is done here: -T takes the name as written.

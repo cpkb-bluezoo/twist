@@ -552,13 +552,32 @@ on_settings (struct twist_h2 *h, const uint8_t *p, size_t len)
         h->peer_max = val;
       else if (id == 4)
         {
-          int32_t delta = (int32_t) val - h->peer_init;
+          int64_t delta;
           struct twist_h2_stream *s;
 
-          h->peer_init = (int32_t) val;
+          /* A window is a number of 31 bits (RFC 7540, 6.5.2); more is a flow
+             control error, and a number that wraps.  */
+          if (val > 0x7fffffffu)
+            {
+              h2_fail (h, TWIST_ERR_PROTOCOL);
+              return;
+            }
+          delta = (int64_t) val - h->peer_init;
           for (s = h->active; s != NULL; s = s->next)
             if (s->live)
-              s->send_left += delta;
+              {
+                /* A window may be below zero after this, and it may not be
+                   above the largest there is.  */
+                int64_t now = (int64_t) s->send_left + delta;
+
+                if (now > 0x7fffffff || now < -(int64_t) 0x7fffffff - 1)
+                  {
+                    h2_fail (h, TWIST_ERR_PROTOCOL);
+                    return;
+                  }
+                s->send_left = (int32_t) now;
+              }
+          h->peer_init = (int32_t) val;
         }
       else if (id == 5)
         {
@@ -674,7 +693,8 @@ dispatch_frame (struct twist_h2 *h, uint8_t type, uint8_t flags,
       inc &= 0x7fffffffu;
       if (stream == 0)
         {
-          if (inc > (uint32_t) (0x7fffffff - h->conn_send))
+          /* In 64 bits: a window below zero would overflow the difference.  */
+          if ((int64_t) h->conn_send + (int64_t) inc > 0x7fffffff)
             {
               h2_fail (h, TWIST_ERR_PROTOCOL);
               return;
@@ -686,7 +706,7 @@ dispatch_frame (struct twist_h2 *h, uint8_t type, uint8_t flags,
           s = find_stream (h, stream);
           if (s != NULL)
             {
-              if (inc > (uint32_t) (0x7fffffff - s->send_left))
+              if ((int64_t) s->send_left + (int64_t) inc > 0x7fffffff)
                 {
                   h2_fail (h, TWIST_ERR_PROTOCOL);
                   return;

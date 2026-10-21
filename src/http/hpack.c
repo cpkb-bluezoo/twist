@@ -27,7 +27,10 @@
 #include <string.h>
 
 #define HPACK_STATIC 61
-#define HPACK_DYN 64
+/* The dynamic table is counted in bytes (RFC 7541, 4.1): an entry is its name,
+   its value and 32.  4096 is what we allow, and it holds at most 128.  */
+#define HPACK_TABLE_MAX 4096u
+#define HPACK_DYN (HPACK_TABLE_MAX / 32)
 
 struct twist_hfield
 {
@@ -39,12 +42,18 @@ struct twist_hpack
 {
   struct twist_hfield dyn[HPACK_DYN];
   size_t n_dyn;
+  size_t dyn_size;		/* Bytes the entries take, as counted above.  */
+  size_t dyn_max;		/* The table's size now: a size update sets it.  */
 };
 
 struct twist_hpack *
 twist_hpack_new (void)
 {
-  return calloc (1, sizeof (struct twist_hpack));
+  struct twist_hpack *hp = calloc (1, sizeof (struct twist_hpack));
+
+  if (hp != NULL)
+    hp->dyn_max = HPACK_TABLE_MAX;
+  return hp;
 }
 
 void
@@ -222,22 +231,54 @@ lookup (struct twist_hpack *hp, uint64_t idx, const char **name,
   return TWIST_OK;
 }
 
+static size_t
+entry_size (const char *name, const char *value)
+{
+  return strlen (name) + strlen (value) + 32;
+}
+
+/* Drop the oldest entries until the table is no bigger than LIMIT.  */
+static void
+evict (struct twist_hpack *hp, size_t limit)
+{
+  while (hp->n_dyn > 0 && hp->dyn_size > limit)
+    {
+      struct twist_hfield *old = &hp->dyn[hp->n_dyn - 1];
+
+      hp->dyn_size -= entry_size (old->name, old->value);
+      free (old->name);
+      free (old->value);
+      hp->n_dyn--;
+    }
+}
+
+/* Add an entry, which the table owns.  Room is made first; an entry that is
+   bigger than the whole table empties it and is not kept (RFC 7541, 4.4).  */
 static void
 dyn_insert (struct twist_hpack *hp, char *name, char *value)
 {
-  size_t i;
+  size_t sz, i;
 
-  if (hp->n_dyn == HPACK_DYN)
+  if (name == NULL || value == NULL)
     {
-      free (hp->dyn[HPACK_DYN - 1].name);
-      free (hp->dyn[HPACK_DYN - 1].value);
-      hp->n_dyn--;
+      free (name);
+      free (value);
+      return;
+    }
+  sz = entry_size (name, value);
+  evict (hp, sz > hp->dyn_max ? 0 : hp->dyn_max - sz);
+  if (sz > hp->dyn_max)
+    {
+      free (name);
+      free (value);
+      return;
     }
   for (i = hp->n_dyn; i > 0; i--)
     hp->dyn[i] = hp->dyn[i - 1];
   hp->dyn[0].name = name;
   hp->dyn[0].value = value;
   hp->n_dyn++;
+  hp->dyn_size += sz;
 }
 
 int
@@ -253,52 +294,47 @@ twist_hpack_decode (struct twist_hpack *hp, const uint8_t *data, size_t len,
       const char *value = NULL;
       char *nbuf = NULL;
       char *vbuf = NULL;
-      int indexed = 0;
+      int add = 0, rc = TWIST_ERR_PROTOCOL;
+      uint64_t idx = 0;
 
       if (b & 0x80)
         {
-          uint64_t idx;
+          /* An entry of either table.  */
           if (read_int (data, len, &off, 7, &idx) <= 0)
             return TWIST_ERR_PROTOCOL;
           if (lookup (hp, idx, &name, &value) != TWIST_OK)
             return TWIST_ERR_PROTOCOL;
-          indexed = 1;
         }
-      else if (b & 0x40)
+      else if ((b & 0xe0) == 0x20)
         {
-          uint64_t idx = 0;
-          if ((b & 0x3f) != 0)
-            {
-              if (read_int (data, len, &off, 6, &idx) <= 0)
-                return TWIST_ERR_PROTOCOL;
-              if (lookup (hp, idx, &name, &value) != TWIST_OK)
-                return TWIST_ERR_PROTOCOL;
-              nbuf = twist_strdup (name);
-            }
-          else
-            {
-              off++;
-              if (read_string (data, len, &off, &nbuf) <= 0)
-                return TWIST_ERR_PROTOCOL;
-            }
-          if (read_string (data, len, &off, &vbuf) <= 0)
+          /* The table is to be this big (6.3); not more than we allow.  */
+          uint64_t size;
+
+          if (read_int (data, len, &off, 5, &size) <= 0)
             return TWIST_ERR_PROTOCOL;
-          name = nbuf;
-          value = vbuf;
-          dyn_insert (hp, twist_strdup (nbuf), twist_strdup (vbuf));
+          if (size > HPACK_TABLE_MAX)
+            return TWIST_ERR_PROTOCOL;
+          hp->dyn_max = (size_t) size;
+          evict (hp, hp->dyn_max);
+          continue;
         }
       else
         {
-          unsigned prefix = (b & 0x10) ? 4 : 4;
-          uint64_t idx = 0;
-          (void) prefix;
-          if ((b & 0x0f) != 0)
+          /* A literal: with indexing (01, 6 bit prefix), or without or never
+             (0000 and 0001, 4 bit).  The name is an entry's, or a string.  */
+          unsigned prefix = (b & 0x40) ? 6 : 4;
+          unsigned mask = (b & 0x40) ? 0x3f : 0x0f;
+
+          add = (b & 0x40) != 0;
+          if ((b & mask) != 0)
             {
-              if (read_int (data, len, &off, 4, &idx) <= 0)
+              if (read_int (data, len, &off, prefix, &idx) <= 0)
                 return TWIST_ERR_PROTOCOL;
               if (lookup (hp, idx, &name, &value) != TWIST_OK)
                 return TWIST_ERR_PROTOCOL;
               nbuf = twist_strdup (name);
+              if (nbuf == NULL)
+                return TWIST_ERR_NOMEM;
             }
           else
             {
@@ -307,17 +343,26 @@ twist_hpack_decode (struct twist_hpack *hp, const uint8_t *data, size_t len,
                 return TWIST_ERR_PROTOCOL;
             }
           if (read_string (data, len, &off, &vbuf) <= 0)
-            return TWIST_ERR_PROTOCOL;
+            goto fail;
           name = nbuf;
           value = vbuf;
         }
       if (ev != NULL && ev->header != NULL)
         ev->header (ev->user, name, strlen (name), value, strlen (value));
-      if (!indexed)
+      if (add)
         {
-          free (nbuf);
-          free (vbuf);
+          /* The table keeps copies, so that the event has had the originals
+             whatever the table does.  */
+          dyn_insert (hp, twist_strdup (nbuf), twist_strdup (vbuf));
         }
+      free (nbuf);
+      free (vbuf);
+      continue;
+    fail:
+      /* The name that was read is not leaked.  */
+      free (nbuf);
+      free (vbuf);
+      return rc;
     }
   return TWIST_OK;
 }

@@ -20,7 +20,7 @@
 
 ACLOCAL_AMFLAGS = -I m4
 SUBDIRS = po src doc tests
-DIST_SUBDIRS = $(SUBDIRS) integration
+DIST_SUBDIRS = $(SUBDIRS) integration fuzz
 
 include_HEADERS = include/twist.h
 
@@ -30,6 +30,10 @@ pkgconfig_DATA = twist.pc
 EXTRA_DIST = HACKING ARCHITECTURE.md TODO build-aux/config.rpath
 
 ## integration/ is distributed but not built by 'make check'.
-.PHONY: check-integration
+.PHONY: check-integration check-fuzz
 check-integration:
 	cd integration && $(MAKE) $(AM_MAKEFLAGS) check
+
+## fuzz/ is distributed too; this runs the inputs that once found a bug.
+check-fuzz:
+	cd fuzz && $(MAKE) $(AM_MAKEFLAGS) check-fuzz

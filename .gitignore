@@ -56,6 +56,9 @@ Makefile
 /tests/test-*
 !/tests/test-*.c
 
+# Fuzzing: the sanitized build, its corpora and what crashed
+/fuzz-build/
+
 # Test logs
 *.log
 *.trs

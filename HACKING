@@ -107,6 +107,36 @@ a virtual clock into the loop).  Anything that dials a peer goes in
 integration/ and skips with exit 77 when the peer is absent.
 integration/ is not a subdirectory of 'make check'.
 
+Fuzzing
+-------
+
+  fuzz/fuzz.sh list                  # the targets
+  fuzz/fuzz.sh run -t 60 [-l] [T...] # fuzz each; -l looks for leaks too
+  fuzz/fuzz.sh replay T FILE...      # an input that failed, again
+  make check-fuzz                    # the inputs that once found a bug
+
+Every parser that takes bytes or text from outside has a harness in fuzz/
+(harness-NAME.c), written as for libFuzzer: LLVMFuzzerTestOneInput, and if it
+likes, fuzz_seeds and fuzz_tokens.  There is no libFuzzer or AFL on every
+machine, so fuzz/engine.c is a small coverage-guided fuzzer that needs only
+gcc: the script compiles the library again, in fuzz-build/, with
+-fsanitize=address,undefined and -fsanitize-coverage=trace-pc.  With clang a
+harness builds with -fsanitize=fuzzer and engine.c is not needed.
+
+A harness frees what it makes, so a leak is a finding.  An input that
+fails is written to fuzz-build/artifacts/NAME; when the bug is fixed, put
+the input (they are small) in fuzz/regress/NAME/ with a name that says what
+it was, write the ordinary test as well, and 'make check-fuzz' will keep it
+fixed.  Fixing comes first-test-first as for any bug: a fuzzer finds the
+input, the test says what should have happened.
+
+What is fuzzed is what the network or the user can send to twist's own
+code: URLs, globs, variables, quote commands, proxy replies, HTTP/1, HTTP/2,
+HTTP/3 and the header compressions, DNS messages, content codings, cookies,
+Alt-Svc, FTP, SMTP, POP3, IMAP, MQTT, LDAP, TFTP, DICT, Gopher, WebSocket,
+SASL and Digest, and the cutting of mail text.  SSH is foxtrot's and the TLS
+and QUIC stacks are quickstep's, and are fuzzed there.
+
 Copyright
 ---------
 
