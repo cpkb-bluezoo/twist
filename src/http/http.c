@@ -953,11 +953,17 @@ send_request (struct twist_http *h)
     snprintf (target, sizeof target, "%s?%s", path, url->query);
   else
     snprintf (target, sizeof target, "%s", path);
-  if (url->port > 0
-      && url->port != twist_url_default_port (url->scheme))
-    snprintf (authority, sizeof authority, "%s:%d", url->host, url->port);
-  else
-    snprintf (authority, sizeof authority, "%s", url->host != NULL ? url->host : "");
+  {
+    char hosttext[400];
+
+    if (twist_url_host_text (url, 0, hosttext, sizeof hosttext) != TWIST_OK)
+      return TWIST_ERR_URL;
+    if (url->port > 0
+        && url->port != twist_url_default_port (url->scheme))
+      snprintf (authority, sizeof authority, "%s:%d", hosttext, url->port);
+    else
+      snprintf (authority, sizeof authority, "%s", hosttext);
+  }
   scheme = url->scheme;
   if (h->ws)
     {
@@ -1593,6 +1599,7 @@ dial (struct twist_http *h, const struct twist_dns_addr *addr)
       memset (&sin6, 0, sizeof sin6);
       sin6.sin6_family = AF_INET6;
       memcpy (&sin6.sin6_addr, addr->addr, 16);
+      sin6.sin6_scope_id = addr->scope_id;
       sin6.sin6_port = htons ((uint16_t) h->dial_port);
       sa = &sin6;
       salen = sizeof sin6;

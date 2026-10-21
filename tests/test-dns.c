@@ -23,6 +23,7 @@
 #include "check.h"
 #include "twist-int.h"
 
+#include <net/if.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -262,6 +263,8 @@ struct doh_saw
   int calls;
   int err;
   char text[64];
+  int family;
+  unsigned scope;
 };
 
 static int
@@ -287,7 +290,11 @@ on_literal (void *user, int err, const struct twist_dns_addr *addr)
   saw->err = err;
   saw->text[0] = 0;
   if (err == TWIST_OK && addr != NULL)
-    snprintf (saw->text, sizeof saw->text, "%s", addr->text);
+    {
+      snprintf (saw->text, sizeof saw->text, "%s", addr->text);
+      saw->family = addr->family;
+      saw->scope = addr->scope_id;
+    }
 }
 
 static void
@@ -406,6 +413,40 @@ test_doh (void)
   check (twist_dns_resolve_easy (easy, "2001:db8::1", on_literal, &saw) == TWIST_OK
          && saw.calls == 1 && saw.err == TWIST_OK
          && strcmp (saw.text, "2001:db8::1") == 0, "v6 needs no lookup");
+  /* A zone is the interface the address is reached by.  It is part of the
+     address as far as the system is concerned: without it a link-local address
+     goes nowhere.  */
+  {
+    unsigned lo = if_nametoindex ("lo");
+
+    memset (&saw, 0, sizeof saw);
+    saw.scope = 12345;
+    check (twist_dns_resolve_easy (easy, "fe80::1%lo", on_literal, &saw)
+           == TWIST_OK && saw.calls == 1 && saw.err == TWIST_OK
+           && strcmp (saw.text, "fe80::1%lo") == 0
+           && saw.family == 6 && saw.scope == lo && lo != 0,
+           "a zone by name gives the index of the interface");
+    memset (&saw, 0, sizeof saw);
+    check (twist_dns_resolve_easy (easy, "fe80::1%7", on_literal, &saw)
+           == TWIST_OK && saw.scope == 7, "a zone by number");
+    memset (&saw, 0, sizeof saw);
+    check (twist_dns_resolve_easy (easy, "2001:db8::1", on_literal, &saw)
+           == TWIST_OK && saw.scope == 0, "no zone, no scope");
+  }
+  /* What cannot be an address is not a name to look up either: it is an error
+     at once, not a query that never comes back.  */
+  memset (&saw, 0, sizeof saw);
+  check (twist_dns_resolve_easy (easy, "fe80::1%no-such-if0", on_literal, &saw)
+         == TWIST_ERR_CONNECT && saw.calls == 0,
+         "an interface that is not there cannot be connected through");
+  check (twist_dns_resolve_easy (easy, "::g", on_literal, &saw)
+         == TWIST_ERR_RESOLVE && saw.calls == 0, "text that is not an address");
+  check (twist_dns_resolve_easy (easy, "1:2:3", on_literal, &saw)
+         == TWIST_ERR_RESOLVE && saw.calls == 0, "colons make no name");
+  check (twist_dns_resolve_easy (easy, "fe80::1%", on_literal, &saw)
+         == TWIST_ERR_RESOLVE && saw.calls == 0, "an empty zone");
+  check (twist_dns_resolve_easy (easy, "1.2.3.4%lo", on_literal, &saw)
+         != TWIST_OK || saw.calls == 0, "a zone on an IPv4 address");
   twist_easy_cleanup (easy);
 
   check (twist_dns_encode_query ("example.com", 1, 0x1234, &q, &qlen) == TWIST_OK,

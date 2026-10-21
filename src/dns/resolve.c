@@ -27,6 +27,7 @@
 
 #include <arpa/inet.h>
 #include <fcntl.h>
+#include <net/if.h>
 #include <netinet/in.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -1166,7 +1167,7 @@ open_doq (struct dns_query *q)
           if (rc != TWIST_OK)
             return rc;
         }
-      if (literal (q->doq_parsed->host, &lit))
+      if (literal (q->doq_parsed->host, &lit) == 1)
         return connect_doq (q, &lit.addr, q->doq_parsed->port,
                             q->doq_parsed->host);
       q->boot = TWIST_DNS_DOQ;
@@ -1195,7 +1196,7 @@ open_dot (struct dns_query *q)
           if (rc != TWIST_OK)
             return rc;
         }
-      if (literal (q->dot_parsed->host, &lit))
+      if (literal (q->dot_parsed->host, &lit) == 1)
         return connect_dot (q, &lit.addr, q->dot_parsed->port,
                             q->dot_parsed->host);
       q->boot = TWIST_DNS_DOT;
@@ -1288,11 +1289,21 @@ fallback_cb (void *user)
     dns_finish (q, rc == TWIST_ERR_UNSUPPORTED ? TWIST_ERR_RESOLVE : rc);
 }
 
+/* 1: HOST is an address, and SVC has it.  0: it is not one, and may be a
+   name.  -1: it has a colon, so it can only be an IPv6 address, and it is not
+   a good one: there is nothing to look up.  -2: a good one, with a zone that
+   is not an interface of this machine, so it cannot be reached.  An IPv6 address may end in a zone,
+   %eth0 or %3, the interface it is reached by; that is how a link-local
+   address is told from the same one on another link.  */
 static int
 literal (const char *host, struct twist_dns_service *svc)
 {
   struct in_addr a4;
   struct in6_addr a6;
+  char addr[64];
+  const char *pct;
+  size_t n;
+  unsigned scope = 0;
 
   memset (svc, 0, sizeof *svc);
   if (inet_pton (AF_INET, host, &a4) == 1)
@@ -1302,14 +1313,45 @@ literal (const char *host, struct twist_dns_service *svc)
       snprintf (svc->addr.text, sizeof svc->addr.text, "%s", host);
       return 1;
     }
-  if (inet_pton (AF_INET6, host, &a6) == 1)
+  if (strchr (host, ':') == NULL)
+    return 0;
+  pct = strchr (host, '%');
+  n = pct != NULL ? (size_t) (pct - host) : strlen (host);
+  if (n >= sizeof addr)
+    return -1;
+  memcpy (addr, host, n);
+  addr[n] = 0;
+  if (inet_pton (AF_INET6, addr, &a6) != 1)
+    return -1;
+  if (pct != NULL)
     {
-      svc->addr.family = 6;
-      memcpy (svc->addr.addr, &a6, 16);
-      snprintf (svc->addr.text, sizeof svc->addr.text, "%s", host);
-      return 1;
+      const char *zone = pct + 1;
+      const char *d;
+
+      if (*zone == 0)
+        return -1;
+      for (d = zone; *d >= '0' && *d <= '9'; d++)
+        ;
+      if (*d == 0)
+        {
+          unsigned long v = strtoul (zone, NULL, 10);
+
+          if (d - zone > 9 || v == 0)
+            return -1;
+          scope = (unsigned) v;
+        }
+      else
+        {
+          scope = if_nametoindex (zone);
+          if (scope == 0)
+            return -2;
+        }
     }
-  return 0;
+  svc->addr.family = 6;
+  memcpy (svc->addr.addr, &a6, 16);
+  svc->addr.scope_id = scope;
+  snprintf (svc->addr.text, sizeof svc->addr.text, "%s", host);
+  return 1;
 }
 
 static void
@@ -1342,7 +1384,12 @@ resolve (struct twist_loop *loop, const char *host, const int *order,
 
   if (host == NULL || (cb == NULL && svc_cb == NULL))
     return TWIST_ERR_INVAL;
-  if (literal (host, &lit))
+  rc = literal (host, &lit);
+  if (rc == -2)
+    return TWIST_ERR_CONNECT;
+  if (rc < 0)
+    return TWIST_ERR_RESOLVE;
+  if (rc == 1)
     {
       if (svc_cb != NULL)
         svc_cb (user, TWIST_OK, &lit);

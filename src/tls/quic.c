@@ -854,6 +854,7 @@ twist_quic_dial (struct twist_loop *loop, const char *server_name,
       struct sockaddr_in6 *sin6 = (struct sockaddr_in6 *) &ss;
       sin6->sin6_family = AF_INET6;
       memcpy (&sin6->sin6_addr, addr->addr, 16);
+      sin6->sin6_scope_id = addr->scope_id;
       sin6->sin6_port = htons ((uint16_t) port);
       slen = sizeof *sin6;
     }

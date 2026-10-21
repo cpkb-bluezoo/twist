@@ -480,6 +480,23 @@ download resume, to find the start of @samp{-50}, or to resume an upload.
 A server that does not say how big a file is cannot do the last, nor
 @samp{-50}.
 
+@subheading IPv6 addresses
+
+An IPv6 address is written in brackets, @samp{sftp://user@@[2001:db8::7]:2222/f}.
+known_hosts names it as @command{ssh} does: bare for port 22
+(@samp{2001:db8::7}), and in brackets with the port for any other
+(@samp{[2001:db8::7]:2222}).  A link-local address names the interface it is
+reached by after a percent sign, which a URL writes encoded:
+@samp{[fe80::1%25eth0]} (a bare @samp{%eth0} is taken too).  known_hosts keeps
+the zone, @samp{fe80::1%eth0}, as @command{ssh} does, and the connection goes
+out by that interface; without it a link-local address goes nowhere.  An
+interface may be given by number as well.  What is between brackets must be
+an IPv6 address: anything else is a malformed URL (status 3), and an interface
+that this machine does not have is a connection that cannot be made (status
+7).  Neither waits for a lookup.  The effective URL (@samp{%@{url_effective@}})
+keeps the brackets and the zone, and an HTTP request names the host in its
+@code{Host} header with the brackets and without the zone.
+
 @subheading Commands and missing directories
 
 @option{-Q @var{command}} runs a command on the server before the transfer,

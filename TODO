@@ -31,6 +31,8 @@ Twist TODO List
         - statvfs, and the other commands the sftp tool has, as -Q
           commands; --create-file-mode and the directory mode.
         - quote commands for scp URLs (curl has none either).
+        - an HTTP/3 URL does not take a zone: quic_connect reads the host
+          with inet_pton itself.  Only the TCP dialers pass the scope.
         - --limit-rate for the other protocols: the pacer is in
           src/engine/rate.c; only the SFTP pumps use it.  Until then the
           command line refuses the option for other URLs.

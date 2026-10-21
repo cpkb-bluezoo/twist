@@ -726,6 +726,7 @@ dial_udp (struct twist_tftp *t, const struct twist_dns_addr *addr)
       t->peer.in6.sin6_family = AF_INET6;
       t->peer.in6.sin6_port = htons ((uint16_t) port);
       memcpy (&t->peer.in6.sin6_addr, addr->addr, 16);
+      t->peer.in6.sin6_scope_id = addr->scope_id;
       t->peer_len = sizeof t->peer.in6;
     }
   else

@@ -35,6 +35,8 @@
 
 #include <arpa/inet.h>
 #include <errno.h>
+#include <ifaddrs.h>
+#include <net/if.h>
 #include <netinet/in.h>
 #include <poll.h>
 #include <pthread.h>
@@ -3598,6 +3600,8 @@ struct tcp_server
   unsigned up_sum;
   int late_eof;			/* Set on each server it makes.  */
   uint32_t max_read;		/* The most a read asked for, on any.  */
+  char urlhost[128];		/* The host as a URL writes it.  */
+  char khost[128];		/* As known_hosts names it.  */
 };
 
 static void
@@ -3756,33 +3760,108 @@ ts_serve (void *arg)
   return NULL;
 }
 
+/* Where a test server listens.  */
+enum
+{
+  TS_V4 = 0,			/* 127.0.0.1 */
+  TS_V6,			/* ::1 */
+  TS_ZONE			/* A link-local address, reached by its zone.  */
+};
+
+/* The first link-local IPv6 address of an interface that is up: the address
+   and the interface's name.  0 if the machine has none.  */
 static int
-ts_start (struct tcp_server *ts)
+link_local (struct in6_addr *addr, unsigned *scope, char *name)
+{
+  struct ifaddrs *list, *a;
+  int found = 0;
+
+  if (getifaddrs (&list) != 0)
+    return 0;
+  for (a = list; a != NULL && !found; a = a->ifa_next)
+    {
+      const struct sockaddr_in6 *s6 = (const struct sockaddr_in6 *) a->ifa_addr;
+
+      if (a->ifa_addr == NULL || a->ifa_addr->sa_family != AF_INET6
+          || !(a->ifa_flags & IFF_UP) || (a->ifa_flags & IFF_LOOPBACK)
+          || !IN6_IS_ADDR_LINKLOCAL (&s6->sin6_addr))
+        continue;
+      *addr = s6->sin6_addr;
+      *scope = if_nametoindex (a->ifa_name);
+      snprintf (name, IF_NAMESIZE, "%s", a->ifa_name);
+      found = *scope != 0;
+    }
+  freeifaddrs (list);
+  return found;
+}
+
+/* 0: listening.  -1: failed.  1: this machine cannot do it (no IPv6, no
+   link-local address); the test is skipped.  */
+static int
+ts_start_on (struct tcp_server *ts, int where)
 {
   struct sockaddr_in sin;
-  socklen_t len = sizeof sin;
+  struct sockaddr_in6 sin6;
+  struct sockaddr *sa = (struct sockaddr *) &sin;
+  socklen_t len = sizeof sin, salen = sizeof sin;
   int i, one = 1;
 
   memset (ts, 0, sizeof *ts);
   for (i = 0; i < TS_CONNS; i++)
     ts->conns[i].fd = -1;
   pthread_mutex_init (&ts->mu, NULL);
-  if (gf_key_generate (&ts->host, GF_KEY_ED25519, 0) != GF_OK)
-    return -1;
-  ts->lfd = socket (AF_INET, SOCK_STREAM, 0);
-  if (ts->lfd < 0)
-    return -1;
-  setsockopt (ts->lfd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+  snprintf (ts->urlhost, sizeof ts->urlhost, "127.0.0.1");
+  snprintf (ts->khost, sizeof ts->khost, "127.0.0.1");
   memset (&sin, 0, sizeof sin);
   sin.sin_family = AF_INET;
   sin.sin_addr.s_addr = htonl (INADDR_LOOPBACK);
-  if (bind (ts->lfd, (struct sockaddr *) &sin, sizeof sin) != 0
-      || listen (ts->lfd, 8) != 0
-      || getsockname (ts->lfd, (struct sockaddr *) &sin, &len) != 0)
+  if (where != TS_V4)
+    {
+      char text[INET6_ADDRSTRLEN], name[IF_NAMESIZE] = "";
+
+      memset (&sin6, 0, sizeof sin6);
+      sin6.sin6_family = AF_INET6;
+      if (where == TS_V6)
+        sin6.sin6_addr = in6addr_loopback;
+      else if (!link_local (&sin6.sin6_addr, &sin6.sin6_scope_id, name))
+        return 1;
+      inet_ntop (AF_INET6, &sin6.sin6_addr, text, sizeof text);
+      if (where == TS_V6)
+        {
+          snprintf (ts->urlhost, sizeof ts->urlhost, "[%s]", text);
+          snprintf (ts->khost, sizeof ts->khost, "%s", text);
+        }
+      else
+        {
+          snprintf (ts->urlhost, sizeof ts->urlhost, "[%s%%25%s]", text, name);
+          snprintf (ts->khost, sizeof ts->khost, "%s%%%s", text, name);
+        }
+      sa = (struct sockaddr *) &sin6;
+      salen = len = sizeof sin6;
+    }
+  if (gf_key_generate (&ts->host, GF_KEY_ED25519, 0) != GF_OK)
     return -1;
-  ts->port = ntohs (sin.sin_port);
+  ts->lfd = socket (sa->sa_family, SOCK_STREAM, 0);
+  if (ts->lfd < 0)
+    return where == TS_V4 ? -1 : 1;
+  setsockopt (ts->lfd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+  if (bind (ts->lfd, sa, salen) != 0)
+    {
+      close (ts->lfd);
+      gf_key_free (ts->host);
+      return where == TS_V4 ? -1 : 1;
+    }
+  if (listen (ts->lfd, 8) != 0 || getsockname (ts->lfd, sa, &len) != 0)
+    return -1;
+  ts->port = ntohs (where == TS_V4 ? sin.sin_port : sin6.sin6_port);
   shared_host = ts->host;
   return pthread_create (&ts->thread, NULL, ts_serve, ts) == 0 ? 0 : -1;
+}
+
+static int
+ts_start (struct tcp_server *ts)
+{
+  return ts_start_on (ts, TS_V4);
 }
 
 static void
@@ -3865,8 +3944,8 @@ tcp_get (struct twist_multi *multi, struct twist_easy *easy,
 {
   char url[200];
 
-  snprintf (url, sizeof url, "%s://alice@127.0.0.1:%d%s", scheme, ts->port,
-            path);
+  snprintf (url, sizeof url, "%s://alice@%s:%d%s", scheme, ts->urlhost,
+            ts->port, path);
   twist_easy_setopt (easy, TWISTOPT_URL, url);
   got_len = 0;
   return twist_easy_perform_in (multi, easy);
@@ -3891,7 +3970,7 @@ test_reuse_basic (void)
 
   check (ts_start (&ts) == 0, "server");
   snprintf (kh, sizeof kh, "%s/known_hosts", home);
-  check (gf_knownhosts_format (line, sizeof line, &n, "127.0.0.1",
+  check (gf_knownhosts_format (line, sizeof line, &n, ts.khost,
                                (unsigned) ts.port, ts.host, 0) == GF_OK,
          "known_hosts line");
   write_file (kh, line, n, 0600);
@@ -4235,6 +4314,153 @@ test_limit_chunks (void)
   ts_stop (&ts);
 }
 
+/* ---- IPv6 ---- */
+
+/* A server on ::1: the host is in brackets in the URL and known_hosts names
+   it as [::1]:PORT.  The session is kept for the next URL as for any host.  */
+static void
+test_ipv6_literal (void)
+{
+  struct tcp_server ts;
+  struct twist_multi *multi;
+  struct twist_easy *easy;
+  char kh[300], line[300];
+  size_t n = 0;
+  int up = ts_start_on (&ts, TS_V6);
+
+  if (up != 0)
+    {
+      fputs ("test-ssh: no IPv6 loopback; skipping the IPv6 tests\n", stderr);
+      return;
+    }
+  snprintf (kh, sizeof kh, "%s/known_hosts", home);
+  check (gf_knownhosts_format (line, sizeof line, &n, ts.khost,
+                               (unsigned) ts.port, ts.host, 0) == GF_OK
+         && strncmp (line, "[::1]:", 6) == 0, "known_hosts names [::1]:port");
+  write_file (kh, line, n, 0600);
+  multi = twist_multi_init ();
+  easy = tcp_easy (1, "secret", kh);
+  check (tcp_get (multi, easy, &ts, "sftp", "/data.bin") == TWIST_OK
+         && got_data (), "a download from [::1] with the host key checked");
+  check (tcp_get (multi, easy, &ts, "sftp", "/data.bin") == TWIST_OK
+         && got_data () && ts_accepted (&ts) == 1, "and the next URL reuses it");
+  {
+    char *eff = NULL;
+
+    twist_easy_getinfo (easy, TWISTINFO_EFFECTIVE_URL, &eff);
+    check (eff != NULL && strstr (eff, "@[::1]:") != NULL,
+           "the effective URL keeps the brackets");
+  }
+
+  /* With nothing in known_hosts the address is refused.  A new multi handle:
+     the connection already made was trusted when it was made, and a kept one
+     is not checked again.  */
+  write_file (kh, "", 0, 0600);
+  twist_easy_cleanup (easy);
+  twist_multi_cleanup (multi);
+  multi = twist_multi_init ();
+  easy = tcp_easy (1, "secret", kh);
+  check (tcp_get (multi, easy, &ts, "sftp", "/data.bin") == TWIST_ERR_HOSTKEY
+         && got_len == 0, "an address that is not in known_hosts");
+  twist_easy_cleanup (easy);
+  twist_multi_cleanup (multi);
+  ts_stop (&ts);
+  unlink (kh);
+}
+
+/* A link-local address is reached by an interface; the URL names it, and the
+   connection goes only where that says.  */
+static void
+test_ipv6_zone (void)
+{
+  struct tcp_server ts;
+  struct twist_multi *multi;
+  struct twist_easy *easy;
+  char kh[300], line[400];
+  size_t n = 0;
+  int up = ts_start_on (&ts, TS_ZONE);
+
+  if (up != 0)
+    {
+      fputs ("test-ssh: no link-local IPv6 address; skipping the zone test\n",
+             stderr);
+      return;
+    }
+  snprintf (kh, sizeof kh, "%s/known_hosts", home);
+  check (gf_knownhosts_format (line, sizeof line, &n, ts.khost,
+                               (unsigned) ts.port, ts.host, 0) == GF_OK,
+         "known_hosts line for a zone");
+  write_file (kh, line, n, 0600);
+  multi = twist_multi_init ();
+  easy = tcp_easy (1, "secret", kh);
+  check (tcp_get (multi, easy, &ts, "sftp", "/data.bin") == TWIST_OK
+         && got_data (), "a download from a link-local address by its zone");
+  twist_easy_cleanup (easy);
+  twist_multi_cleanup (multi);
+  ts_stop (&ts);
+  unlink (kh);
+}
+
+/* The default port: known_hosts has the address bare, as ssh writes it, and a
+   port that is not the default in brackets.  */
+static void
+test_ipv6_known_hosts (void)
+{
+  struct server sv;
+  struct world w;
+  struct twist_easy *easy;
+  struct setup su = SETUP ("sftp://alice@[::1]/data.bin", 1, "secret");
+  char kh[300], line[400];
+  size_t n = 0;
+
+  snprintf (kh, sizeof kh, "%s/known_hosts", home);
+  su.known_hosts = kh;
+
+  check (server_new (&sv) == 0, "server");
+  check (gf_knownhosts_format (line, sizeof line, &n, "::1", 22, sv.host, 0)
+         == GF_OK && strncmp (line, "::1 ", 4) == 0,
+         "the default port is written without brackets");
+  write_file (kh, line, n, 0600);
+  easy = run (&w, &sv, &su);
+  check (easy->done && easy->result == TWIST_OK, "found on the default port");
+  twist_easy_cleanup (easy);
+  server_free (&sv);
+
+  check (server_new (&sv) == 0, "server 2");
+  check (gf_knownhosts_format (line, sizeof line, &n, "2001:db8::1", 22,
+                               sv.host, 0) == GF_OK, "other line");
+  write_file (kh, line, n, 0600);
+  easy = run (&w, &sv, &su);
+  check (easy->done && easy->result == TWIST_ERR_HOSTKEY
+         && detail_has (easy, "::1"), "another address is not this one");
+  twist_easy_cleanup (easy);
+  server_free (&sv);
+
+  /* A port that is not the default: [addr]:port.  */
+  su.url = "sftp://alice@[::1]:2222/data.bin";
+  check (server_new (&sv) == 0, "server 3");
+  check (gf_knownhosts_format (line, sizeof line, &n, "::1", 2222, sv.host, 0)
+         == GF_OK && strncmp (line, "[::1]:2222 ", 11) == 0, "bracketed");
+  write_file (kh, line, n, 0600);
+  easy = run (&w, &sv, &su);
+  check (easy->done && easy->result == TWIST_OK, "found on another port");
+  twist_easy_cleanup (easy);
+  server_free (&sv);
+
+  /* A zone is part of the name, as ssh keeps it.  */
+  su.url = "sftp://alice@[fe80::1%25eth0]/data.bin";
+  check (server_new (&sv) == 0, "server 4");
+  check (gf_knownhosts_format (line, sizeof line, &n, "fe80::1%eth0", 22,
+                               sv.host, 0) == GF_OK, "zone line");
+  write_file (kh, line, n, 0600);
+  easy = run (&w, &sv, &su);
+  check (easy->done && easy->result == TWIST_OK, "a zone in known_hosts");
+  twist_easy_cleanup (easy);
+  server_free (&sv);
+  unlink (kh);
+}
+
+
 /* A transfer that goes away while its job is queued or running: the job
    finishes by itself and frees what it made.  Whichever happens first, the
    result must not be touched; valgrind finds it if it is.  */
@@ -4348,6 +4574,9 @@ main (void)
   test_reuse_concurrent ();
   test_limits ();
   test_limit_chunks ();
+  test_ipv6_known_hosts ();
+  test_ipv6_literal ();
+  test_ipv6_zone ();
   rmdir (home);
   return tests_finish ();
 }

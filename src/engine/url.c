@@ -22,7 +22,9 @@
 
 #include "twist-int.h"
 
+#include <arpa/inet.h>
 #include <ctype.h>
+#include <netinet/in.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -44,6 +46,36 @@ url_clear (struct twist_url *u)
   free (u->query);
   free (u->fragment);
   free (u);
+}
+
+static int host_zone (char *host);
+
+/* Is HOST, the text between brackets with any zone, an IPv6 address?  */
+static int
+host_is_ipv6 (const char *host)
+{
+  struct in6_addr a;
+  char addr[64];
+  const char *pct = strchr (host, '%');
+  size_t n = pct != NULL ? (size_t) (pct - host) : strlen (host);
+
+  if (n >= sizeof addr)
+    return 0;
+  memcpy (addr, host, n);
+  addr[n] = 0;
+  return inet_pton (AF_INET6, addr, &a) == 1;
+}
+
+static int
+hex_digit (int c)
+{
+  if (c >= '0' && c <= '9')
+    return c - '0';
+  if (c >= 'a' && c <= 'f')
+    return c - 'a' + 10;
+  if (c >= 'A' && c <= 'F')
+    return c - 'A' + 10;
+  return -1;
 }
 
 /* Percent escapes of a user name or password, undone in place.  Anything
@@ -211,6 +243,11 @@ twist_url_parse_int (const char *input, struct twist_url **out)
             }
           memcpy (u->host, host + 1, (size_t) (endhost - host - 1));
           u->host[endhost - host - 1] = 0;
+          if (host_zone (u->host) != 0 || !host_is_ipv6 (u->host))
+            {
+              url_clear (u);
+              return TWIST_ERR_URL;
+            }
           p = endhost + 1;
         }
       else
@@ -384,11 +421,84 @@ twist_url_default_port (const char *scheme)
   return 0;
 }
 
+/* The zone of an IPv6 address in brackets, as the URL writes it, is the name
+   of an interface after a percent sign that is itself encoded (RFC 6874:
+   fe80::1%25eth0).  A bare percent sign is taken too.  The host keeps the
+   zone as ssh does, fe80::1%eth0, decoded in place.  Only what can name an
+   interface is allowed: the text reaches the system, known_hosts and
+   messages.  */
+static int
+host_zone (char *host)
+{
+  char *pct = strchr (host, '%');
+  const char *z;
+  char zone[40];
+  size_t n = 0;
+
+  if (pct == NULL)
+    return 0;
+  z = pct + 1;
+  if (z[0] == '2' && z[1] == '5')
+    z += 2;
+  while (*z != 0)
+    {
+      int c = (unsigned char) *z++;
+
+      if (c == '%')
+        {
+          int hi = hex_digit (z[0]), lo = z[0] != 0 ? hex_digit (z[1]) : -1;
+
+          if (hi < 0 || lo < 0)
+            return -1;
+          c = hi * 16 + lo;
+          z += 2;
+        }
+      if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'z')
+            || (c >= 'A' && c <= 'Z') || c == '.' || c == '_' || c == '-'
+            || c == '~'))
+        return -1;
+      /* Interface names are 15 characters on Linux; this is generous.  */
+      if (n >= 32)
+        return -1;
+      zone[n++] = (char) c;
+    }
+  if (n == 0)
+    return -1;
+  memcpy (pct + 1, zone, n);
+  pct[1 + n] = 0;
+  return 0;
+}
+
+int
+twist_url_host_text (const struct twist_url *url, int with_zone, char *buf,
+                     size_t cap)
+{
+  const char *host = url->host != NULL ? url->host : "";
+  int n;
+
+  if (strchr (host, ':') == NULL)
+    n = snprintf (buf, cap, "%s", host);
+  else
+    {
+      const char *pct = strchr (host, '%');
+
+      if (pct != NULL && with_zone)
+        n = snprintf (buf, cap, "[%.*s%%25%s]", (int) (pct - host), host,
+                      pct + 1);
+      else if (pct != NULL)
+        n = snprintf (buf, cap, "[%.*s]", (int) (pct - host), host);
+      else
+        n = snprintf (buf, cap, "[%s]", host);
+    }
+  return n >= 0 && (size_t) n < cap ? TWIST_OK : TWIST_ERR_NOMEM;
+}
+
 char *
 twist_url_format (const struct twist_url *url)
 {
   char buf[2048];
   char user[768] = "", password[768] = "";
+  char host[512];
   int n;
 
   if (url == NULL || url->scheme == NULL)
@@ -397,13 +507,15 @@ twist_url_format (const struct twist_url *url)
       || (url->password != NULL
           && userinfo_escape (url->password, password, sizeof password) < 0))
     return NULL;
+  if (twist_url_host_text (url, 1, host, sizeof host) != TWIST_OK)
+    return NULL;
   n = snprintf (buf, sizeof buf, "%s://%s%s%s%s%s:%d%s%s%s",
                 url->scheme,
                 user,
                 url->password != NULL ? ":" : "",
                 password,
                 url->user != NULL ? "@" : "",
-                url->host != NULL ? url->host : "",
+                host,
                 url->port,
                 url->path != NULL ? url->path : "/",
                 url->query != NULL ? "?" : "",
@@ -418,13 +530,14 @@ twist_url_proxy_target (const struct twist_url *url, char *buf, size_t cap)
 {
   const char *path;
   const char *scheme;
-  const char *host;
+  char host[512];
   int n;
 
   if (url == NULL || buf == NULL || cap == 0)
     return TWIST_ERR_INVAL;
   scheme = url->scheme != NULL ? url->scheme : "http";
-  host = url->host != NULL ? url->host : "";
+  if (twist_url_host_text (url, 0, host, sizeof host) != TWIST_OK)
+    return TWIST_ERR_URL;
   path = url->path != NULL && url->path[0] != 0 ? url->path : "/";
   if (url->query != NULL)
     n = snprintf (buf, cap, "%s://%s:%d%s?%s", scheme, host, url->port, path,

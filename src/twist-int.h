@@ -365,6 +365,11 @@ void twist_url_free_int (struct twist_url *url);
 int twist_url_resolve_int (const struct twist_url *base, const char *ref,
                            struct twist_url **out);
 char *twist_url_format (const struct twist_url *url);
+/* The host of URL as it is written in a URL or a Host header: an IPv6
+   address in brackets.  WITH_ZONE keeps the interface of a link-local address
+   (encoded, as RFC 6874 has it), and a Host header does not name one.  */
+int twist_url_host_text (const struct twist_url *url, int with_zone, char *buf,
+                         size_t cap);
 /* Absolute-form request target without userinfo.  */
 int twist_url_proxy_target (const struct twist_url *url, char *buf, size_t cap);
 int twist_url_default_port (const char *scheme);
@@ -428,6 +433,9 @@ struct twist_dns_addr
   int family;
   unsigned char addr[16];
   char text[64];
+  /* The interface a link-local IPv6 address is reached by, from a zone
+     (fe80::1%eth0); 0 for any other address.  */
+  unsigned scope_id;
 };
 
 /* Data connection uses the control peer.  port is the 227 port.  */

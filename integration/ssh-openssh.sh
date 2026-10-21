@@ -99,6 +99,7 @@ for try in 1 2 3 4 5 6 7 8; do
   cat > "$work/sshd_config" <<EOF
 Port $port
 ListenAddress 127.0.0.1
+ListenAddress ::1
 HostKey $work/hostkey
 PidFile $work/sshd.pid
 AuthorizedKeysFile $work/authorized_keys
@@ -728,6 +729,52 @@ check "$([ $rc -eq 0 ] && [ $(( $(ms) - t0 )) -lt 1000 ] && echo ok)" "--limit-r
 t -k --limit-rate 1M -o /dev/null "http://127.0.0.1:1/x" 2>/dev/null
 rc=$?
 check "$([ $rc -eq 2 ] && echo ok)" "a scheme that cannot keep to it is refused (exit $rc)"
+
+# 20. IPv6 literals.  The address is in brackets in the URL, and known_hosts
+# names it [::1]:port.  The login, a listing and two URLs on one connection all
+# work, and a malformed address is a malformed URL (3) where an interface that
+# is not there is a connection that cannot be made (7).  Skipped when there is
+# an IPv6 loopback on the machine (sshd listens on ::1 if it can).
+if grep -q '^00000000000000000000000000000001 ' /proc/net/if_inet6 2>/dev/null; then
+  b6="[::1]:$port"
+  printf '[::1]:%s %s\n' "$port" "$hostpub" > "$work/home/.ssh/known_hosts"
+  before=$(logins)
+  rm -f "$work/o1" "$work/o2"
+  t --key "$work/userkey" -o "$work/o1" "sftp://$user@$b6$work/srv/small.txt" \
+    -o "$work/o2" "sftp://$user@$b6$work/srv/data.bin"
+  rc=$?
+  sleep 0.3
+  n=$(( $(logins) - before ))
+  ok=
+  [ $rc -eq 0 ] && [ "$(cat "$work/o1")" = small ] && cmp -s "$work/o2" "$work/srv/data.bin" \
+    && [ $n -eq 1 ] && ok=ok
+  check "$ok" "two URLs on [::1] with the host key checked, one login (logins $n, exit $rc)"
+
+  t --key "$work/userkey" "sftp://$user@$b6$work/srv/" > "$work/list" 2>/dev/null
+  rc=$?
+  check "$([ $rc -eq 0 ] && grep -q small.txt "$work/list" && echo ok)" "a listing over [::1] (exit $rc)"
+
+  t --key "$work/userkey" -w '%{url_effective}' -o /dev/null "sftp://$user@$b6$work/srv/small.txt" > "$work/eff"
+  check "$(grep -q "@\[::1\]:$port/" "$work/eff" && echo ok)" "the effective URL keeps the brackets ($(cat "$work/eff"))"
+
+  # The address of this host, not in known_hosts under that name.
+  printf '127.0.0.1 %s\n' "$hostpub" > "$work/home/.ssh/known_hosts"
+  t --key "$work/userkey" -o /dev/null "sftp://$user@$b6$work/srv/small.txt" 2> "$work/err"
+  rc=$?
+  check "$([ $rc -eq 60 ] && grep -q '::1' "$work/err" && echo ok)" \
+    "[::1] is not 127.0.0.1 in known_hosts (exit $rc)"
+
+  for bad in '[::g]' '[1:2:3]' '[1.2.3.4]'; do
+    t -k --key "$work/userkey" -o /dev/null "sftp://$user@$bad:$port$work/srv/small.txt" 2>/dev/null
+    rc=$?
+    check "$([ $rc -eq 3 ] && echo ok)" "$bad is a malformed URL (exit $rc)"
+  done
+  t -k --key "$work/userkey" -o /dev/null "sftp://$user@[fe80::1%25no-such-if0]:$port/x" 2>/dev/null
+  rc=$?
+  check "$([ $rc -eq 7 ] && echo ok)" "an interface that is not there gives 7 (exit $rc)"
+else
+  echo "ssh-openssh: no IPv6 loopback; skipping the IPv6 checks" >&2
+fi
 
 [ $fail -eq 0 ] || exit 1
 exit 0

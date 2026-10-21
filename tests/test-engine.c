@@ -93,6 +93,103 @@ test_url_userinfo (void)
          "a raw CRLF, as before");
 }
 
+/* An IPv6 address in a URL is in brackets, and the host is kept without
+   them.  Written back it has them again, or the text would not parse.  A link
+   local address may carry the name of the interface, which RFC 6874 writes
+   after %25 (a percent sign, encoded); the host keeps it as ssh does
+   (fe80::1%eth0), it is written back encoded, and it is not part of the
+   authority a Host header names.  */
+static void
+test_url_ipv6 (void)
+{
+  struct twist_url *u = NULL, *again = NULL;
+  char *text;
+  char buf[128];
+
+  check (twist_url_parse_int ("sftp://u@[::1]:2222/p", &u) == TWIST_OK
+         && strcmp (u->host, "::1") == 0 && u->port == 2222,
+         "an IPv6 literal with a port");
+  text = twist_url_format (u);
+  check (text != NULL && strcmp (text, "sftp://u@[::1]:2222/p") == 0,
+         "is written with its brackets");
+  free (text);
+  twist_url_free_int (u);
+
+  check (twist_url_parse_int ("http://[2001:db8::7]/x?y=1", &u) == TWIST_OK
+         && strcmp (u->host, "2001:db8::7") == 0 && u->port == 80,
+         "and without one");
+  text = twist_url_format (u);
+  check (text != NULL && strcmp (text, "http://[2001:db8::7]:80/x?y=1") == 0,
+         "the effective URL parses again");
+  if (text != NULL)
+    {
+      check (twist_url_parse_int (text, &again) == TWIST_OK
+             && strcmp (again->host, "2001:db8::7") == 0, "it round-trips");
+      twist_url_free_int (again);
+    }
+  free (text);
+  check (twist_url_host_text (u, 0, buf, sizeof buf) == TWIST_OK
+         && strcmp (buf, "[2001:db8::7]") == 0, "the host as an authority");
+  twist_url_free_int (u);
+
+  check (twist_url_parse_int ("http://example.com/", &u) == TWIST_OK
+         && twist_url_host_text (u, 0, buf, sizeof buf) == TWIST_OK
+         && strcmp (buf, "example.com") == 0, "a name has no brackets");
+  twist_url_free_int (u);
+
+  /* The zone.  */
+  check (twist_url_parse_int ("sftp://u@[fe80::1%25eth0]:22/p", &u) == TWIST_OK
+         && strcmp (u->host, "fe80::1%eth0") == 0, "a zone is decoded");
+  text = twist_url_format (u);
+  check (text != NULL && strcmp (text, "sftp://u@[fe80::1%25eth0]:22/p") == 0,
+         "and encoded again");
+  free (text);
+  check (twist_url_host_text (u, 1, buf, sizeof buf) == TWIST_OK
+         && strcmp (buf, "[fe80::1%25eth0]") == 0, "with the zone");
+  check (twist_url_host_text (u, 0, buf, sizeof buf) == TWIST_OK
+         && strcmp (buf, "[fe80::1]") == 0, "and without it, for a Host header");
+  twist_url_free_int (u);
+  check (twist_url_parse_int ("sftp://[fe80::1%253]/", &u) == TWIST_OK
+         && strcmp (u->host, "fe80::1%3") == 0, "a zone that is a number");
+  twist_url_free_int (u);
+  check (twist_url_parse_int ("sftp://[fe80::1%eth0]/", &u) == TWIST_OK
+         && strcmp (u->host, "fe80::1%eth0") == 0,
+         "a zone with a bare percent sign, as curl takes it");
+  twist_url_free_int (u);
+  check (twist_url_parse_int ("sftp://[fe80::1%25en%2Dp0]/", &u) == TWIST_OK
+         && strcmp (u->host, "fe80::1%en-p0") == 0, "an encoded character");
+  twist_url_free_int (u);
+
+  /* What cannot be a zone is refused, since the text goes to the system and
+     to known_hosts.  */
+  check (twist_url_parse_int ("sftp://[fe80::1%25]/", &u) == TWIST_ERR_URL,
+         "an empty zone");
+  /* Brackets hold an IPv6 address and nothing else.  */
+  check (twist_url_parse_int ("sftp://[::g]/", &u) == TWIST_ERR_URL,
+         "text that is not an address");
+  check (twist_url_parse_int ("sftp://[1:2:3]/", &u) == TWIST_ERR_URL,
+         "too few groups");
+  check (twist_url_parse_int ("sftp://[1.2.3.4]/", &u) == TWIST_ERR_URL,
+         "an IPv4 address in brackets");
+  check (twist_url_parse_int ("sftp://[example.com]/", &u) == TWIST_ERR_URL,
+         "a name in brackets");
+  check (twist_url_parse_int ("sftp://[::ffff:1.2.3.4]/", &u) == TWIST_OK
+         && strcmp (u->host, "::ffff:1.2.3.4") == 0, "a mapped address");
+  twist_url_free_int (u);
+  check (twist_url_parse_int ("sftp://[fe80::1%25a%20b]/", &u)
+         == TWIST_ERR_URL, "a space in a zone");
+  check (twist_url_parse_int ("sftp://[fe80::1%25a%0ab]/", &u)
+         == TWIST_ERR_URL, "a newline in a zone");
+  check (twist_url_parse_int ("sftp://[fe80::1%25a%00b]/", &u)
+         == TWIST_ERR_URL, "a NUL in a zone");
+  check (twist_url_parse_int ("sftp://[fe80::1%25a%25b]/", &u)
+         == TWIST_ERR_URL, "a percent sign in a zone");
+  check (twist_url_parse_int ("sftp://[fe80::1%25a/b]/", &u) == TWIST_ERR_URL,
+         "a slash in a zone");
+  check (twist_url_parse_int ("sftp://[fe80::1%25aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa]/",
+                              &u) == TWIST_ERR_URL, "a very long zone");
+}
+
 static void
 test_url (void)
 {
@@ -548,7 +645,27 @@ struct ka
   int conns[KA_MAX];
   int stop;
   pthread_t thread;
+  char host[128];		/* The Host header of the last request.  */
 };
+
+/* The Host header of a request, for the test to read once the transfer is
+   over.  */
+static void
+ka_note_host (struct ka *k, const char *request)
+{
+  const char *h = strstr (request, "\r\nHost: ");
+  size_t n;
+
+  if (h == NULL)
+    return;
+  h += 8;
+  n = strcspn (h, "\r");
+  if (n >= sizeof k->host)
+    n = sizeof k->host - 1;
+  memcpy (k->host, h, n);
+  k->host[n] = 0;
+  __atomic_thread_fence (__ATOMIC_RELEASE);
+}
 
 static void *
 ka_serve (void *arg)
@@ -599,16 +716,21 @@ ka_serve (void *arg)
               hit = 1;
           if (!hit)
             continue;
-          got = read (k->conns[i], buf, sizeof buf);
+          got = read (k->conns[i], buf, sizeof buf - 1);
           if (got <= 0)
             {
               close (k->conns[i]);
               k->conns[i] = -1;
             }
-          else if (write (k->conns[i], reply, sizeof reply - 1) < 0)
+          else
             {
-              close (k->conns[i]);
-              k->conns[i] = -1;
+              buf[got] = 0;
+              ka_note_host (k, buf);
+              if (write (k->conns[i], reply, sizeof reply - 1) < 0)
+                {
+                  close (k->conns[i]);
+                  k->conns[i] = -1;
+                }
             }
         }
     }
@@ -618,28 +740,47 @@ ka_serve (void *arg)
   return NULL;
 }
 
+/* On 127.0.0.1, or on ::1 if V6.  */
 static int
-ka_start (struct ka *k)
+ka_start_on (struct ka *k, int v6)
 {
   struct sockaddr_in sin;
+  struct sockaddr_in6 sin6;
+  struct sockaddr *sa = (struct sockaddr *) &sin;
   socklen_t len = sizeof sin;
   int i;
 
   memset (k, 0, sizeof *k);
   for (i = 0; i < KA_MAX; i++)
     k->conns[i] = -1;
-  k->listen_fd = socket (AF_INET, SOCK_STREAM, 0);
+  k->listen_fd = socket (v6 ? AF_INET6 : AF_INET, SOCK_STREAM, 0);
   if (k->listen_fd < 0)
     return -1;
   memset (&sin, 0, sizeof sin);
   sin.sin_family = AF_INET;
   sin.sin_addr.s_addr = htonl (INADDR_LOOPBACK);
-  if (bind (k->listen_fd, (struct sockaddr *) &sin, sizeof sin) != 0
-      || listen (k->listen_fd, 8) != 0
-      || getsockname (k->listen_fd, (struct sockaddr *) &sin, &len) != 0)
-    return -1;
-  k->port = ntohs (sin.sin_port);
+  if (v6)
+    {
+      memset (&sin6, 0, sizeof sin6);
+      sin6.sin6_family = AF_INET6;
+      sin6.sin6_addr = in6addr_loopback;
+      sa = (struct sockaddr *) &sin6;
+      len = sizeof sin6;
+    }
+  if (bind (k->listen_fd, sa, len) != 0 || listen (k->listen_fd, 8) != 0
+      || getsockname (k->listen_fd, sa, &len) != 0)
+    {
+      close (k->listen_fd);
+      return -1;
+    }
+  k->port = ntohs (v6 ? sin6.sin6_port : sin.sin_port);
   return pthread_create (&k->thread, NULL, ka_serve, k);
+}
+
+static int
+ka_start (struct ka *k)
+{
+  return ka_start_on (k, 0);
 }
 
 static void
@@ -658,6 +799,41 @@ ka_body (char *ptr, size_t size, size_t nmemb, void *user)
   (void) ptr;
   *total += size * nmemb;
   return size * nmemb;
+}
+
+/* A URL with an IPv6 address is written, and its Host header too, with the
+   brackets: Host: [::1]:8080, and not ::1:8080, which names nothing.  */
+static void
+test_http_ipv6_host (void)
+{
+  struct ka k;
+  twist_easy *easy;
+  char url[128], want[64];
+  size_t total = 0;
+  char *eff = NULL;
+
+  if (ka_start_on (&k, 1) != 0)
+    {
+      fputs ("test-engine: no IPv6 loopback; skipping the IPv6 Host test\n",
+             stderr);
+      return;
+    }
+  easy = twist_easy_init ();
+  snprintf (url, sizeof url, "http://[::1]:%d/x", k.port);
+  twist_easy_setopt (easy, TWISTOPT_URL, url);
+  twist_easy_setopt (easy, TWISTOPT_WRITEFUNCTION, ka_body);
+  twist_easy_setopt (easy, TWISTOPT_WRITEDATA, &total);
+  check (twist_easy_perform (easy) == TWIST_OK && total == 6,
+         "a transfer from [::1]");
+  __atomic_thread_fence (__ATOMIC_ACQUIRE);
+  snprintf (want, sizeof want, "[::1]:%d", k.port);
+  check (strcmp (k.host, want) == 0, "the Host header has the brackets");
+  twist_easy_getinfo (easy, TWISTINFO_EFFECTIVE_URL, &eff);
+  snprintf (want, sizeof want, "http://[::1]:%d/x", k.port);
+  check (eff != NULL && strcmp (eff, want) == 0,
+         "the effective URL has them too");
+  twist_easy_cleanup (easy);
+  ka_stop (&k);
 }
 
 /* A share keeps its connection pool for longer than any transfer, and each
@@ -702,6 +878,8 @@ main (void)
 {
   test_url ();
   test_url_userinfo ();
+  test_url_ipv6 ();
+  test_http_ipv6_host ();
   test_scheme ();
   test_proxy ();
   test_conn_pool ();

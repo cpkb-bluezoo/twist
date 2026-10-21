@@ -79,6 +79,7 @@ dial_tcp (struct twist_mail_link *link, const struct twist_dns_addr *addr)
       memset (&sin6, 0, sizeof sin6);
       sin6.sin6_family = AF_INET6;
       memcpy (&sin6.sin6_addr, addr->addr, 16);
+      sin6.sin6_scope_id = addr->scope_id;
       sin6.sin6_port = htons ((uint16_t) link->dial_port);
       sa = &sin6;
       salen = sizeof sin6;

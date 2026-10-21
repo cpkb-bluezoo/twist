@@ -370,6 +370,14 @@ Host keys are checked against `~/.ssh/known_hosts` by default, as the
 curl tool does. A key that is missing or changed fails the transfer, there
 is no accept-new mode, and turning off peer verification (`-k`) skips the
 check. A pinned SHA-256 of the host key is the other way to trust a host.
+An IPv6 literal is stored without its brackets, and a zone (`fe80::1%eth0`,
+written `%25eth0` in a URL, RFC 6874) stays in the host, as ssh keeps it for
+known_hosts. `twist_url_host_text` writes a host back with brackets (and with
+the zone encoded, or without it for a Host header). The resolver treats text
+with a colon as an address or an error, never as a name to look up, and turns
+a zone into the interface index in the address (`scope_id`); the places that
+build a `sockaddr_in6` pass it on, because a link-local address needs it.
+
 A rate limit (`src/engine/rate.c`) is a pacer: a chunk may go when the bytes
 before it have been earned at the limit since the transfer's first chunk, so the
 transfer is ahead by at most one chunk, and the chunk is made no bigger than
