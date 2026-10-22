@@ -102,6 +102,10 @@ Twist TODO List
       c_rehash name), not through OpenSSL's rules.
   [ ] https proxies (engine/tunnel.c) are done for TCP: TLS to the proxy, then
       CONNECT in HTTP/2 or HTTP/1.1.  Left:
+        - CONNECT-UDP (RFC 9298, engine/masque.c) has no end-to-end test: the
+          only proxy to test against was a Go program, which has been
+          removed.  The unit tests (tests/test-masque.c) remain.  HTTP/3
+          directly has none either.
         - CONNECT-UDP (RFC 9298, engine/masque.c) is done for HTTP/3, with
           --proxy-template-udp.  Left: HTTP/3 under a proxy is chosen only by
           --http3-only (the target's HTTPS record and Alt-Svc are not asked

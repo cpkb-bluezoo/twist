@@ -26,6 +26,11 @@
 #include "reactor/cmdq.h"
 #include <pthread.h>
 #include <unistd.h>
+#include <fcntl.h>
+#include <sys/socket.h>
+#ifdef __GLIBC__
+# include <malloc.h>
+#endif
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -527,6 +532,117 @@ test_inbound_ceiling (void)
   twist_loop_free (loop);
 }
 
+/* A connection freed by a posted command must not be dispatched afterwards
+   in the same batch of poll events.  The loop used to run the command queue
+   when it met the waker's event and went on to the next event, which could
+   belong to the connection just freed.  Freed memory is poisoned (glibc) so
+   that a read of it is not a read of intact data, and the handler records
+   anything it is told once the free has run.  */
+static struct twist_loop *stale_loop;
+static struct twist_connection *stale_conn;
+static int stale_fds[2];
+static int stale_variant;
+static int stale_freed;
+static int stale_after_free;
+
+static size_t
+stale_receive (struct twist_endpoint *ep, const uint8_t *data, size_t len)
+{
+  (void) ep;
+  (void) data;
+  if (stale_freed)
+    stale_after_free++;
+  return len;
+}
+
+static void
+stale_error (struct twist_endpoint *ep, int err)
+{
+  (void) ep;
+  (void) err;
+  if (stale_freed)
+    stale_after_free++;
+}
+
+static void
+stale_disconnected (struct twist_endpoint *ep, int err)
+{
+  (void) ep;
+  (void) err;
+  if (stale_freed)
+    stale_after_free++;
+}
+
+static const struct twist_protocol_handler stale_handler = {
+  NULL, stale_receive, stale_disconnected, NULL, stale_error, NULL, NULL
+};
+
+static void
+stale_free (void *user)
+{
+  twist_connection_free (user);
+  stale_freed = 1;
+}
+
+static void
+stale_noop (void *user)
+{
+  (void) user;
+}
+
+static void
+stale_timer (void *user)
+{
+  (void) user;
+  twist_loop_post (stale_loop, stale_free, stale_conn);
+  if (stale_variant == 1 && write (stale_fds[1], "x", 1) != 1)
+    abort ();
+}
+
+static void
+stale_run (int variant)
+{
+  stale_variant = variant;
+  stale_freed = 0;
+  stale_after_free = 0;
+  stale_loop = twist_loop_new (0);
+  stale_conn = twist_connection_new (stale_loop);
+  if (stale_loop == NULL || stale_conn == NULL
+      || socketpair (AF_UNIX, SOCK_STREAM, 0, stale_fds) != 0)
+    abort ();
+  fcntl (stale_fds[0], F_SETFL, O_NONBLOCK);
+  twist_connection_set_handler (stale_conn, &stale_handler);
+  twist_connection_set_fd (stale_conn, stale_fds[0]);
+  twist_connection_connected (stale_conn);
+  if (variant == 2)
+    {
+      /* The waker is already readable from an earlier post, and the
+         connection becomes readable afterwards.  */
+      twist_loop_post (stale_loop, stale_noop, NULL);
+      if (write (stale_fds[1], "x", 1) != 1)
+        abort ();
+    }
+  twist_loop_schedule (stale_loop, twist_loop_now (stale_loop), stale_timer,
+                       NULL, NULL);
+  twist_loop_run_once_ms (stale_loop, 10);
+  twist_loop_free (stale_loop);
+  close (stale_fds[1]);
+}
+
+static void
+test_stale_event (void)
+{
+#ifdef M_PERTURB
+  mallopt (M_PERTURB, 0xa5);
+#endif
+  stale_run (1);
+  check (stale_freed && stale_after_free == 0,
+         "a connection freed by a command is not dispatched in the batch");
+  stale_run (2);
+  check (stale_freed && stale_after_free == 0,
+         "the same when the waker was already readable");
+}
+
 int
 main (void)
 {
@@ -537,5 +653,6 @@ main (void)
   test_security_without_alpn ();
   test_connection_owner ();
   test_inbound_ceiling ();
+  test_stale_event ();
   return tests_finish ();
 }

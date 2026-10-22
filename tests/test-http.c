@@ -871,6 +871,75 @@ test_h2_share (void)
   twist_multi_cleanup (multi);
 }
 
+/* The request writer sized its buffer from the extra headers alone, so a
+   request line longer than that wrote past the allocation.  Every length
+   from well under the old capacity to well over it must give the request,
+   byte for byte.  */
+static void
+test_h1_write_request (void)
+{
+  static const size_t lens[] = { 1, 100, 440, 480, 500, 505, 510, 511, 512,
+                                 513, 520, 560, 700, 1500, 2047 };
+  struct twist_slist *extra = NULL;
+  size_t i;
+  int ok = 1;
+
+  extra = twist_slist_append (extra, "User-Agent: twist/0.1");
+  extra = twist_slist_append (extra, "Accept-Encoding: gzip, deflate");
+  for (i = 0; i < sizeof lens / sizeof lens[0]; i++)
+    {
+      char *target = malloc (lens[i] + 1);
+      char *expect = malloc (lens[i] + 256);
+      uint8_t *out = NULL;
+      size_t out_len = 0;
+      int n;
+      int rc;
+
+      if (target == NULL || expect == NULL)
+        abort ();
+      memset (target, 'a', lens[i]);
+      target[0] = '/';
+      target[lens[i]] = 0;
+      n = snprintf (expect, lens[i] + 256,
+                    "GET %s HTTP/1.1\r\nHost: example.com\r\n"
+                    "User-Agent: twist/0.1\r\n"
+                    "Accept-Encoding: gzip, deflate\r\n\r\n", target);
+      rc = twist_h1_write_request ("GET", target, "example.com", 0, extra,
+                                   NULL, 0, &out, &out_len);
+      if (rc != TWIST_OK || out == NULL || out_len != (size_t) n
+          || memcmp (out, expect, out_len) != 0)
+        ok = 0;
+      free (out);
+      free (target);
+      free (expect);
+    }
+  check (ok, "h1 request is written whole for any target length");
+  twist_slist_free_all (extra);
+}
+
+/* A long host and a body length go through the same buffer.  */
+static void
+test_h1_write_request_host (void)
+{
+  char host[512];
+  uint8_t payload[1] = { 'x' };
+  struct twist_slist *extra = NULL;
+  uint8_t *out = NULL;
+  size_t out_len = 0;
+  int rc;
+
+  memset (host, 'h', sizeof host - 1);
+  host[sizeof host - 1] = 0;
+  extra = twist_slist_append (extra, "User-Agent: twist/0.1");
+  rc = twist_h1_write_request ("POST", "/p", host, 0, extra, payload, 1, &out,
+                               &out_len);
+  check (rc == TWIST_OK && out != NULL && out_len > sizeof host
+         && memmem (out, out_len, "Content-Length: 1\r\n\r\n", 21) != NULL,
+         "h1 request with a long host and a body length");
+  free (out);
+  twist_slist_free_all (extra);
+}
+
 static void
 test_http_status (void)
 {
@@ -897,5 +966,7 @@ main (void)
   test_hpack_long ();
   test_h2_share ();
   test_http_status ();
+  test_h1_write_request ();
+  test_h1_write_request_host ();
   return tests_finish ();
 }

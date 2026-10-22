@@ -1878,7 +1878,6 @@ start_quic (struct twist_http *h, const struct twist_dns_addr *addr)
   struct twist_easy *easy = h->easy;
   char *saved = easy->url->host;
   int saved_port = easy->url->port;
-  char *literal;
   int rc;
 
   if (twist_quic_connect_fn == NULL)
@@ -1906,20 +1905,9 @@ start_quic (struct twist_http *h, const struct twist_dns_addr *addr)
         }
       return;
     }
-  literal = twist_strdup (addr->text);
-  if (literal == NULL || literal[0] == 0)
-    {
-      free (literal);
-      http_fail (h, TWIST_ERR_RESOLVE);
-      return;
-    }
-  easy->url->host = literal;
-  if (h->dial_port > 0)
-    easy->url->port = h->dial_port;
-  rc = twist_quic_connect_fn (easy, &h->conn);
-  easy->url->host = saved;
-  easy->url->port = saved_port;
-  free (literal);
+  rc = twist_quic_connect_fn (easy, addr,
+                              h->dial_port > 0 ? h->dial_port : saved_port,
+                              &h->conn);
   if (rc != TWIST_OK)
     {
       http_fail (h, rc);

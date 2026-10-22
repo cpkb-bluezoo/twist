@@ -27,6 +27,7 @@
 #include <quickstep/frame.h>
 
 #include <stdio.h>
+#include <sys/socket.h>
 #include <sys/types.h>
 
 #define TWIST_IN_CEILING (256u * 1024u)
@@ -397,8 +398,12 @@ extern int (*twist_tls_receive_fn) (struct twist_connection *conn,
                                     const uint8_t *data, size_t len);
 extern int (*twist_tls_send_plain_fn) (struct twist_connection *conn,
                                        const uint8_t *data, size_t len);
+/* A QUIC connection for the transfer EASY to the address ADDR and PORT, which
+   a lookup gave.  The certificate is checked against the host of the URL, not
+   against ADDR.  */
 extern int (*twist_quic_connect_fn) (struct twist_easy *easy,
-                                     struct twist_connection **out);
+                                     const struct twist_dns_addr *addr,
+                                     int port, struct twist_connection **out);
 /* What a QUIC connection can be asked for besides the usual.  DATAGRAMS: DATAGRAM
    frames (RFC 9221) are accepted, and HTTP/3 says H3_DATAGRAM (RFC 9297).  SEND:
    the UDP datagrams do not go to a socket but to this, which is a carrier such
@@ -421,6 +426,7 @@ int twist_quic_dial (struct twist_loop *loop, const char *server_name,
    largest that can be sent now (0: not allowed yet), and who is given the
    ones that arrive.  */
 uint64_t twist_quic_stream_id (struct twist_connection *conn);
+const char *twist_quic_server_name (struct twist_connection *conn);
 int twist_quic_datagram_send (struct twist_connection *conn,
                               const uint8_t *data, size_t len);
 size_t twist_quic_datagram_max (struct twist_connection *conn);
@@ -1123,6 +1129,13 @@ const uint8_t *twist_tftp_packet (const struct twist_tftp *tftp, size_t *len);
 size_t twist_tftp_receive (struct twist_tftp *tftp, const uint8_t *data,
                            size_t len);
 void twist_tftp_timeout (struct twist_tftp *tftp);
+/* The request goes to ADDR and PORT, and the first reply from that address
+   fixes the port the rest is exchanged with.  twist_tftp_accept_source says
+   whether a datagram from FROM is that peer's, and is false for any other.  */
+void twist_tftp_set_dest (struct twist_tftp *tftp,
+                          const struct twist_dns_addr *addr, int port);
+int twist_tftp_accept_source (struct twist_tftp *tftp,
+                              const struct sockaddr *from, socklen_t flen);
 int twist_tftp_attach (struct twist_easy *easy);
 
 struct twist_share

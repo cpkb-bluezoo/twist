@@ -467,6 +467,7 @@ twist_loop_run_once_ms (struct twist_loop *loop, int wait_ms)
   struct twist_poll_event ev[TWIST_POLL_BATCH];
   uint64_t now;
   long timeout;
+  int drain_cmds = 0;
   int n;
   int i;
 
@@ -488,12 +489,17 @@ twist_loop_run_once_ms (struct twist_loop *loop, int wait_ms)
   n = twist_poll_wait (loop->poll, ev, TWIST_POLL_BATCH, (int) timeout);
   if (n < 0)
     return TWIST_ERR_CONNECT;
+  /* The events of this batch hold connection pointers, so nothing that
+     frees a connection may run until every one has been dispatched.  A
+     command is such a thing (the deferred frees are posted as commands), and
+     the waker's event can come before a connection's: the wake-up is cleared
+     where it is met and the queue is drained after the last event.  */
   for (i = 0; i < n; i++)
     {
       if (ev[i].ptr == loop)
         {
           waker_drain (loop->waker_r);
-          twist_cmdq_drain (loop->cmds);
+          drain_cmds = 1;
         }
       else if (ev[i].ptr != NULL)
         {
@@ -507,6 +513,8 @@ twist_loop_run_once_ms (struct twist_loop *loop, int wait_ms)
       else
         dispatch_fd (loop, ev[i].fd, ev[i].readable, ev[i].writable);
     }
+  if (drain_cmds)
+    twist_cmdq_drain (loop->cmds);
   now = twist_loop_now (loop);
   twist_timer_heap_fire (loop->timers, now);
   fire_aux (loop, now);

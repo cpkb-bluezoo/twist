@@ -336,7 +336,12 @@ twist_h1_write_request (const char *method, const char *target,
                         const uint8_t *body, size_t body_len, uint8_t **out,
                         size_t *out_len)
 {
-  size_t cap = 512;
+  /* "<method> <target> HTTP/1.x\r\nHost: <host>\r\n" is the fixed text
+     around the three; each header is its line and a CRLF; the Content-Length
+     line is "Content-Length: " and at most 20 digits and a CRLF; the blank
+     line ends it.  The buffer is sized from these, so no input can outgrow
+     it; the checks below keep that true if one of them is ever changed.  */
+  size_t cap;
   const struct twist_slist *h;
   uint8_t *buf;
   size_t n = 0;
@@ -344,19 +349,21 @@ twist_h1_write_request (const char *method, const char *target,
 
   if (twist_has_ctl (method) || twist_has_ctl (target) || twist_has_ctl (host))
     return TWIST_ERR_PROTOCOL;
+  cap = strlen (method) + strlen (target) + strlen (host)
+        + sizeof " " " HTTP/1.x\r\nHost: \r\n" + 16 + 20 + 2 + 2;
   for (h = extra; h != NULL; h = h->next)
     {
       if (twist_has_ctl (h->data))
         return TWIST_ERR_PROTOCOL;
       cap += strlen (h->data) + 2;
     }
-  buf = twist_xmalloc (cap + 64);
+  buf = twist_xmalloc (cap);
   if (buf == NULL)
     return TWIST_ERR_NOMEM;
   wr = snprintf ((char *) buf, cap,
                  "%s %s HTTP/1.%d\r\nHost: %s\r\n",
                  method, target, http10 ? 0 : 1, host);
-  if (wr < 0)
+  if (wr < 0 || (size_t) wr >= cap)
     {
       free (buf);
       return TWIST_ERR_NOMEM;
@@ -365,7 +372,7 @@ twist_h1_write_request (const char *method, const char *target,
   for (h = extra; h != NULL; h = h->next)
     {
       wr = snprintf ((char *) buf + n, cap - n, "%s\r\n", h->data);
-      if (wr < 0 || n + (size_t) wr >= cap)
+      if (wr < 0 || (size_t) wr >= cap - n)
         {
           free (buf);
           return TWIST_ERR_NOMEM;
@@ -376,21 +383,20 @@ twist_h1_write_request (const char *method, const char *target,
     {
       wr = snprintf ((char *) buf + n, cap - n, "Content-Length: %zu\r\n",
                      body_len);
-      if (wr < 0 || n + (size_t) wr >= cap)
+      if (wr < 0 || (size_t) wr >= cap - n)
         {
           free (buf);
           return TWIST_ERR_NOMEM;
         }
       n += (size_t) wr;
     }
-  if (n + 2 > cap)
+  if (cap - n < 2)
     {
       free (buf);
       return TWIST_ERR_NOMEM;
     }
   buf[n++] = '\r';
   buf[n++] = '\n';
-  (void) body;
   *out = buf;
   *out_len = n;
   return TWIST_OK;

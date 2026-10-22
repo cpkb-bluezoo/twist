@@ -76,7 +76,8 @@ int (*twist_tls_start_fn) (struct twist_connection *,
                            const struct twist_tls_want *);
 int (*twist_tls_receive_fn) (struct twist_connection *, const uint8_t *,
                              size_t);
-int (*twist_quic_connect_fn) (struct twist_easy *, struct twist_connection **);
+int (*twist_quic_connect_fn) (struct twist_easy *, const struct twist_dns_addr *,
+                              int, struct twist_connection **);
 
 int twist_connection_send_plain (struct twist_connection *c,
                                 const uint8_t *data, size_t len);

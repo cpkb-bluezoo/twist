@@ -24,9 +24,12 @@
 #include "twist-int.h"
 #include "body.h"
 
+#include <arpa/inet.h>
+#include <netinet/in.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
 
 static size_t
 tftp_read (char *ptr, size_t size, size_t nmemb, void *user)
@@ -273,9 +276,101 @@ test_tftp (void)
   twist_easy_cleanup (easy);
 }
 
+static struct sockaddr_in
+from4 (const char *ip, int port)
+{
+  struct sockaddr_in sin;
+
+  memset (&sin, 0, sizeof sin);
+  sin.sin_family = AF_INET;
+  sin.sin_port = htons ((uint16_t) port);
+  inet_pton (AF_INET, ip, &sin.sin_addr);
+  return sin;
+}
+
+static struct sockaddr_in6
+from6 (const char *ip, int port)
+{
+  struct sockaddr_in6 sin;
+
+  memset (&sin, 0, sizeof sin);
+  sin.sin6_family = AF_INET6;
+  sin.sin6_port = htons ((uint16_t) port);
+  inet_pton (AF_INET6, ip, &sin.sin6_addr);
+  return sin;
+}
+
+static int
+accepts4 (struct twist_tftp *t, const char *ip, int port)
+{
+  struct sockaddr_in sin = from4 (ip, port);
+
+  return twist_tftp_accept_source (t, (struct sockaddr *) &sin, sizeof sin);
+}
+
+static int
+accepts6 (struct twist_tftp *t, const char *ip, int port)
+{
+  struct sockaddr_in6 sin = from6 (ip, port);
+
+  return twist_tftp_accept_source (t, (struct sockaddr *) &sin, sizeof sin);
+}
+
+/* RFC 1350 section 4: the server answers from a port of its own, and the
+   client goes on with that port only.  A datagram from anywhere else is not
+   the transfer's, whatever it says.  It used to be taken, and the rest of the
+   transfer was then sent to whoever sent it.  */
+static void
+test_tftp_source (void)
+{
+  struct twist_easy *easy = twist_easy_init ();
+  struct twist_tftp *t;
+  struct twist_dns_addr a4;
+  struct twist_dns_addr a6;
+
+  memset (&a4, 0, sizeof a4);
+  a4.family = 4;
+  inet_pton (AF_INET, "192.0.2.1", a4.addr);
+  memset (&a6, 0, sizeof a6);
+  a6.family = 6;
+  inet_pton (AF_INET6, "2001:db8::1", a6.addr);
+
+  check (twist_url_parse_int ("tftp://192.0.2.1/hello", &easy->url)
+         == TWIST_OK, "source url");
+  t = twist_tftp_new (easy, 0);
+  twist_tftp_set_dest (t, &a4, 69);
+  check (!accepts4 (t, "198.51.100.7", 5000),
+         "a stranger before the first reply is not taken");
+  check (!accepts4 (t, "192.0.2.2", 5000),
+         "a neighbour of the server is not taken");
+  check (accepts4 (t, "192.0.2.1", 5000),
+         "the server's first reply is taken");
+  check (accepts4 (t, "192.0.2.1", 5000), "and the ones after it");
+  check (!accepts4 (t, "192.0.2.1", 5001),
+         "the server's address on another port is not taken");
+  check (!accepts4 (t, "198.51.100.7", 5000),
+         "a stranger on the same port is not taken");
+  check (!accepts4 (t, "198.51.100.7", 69), "nor from port 69");
+  check (accepts4 (t, "192.0.2.1", 5000), "the server is still heard");
+  twist_easy_cleanup (easy);
+
+  easy = twist_easy_init ();
+  check (twist_url_parse_int ("tftp://[2001:db8::1]/hello", &easy->url)
+         == TWIST_OK, "v6 source url");
+  t = twist_tftp_new (easy, 0);
+  twist_tftp_set_dest (t, &a6, 69);
+  check (!accepts6 (t, "2001:db8::2", 5000), "v6: a stranger is not taken");
+  check (!accepts4 (t, "192.0.2.1", 5000), "v6: another family is not taken");
+  check (accepts6 (t, "2001:db8::1", 5000), "v6: the server's reply is taken");
+  check (!accepts6 (t, "2001:db8::1", 5001), "v6: another port is not taken");
+  check (!accepts6 (t, "2001:db8::2", 5000), "v6: a stranger is still not");
+  twist_easy_cleanup (easy);
+}
+
 int
 main (void)
 {
   test_tftp ();
+  test_tftp_source ();
   return tests_finish ();
 }

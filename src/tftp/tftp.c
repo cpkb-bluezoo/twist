@@ -81,6 +81,16 @@ struct twist_tftp
     struct sockaddr_in6 in6;
   } peer;
   socklen_t peer_len;
+  /* Where the request went, which is whose reply is wanted; and whether the
+     first reply has fixed PEER to the port it came from.  */
+  union
+  {
+    struct sockaddr sa;
+    struct sockaddr_in in;
+    struct sockaddr_in6 in6;
+  } dest;
+  socklen_t dest_len;
+  int locked;
   const char *upload_data;
   size_t upload_len;
   size_t upload_off;
@@ -619,21 +629,113 @@ twist_tftp_timeout (struct twist_tftp *t)
   on_retry (t);
 }
 
+/* Where the request goes.  */
+void
+twist_tftp_set_dest (struct twist_tftp *t, const struct twist_dns_addr *addr,
+                     int port)
+{
+  memset (&t->peer, 0, sizeof t->peer);
+  if (addr->family == 6)
+    {
+      t->peer.in6.sin6_family = AF_INET6;
+      t->peer.in6.sin6_port = htons ((uint16_t) port);
+      memcpy (&t->peer.in6.sin6_addr, addr->addr, 16);
+      t->peer.in6.sin6_scope_id = addr->scope_id;
+      t->peer_len = sizeof t->peer.in6;
+    }
+  else
+    {
+      t->peer.in.sin_family = AF_INET;
+      t->peer.in.sin_port = htons ((uint16_t) port);
+      memcpy (&t->peer.in.sin_addr, addr->addr, 4);
+      t->peer_len = sizeof t->peer.in;
+    }
+  memcpy (&t->dest, &t->peer, sizeof t->dest);
+  t->dest_len = t->peer_len;
+  t->locked = 0;
+}
+
+/* Whether A and B, of lengths ALEN and BLEN, are the same IP address, and
+   with PORT the same port.  Anything that is not a whole IPv4 or IPv6 socket
+   address is not the same as anything.  */
+static int
+same_address (const struct sockaddr *a, socklen_t alen,
+              const struct sockaddr *b, socklen_t blen, int port)
+{
+  if (alen < (socklen_t) sizeof (sa_family_t)
+      || blen < (socklen_t) sizeof (sa_family_t)
+      || a->sa_family != b->sa_family)
+    return 0;
+  if (a->sa_family == AF_INET)
+    {
+      const struct sockaddr_in *x = (const struct sockaddr_in *) a;
+      const struct sockaddr_in *y = (const struct sockaddr_in *) b;
+
+      return alen >= (socklen_t) sizeof *x && blen >= (socklen_t) sizeof *y
+             && x->sin_addr.s_addr == y->sin_addr.s_addr
+             && (!port || x->sin_port == y->sin_port);
+    }
+  if (a->sa_family == AF_INET6)
+    {
+      const struct sockaddr_in6 *x = (const struct sockaddr_in6 *) a;
+      const struct sockaddr_in6 *y = (const struct sockaddr_in6 *) b;
+
+      return alen >= (socklen_t) sizeof *x && blen >= (socklen_t) sizeof *y
+             && memcmp (&x->sin6_addr, &y->sin6_addr, 16) == 0
+             && (!port || x->sin6_port == y->sin6_port);
+    }
+  return 0;
+}
+
+/* Whether a datagram that came from FROM is the peer's (RFC 1350, section 4).
+   The server answers a request from a port of its own, which is the transfer
+   ID, and the rest of the transfer is between that port and ours.  So the
+   first reply must come from the address the request went to, and fixes the
+   port; after that only that address and port are heard.  The socket is not
+   connected, since the reply comes from another port than the one it was sent
+   to, so the check is made here.  Without it anyone who can reach our port
+   could put data in the file and be sent the rest of the transfer.  */
+int
+twist_tftp_accept_source (struct twist_tftp *t, const struct sockaddr *from,
+                          socklen_t flen)
+{
+  if (flen <= 0 || (size_t) flen > sizeof t->peer)
+    return 0;
+  if (!t->locked)
+    {
+      if (!same_address (from, flen, &t->dest.sa, t->dest_len, 0))
+        return 0;
+      memcpy (&t->peer, from, (size_t) flen);
+      t->peer_len = flen;
+      t->locked = 1;
+      return 1;
+    }
+  return same_address (from, flen, &t->peer.sa, t->peer_len, 1);
+}
+
 static ssize_t
 udp_read (void *user, uint8_t *buf, size_t len)
 {
   struct twist_tftp *t = user;
   struct sockaddr_storage from;
-  socklen_t flen = sizeof from;
+  socklen_t flen;
   ssize_t n;
+  int tries;
 
-  n = recvfrom (t->fd, buf, len, 0, (struct sockaddr *) &from, &flen);
-  if (n >= 0 && flen > 0 && (size_t) flen <= sizeof t->peer)
+  /* A datagram that is not the peer's is dropped, and the next is read.  The
+     count keeps a flood of them from holding the loop; what is left is read
+     when the socket is next found readable.  */
+  for (tries = 0; tries < 32; tries++)
     {
-      memcpy (&t->peer, &from, (size_t) flen);
-      t->peer_len = flen;
+      flen = sizeof from;
+      n = recvfrom (t->fd, buf, len, 0, (struct sockaddr *) &from, &flen);
+      if (n < 0)
+        return n;
+      if (twist_tftp_accept_source (t, (struct sockaddr *) &from, flen))
+        return n;
     }
-  return n;
+  errno = EAGAIN;
+  return -1;
 }
 
 static ssize_t
@@ -725,12 +827,6 @@ dial_udp (struct twist_tftp *t, const struct twist_dns_addr *addr)
           close (fd);
           return TWIST_ERR_CONNECT;
         }
-      memset (&t->peer, 0, sizeof t->peer);
-      t->peer.in6.sin6_family = AF_INET6;
-      t->peer.in6.sin6_port = htons ((uint16_t) port);
-      memcpy (&t->peer.in6.sin6_addr, addr->addr, 16);
-      t->peer.in6.sin6_scope_id = addr->scope_id;
-      t->peer_len = sizeof t->peer.in6;
     }
   else
     {
@@ -744,12 +840,8 @@ dial_udp (struct twist_tftp *t, const struct twist_dns_addr *addr)
           close (fd);
           return TWIST_ERR_CONNECT;
         }
-      memset (&t->peer, 0, sizeof t->peer);
-      t->peer.in.sin_family = AF_INET;
-      t->peer.in.sin_port = htons ((uint16_t) port);
-      memcpy (&t->peer.in.sin_addr, addr->addr, 4);
-      t->peer_len = sizeof t->peer.in;
     }
+  twist_tftp_set_dest (t, addr, port);
   c = twist_connection_new (t->easy->loop);
   if (c == NULL)
     {

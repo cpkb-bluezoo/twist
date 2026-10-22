@@ -350,11 +350,59 @@ test_qlog (void)
   rmdir (dir);
 }
 
+/* Direct HTTP/3 dials the address a lookup gave, but the certificate must be
+   checked against the host of the URL.  It was checked against the address,
+   so that anyone who could answer the lookup, and held a certificate that
+   names their own address, was taken for the origin.  The address stands in
+   for the lookup here and nothing answers at it.  */
+static void
+test_quic_server_name (void)
+{
+  struct twist_loop *loop = twist_loop_new (0);
+  struct twist_easy *easy = twist_easy_init ();
+  struct twist_connection *conn = NULL;
+  struct twist_dns_addr addr;
+  struct sockaddr_in sin;
+  socklen_t sl = sizeof sin;
+  int udp = socket (AF_INET, SOCK_DGRAM, 0);
+  char url[64];
+  const char *name;
+  int rc;
+
+  check (loop != NULL && easy != NULL && udp >= 0, "name test set up");
+  check (twist_quic_register () == TWIST_OK && twist_quic_connect_fn != NULL,
+         "the QUIC dialer is registered");
+  memset (&sin, 0, sizeof sin);
+  sin.sin_family = AF_INET;
+  inet_pton (AF_INET, "127.0.0.1", &sin.sin_addr);
+  check (bind (udp, (struct sockaddr *) &sin, sl) == 0
+         && getsockname (udp, (struct sockaddr *) &sin, &sl) == 0, "a port");
+  memset (&addr, 0, sizeof addr);
+  addr.family = 4;
+  inet_pton (AF_INET, "127.0.0.1", addr.addr);
+  snprintf (url, sizeof url, "https://example.test:%d/", ntohs (sin.sin_port));
+  check (twist_url_parse_int (url, &easy->url) == TWIST_OK
+         && easy->url != NULL, "a URL");
+  easy->loop = loop;
+
+  rc = twist_quic_connect_fn (easy, &addr, ntohs (sin.sin_port), &conn);
+  check (rc == TWIST_OK && conn != NULL, "dial");
+  name = conn != NULL ? twist_quic_server_name (conn) : NULL;
+  check (name != NULL && strcmp (name, "example.test") == 0,
+         "the server name is the host of the URL, not the address");
+  if (conn != NULL)
+    twist_connection_free (conn);
+  twist_easy_cleanup (easy);
+  close (udp);
+  twist_loop_free (loop);
+}
+
 int
 main (void)
 {
   test_keylog_writer ();
   test_trust ();
   test_qlog ();
+  test_quic_server_name ();
   return tests_finish ();
 }

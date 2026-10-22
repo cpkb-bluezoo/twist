@@ -317,6 +317,17 @@ twist_quic_stream_id (struct twist_connection *conn)
   return s != NULL ? s->id : UINT64_MAX;
 }
 
+/* The name the certificate of the server is checked against and that is sent
+   as the server name: the host of the URL, never the address that was dialled.
+   NULL if CONN is not a QUIC connection.  */
+const char *
+twist_quic_server_name (struct twist_connection *conn)
+{
+  struct twist_quic *q = conn != NULL ? twist_connection_tls (conn) : NULL;
+
+  return q != NULL ? q->server_name : NULL;
+}
+
 int
 twist_quic_datagram_send (struct twist_connection *conn, const uint8_t *data,
                           size_t len)
@@ -1153,22 +1164,19 @@ twist_quic_dial (struct twist_loop *loop, const char *server_name,
   return TWIST_OK;
 }
 
+/* The address is what a lookup gave, which an attacker who can answer the
+   lookup chooses.  What the server must prove is the name the user asked for,
+   so that, and not the address, is the name the certificate is checked
+   against.  */
 static int
-quic_connect (struct twist_easy *easy, struct twist_connection **out)
+quic_connect (struct twist_easy *easy, const struct twist_dns_addr *addr,
+              int port, struct twist_connection **out)
 {
-  struct twist_dns_addr addr;
-
-  if (easy == NULL || easy->url == NULL || easy->url->host == NULL)
+  if (easy == NULL || easy->url == NULL || easy->url->host == NULL
+      || addr == NULL)
     return TWIST_ERR_INVAL;
-  memset (&addr, 0, sizeof addr);
-  if (inet_pton (AF_INET, easy->url->host, addr.addr) == 1)
-    addr.family = 4;
-  else if (inet_pton (AF_INET6, easy->url->host, addr.addr) == 1)
-    addr.family = 6;
-  else
-    return TWIST_ERR_RESOLVE;
-  return twist_quic_dial (easy->loop, easy->url->host, "h3", &addr,
-                          easy->url->port, easy->cainfo, easy->capath, easy->sslcert,
+  return twist_quic_dial (easy->loop, easy->url->host, "h3", addr, port,
+                          easy->cainfo, easy->capath, easy->sslcert,
                           easy->sslkey, easy->verifypeer, NULL, out);
 }
 
