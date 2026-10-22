@@ -20,6 +20,7 @@
 # include <config.h>
 #endif
 
+#include "gettext.h"
 #include "twist-int.h"
 
 #include <ctype.h>
@@ -39,7 +40,9 @@ enum
   I_CAP,
   I_AUTH,
   I_BOX,
-  I_FETCH
+  I_FETCH,
+  I_STARTTLS,
+  I_TLSWAIT
 };
 
 struct twist_imap
@@ -49,6 +52,12 @@ struct twist_imap
   struct twist_mail_sasl sasl;
   struct twist_endpoint *ep;
   int implicit_tls;
+  /* TWISTOPT_USE_SSL, for a scheme that is not TLS already.  TLS_DONE: the
+     connection was upgraded.  STARTTLS_ADV: the server said it can, in its
+     capabilities.  */
+  int use_ssl;
+  int tls_done;
+  int starttls_adv;
   int state;
   int finished;
   int tag;
@@ -258,6 +267,42 @@ start_auth (struct twist_imap *m)
   return rc;
 }
 
+/* The capabilities have been answered.  If TLS was asked for and the
+   connection has not been upgraded, this is the place: before the login, so
+   that the password is not sent where it can be read.  */
+static int
+after_cap (struct twist_imap *m)
+{
+  if (m->use_ssl != TWIST_USE_SSL_NONE && !m->tls_done)
+    {
+      if (m->starttls_adv)
+        {
+          next_tag (m);
+          m->state = I_STARTTLS;
+          return imap_send (m, "%s STARTTLS\r\n", m->expect);
+        }
+      if (m->use_ssl == TWIST_USE_SSL_ALL)
+        return twist_easy_use_ssl_failed (m->easy,
+                                          _("the server does not offer "
+                                            "STARTTLS"));
+    }
+  return start_auth (m);
+}
+
+/* The server has said yes to STARTTLS: the handshake starts, and nothing is
+   sent until it is done.  A test with no connection has none to start.  */
+static int
+begin_tls (struct twist_imap *m)
+{
+  m->state = I_TLSWAIT;
+  if (m->ep == NULL)
+    return TWIST_OK;
+  return twist_connection_start_tls (m->ep->conn, m->easy->url->host,
+                                     m->easy->verifypeer, NULL, 0,
+                                     m->easy->cainfo, m->easy->capath,
+                                     m->easy->sslcert, m->easy->sslkey);
+}
+
 static void
 note_cap (struct twist_imap *m, const uint8_t *line, size_t n)
 {
@@ -293,8 +338,12 @@ note_cap (struct twist_imap *m, const uint8_t *line, size_t n)
         }
       else
         {
-          while (p < s + n && *p != ' ')
-            p++;
+          e = p;
+          while (e < s + n && *e != ' ')
+            e++;
+          if (e - p == 8 && strncasecmp (p, "STARTTLS", 8) == 0)
+            m->starttls_adv = 1;
+          p = e;
         }
     }
 }
@@ -385,6 +434,21 @@ on_line (struct twist_imap *m, const uint8_t *line, size_t n)
     }
   if (!is_tagged (m, line, n, &ok))
     return;
+  if (!ok && m->state == I_STARTTLS)
+    {
+      /* Refused: required, that is the end; wanted, go on as it is.  */
+      if (m->use_ssl == TWIST_USE_SSL_ALL)
+        {
+          imap_complete (m, twist_easy_use_ssl_failed (m->easy,
+                                                       _("the server refused "
+                                                         "STARTTLS")));
+          return;
+        }
+      rc = start_auth (m);
+      if (rc != TWIST_OK)
+        imap_complete (m, rc);
+      return;
+    }
   if (!ok)
     {
       imap_complete (m, m->state == I_AUTH ? TWIST_ERR_AUTH : TWIST_ERR_PROTOCOL);
@@ -393,7 +457,10 @@ on_line (struct twist_imap *m, const uint8_t *line, size_t n)
   switch (m->state)
     {
     case I_CAP:
-      rc = start_auth (m);
+      rc = after_cap (m);
+      break;
+    case I_STARTTLS:
+      rc = begin_tls (m);
       break;
     case I_AUTH:
       rc = start_box (m);
@@ -462,6 +529,15 @@ twist_imap_receive (struct twist_imap *m, const uint8_t *data, size_t len)
           return off;
         on_line (m, line, line_len);
         off += used;
+        /* A server that has agreed to start TLS says nothing more until the
+           handshake is done.  Whatever else is in this buffer came in the
+           clear, from whoever is on the path, and must not be taken for the
+           encrypted session's.  */
+        if (m->state == I_TLSWAIT && !m->finished && off < len)
+          {
+            imap_complete (m, TWIST_ERR_PROTOCOL);
+            return len;
+          }
       }
     }
   return off;
@@ -496,6 +572,19 @@ imap_connected (struct twist_endpoint *ep)
     imap_complete (m, rc);
 }
 
+/* The handshake is done, for imaps as well as after STARTTLS: only the
+   second is waited for.  */
+static void
+imap_security (struct twist_endpoint *ep, const char *alpn, size_t alpn_len)
+{
+  struct twist_imap *m = ep->user_data;
+
+  (void) alpn;
+  (void) alpn_len;
+  m->ep = ep;
+  twist_imap_tls_done (m);
+}
+
 static size_t
 imap_on_recv (struct twist_endpoint *ep, const uint8_t *data, size_t len)
 {
@@ -527,7 +616,7 @@ static const struct twist_protocol_handler imap_handler = {
   imap_connected,
   imap_on_recv,
   imap_disconnected,
-  NULL,
+  imap_security,
   imap_error,
   NULL,
   NULL
@@ -559,6 +648,7 @@ twist_imap_new (struct twist_easy *easy, int live)
   m->easy = easy;
   m->implicit_tls = easy->url->scheme != NULL
                     && strcmp (easy->url->scheme, "imaps") == 0;
+  m->use_ssl = m->implicit_tls ? TWIST_USE_SSL_NONE : easy->use_ssl;
   twist_mail_sasl_init (&m->sasl);
   easy->xfer = m;
   easy->xfer_free = twist_imap_free;
@@ -580,4 +670,21 @@ twist_imap_attach (struct twist_easy *easy)
   if (rc != TWIST_OK)
     imap_complete (m, rc);
   return easy->done ? easy->result : TWIST_OK;
+}
+
+/* The handshake that followed STARTTLS is done.  What the server said before
+   is not to be trusted now, or kept: it was said in the clear.  The
+   capabilities are asked for again, as RFC 3501 says.  */
+void
+twist_imap_tls_done (struct twist_imap *m)
+{
+  if (m == NULL || m->finished || m->state != I_TLSWAIT)
+    return;
+  m->tls_done = 1;
+  m->starttls_adv = 0;
+  m->auth_adv[0] = 0;
+  next_tag (m);
+  m->state = I_CAP;
+  if (imap_send (m, "%s CAPABILITY\r\n", m->expect) != TWIST_OK)
+    imap_complete (m, TWIST_ERR_PROTOCOL);
 }

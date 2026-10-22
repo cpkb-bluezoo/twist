@@ -20,6 +20,7 @@
 # include <config.h>
 #endif
 
+#include "gettext.h"
 #include "twist-int.h"
 
 #include <ctype.h>
@@ -40,7 +41,9 @@ enum
   P_USER,
   P_PASS,
   P_XFER,
-  P_QUIT
+  P_QUIT,
+  P_STLS,
+  P_TLSWAIT
 };
 
 struct twist_pop3
@@ -51,6 +54,12 @@ struct twist_pop3
   struct twist_dotin dot;
   struct twist_endpoint *ep;
   int implicit_tls;
+  /* TWISTOPT_USE_SSL, for a scheme that is not TLS already.  TLS_DONE: the
+     connection was upgraded.  STLS_ADV: the server said it can, in its answer
+     to CAPA.  */
+  int use_ssl;
+  int tls_done;
+  int stls_adv;
   int state;
   int finished;
   int message;
@@ -213,9 +222,48 @@ start_auth (struct twist_pop3 *p)
   return rc;
 }
 
+/* The capabilities have been answered, or CAPA was.  If TLS was asked for and
+   the connection has not been upgraded, this is the place: before the login,
+   so that the password is not sent where it can be read.  A server that has
+   no CAPA cannot be asked whether it offers STLS, which counts as not
+   offering it.  */
+static int
+after_capa (struct twist_pop3 *p)
+{
+  if (p->use_ssl != TWIST_USE_SSL_NONE && !p->tls_done)
+    {
+      if (p->stls_adv)
+        {
+          p->state = P_STLS;
+          return pop3_send (p, "STLS\r\n");
+        }
+      if (p->use_ssl == TWIST_USE_SSL_ALL)
+        return twist_easy_use_ssl_failed (p->easy,
+                                          _("the server does not offer "
+                                            "STLS"));
+    }
+  return start_auth (p);
+}
+
+/* The server has said yes to STLS: the handshake starts, and nothing is sent
+   until it is done.  A test with no connection has none to start.  */
+static int
+begin_tls (struct twist_pop3 *p)
+{
+  p->state = P_TLSWAIT;
+  if (p->ep == NULL)
+    return TWIST_OK;
+  return twist_connection_start_tls (p->ep->conn, p->easy->url->host,
+                                     p->easy->verifypeer, NULL, 0,
+                                     p->easy->cainfo, p->easy->capath,
+                                     p->easy->sslcert, p->easy->sslkey);
+}
+
 static void
 note_sasl (struct twist_pop3 *p, const uint8_t *line, size_t n)
 {
+  if (n == 4 && strncasecmp ((const char *) line, "STLS", 4) == 0)
+    p->stls_adv = 1;
   if (n >= 5 && strncasecmp ((const char *) line, "SASL ", 5) == 0)
     {
       size_t c = n - 5;
@@ -234,8 +282,27 @@ on_status (struct twist_pop3 *p, const uint8_t *line, size_t n)
 
   if (p->state == P_CAPA && err_line (line, n))
     {
-      if (start_auth (p) != TWIST_OK)
+      /* No CAPA: no way to know that STLS is there.  */
+      rc = after_capa (p);
+      if (rc == TWIST_ERR_USE_SSL)
+        pop3_complete (p, rc);
+      else if (rc != TWIST_OK)
         pop3_complete (p, TWIST_ERR_AUTH);
+      return;
+    }
+  if (p->state == P_STLS && err_line (line, n))
+    {
+      /* Refused: required, that is the end; wanted, go on as it is.  */
+      if (p->use_ssl == TWIST_USE_SSL_ALL)
+        {
+          pop3_complete (p, twist_easy_use_ssl_failed (p->easy,
+                                                       _("the server refused "
+                                                         "STLS")));
+          return;
+        }
+      rc = start_auth (p);
+      if (rc != TWIST_OK)
+        pop3_complete (p, rc);
       return;
     }
   if (err_line (line, n))
@@ -253,18 +320,28 @@ on_status (struct twist_pop3 *p, const uint8_t *line, size_t n)
           return;
         }
       p->state = P_CAPA;
+      p->stls_adv = 0;
+      p->auth_adv[0] = 0;
       rc = pop3_send (p, "CAPA\r\n");
       break;
     case P_CAPA:
       if (n == 1 && line[0] == '.')
         {
-          rc = start_auth (p);
+          rc = after_capa (p);
           break;
+        }
+      if (n == 4 && strncasecmp ((const char *) line, "STLS", 4) == 0)
+        {
+          p->stls_adv = 1;
+          return;
         }
       if (ok_line (line, n))
         return;
       note_sasl (p, line, n);
       return;
+    case P_STLS:
+      rc = begin_tls (p);
+      break;
     case P_AUTH:
       if (cont_line (line, n) && !ok_line (line, n))
         {
@@ -367,6 +444,15 @@ twist_pop3_receive (struct twist_pop3 *p, const uint8_t *data, size_t len)
           return off;
         on_status (p, line, line_len);
         off += used;
+        /* A server that has agreed to start TLS says nothing more until the
+           handshake is done.  Whatever else is in this buffer came in the
+           clear, from whoever is on the path, and must not be taken for the
+           encrypted session's.  */
+        if (p->state == P_TLSWAIT && !p->finished && off < len)
+          {
+            pop3_complete (p, TWIST_ERR_PROTOCOL);
+            return len;
+          }
       }
     }
   return off;
@@ -401,6 +487,19 @@ pop3_connected (struct twist_endpoint *ep)
     pop3_complete (p, rc);
 }
 
+/* The handshake is done, for pop3s as well as after STLS: only the second is
+   waited for.  */
+static void
+pop3_security (struct twist_endpoint *ep, const char *alpn, size_t alpn_len)
+{
+  struct twist_pop3 *p = ep->user_data;
+
+  (void) alpn;
+  (void) alpn_len;
+  p->ep = ep;
+  twist_pop3_tls_done (p);
+}
+
 static size_t
 pop3_on_recv (struct twist_endpoint *ep, const uint8_t *data, size_t len)
 {
@@ -432,7 +531,7 @@ static const struct twist_protocol_handler pop3_handler = {
   pop3_connected,
   pop3_on_recv,
   pop3_disconnected,
-  NULL,
+  pop3_security,
   pop3_error,
   NULL,
   NULL
@@ -464,6 +563,7 @@ twist_pop3_new (struct twist_easy *easy, int live)
   p->easy = easy;
   p->implicit_tls = easy->url->scheme != NULL
                     && strcmp (easy->url->scheme, "pop3s") == 0;
+  p->use_ssl = p->implicit_tls ? TWIST_USE_SSL_NONE : easy->use_ssl;
   twist_mail_sasl_init (&p->sasl);
   easy->xfer = p;
   easy->xfer_free = twist_pop3_free;
@@ -485,4 +585,20 @@ twist_pop3_attach (struct twist_easy *easy)
   if (rc != TWIST_OK)
     pop3_complete (p, rc);
   return easy->done ? easy->result : TWIST_OK;
+}
+
+/* The handshake that followed STLS is done.  What the server said before is
+   not to be trusted now, or kept: it was said in the clear.  The capabilities
+   are asked for again, as RFC 2595 says.  */
+void
+twist_pop3_tls_done (struct twist_pop3 *p)
+{
+  if (p == NULL || p->finished || p->state != P_TLSWAIT)
+    return;
+  p->tls_done = 1;
+  p->stls_adv = 0;
+  p->auth_adv[0] = 0;
+  p->state = P_CAPA;
+  if (pop3_send (p, "CAPA\r\n") != TWIST_OK)
+    pop3_complete (p, TWIST_ERR_PROTOCOL);
 }

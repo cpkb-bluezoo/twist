@@ -57,8 +57,6 @@ Twist TODO List
   [ ] ftps (src/ftp/ftp.c).  The control connection is TLS from the first byte
       and the data connection is protected (PBSZ 0, PROT P) and resumes the
       control session.  Left:
-        - explicit TLS (AUTH TLS) for ftp:// URLs, and --ssl-reqd.  ftp is
-          never upgraded.
         - session reuse needs a TLS 1.3 ticket from the control connection.
           Against a TLS 1.2 server, or one that gave none, the data
           connection does a full handshake, and a server that requires
@@ -79,10 +77,12 @@ Twist TODO List
       Max-Age=0 does not delete.  SameSite and HttpOnly are not looked at.
   [ ] Redirects.  A redirect is followed only to http, https, ws and wss; there
       is no --proto-redir to change that.
-  [ ] STARTTLS (smtp, pop3, imap, ldap), AUTH TLS (ftp) and --ssl-reqd are not
-      done.  Credentials for a scheme without the s go in the clear (the manual
-      says so), and PLAIN and LOGIN are tried when the server advertises no
-      mechanism.
+  [ ] STARTTLS for ldap, and a TLS upgrade for mqtt, are not done; curl has
+      the first through OpenLDAP only, and mqtt has no upgrade command.  A
+      user name and password for those schemes without the s go in the clear
+      (the manual says so).  PLAIN and LOGIN are tried when an smtp, imap or
+      pop3 server advertises no mechanism, and --ssl-reqd keeps them off the
+      wire until the connection is encrypted.
   [ ] The output buffer of a connection has no limit.  A handler that queues
       without end against a peer that does not read grows it, so each handler
       limits itself (SFTP does, by its window); none does for a body given in

@@ -170,6 +170,15 @@ twist_easy_set_error (struct twist_easy *easy, char *msg)
   easy->error = msg;
 }
 
+/* TLS was asked for, to be required, and could not be had.  The words say
+   why; the code is the one for that.  */
+int
+twist_easy_use_ssl_failed (struct twist_easy *easy, const char *why)
+{
+  twist_easy_set_error (easy, twist_strdup (why));
+  return TWIST_ERR_USE_SSL;
+}
+
 const char *
 twist_easy_error (const twist_easy *easy)
 {
@@ -282,6 +291,16 @@ twist_easy_setopt (twist_easy *easy, int opt, ...)
           }
         replace (&easy->unix_path, s);
         easy->unix_abstract = s != NULL && abstract;
+      }
+      break;
+    case TWISTOPT_USE_SSL:
+      {
+        long how = va_arg (ap, long);
+
+        if (how < TWIST_USE_SSL_NONE || how > TWIST_USE_SSL_ALL)
+          rc = TWIST_ERR_INVAL;
+        else
+          easy->use_ssl = (int) how;
       }
       break;
     case TWISTOPT_RESUME_FROM:

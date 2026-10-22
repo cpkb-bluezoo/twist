@@ -173,6 +173,8 @@ cli_status (int err, const char *url)
       return 93;
     case TWIST_ERR_PARTIAL:
       return 18;
+    case TWIST_ERR_USE_SSL:
+      return 64;
     case TWIST_ERR_HOSTKEY:
       return 60;
     case TWIST_ERR_ENCODING:
@@ -234,6 +236,10 @@ usage (void)
   fputs (_("      --capath DIR        directory of CA certificates (PEM)\n"),
          stdout);
   fputs (_("      --noproxy LIST      hosts that do not go through a proxy\n"),
+         stdout);
+  fputs (_("      --ssl               upgrade ftp, imap, pop3 and smtp to TLS if offered\n"),
+         stdout);
+  fputs (_("      --ssl-reqd          the same, and fail if the server will not\n"),
          stdout);
   fputs (_("      --unix-socket PATH  connect to a Unix socket for http and https\n"),
          stdout);
@@ -1687,6 +1693,10 @@ main (int argc, char **argv)
     { "proxy-insecure", no_argument, NULL, 47 },
     { "proxy-template-udp", required_argument, NULL, 48 },
     { "noproxy", required_argument, NULL, 45 },
+    { "ssl", no_argument, NULL, 51 },
+    { "ftp-ssl", no_argument, NULL, 51 },
+    { "ssl-reqd", no_argument, NULL, 52 },
+    { "ftp-ssl-reqd", no_argument, NULL, 52 },
     { "unix-socket", required_argument, NULL, 49 },
     { "abstract-unix-socket", required_argument, NULL, 50 },
     { "proxy", required_argument, NULL, 'x' },
@@ -1953,6 +1963,14 @@ main (int argc, char **argv)
           break;
         case 45:
           twist_easy_setopt (op->easy, TWISTOPT_NOPROXY, optarg);
+          break;
+        case 51:
+          twist_easy_setopt (op->easy, TWISTOPT_USE_SSL,
+                             (long) TWIST_USE_SSL_TRY);
+          break;
+        case 52:
+          twist_easy_setopt (op->easy, TWISTOPT_USE_SSL,
+                             (long) TWIST_USE_SSL_ALL);
           break;
         case 49:
         case 50:

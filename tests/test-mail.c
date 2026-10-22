@@ -277,10 +277,333 @@ test_mail (void)
   }
 }
 
+/* Explicit TLS (--ssl, --ssl-reqd): STARTTLS for smtp and imap, STLS for pop3.
+   The upgrade is asked for only when the user asked for it and the server has
+   said that it offers it, and the user name and password are not sent until
+   the connection is encrypted.  Once it is, what the server said before is
+   forgotten and asked again.  A server that cannot, or will not, is an error
+   if TLS is required and is gone on without if it was only wanted.  Bytes that
+   come in the clear behind the server's yes are not read as part of the
+   encrypted session: they are an attack, and end the transfer.  */
+static int
+starts_with (const char *s, const char *prefix)
+{
+  return strncmp (s, prefix, strlen (prefix)) == 0;
+}
+
+static twist_easy *
+tls_easy (const char *url, int use_ssl)
+{
+  twist_easy *easy = twist_easy_init ();
+
+  check (twist_url_parse_int (url, &easy->url) == TWIST_OK, "starttls url");
+  check (twist_easy_setopt (easy, TWISTOPT_USE_SSL, (long) use_ssl) == TWIST_OK,
+         "use ssl");
+  easy->write_cb = mail_write;
+  return easy;
+}
+
+static void
+test_smtp_starttls (void)
+{
+  static const char *const url = "smtp://alice:secret@127.0.0.1/";
+  size_t splits[2] = { 1, 200 };
+  size_t k;
+
+  for (k = 0; k < 2; k++)
+    {
+      size_t split = splits[k];
+      twist_easy *easy;
+      struct twist_smtp *s;
+
+      /* Wanted and required, offered: upgraded before anything is sent.  */
+      easy = tls_easy (url, TWIST_USE_SSL_ALL);
+      s = twist_smtp_new (easy, 0);
+      feed_n (smtp_recv, s, "220 ready\r\n", split);
+      check (strcmp (twist_smtp_command (s), "EHLO twist\r\n") == 0, "ehlo");
+      feed_n (smtp_recv, s, "250-mx\r\n250-STARTTLS\r\n250 AUTH PLAIN\r\n", split);
+      check (strcmp (twist_smtp_command (s), "STARTTLS\r\n") == 0,
+             "STARTTLS, not AUTH, when offered");
+      feed_n (smtp_recv, s, "220 Ready to start TLS\r\n", split);
+      check (strcmp (twist_smtp_command (s), "STARTTLS\r\n") == 0 && !easy->done,
+             "nothing is sent until the handshake is done");
+      twist_smtp_tls_done (s);
+      check (strcmp (twist_smtp_command (s), "EHLO twist\r\n") == 0,
+             "EHLO again, encrypted");
+      /* STARTTLS in the new answer does not start another upgrade.  */
+      feed_n (smtp_recv, s, "250-mx\r\n250-STARTTLS\r\n250 AUTH PLAIN\r\n", split);
+      check (starts_with (twist_smtp_command (s), "AUTH PLAIN ") && !easy->done,
+             "then the login");
+      twist_easy_cleanup (easy);
+
+      /* Required, and not offered.  */
+      easy = tls_easy (url, TWIST_USE_SSL_ALL);
+      s = twist_smtp_new (easy, 0);
+      feed_n (smtp_recv, s, "220 ready\r\n250 AUTH PLAIN\r\n", split);
+      check (easy->done && easy->result == TWIST_ERR_USE_SSL
+             && !starts_with (twist_smtp_command (s), "AUTH"),
+             "required and not offered is an error, and nothing is sent");
+      twist_easy_cleanup (easy);
+
+      /* Wanted, and not offered: on in the clear.  */
+      easy = tls_easy (url, TWIST_USE_SSL_TRY);
+      s = twist_smtp_new (easy, 0);
+      feed_n (smtp_recv, s, "220 ready\r\n250 AUTH PLAIN\r\n", split);
+      check (starts_with (twist_smtp_command (s), "AUTH PLAIN ") && !easy->done,
+             "wanted and not offered goes on");
+      twist_easy_cleanup (easy);
+
+      /* Refused after it was asked.  */
+      easy = tls_easy (url, TWIST_USE_SSL_ALL);
+      s = twist_smtp_new (easy, 0);
+      feed_n (smtp_recv, s, "220 ready\r\n250-STARTTLS\r\n250 AUTH PLAIN\r\n",
+              split);
+      feed_n (smtp_recv, s, "454 TLS not available\r\n", split);
+      check (easy->done && easy->result == TWIST_ERR_USE_SSL,
+             "required and refused is an error");
+      twist_easy_cleanup (easy);
+      easy = tls_easy (url, TWIST_USE_SSL_TRY);
+      s = twist_smtp_new (easy, 0);
+      feed_n (smtp_recv, s, "220 ready\r\n250-STARTTLS\r\n250 AUTH PLAIN\r\n",
+              split);
+      feed_n (smtp_recv, s, "454 TLS not available\r\n", split);
+      check (starts_with (twist_smtp_command (s), "AUTH PLAIN ") && !easy->done,
+             "wanted and refused goes on");
+      twist_easy_cleanup (easy);
+
+      /* Not asked for: never upgraded, even if it is offered.  */
+      easy = tls_easy (url, TWIST_USE_SSL_NONE);
+      s = twist_smtp_new (easy, 0);
+      feed_n (smtp_recv, s, "220 ready\r\n250-STARTTLS\r\n250 AUTH PLAIN\r\n",
+              split);
+      check (starts_with (twist_smtp_command (s), "AUTH PLAIN "),
+             "STARTTLS is not sent unless it is asked for");
+      twist_easy_cleanup (easy);
+    }
+
+  /* Bytes behind the 220 that are not encrypted.  */
+  {
+    twist_easy *easy = tls_easy (url, TWIST_USE_SSL_ALL);
+    struct twist_smtp *s = twist_smtp_new (easy, 0);
+
+    feed_n (smtp_recv, s, "220 ready\r\n250-STARTTLS\r\n250 AUTH PLAIN\r\n", 200);
+    feed_n (smtp_recv, s, "220 go\r\n250 AUTH PLAIN\r\n", 200);
+    check (easy->done && easy->result == TWIST_ERR_PROTOCOL,
+           "bytes in the clear behind the reply to STARTTLS end the transfer");
+    check (strcmp (twist_smtp_command (s), "STARTTLS\r\n") == 0,
+           "and nothing is sent for them");
+    twist_easy_cleanup (easy);
+  }
+}
+
+static void
+test_imap_starttls (void)
+{
+  static const char *const url = "imap://alice:secret@127.0.0.1/INBOX;UID=1";
+  size_t splits[2] = { 1, 200 };
+  size_t k;
+
+  for (k = 0; k < 2; k++)
+    {
+      size_t split = splits[k];
+      twist_easy *easy;
+      struct twist_imap *m;
+
+      easy = tls_easy (url, TWIST_USE_SSL_ALL);
+      m = twist_imap_new (easy, 0);
+      feed_n (imap_recv, m, "* OK ready\r\n", split);
+      check (strcmp (twist_imap_command (m), "A1 CAPABILITY\r\n") == 0, "cap");
+      feed_n (imap_recv, m,
+              "* CAPABILITY IMAP4rev1 STARTTLS LOGINDISABLED\r\nA1 OK\r\n",
+              split);
+      check (strcmp (twist_imap_command (m), "A2 STARTTLS\r\n") == 0,
+             "STARTTLS, not AUTHENTICATE, when offered");
+      feed_n (imap_recv, m, "A2 OK Begin TLS negotiation now\r\n", split);
+      check (strcmp (twist_imap_command (m), "A2 STARTTLS\r\n") == 0
+             && !easy->done, "nothing is sent until the handshake is done");
+      twist_imap_tls_done (m);
+      check (strcmp (twist_imap_command (m), "A3 CAPABILITY\r\n") == 0,
+             "CAPABILITY again, encrypted");
+      feed_n (imap_recv, m, "* CAPABILITY IMAP4rev1 AUTH=PLAIN\r\nA3 OK\r\n",
+              split);
+      check (starts_with (twist_imap_command (m), "A4 AUTHENTICATE PLAIN ")
+             && !easy->done, "then the login");
+      twist_easy_cleanup (easy);
+
+      easy = tls_easy (url, TWIST_USE_SSL_ALL);
+      m = twist_imap_new (easy, 0);
+      feed_n (imap_recv, m, "* OK ready\r\n", split);
+      feed_n (imap_recv, m, "* CAPABILITY IMAP4rev1 AUTH=PLAIN\r\nA1 OK\r\n",
+              split);
+      check (easy->done && easy->result == TWIST_ERR_USE_SSL
+             && !starts_with (twist_imap_command (m), "A2 AUTH"),
+             "required and not offered is an error, and nothing is sent");
+      twist_easy_cleanup (easy);
+
+      easy = tls_easy (url, TWIST_USE_SSL_TRY);
+      m = twist_imap_new (easy, 0);
+      feed_n (imap_recv, m, "* OK ready\r\n", split);
+      feed_n (imap_recv, m, "* CAPABILITY IMAP4rev1 AUTH=PLAIN\r\nA1 OK\r\n",
+              split);
+      check (starts_with (twist_imap_command (m), "A2 AUTHENTICATE PLAIN ")
+             && !easy->done, "wanted and not offered goes on");
+      twist_easy_cleanup (easy);
+
+      easy = tls_easy (url, TWIST_USE_SSL_ALL);
+      m = twist_imap_new (easy, 0);
+      feed_n (imap_recv, m, "* OK ready\r\n", split);
+      feed_n (imap_recv, m, "* CAPABILITY IMAP4rev1 STARTTLS AUTH=PLAIN\r\nA1 OK\r\n",
+              split);
+      feed_n (imap_recv, m, "A2 NO TLS not available\r\n", split);
+      check (easy->done && easy->result == TWIST_ERR_USE_SSL,
+             "required and refused is an error");
+      twist_easy_cleanup (easy);
+      easy = tls_easy (url, TWIST_USE_SSL_TRY);
+      m = twist_imap_new (easy, 0);
+      feed_n (imap_recv, m, "* OK ready\r\n", split);
+      feed_n (imap_recv, m, "* CAPABILITY IMAP4rev1 STARTTLS AUTH=PLAIN\r\nA1 OK\r\n",
+              split);
+      feed_n (imap_recv, m, "A2 NO TLS not available\r\n", split);
+      check (starts_with (twist_imap_command (m), "A3 AUTHENTICATE PLAIN ")
+             && !easy->done, "wanted and refused goes on");
+      twist_easy_cleanup (easy);
+
+      easy = tls_easy (url, TWIST_USE_SSL_NONE);
+      m = twist_imap_new (easy, 0);
+      feed_n (imap_recv, m, "* OK ready\r\n", split);
+      feed_n (imap_recv, m, "* CAPABILITY IMAP4rev1 STARTTLS AUTH=PLAIN\r\nA1 OK\r\n",
+              split);
+      check (starts_with (twist_imap_command (m), "A2 AUTHENTICATE PLAIN "),
+             "STARTTLS is not sent unless it is asked for");
+      twist_easy_cleanup (easy);
+    }
+  {
+    twist_easy *easy = tls_easy (url, TWIST_USE_SSL_ALL);
+    struct twist_imap *m = twist_imap_new (easy, 0);
+
+    feed_n (imap_recv, m, "* OK ready\r\n", 200);
+    feed_n (imap_recv, m, "* CAPABILITY IMAP4rev1 STARTTLS\r\nA1 OK\r\n", 200);
+    feed_n (imap_recv, m, "A2 OK go\r\n* CAPABILITY IMAP4rev1 AUTH=PLAIN\r\n", 200);
+    check (easy->done && easy->result == TWIST_ERR_PROTOCOL,
+           "bytes in the clear behind the reply to STARTTLS end the transfer");
+    twist_easy_cleanup (easy);
+  }
+}
+
+static void
+test_pop3_stls (void)
+{
+  static const char *const url = "pop3://alice:secret@127.0.0.1/1";
+  size_t splits[2] = { 1, 200 };
+  size_t k;
+
+  for (k = 0; k < 2; k++)
+    {
+      size_t split = splits[k];
+      twist_easy *easy;
+      struct twist_pop3 *p;
+
+      easy = tls_easy (url, TWIST_USE_SSL_ALL);
+      p = twist_pop3_new (easy, 0);
+      feed_n (pop3_recv, p, "+OK pop\r\n", split);
+      check (strcmp (twist_pop3_command (p), "CAPA\r\n") == 0, "capa");
+      feed_n (pop3_recv, p, "+OK\r\nSTLS\r\nUSER\r\n.\r\n", split);
+      check (strcmp (twist_pop3_command (p), "STLS\r\n") == 0,
+             "STLS, not USER, when offered");
+      feed_n (pop3_recv, p, "+OK Begin TLS negotiation\r\n", split);
+      check (strcmp (twist_pop3_command (p), "STLS\r\n") == 0 && !easy->done,
+             "nothing is sent until the handshake is done");
+      twist_pop3_tls_done (p);
+      check (strcmp (twist_pop3_command (p), "CAPA\r\n") == 0,
+             "CAPA again, encrypted");
+      feed_n (pop3_recv, p, "+OK\r\nSTLS\r\nUSER\r\n.\r\n", split);
+      check (strcmp (twist_pop3_command (p), "USER alice\r\n") == 0
+             && !easy->done, "then the login");
+      twist_easy_cleanup (easy);
+
+      easy = tls_easy (url, TWIST_USE_SSL_ALL);
+      p = twist_pop3_new (easy, 0);
+      feed_n (pop3_recv, p, "+OK pop\r\n", split);
+      feed_n (pop3_recv, p, "+OK\r\nUSER\r\n.\r\n", split);
+      check (easy->done && easy->result == TWIST_ERR_USE_SSL
+             && !starts_with (twist_pop3_command (p), "USER"),
+             "required and not offered is an error, and nothing is sent");
+      twist_easy_cleanup (easy);
+
+      easy = tls_easy (url, TWIST_USE_SSL_ALL);
+      p = twist_pop3_new (easy, 0);
+      feed_n (pop3_recv, p, "+OK pop\r\n-ERR no CAPA\r\n", split);
+      check (easy->done && easy->result == TWIST_ERR_USE_SSL,
+             "required, and no way to ask what is offered, is an error");
+      twist_easy_cleanup (easy);
+
+      easy = tls_easy (url, TWIST_USE_SSL_TRY);
+      p = twist_pop3_new (easy, 0);
+      feed_n (pop3_recv, p, "+OK pop\r\n", split);
+      feed_n (pop3_recv, p, "+OK\r\nUSER\r\n.\r\n", split);
+      check (strcmp (twist_pop3_command (p), "USER alice\r\n") == 0
+             && !easy->done, "wanted and not offered goes on");
+      twist_easy_cleanup (easy);
+
+      easy = tls_easy (url, TWIST_USE_SSL_ALL);
+      p = twist_pop3_new (easy, 0);
+      feed_n (pop3_recv, p, "+OK pop\r\n", split);
+      feed_n (pop3_recv, p, "+OK\r\nSTLS\r\n.\r\n", split);
+      feed_n (pop3_recv, p, "-ERR not now\r\n", split);
+      check (easy->done && easy->result == TWIST_ERR_USE_SSL,
+             "required and refused is an error");
+      twist_easy_cleanup (easy);
+      easy = tls_easy (url, TWIST_USE_SSL_TRY);
+      p = twist_pop3_new (easy, 0);
+      feed_n (pop3_recv, p, "+OK pop\r\n", split);
+      feed_n (pop3_recv, p, "+OK\r\nSTLS\r\n.\r\n", split);
+      feed_n (pop3_recv, p, "-ERR not now\r\n", split);
+      check (strcmp (twist_pop3_command (p), "USER alice\r\n") == 0
+             && !easy->done, "wanted and refused goes on");
+      twist_easy_cleanup (easy);
+
+      easy = tls_easy (url, TWIST_USE_SSL_NONE);
+      p = twist_pop3_new (easy, 0);
+      feed_n (pop3_recv, p, "+OK pop\r\n", split);
+      feed_n (pop3_recv, p, "+OK\r\nSTLS\r\n.\r\n", split);
+      check (strcmp (twist_pop3_command (p), "USER alice\r\n") == 0,
+             "STLS is not sent unless it is asked for");
+      twist_easy_cleanup (easy);
+    }
+  {
+    twist_easy *easy = tls_easy (url, TWIST_USE_SSL_ALL);
+    struct twist_pop3 *p = twist_pop3_new (easy, 0);
+
+    feed_n (pop3_recv, p, "+OK pop\r\n", 200);
+    feed_n (pop3_recv, p, "+OK\r\nSTLS\r\n.\r\n", 200);
+    feed_n (pop3_recv, p, "+OK go\r\nUSER\r\n.\r\n", 200);
+    check (easy->done && easy->result == TWIST_ERR_PROTOCOL,
+           "bytes in the clear behind the reply to STLS end the transfer");
+    twist_easy_cleanup (easy);
+  }
+}
+
+/* The option takes the three values and no others.  */
+static void
+test_use_ssl_option (void)
+{
+  twist_easy *easy = twist_easy_init ();
+
+  check (twist_easy_setopt (easy, TWISTOPT_USE_SSL, 3L) == TWIST_ERR_INVAL
+         && twist_easy_setopt (easy, TWISTOPT_USE_SSL, -1L) == TWIST_ERR_INVAL,
+         "a value that is not one of the three is refused");
+  check (twist_strerror (TWIST_ERR_USE_SSL)[0] != 0, "a sentence for the error");
+  twist_easy_cleanup (easy);
+}
+
 int
 main (void)
 {
   test_imap_mailbox ();
   test_mail ();
+  test_use_ssl_option ();
+  test_smtp_starttls ();
+  test_imap_starttls ();
+  test_pop3_stls ();
   return tests_finish ();
 }

@@ -99,6 +99,9 @@ LLVMFuzzerTestOneInput (const uint8_t *data, size_t size)
                               &easy->url) != TWIST_OK)
     abort ();
   easy->write_cb = fuzz_sink;
+  /* The top two bits say whether TLS is wanted, and the handshake of an
+     upgrade, if there is one, finishes half way through the replies.  */
+  easy->use_ssl = (data[0] >> 6) % 3;
   f = twist_ftp_new (easy, 0);
   if (f == NULL)
     abort ();
@@ -108,7 +111,10 @@ LLVMFuzzerTestOneInput (const uint8_t *data, size_t size)
   peer.addr[3] = 1;
   snprintf (peer.text, sizeof peer.text, "127.0.0.1");
   twist_ftp_set_peer (f, &peer);
-  fuzz_feed ((fuzz_recv) twist_ftp_receive, f, data + 1, n,
+  fuzz_feed ((fuzz_recv) twist_ftp_receive, f, data + 1, n / 2,
+             fuzz_piece (data[0] >> 2, size));
+  twist_ftp_tls_done (f);
+  fuzz_feed ((fuzz_recv) twist_ftp_receive, f, data + 1 + n / 2, n - n / 2,
              fuzz_piece (data[0] >> 2, size));
   twist_ftp_command (f);
   twist_ftp_data_port (f);

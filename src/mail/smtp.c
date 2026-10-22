@@ -20,6 +20,7 @@
 # include <config.h>
 #endif
 
+#include "gettext.h"
 #include "twist-int.h"
 
 #include <ctype.h>
@@ -40,7 +41,9 @@ enum
   S_MAIL,
   S_RCPT,
   S_DATA,
-  S_SENT
+  S_SENT,
+  S_STARTTLS,
+  S_TLSWAIT
 };
 
 struct twist_smtp
@@ -51,6 +54,12 @@ struct twist_smtp
   struct twist_endpoint *ep;
   struct twist_slist *rcpt;
   int implicit_tls;
+  /* TWISTOPT_USE_SSL, for a scheme that is not TLS already.  TLS_DONE: the
+     connection was upgraded.  STARTTLS_ADV: the server said it can, in its
+     answer to the last EHLO.  */
+  int use_ssl;
+  int tls_done;
+  int starttls_adv;
   int state;
   int finished;
   int cont;
@@ -217,9 +226,46 @@ start_auth (struct twist_smtp *s)
   return rc;
 }
 
+/* The EHLO has been answered.  If TLS was asked for and the connection has
+   not been upgraded, this is the place: before the login, so that the
+   password is not sent where it can be read.  */
+static int
+after_ehlo (struct twist_smtp *s)
+{
+  if (s->use_ssl != TWIST_USE_SSL_NONE && !s->tls_done)
+    {
+      if (s->starttls_adv)
+        {
+          s->state = S_STARTTLS;
+          return smtp_printf (s, "STARTTLS\r\n");
+        }
+      if (s->use_ssl == TWIST_USE_SSL_ALL)
+        return twist_easy_use_ssl_failed (s->easy,
+                                          _("the server does not offer "
+                                            "STARTTLS"));
+    }
+  return start_auth (s);
+}
+
+/* The server has said yes to STARTTLS: the handshake starts, and nothing is
+   sent until it is done.  A test with no connection has none to start.  */
+static int
+begin_tls (struct twist_smtp *s)
+{
+  s->state = S_TLSWAIT;
+  if (s->ep == NULL)
+    return TWIST_OK;
+  return twist_connection_start_tls (s->ep->conn, s->easy->url->host,
+                                     s->easy->verifypeer, NULL, 0,
+                                     s->easy->cainfo, s->easy->capath,
+                                     s->easy->sslcert, s->easy->sslkey);
+}
+
 static void
 note_auth (struct twist_smtp *s, const char *text, size_t n)
 {
+  if (n == 8 && strncasecmp (text, "STARTTLS", 8) == 0)
+    s->starttls_adv = 1;
   if (n >= 5 && strncasecmp (text, "AUTH ", 5) == 0)
     {
       size_t c = n - 5;
@@ -269,12 +315,29 @@ on_final (struct twist_smtp *s, int code)
           return;
         }
       s->state = S_EHLO;
+      s->starttls_adv = 0;
+      s->auth_adv[0] = 0;
       rc = smtp_printf (s, "EHLO twist\r\n");
       break;
     case S_EHLO:
       if (code / 100 != 2)
         {
           smtp_complete (s, TWIST_ERR_PROTOCOL);
+          return;
+        }
+      rc = after_ehlo (s);
+      break;
+    case S_STARTTLS:
+      if (code == 220)
+        {
+          rc = begin_tls (s);
+          break;
+        }
+      if (s->use_ssl == TWIST_USE_SSL_ALL)
+        {
+          smtp_complete (s, twist_easy_use_ssl_failed (s->easy,
+                                                       _("the server refused "
+                                                         "STARTTLS")));
           return;
         }
       rc = start_auth (s);
@@ -414,6 +477,15 @@ twist_smtp_receive (struct twist_smtp *s, const uint8_t *data, size_t len)
         return off;
       on_line (s, line, line_len);
       off += used;
+      /* A server that has agreed to start TLS says nothing more until the
+         handshake is done.  Whatever else is in this buffer came in the
+         clear, from whoever is on the path, and must not be taken for the
+         encrypted session's.  */
+      if (s->state == S_TLSWAIT && !s->finished && off < len)
+        {
+          smtp_complete (s, TWIST_ERR_PROTOCOL);
+          return len;
+        }
     }
   return off;
 }
@@ -447,6 +519,19 @@ smtp_connected (struct twist_endpoint *ep)
     smtp_complete (s, rc);
 }
 
+/* The handshake is done, for smtps as well as after STARTTLS: only the
+   second is waited for.  */
+static void
+smtp_security (struct twist_endpoint *ep, const char *alpn, size_t alpn_len)
+{
+  struct twist_smtp *s = ep->user_data;
+
+  (void) alpn;
+  (void) alpn_len;
+  s->ep = ep;
+  twist_smtp_tls_done (s);
+}
+
 static size_t
 smtp_on_recv (struct twist_endpoint *ep, const uint8_t *data, size_t len)
 {
@@ -478,7 +563,7 @@ static const struct twist_protocol_handler smtp_handler = {
   smtp_connected,
   smtp_on_recv,
   smtp_disconnected,
-  NULL,
+  smtp_security,
   smtp_error,
   NULL,
   NULL
@@ -510,6 +595,7 @@ twist_smtp_new (struct twist_easy *easy, int live)
   s->easy = easy;
   s->implicit_tls = easy->url->scheme != NULL
                     && strcmp (easy->url->scheme, "smtps") == 0;
+  s->use_ssl = s->implicit_tls ? TWIST_USE_SSL_NONE : easy->use_ssl;
   twist_mail_sasl_init (&s->sasl);
   easy->xfer = s;
   easy->xfer_free = twist_smtp_free;
@@ -531,4 +617,21 @@ twist_smtp_attach (struct twist_easy *easy)
   if (rc != TWIST_OK)
     smtp_complete (s, rc);
   return easy->done ? easy->result : TWIST_OK;
+}
+
+/* The handshake that followed STARTTLS is done.  What the server said before
+   is not to be trusted now, or kept: it was said in the clear.  The
+   capabilities are asked for again, as RFC 3207 says.  */
+void
+twist_smtp_tls_done (struct twist_smtp *s)
+{
+  if (s == NULL || s->finished || s->state != S_TLSWAIT)
+    return;
+  s->tls_done = 1;
+  s->starttls_adv = 0;
+  s->auth_adv[0] = 0;
+  s->cont = 0;
+  s->state = S_EHLO;
+  if (smtp_printf (s, "EHLO twist\r\n") != TWIST_OK)
+    smtp_complete (s, TWIST_ERR_PROTOCOL);
 }

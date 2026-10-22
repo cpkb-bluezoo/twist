@@ -29,9 +29,10 @@ Each is a scheme of one transfer engine:
   file              local files
 
 The schemes with an s added to the protocol's name (https, wss, ftps, smtps,
-imaps, pop3s, ldaps, mqtts, gophers) are TLS from the first byte.  None is
-upgraded to TLS once it has started, so there is no STARTTLS.  telnet,
-rtsp, smb, smbs, rtmp and rtmps are recognised and not implemented; see TODO.
+imaps, pop3s, ldaps, mqtts, gophers) are TLS from the first byte.  ftp, imap,
+pop3 and smtp can also be upgraded after they start (AUTH TLS, STARTTLS and
+STLS) with --ssl or --ssl-reqd; ldap and mqtt cannot.  telnet, rtsp, smb,
+smbs, rtmp and rtmps are recognised and not implemented; see TODO.
 
 TLS 1.2 and 1.3 and QUIC are quickstep's, and SSH is foxtrot's.  Transfers can
 go through HTTP, HTTPS and SOCKS5 proxies (HTTP/3 through a CONNECT-UDP

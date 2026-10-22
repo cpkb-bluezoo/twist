@@ -462,12 +462,104 @@ test_ftp_partial (void)
   }
 }
 
+/* Explicit TLS for ftp (--ssl, --ssl-reqd): AUTH TLS (RFC 4217) before the
+   user name and the password, which are sent only once the control connection
+   is encrypted.  After it the data connection is protected too, as on ftps.
+   A server that will not, or cannot, is an error when TLS is required and is
+   gone on without when it was only wanted.  Bytes in the clear behind the 234
+   reply are not part of the encrypted session, and end the transfer.  */
+static twist_easy *
+auth_tls_easy (int use_ssl, struct twist_ftp **f)
+{
+  twist_easy *easy = twist_easy_init ();
+
+  check (twist_url_parse_int ("ftp://alice:secret@127.0.0.1/f.txt", &easy->url)
+         == TWIST_OK, "auth tls url");
+  /* Before the handler is made: it takes the option when it starts.  */
+  check (twist_easy_setopt (easy, TWISTOPT_USE_SSL, (long) use_ssl) == TWIST_OK,
+         "use ssl");
+  *f = twist_ftp_new (easy, 0);
+  check (*f != NULL, "auth tls handle");
+  return easy;
+}
+
+static void
+test_ftp_auth_tls (void)
+{
+  size_t splits[2] = { 1, 200 };
+  size_t k;
+
+  for (k = 0; k < 2; k++)
+    {
+      size_t split = splits[k];
+      struct twist_ftp *f;
+      twist_easy *easy = auth_tls_easy (TWIST_USE_SSL_ALL, &f);
+
+      feed_session (f, "220 ready\r\n", split);
+      check (strcmp (twist_ftp_command (f), "AUTH TLS\r\n") == 0,
+             "AUTH TLS before USER");
+      feed_session (f, "234 Proceed with negotiation.\r\n", split);
+      check (strcmp (twist_ftp_command (f), "AUTH TLS\r\n") == 0 && !easy->done,
+             "nothing is sent until the handshake is done");
+      twist_ftp_tls_done (f);
+      check (strcmp (twist_ftp_command (f), "USER alice\r\n") == 0,
+             "the user name goes encrypted");
+      feed_session (f, "331 need pass\r\n", split);
+      check (strcmp (twist_ftp_command (f), "PASS secret\r\n") == 0, "pass");
+      feed_session (f, "230 ok\r\n", split);
+      check (strcmp (twist_ftp_command (f), "PBSZ 0\r\n") == 0,
+             "the data connection is protected, as on ftps");
+      feed_session (f, "200 PBSZ=0\r\n", split);
+      check (strcmp (twist_ftp_command (f), "PROT P\r\n") == 0, "PROT P");
+      feed_session (f, "200 PROT now Private\r\n", split);
+      check (twist_ftp_data_protected (f), "protected once agreed");
+      twist_easy_cleanup (easy);
+
+      easy = auth_tls_easy (TWIST_USE_SSL_ALL, &f);
+      feed_session (f, "220 ready\r\n", split);
+      feed_session (f, "534 Unavailable\r\n", split);
+      check (easy->done && easy->result == TWIST_ERR_USE_SSL
+             && strcmp (twist_ftp_command (f), "AUTH TLS\r\n") == 0,
+             "required and refused is an error, and no USER is sent");
+      twist_easy_cleanup (easy);
+
+      easy = auth_tls_easy (TWIST_USE_SSL_TRY, &f);
+      feed_session (f, "220 ready\r\n", split);
+      feed_session (f, "534 Unavailable\r\n", split);
+      check (strcmp (twist_ftp_command (f), "USER alice\r\n") == 0 && !easy->done,
+             "wanted and refused goes on in the clear");
+      feed_session (f, "331 need pass\r\n", split);
+      feed_session (f, "230 ok\r\n", split);
+      check (strcmp (twist_ftp_command (f), "TYPE I\r\n") == 0,
+             "and the data is not protected there");
+      twist_easy_cleanup (easy);
+
+      easy = auth_tls_easy (TWIST_USE_SSL_NONE, &f);
+      feed_session (f, "220 ready\r\n", split);
+      check (strcmp (twist_ftp_command (f), "USER alice\r\n") == 0,
+             "AUTH TLS is not sent unless it is asked for");
+      twist_easy_cleanup (easy);
+    }
+  {
+    struct twist_ftp *f;
+    twist_easy *easy = auth_tls_easy (TWIST_USE_SSL_ALL, &f);
+
+    feed_session (f, "220 ready\r\n", 200);
+    feed_session (f, "234 go\r\n331 need pass\r\n", 200);
+    check (easy->done && easy->result == TWIST_ERR_PROTOCOL
+           && strcmp (twist_ftp_command (f), "AUTH TLS\r\n") == 0,
+           "bytes in the clear behind the reply to AUTH TLS end the transfer");
+    twist_easy_cleanup (easy);
+  }
+}
+
 int
 main (void)
 {
   test_ftp_parser ();
   test_ftp_session ();
   test_ftps_session ();
+  test_ftp_auth_tls ();
   test_ftp_partial ();
   return tests_finish ();
 }

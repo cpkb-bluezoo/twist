@@ -74,6 +74,8 @@ twist_strerror (int err)
       return _("a quote command failed");
     case TWIST_ERR_PARTIAL:
       return _("transferred a partial file");
+    case TWIST_ERR_USE_SSL:
+      return _("the server would not upgrade to TLS");
     case TWIST_ERR_RECURSIVE:
       return _("an API function was called from inside a callback");
     case TWIST_ERR_PROXY:

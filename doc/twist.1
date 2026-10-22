@@ -57,7 +57,7 @@ stops at the first failure.
 The schemes that are implemented are listed under
 .BR PROTOCOLS .
 .SH PROTOCOLS
-A URL scheme selects the protocol.  The scheme with an \fBs\fR is the same protocol inside TLS from the first byte; no scheme is upgraded to TLS after it starts.
+A URL scheme selects the protocol.  The scheme with an \fBs\fR is the same protocol inside TLS from the first byte.  \fBftp\fR, \fBimap\fR, \fBpop3\fR and \fBsmtp\fR can be upgraded to TLS after they start, when \fB\-\-ssl\fR or \fB\-\-ssl\-reqd\fR asks; nothing else is.
 .TP
 .B dict
 Looks up a word with a DICT server: DEFINE, MATCH or SHOW, chosen by the URL path.  The reply is written until the server closes.
@@ -71,7 +71,7 @@ device or a directory is refused with exit 37, and is not waited on.
 takes part of the file.
 .TP
 .B ftp, ftps
-Downloads a file, or lists a directory when the URL path ends in a slash.  \fBftps\fR is TLS from the first byte (port 990), and its data connection is protected too (PBSZ 0 and PROT P), resuming the session of the control connection; a server that will not protect it ends the transfer with status 35.  \fBftp\fR is never upgraded.
+Downloads a file, or lists a directory when the URL path ends in a slash.  \fBftps\fR is TLS from the first byte (port 990), and its data connection is protected too (PBSZ 0 and PROT P), resuming the session of the control connection; a server that will not protect it ends the transfer with status 35.  \fBftp\fR is upgraded with AUTH TLS only when \fB\-\-ssl\fR or \fB\-\-ssl\-reqd\fR asks, and its data connection is then protected the same way.
 .TP
 .B gopher, gophers
 Sends the selector from the URL and writes the reply until the server closes.
@@ -104,11 +104,50 @@ Reads a file, or uploads one with \fB\-\-data\fR or \fB\-T\fR.  It is a datagram
 WebSocket, over HTTP/1, HTTP/2 or HTTP/3.  The payload bytes are written.
 .PP
 The schemes with a trailing s are TLS from the first byte.  The others are not
-upgraded: there is no STARTTLS, STLS or AUTH TLS, and no option to require
-them.  A user name and password given for smtp, pop3, imap, ldap, mqtt or ftp
-go on a connection that is not encrypted, by a method such as PLAIN, LOGIN or a
-simple bind that does not hide them; PLAIN is tried when the server advertises
-none.  Use the scheme with the s.
+upgraded unless asked: only ftp, imap, pop3 and smtp can be, with
+.B \-\-ssl
+or
+.BR \-\-ssl\-reqd ;
+ldap and mqtt cannot.  A user name and password given for any of these, and not
+upgraded, go on a connection that is not encrypted, by a method such as PLAIN,
+LOGIN or a simple bind that does not hide them; PLAIN is tried when the server
+advertises none.  Use the scheme with the s, or
+.BR \-\-ssl\-reqd .
+.SH "EXPLICIT TLS"
+.B \-\-ssl
+and
+.B \-\-ssl\-reqd
+upgrade a connection that starts in the clear, for ftp, imap, pop3 and smtp,
+with the command each protocol has: AUTH TLS (RFC 4217), STARTTLS (RFC 3501 and
+RFC 3207) and STLS (RFC 2595).  They do nothing for a scheme that is TLS
+already, and nothing for the others.  Without one of them twist never asks,
+however much the server offers.
+.PP
+The upgrade comes first.  twist reads what the server offers and asks for TLS,
+and the user name and password are sent only after the handshake, which checks
+the certificate as for any other TLS connection
+.RB ( \-\-cacert ,
+.BR \-k ).
+What the server said before the handshake is forgotten, and its capabilities
+are asked for again.  With ftp the data connection is then protected as on
+ftps, with PBSZ 0 and PROT P, and a server that will not ends the transfer.  A
+server of imap or pop3 that has no capability list cannot be asked whether it
+offers the upgrade, and counts as not offering it.
+.PP
+.B \-\-ssl\-reqd
+ends the transfer with exit status 64 if the server does not offer the upgrade
+or refuses it, and no password has been sent.
+.B \-\-ssl
+goes on in the clear instead.  That is as secure as
+.B \-\-ssl\-reqd
+when the server agrees and not otherwise, and whoever is on the path can make a
+server seem not to offer TLS, so it protects against nobody who is.  Use
+.BR \-\-ssl\-reqd .
+.PP
+A server that has said yes and then sends anything before the handshake, in the
+same packet or after it, has sent it in the clear, from anyone on the path, and
+it is not taken as part of the encrypted session: the transfer ends with exit
+status 8.
 .PP
 These schemes are recognised, but are not implemented, and exit 1:
 .B rtmp, rtmps,
@@ -530,6 +569,21 @@ The same for a socket in the abstract namespace of Linux.
 has no NUL byte before it.  This and
 .B \-\-unix\-socket
 replace each other.
+.TP
+.B \-\-ssl
+Upgrade ftp, imap, pop3 and smtp to TLS if the server offers it, and go on in
+the clear if it does not.  The login comes after the upgrade.
+.B \-\-ftp\-ssl
+is the same.  Reset by
+.BR \-\-next .
+See
+.BR "EXPLICIT TLS" .
+.TP
+.B \-\-ssl\-reqd
+The same, and exit status 64 if the server will not.
+.B \-\-ftp\-ssl\-reqd
+is the same.  Reset by
+.BR \-\-next .
 .TP
 .BI \-U ", " \-\-proxy\-user " user:password"
 The user name and password for the proxy, if its URL has none.
@@ -1069,6 +1123,11 @@ or 407.
 .TP
 .B 61
 The content encoding could not be decoded.
+.TP
+.B 64
+TLS was asked for with
+.B \-\-ssl\-reqd
+and the server does not offer it or refuses it.
 .TP
 .B 9
 The SFTP server would not let the user read the file.

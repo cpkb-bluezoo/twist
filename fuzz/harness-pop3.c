@@ -63,11 +63,17 @@ LLVMFuzzerTestOneInput (const uint8_t *data, size_t size)
   if (twist_url_parse_int ("pop3://alice:secret@127.0.0.1/1", &easy->url) != TWIST_OK)
     abort ();
   easy->write_cb = fuzz_sink;
+  /* The top two bits say whether TLS is wanted, and the handshake of an
+     upgrade, if there is one, finishes half way through.  */
+  easy->use_ssl = (data[0] >> 6) % 3;
   obj = twist_pop3_new (easy, 0);
   if (obj == NULL)
     abort ();
-  fuzz_feed ((fuzz_recv) twist_pop3_receive, obj, data + 1, size - 1,
+  fuzz_feed ((fuzz_recv) twist_pop3_receive, obj, data + 1, (size - 1) / 2,
              fuzz_piece (data[0], size));
+  twist_pop3_tls_done (obj);
+  fuzz_feed ((fuzz_recv) twist_pop3_receive, obj, data + 1 + (size - 1) / 2,
+             size - 1 - (size - 1) / 2, fuzz_piece (data[0], size));
   twist_easy_cleanup (easy);
   return 0;
 }

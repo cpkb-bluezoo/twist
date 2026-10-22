@@ -71,11 +71,17 @@ LLVMFuzzerTestOneInput (const uint8_t *data, size_t size)
   easy->mail_from = twist_strdup ("a@b");
   easy->mail_rcpt = twist_slist_append (NULL, "c@d");
   easy->postfields = (char[]) { 'H', 'i', '\r', '\n', '.', 'x', '\r', '\n', 0 };
+  /* The top two bits say whether TLS is wanted, and the handshake of an
+     upgrade, if there is one, finishes half way through.  */
+  easy->use_ssl = (data[0] >> 6) % 3;
   obj = twist_smtp_new (easy, 0);
   if (obj == NULL)
     abort ();
-  fuzz_feed ((fuzz_recv) twist_smtp_receive, obj, data + 1, size - 1,
+  fuzz_feed ((fuzz_recv) twist_smtp_receive, obj, data + 1, (size - 1) / 2,
              fuzz_piece (data[0], size));
+  twist_smtp_tls_done (obj);
+  fuzz_feed ((fuzz_recv) twist_smtp_receive, obj, data + 1 + (size - 1) / 2,
+             size - 1 - (size - 1) / 2, fuzz_piece (data[0], size));
   twist_slist_free_all (easy->mail_rcpt);
   easy->mail_rcpt = NULL;
   easy->postfields = NULL;

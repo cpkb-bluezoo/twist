@@ -155,6 +155,8 @@ struct twist_easy
      path, or with unix_abstract a name in the abstract namespace.  */
   char *unix_path;
   int unix_abstract;
+  /* TWISTOPT_USE_SSL.  */
+  int use_ssl;
   int http_version;
   int dns_order[4];
   int dns_order_n;
@@ -568,6 +570,7 @@ size_t twist_ftp_receive (struct twist_ftp *ftp, const uint8_t *data, size_t len
 size_t twist_ftp_data (struct twist_ftp *ftp, const uint8_t *data, size_t len);
 void twist_ftp_data_eof (struct twist_ftp *ftp);
 const char *twist_ftp_command (const struct twist_ftp *ftp);
+void twist_ftp_tls_done (struct twist_ftp *ftp);
 int twist_ftp_data_port (const struct twist_ftp *ftp);
 const char *twist_ftp_data_host (const struct twist_ftp *ftp);
 /* Whether the data connection is to be protected (PROT P, RFC 4217): the
@@ -1131,6 +1134,11 @@ void twist_smtp_free (void *smtp);
 size_t twist_smtp_receive (struct twist_smtp *smtp, const uint8_t *data,
                            size_t len);
 const char *twist_smtp_command (const struct twist_smtp *smtp);
+/* The TLS handshake that STARTTLS began is done.  The connection tells the
+   handler; a test with no connection says so itself.  Likewise for the others:
+   twist_pop3_tls_done (STLS), twist_imap_tls_done (STARTTLS) and
+   twist_ftp_tls_done (AUTH TLS).  */
+void twist_smtp_tls_done (struct twist_smtp *smtp);
 
 struct twist_pop3;
 struct twist_pop3 *twist_pop3_new (struct twist_easy *easy, int live);
@@ -1138,6 +1146,7 @@ void twist_pop3_free (void *pop3);
 size_t twist_pop3_receive (struct twist_pop3 *pop3, const uint8_t *data,
                            size_t len);
 const char *twist_pop3_command (const struct twist_pop3 *pop3);
+void twist_pop3_tls_done (struct twist_pop3 *pop3);
 
 struct twist_imap;
 struct twist_imap *twist_imap_new (struct twist_easy *easy, int live);
@@ -1145,6 +1154,7 @@ void twist_imap_free (void *imap);
 size_t twist_imap_receive (struct twist_imap *imap, const uint8_t *data,
                            size_t len);
 const char *twist_imap_command (const struct twist_imap *imap);
+void twist_imap_tls_done (struct twist_imap *imap);
 int twist_imap_mailbox (const char *box, char *out, size_t cap);
 
 struct twist_mqtt;
@@ -1315,6 +1325,7 @@ size_t twist_write_bytes (twist_write_callback cb, void *user,
 void twist_i18n_init (void);
 
 void twist_easy_set_error (struct twist_easy *easy, char *msg);
+int twist_easy_use_ssl_failed (struct twist_easy *easy, const char *why);
 int twist_easy_finish (struct twist_easy *easy, int result);
 /* As twist_easy_perform, on MULTI, which the caller keeps: what a transfer
    leaves in it, such as a connection, is there for the next.  */

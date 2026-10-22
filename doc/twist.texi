@@ -264,6 +264,14 @@ coded with quality 5 and a window of 4 MiB.  A @samp{br} response is decoded
 with a window of at most 16 MiB, the most that Brotli without its large-window
 extension can ask for, and a stream that asks for more is
 @code{TWIST_ERR_ENCODING}.
+@item TWISTOPT_USE_SSL
+A long: @code{TWIST_USE_SSL_NONE}, the default, @code{TWIST_USE_SSL_TRY} or
+@code{TWIST_USE_SSL_ALL}.  For @code{ftp}, @code{imap}, @code{pop3} and
+@code{smtp}, upgrade the connection to TLS: @code{TRY} asks, and goes on in the
+clear if the server cannot, and @code{ALL} ends the transfer with
+@code{TWIST_ERR_USE_SSL} if it cannot.  The upgrade comes before the login.
+@xref{Explicit TLS}.  Other schemes ignore it, and any other value is
+@code{TWIST_ERR_INVAL}.
 @item TWISTOPT_UNIX_SOCKET
 A string: the path of a Unix socket to connect to in place of the host and port
 of the URL, for @code{http}, @code{https}, @code{ws} and @code{wss}.  The URL
@@ -784,6 +792,7 @@ come from the protocol, and not from the code.
 @item @code{TWIST_ERR_PROXY} @tab 22 @tab 97 @tab The proxy refused the connection.
 @item @code{TWIST_ERR_RECURSIVE} @tab 23 @tab 93 @tab A multi function was called from inside a callback.
 @item @code{TWIST_ERR_PARTIAL} @tab 24 @tab 18 @tab The transfer ended before all that was announced had come.
+@item @code{TWIST_ERR_USE_SSL} @tab 25 @tab 64 @tab TLS was required and the server would not upgrade.
 @end multitable
 
 @node Invocation
@@ -968,6 +977,14 @@ not @samp{www.notlocal.com}.  An address matches itself, or a network as
 @samp{192.168.0.0/16}.  @samp{*} is every host, which is to use no proxy.
 This overrides the environment's @env{no_proxy} and @env{NO_PROXY}, and
 @option{--noproxy ""} turns them off.
+@item --ssl
+Upgrade @code{ftp}, @code{imap}, @code{pop3} and @code{smtp} to TLS if the
+server offers it, and go on in the clear if it does not.  The login comes after
+the upgrade.  @option{--ftp-ssl} is the same.  Reset by @option{--next}.
+@xref{Explicit TLS}.
+@item --ssl-reqd
+The same, and exit status 64 if the server will not.  @option{--ftp-ssl-reqd}
+is the same.  Reset by @option{--next}.
 @item --unix-socket @var{path}
 Connect to the Unix socket @var{path} in place of the host and port of the URL,
 for @code{http}, @code{https}, @code{ws} and @code{wss}.  The URL still gives
@@ -1248,6 +1265,9 @@ A proxy refused a @code{CONNECT} or @code{CONNECT-UDP} tunnel, with a
 status such as 403 or 407.
 @item 61
 The content encoding could not be decoded.
+@item 64
+TLS was asked for with @option{--ssl-reqd} and the server does not offer it or
+refuses it.
 @item 9
 The SFTP server would not let the user read the file.
 @item 60
@@ -1287,8 +1307,9 @@ A SOCKS5 proxy refused the connection or could not complete it.
 @chapter Protocols
 
 A URL scheme selects the protocol.  The scheme with an @samp{s} is the
-same protocol inside TLS from the first byte; no scheme is upgraded to
-TLS after it starts.
+same protocol inside TLS from the first byte.  @code{ftp}, @code{imap},
+@code{pop3} and @code{smtp} can be upgraded to TLS after they start, when
+@option{--ssl} or @option{--ssl-reqd} asks; nothing else is.
 
 @table @code
 @item dict
@@ -1303,8 +1324,9 @@ status 37, and is not waited on.  @option{-r} takes part of the file.
 @item ftp, ftps
 Downloads a file, or lists a directory when the URL path ends in a
 slash.  @code{ftps} is TLS from the first byte (port 990); @code{ftp}
-is never upgraded.  On @code{ftps} the data connection is protected as
-well (RFC 4217): after login twist sends @code{PBSZ 0} and @code{PROT P},
+is upgraded with @code{AUTH TLS} only when @option{--ssl} or
+@option{--ssl-reqd} asks.  On @code{ftps}, and on an upgraded @code{ftp}, the
+data connection is protected as well (RFC 4217): after login twist sends @code{PBSZ 0} and @code{PROT P},
 runs TLS on each data connection, and checks the server against the host
 of the URL as it does the control connection (@option{-k} turns both
 off).  The data connection resumes the TLS session of the control
@@ -1352,13 +1374,46 @@ written.
 
 The schemes with a trailing @code{s} (@code{imaps}, @code{ldaps},
 @code{mqtts}, @code{pop3s}, @code{smtps}, @code{https}, @code{ftps},
-@code{wss}) are TLS from the first byte.  The ones without are not upgraded:
-twist has no @code{STARTTLS}, @code{STLS} or @code{AUTH TLS}, and no option
-to require them.  A user name and password given for @code{smtp},
-@code{pop3}, @code{imap}, @code{ldap}, @code{mqtt} or @code{ftp} are sent on
-a connection that is not encrypted, and by a method such as @code{PLAIN},
-@code{LOGIN} or a simple bind that does not hide them; @code{PLAIN} is tried
-when the server advertises none.  Use the scheme with the @code{s}.
+@code{wss}) are TLS from the first byte.  The ones without are not upgraded
+unless asked: only @code{ftp}, @code{imap}, @code{pop3} and @code{smtp} can
+be, with @option{--ssl} or @option{--ssl-reqd} (@pxref{Explicit TLS}).
+@code{ldap} and @code{mqtt} cannot.  A user name and password given for any
+of these without the @code{s}, and not upgraded, are sent on a connection that
+is not encrypted, and by a method such as @code{PLAIN}, @code{LOGIN} or a
+simple bind that does not hide them; @code{PLAIN} is tried when the server
+advertises none.  Use the scheme with the @code{s}, or @option{--ssl-reqd}.
+
+@heading Explicit TLS
+@anchor{Explicit TLS}
+
+@option{--ssl} and @option{--ssl-reqd} upgrade a connection that starts in the
+clear, for @code{ftp}, @code{imap}, @code{pop3} and @code{smtp}, with the
+command each protocol has: @code{AUTH TLS} (RFC 4217), @code{STARTTLS}
+(RFC 3501 and RFC 3207) and @code{STLS} (RFC 2595).  They do nothing for a
+scheme that is TLS already, and nothing for the others.  Without one of them
+twist never asks, however much the server offers.
+
+The upgrade comes first.  twist reads what the server offers and asks for
+TLS, and the user name and password are sent only after the handshake, which
+checks the certificate as for any other TLS connection (@option{--cacert},
+@option{-k}).  What the server said before the handshake is forgotten, and its
+capabilities are asked for again.  With @code{ftp} the data connection is
+then protected as on @code{ftps}, with @code{PBSZ 0} and @code{PROT P}, and a
+server that will not ends the transfer.  A server of @code{imap} or
+@code{pop3} that has no capability list cannot be asked whether it offers the
+upgrade, and counts as not offering it.
+
+@option{--ssl-reqd} ends the transfer with exit status 64 if the server does
+not offer the upgrade or refuses it, and nothing, no password, has been sent.
+@option{--ssl} goes on in the clear instead.  That is as secure as
+@option{--ssl-reqd} when the server agrees and not otherwise, and whoever is on
+the path can make a server seem not to offer TLS, so it protects against nobody
+who is.  Use @option{--ssl-reqd}.
+
+A server that has said yes and then sends anything before the handshake, in the
+same packet or after it, has sent it in the clear, from anyone on the path, and
+it is not taken as part of the encrypted session: the transfer ends with exit
+status 8.
 
 These schemes are recognised, but are not implemented, and exit 1:
 @code{rtmp}, @code{rtmps}, @code{rtsp}, @code{smb}, @code{smbs} and

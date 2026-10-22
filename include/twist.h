@@ -69,7 +69,11 @@ enum twist_error
   TWIST_ERR_RECURSIVE = 23,
   /* The transfer ended before all of what the server said it would send
      had come (curl's CURLE_PARTIAL_FILE).  */
-  TWIST_ERR_PARTIAL = 24
+  TWIST_ERR_PARTIAL = 24,
+  /* TLS was asked for with TWISTOPT_USE_SSL and could not be had: the
+     server does not offer to upgrade the connection, or refused to
+     (curl's CURLE_USE_SSL_FAILED).  */
+  TWIST_ERR_USE_SSL = 25
 };
 
 const char *twist_strerror (int err);
@@ -281,7 +285,25 @@ enum twist_opt
      TWIST_ERR_UNSUPPORTED.  A path (or a name, see
      TWISTOPT_ABSTRACT_UNIX_SOCKET) too long for the socket address is
      TWIST_ERR_INVAL.  NULL or "" clears it, and clears an abstract name.  */
-  TWISTOPT_UNIX_SOCKET = 66
+  TWISTOPT_UNIX_SOCKET = 66,
+  /* A long: whether a connection that starts in the clear is to be upgraded
+     to TLS, for ftp, imap, pop3 and smtp (AUTH TLS, STARTTLS and STLS), which
+     the schemes with an s do from the first byte.  One of TWIST_USE_SSL_NONE,
+     the default, which never asks, TWIST_USE_SSL_TRY, which asks and goes on
+     in the clear if the server cannot, and TWIST_USE_SSL_ALL, which ends the
+     transfer with TWIST_ERR_USE_SSL if it cannot be done.  A TRY that the
+     server agrees to is as secure as ALL, and one that it does not is not:
+     whoever is on the path can make a server seem not to offer TLS, so TRY
+     protects against nobody who is.  The user name and password are sent only
+     after the upgrade.  Other schemes ignore it.  */
+  TWISTOPT_USE_SSL = 67
+};
+
+enum twist_use_ssl
+{
+  TWIST_USE_SSL_NONE = 0,
+  TWIST_USE_SSL_TRY = 1,
+  TWIST_USE_SSL_ALL = 2
 };
 
 enum twist_dns_transport

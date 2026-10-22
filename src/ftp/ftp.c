@@ -64,7 +64,9 @@ enum
   FTP_PASV,
   FTP_DIAL,
   FTP_RETR,
-  FTP_WAIT
+  FTP_WAIT,
+  FTP_AUTHTLS,
+  FTP_TLSWAIT
 };
 
 struct twist_ftp
@@ -84,6 +86,11 @@ struct twist_ftp
   int dial_port;
   int live;
   int implicit_tls;
+  /* TWISTOPT_USE_SSL, for a scheme that is not TLS already.  CTRL_TLS: the
+     control connection is encrypted, from the first byte (ftps) or since AUTH
+     TLS, and so the data connection is to be too.  */
+  int use_ssl;
+  int ctrl_tls;
   /* The server has agreed to PROT P: the data connection runs TLS.  */
   int prot_p;
   /* The handshake on the data connection is done, and the server has been
@@ -647,6 +654,22 @@ open_data (struct twist_ftp *f, const char *text, size_t len, int epsv)
   dial_data (f);
 }
 
+/* Send the user name, which begins the login.  */
+static void
+ftp_begin_login (struct twist_ftp *f)
+{
+  const char *user_name = ftp_user (f);
+
+  if (bad_token (user_name))
+    {
+      ftp_complete (f, TWIST_ERR_PROTOCOL);
+      return;
+    }
+  f->state = FTP_USER;
+  if (ftp_send (f, "USER %s\r\n", user_name) != TWIST_OK)
+    ftp_complete (f, TWIST_ERR_PROTOCOL);
+}
+
 /* The login is done.  On ftps the data connection is protected before
    anything is transferred (RFC 4217): PBSZ 0, then PROT P.  Left at the
    default, PROT C, the password would be encrypted and the file not.  */
@@ -656,7 +679,7 @@ ftp_logged_in (struct twist_ftp *f)
   const char *cmd = "TYPE I\r\n";
 
   f->state = FTP_TYPE;
-  if (f->implicit_tls)
+  if (f->ctrl_tls)
     {
       f->state = FTP_PBSZ;
       cmd = "PBSZ 0\r\n";
@@ -681,8 +704,8 @@ static void
 ftp_on_reply (void *user, int code, int final, const char *text, size_t len)
 {
   struct twist_ftp *f = user;
-  const char *user_name;
   const char *pass;
+  int user_ssl_rc;
 
   if (!final || f->finished)
     return;
@@ -697,15 +720,51 @@ ftp_on_reply (void *user, int code, int final, const char *text, size_t len)
           ftp_complete (f, TWIST_ERR_PROTOCOL);
           return;
         }
-      user_name = ftp_user (f);
-      if (bad_token (user_name))
+      /* TLS first if it was asked for, so that the user name and the password
+         do not go where they can be read.  An FTP server is not asked what it
+         offers: AUTH TLS is tried, and a server that has no such thing says
+         so.  */
+      if (f->use_ssl != TWIST_USE_SSL_NONE && !f->ctrl_tls)
         {
-          ftp_complete (f, TWIST_ERR_PROTOCOL);
+          f->state = FTP_AUTHTLS;
+          if (ftp_send (f, "AUTH TLS\r\n") != TWIST_OK)
+            ftp_complete (f, TWIST_ERR_PROTOCOL);
           return;
         }
-      f->state = FTP_USER;
-      if (ftp_send (f, "USER %s\r\n", user_name) != TWIST_OK)
-        ftp_complete (f, TWIST_ERR_PROTOCOL);
+      ftp_begin_login (f);
+      return;
+    case FTP_AUTHTLS:
+      if (code == 234)
+        {
+          /* The handshake starts, and nothing is sent until it is done.  A
+             test with no connection has none to start.  */
+          f->state = FTP_TLSWAIT;
+          if (f->ep != NULL
+              && (user_ssl_rc = twist_connection_start_tls (f->ep->conn,
+                                                            f->easy->url->host,
+                                                            f->easy->verifypeer,
+                                                            NULL, 0,
+                                                            f->easy->cainfo,
+                                                            f->easy->capath,
+                                                            f->easy->sslcert,
+                                                            f->easy->sslkey))
+                 != TWIST_OK)
+            ftp_complete (f, user_ssl_rc);
+          return;
+        }
+      /* Refused: required, that is the end; wanted, go on as it is.  */
+      if (f->use_ssl == TWIST_USE_SSL_ALL)
+        {
+          ftp_complete (f, twist_easy_use_ssl_failed (f->easy,
+                                                      _("the server refused "
+                                                        "AUTH TLS")));
+          return;
+        }
+      ftp_begin_login (f);
+      return;
+    case FTP_TLSWAIT:
+      /* A reply behind the 234, before the handshake: it came in the clear.  */
+      ftp_complete (f, TWIST_ERR_PROTOCOL);
       return;
     case FTP_USER:
       if (code == 230)
@@ -863,6 +922,19 @@ ftp_connected (struct twist_endpoint *ep)
     ftp_complete (f, rc);
 }
 
+/* The handshake is done, for ftps as well as after AUTH TLS: only the second
+   is waited for.  */
+static void
+ftp_ctrl_secure (struct twist_endpoint *ep, const char *alpn, size_t alpn_len)
+{
+  struct twist_ftp *f = ep->user_data;
+
+  (void) alpn;
+  (void) alpn_len;
+  f->ep = ep;
+  twist_ftp_tls_done (f);
+}
+
 static size_t
 ftp_receive (struct twist_endpoint *ep, const uint8_t *data, size_t len)
 {
@@ -988,7 +1060,7 @@ static const struct twist_protocol_handler ftp_ctrl_handler = {
   ftp_connected,
   ftp_receive,
   ftp_disconnected,
-  NULL,
+  ftp_ctrl_secure,
   ftp_error,
   NULL,
   NULL
@@ -1007,11 +1079,23 @@ static const struct twist_protocol_handler ftp_data_handler = {
 size_t
 twist_ftp_receive (struct twist_ftp *f, const uint8_t *data, size_t len)
 {
+  size_t used;
+
   if (f == NULL || f->parser == NULL)
     return len;
   if (f->finished)
     return len;
-  return twist_ftp_parser_receive (f->parser, data, len);
+  used = twist_ftp_parser_receive (f->parser, data, len);
+  /* A server that has agreed to start TLS says nothing more until the
+     handshake is done.  Whatever else is in this buffer came in the clear,
+     from whoever is on the path, and must not be taken for the encrypted
+     session's.  */
+  if (f->state == FTP_TLSWAIT && !f->finished && used < len)
+    {
+      ftp_complete (f, TWIST_ERR_PROTOCOL);
+      return len;
+    }
+  return used;
 }
 
 size_t
@@ -1217,6 +1301,8 @@ twist_ftp_new (struct twist_easy *easy, int live)
   f->expect = -1;
   f->implicit_tls = easy->url->scheme != NULL
                     && strcmp (easy->url->scheme, "ftps") == 0;
+  f->ctrl_tls = f->implicit_tls;
+  f->use_ssl = f->implicit_tls ? TWIST_USE_SSL_NONE : easy->use_ssl;
   prepare_arg (f);
   memset (&ev, 0, sizeof ev);
   ev.user = f;
@@ -1247,4 +1333,15 @@ twist_ftp_attach (struct twist_easy *easy)
   if (easy->done)
     return easy->result;
   return TWIST_OK;
+}
+
+/* The handshake that followed AUTH TLS is done.  The login begins, encrypted,
+   and the data connection is to be protected as on ftps.  */
+void
+twist_ftp_tls_done (struct twist_ftp *f)
+{
+  if (f == NULL || f->finished || f->state != FTP_TLSWAIT)
+    return;
+  f->ctrl_tls = 1;
+  ftp_begin_login (f);
 }
