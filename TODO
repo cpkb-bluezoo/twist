@@ -106,10 +106,10 @@ Twist TODO List
           --proxy-template-udp.  Left: HTTP/3 under a proxy is chosen only by
           --http3-only (the target's HTTPS record and Alt-Svc are not asked
           for, since the proxy does the lookup); DNS over QUIC does not use a
-          proxy; the tunnel's packets are at most 1200 bytes (quickstep must
-          send max_udp_payload_size, or a peer's path MTU probes through the
-          tunnel can exceed what the proxy's own datagrams hold, and some
-          proxies then end the flow), and so a larger path MTU is not used.
+          proxy; the tunnel's packets are at most 1200 bytes (twist asks for
+          that with max_udp_payload_size, or a peer's path MTU probes could
+          exceed what the proxy's own datagrams hold, and some proxies then
+          end the flow), and so a larger path MTU is not used.
         - templated CONNECT-TCP (draft-ietf-httpbis-connect-tcp), and
           --proxy-template-tcp for it, when it is an RFC.
         - ftp and ftps through an https proxy (the data connection too).
