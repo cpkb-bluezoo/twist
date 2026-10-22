@@ -252,11 +252,18 @@ A long, one of @code{TWIST_HTTP_VERSION_NONE} (the default, which lets twist
 choose), @code{_1_0}, @code{_1_1}, @code{_2_0}, @code{_2TLS}, @code{_3},
 @code{_3ONLY} and @code{_2_PRIOR_KNOWLEDGE}.
 @item TWISTOPT_ACCEPT_ENCODING
-A string: the response codings to accept.  An empty string is @samp{gzip} and
-@samp{deflate}.  @code{NULL}, the default, advertises none and decodes none.
+A string: the response codings to accept.  An empty string is @samp{br},
+@samp{gzip} and @samp{deflate}, or @samp{gzip} and @samp{deflate} when the
+library was built without libbrotli.  @code{NULL}, the default, advertises none
+and decodes none.
 @item TWISTOPT_CONTENT_ENCODING
-A string, @samp{gzip} or @samp{deflate}: compress the request body.  Any other
-coding is @code{TWIST_ERR_UNSUPPORTED}.  An empty string clears it.
+A string, @samp{gzip}, @samp{deflate} or @samp{br}: compress the request body.
+Any other coding is @code{TWIST_ERR_UNSUPPORTED}, and so is @samp{br} when the
+library was built without libbrotli.  An empty string clears it.  @samp{br} is
+coded with quality 5 and a window of 4 MiB.  A @samp{br} response is decoded
+with a window of at most 16 MiB, the most that Brotli without its large-window
+extension can ask for, and a stream that asks for more is
+@code{TWIST_ERR_ENCODING}.
 @item TWISTOPT_UNIX_SOCKET
 A string: the path of a Unix socket to connect to in place of the host and port
 of the URL, for @code{http}, @code{https}, @code{ws} and @code{wss}.  The URL
@@ -849,11 +856,13 @@ the status is recorded and the body is written.
 Stop at the first failed URL.  This applies to every URL on the
 command line.
 @item --compressed
-Ask for a gzip or deflate response and decompress it.
+Ask for a compressed response and decompress it: @code{br}, @code{gzip} and
+@code{deflate}, or @code{gzip} and @code{deflate} when twist was built without
+libbrotli.  @code{twist --version} says @samp{Features: brotli} when it was.
 @item --content-encoding @var{coding}
-Compress the request body.  @var{coding} is @code{gzip} or
-@code{deflate}.  The request carries @code{Content-Encoding}.  Reset
-by @option{--next}.
+Compress the request body.  @var{coding} is @code{gzip}, @code{deflate}, or
+@code{br} when twist has libbrotli.  The request carries
+@code{Content-Encoding}.  Reset by @option{--next}.
 @item -k
 @itemx --insecure
 Do not check the certificate of the server for TLS, including HTTP/3: any

@@ -18,10 +18,11 @@
 
 #include "fuzz.h"
 
-/* Content codings: gzip and deflate (and any other that is known), fed in
-   pieces.  The first byte picks the coding and the size of the pieces.  */
+/* Content codings: gzip, deflate and br (when libbrotli is built in; without
+   it br is not a coding and the input is dropped), fed in pieces.  The first byte picks the coding and the size of the pieces.  */
 
-static const char *const names[] = { "gzip", "deflate", "x-gzip", "identity" };
+static const char *const names[] = { "gzip", "deflate", "x-gzip", "identity",
+                                     "br" };
 
 void
 fuzz_seeds (void (*add) (const void *, size_t))
@@ -50,6 +51,31 @@ fuzz_seeds (void (*add) (const void *, size_t))
       free (seed);
       free (df);
     }
+  /* Seeds for br, high nibble 4: the dictionary's words, and long copies.  */
+  {
+    static const char *const texts[] = {
+      "the quick brown fox jumps over the lazy dog, the quick brown fox",
+      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    };
+    size_t i;
+
+    for (i = 0; i < sizeof texts / sizeof texts[0]; i++)
+      {
+        uint8_t *br = NULL;
+        size_t bn = 0;
+
+        if (twist_coding_encode ("br", (const uint8_t *) texts[i],
+                                 strlen (texts[i]), &br, &bn) == TWIST_OK)
+          {
+            seed = malloc (bn + 1);
+            seed[0] = (uint8_t) (0x40 | (i * 3));
+            memcpy (seed + 1, br, bn);
+            add (seed, bn + 1);
+            free (seed);
+            free (br);
+          }
+      }
+  }
 }
 
 /* The decoded data is dropped, but each piece is checked to be no larger than
@@ -72,7 +98,7 @@ LLVMFuzzerTestOneInput (const uint8_t *data, size_t size)
 
   if (size == 0)
     return 0;
-  if (twist_coding_open (&c, names[(data[0] >> 4) & 3]) != TWIST_OK)
+  if (twist_coding_open (&c, names[((data[0] >> 4) & 15) % (sizeof names / sizeof names[0])]) != TWIST_OK)
     return 0;
   piece = fuzz_piece (data[0], size);
   data++;

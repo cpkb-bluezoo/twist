@@ -27,8 +27,24 @@
 #include <strings.h>
 #include <zlib.h>
 
-/* gzip and deflate only.  A later coding, such as Brotli, is another
-   name in coding_kind and does not change the HTTP caller.  */
+#ifdef HAVE_BROTLI
+# include <brotli/decode.h>
+# include <brotli/encode.h>
+#endif
+
+/* gzip and deflate, and br when libbrotli is built in (it is optional).  A
+   coding is a name in coding_kind and does not change the HTTP caller.  */
+
+#define KIND_GZIP 1
+#define KIND_DEFLATE 2
+#define KIND_BROTLI 3
+
+/* What a request body is coded with when it is: the quality and window of the
+   encoder.  Quality 11 is for files that are compressed once and sent many
+   times, and is too slow here; 5 is the balance for a reactor.  The window is
+   4 MiB, well within the 16 MiB that br allows a decoder to be asked for.  */
+#define BROTLI_QUALITY 5
+#define BROTLI_LGWIN 22
 
 struct twist_coding
 {
@@ -38,6 +54,9 @@ struct twist_coding
   int raw;
   int started;
   int ended;
+#ifdef HAVE_BROTLI
+  BrotliDecoderState *br;
+#endif
 };
 
 static int
@@ -46,9 +65,13 @@ coding_kind (const char *name)
   if (name == NULL)
     return 0;
   if (strcasecmp (name, "gzip") == 0 || strcasecmp (name, "x-gzip") == 0)
-    return 1;
+    return KIND_GZIP;
   if (strcasecmp (name, "deflate") == 0)
-    return 2;
+    return KIND_DEFLATE;
+#ifdef HAVE_BROTLI
+  if (strcasecmp (name, "br") == 0)
+    return KIND_BROTLI;
+#endif
   return 0;
 }
 
@@ -89,7 +112,23 @@ twist_coding_open (struct twist_coding **out, const char *name)
   if (c == NULL)
     return TWIST_ERR_NOMEM;
   c->kind = kind;
-  window = kind == 1 ? 16 + MAX_WBITS : MAX_WBITS;
+#ifdef HAVE_BROTLI
+  if (kind == KIND_BROTLI)
+    {
+      /* The large-window extension is not set, so a stream that asks for a
+         window above 16 MiB is refused.  */
+      c->br = BrotliDecoderCreateInstance (NULL, NULL, NULL);
+      if (c->br == NULL)
+        {
+          free (c);
+          return TWIST_ERR_NOMEM;
+        }
+      c->inited = 1;
+      *out = c;
+      return TWIST_OK;
+    }
+#endif
+  window = kind == KIND_GZIP ? 16 + MAX_WBITS : MAX_WBITS;
   rc = decoder_init (c, window);
   if (rc != TWIST_OK)
     {
@@ -172,6 +211,67 @@ inflate_chunk (struct twist_coding *c, const uint8_t *in, size_t n,
   return TWIST_OK;
 }
 
+#ifdef HAVE_BROTLI
+/* The error of a Brotli decoder that stopped: out of memory is that, and the
+   rest is a stream that is not Brotli.  */
+static int
+brotli_error (const BrotliDecoderState *st)
+{
+  switch (BrotliDecoderGetErrorCode (st))
+    {
+    case BROTLI_DECODER_ERROR_ALLOC_CONTEXT_MODES:
+    case BROTLI_DECODER_ERROR_ALLOC_TREE_GROUPS:
+    case BROTLI_DECODER_ERROR_ALLOC_CONTEXT_MAP:
+    case BROTLI_DECODER_ERROR_ALLOC_RING_BUFFER_1:
+    case BROTLI_DECODER_ERROR_ALLOC_RING_BUFFER_2:
+    case BROTLI_DECODER_ERROR_ALLOC_BLOCK_TYPE_TREES:
+      return TWIST_ERR_NOMEM;
+    default:
+      return TWIST_ERR_ENCODING;
+    }
+}
+
+/* Decode IN, N bytes, as inflate_chunk does: the output goes on in pieces of
+   no more than TWIST_CODING_PIECE as it is produced, and nothing is held.
+   The decoder resumes inside a symbol, so the input can be cut anywhere.  It
+   is not finished until it says so; bytes after its end are an error.  */
+static int
+brotli_chunk (struct twist_coding *c, const uint8_t *in, size_t n,
+              twist_coding_sink sink, void *user)
+{
+  uint8_t buf[TWIST_CODING_PIECE];
+  const uint8_t *next_in = in;
+  size_t avail_in = n;
+
+  for (;;)
+    {
+      uint8_t *next_out = buf;
+      size_t avail_out = sizeof buf;
+      BrotliDecoderResult r;
+      int rc;
+
+      r = BrotliDecoderDecompressStream (c->br, &avail_in, &next_in,
+                                         &avail_out, &next_out, NULL);
+      rc = emit (sink, user, buf, sizeof buf - avail_out);
+      if (rc != TWIST_OK)
+        return rc;
+      switch (r)
+        {
+        case BROTLI_DECODER_RESULT_SUCCESS:
+          c->ended = 1;
+          return avail_in == 0 ? TWIST_OK : TWIST_ERR_ENCODING;
+        case BROTLI_DECODER_RESULT_NEEDS_MORE_INPUT:
+          c->started = 1;
+          return TWIST_OK;
+        case BROTLI_DECODER_RESULT_NEEDS_MORE_OUTPUT:
+          break;
+        default:
+          return brotli_error (c->br);
+        }
+    }
+}
+#endif
+
 int
 twist_coding_feed (struct twist_coding *c, const uint8_t *data, size_t len,
                    twist_coding_sink sink, void *user)
@@ -186,6 +286,10 @@ twist_coding_feed (struct twist_coding *c, const uint8_t *data, size_t len,
     return TWIST_ERR_ENCODING;
   if (len == 0)
     return TWIST_OK;
+#ifdef HAVE_BROTLI
+  if (c->kind == KIND_BROTLI)
+    return brotli_chunk (c, data, len, sink, user);
+#endif
   return inflate_chunk (c, data, len, sink, user);
 }
 
@@ -202,6 +306,10 @@ twist_coding_finish (struct twist_coding *c, twist_coding_sink sink,
     return TWIST_ERR_ENCODING;
   if (c->ended)
     return TWIST_OK;
+  /* Whatever the decoder had was delivered when it asked for more input, so
+     what is not ended now is a stream cut short.  */
+  if (c->kind == KIND_BROTLI)
+    return TWIST_ERR_ENCODING;
   c->strm.next_in = &empty;
   c->strm.avail_in = 0;
   for (;;)
@@ -235,6 +343,11 @@ twist_coding_free (struct twist_coding *c)
 {
   if (c == NULL)
     return;
+#ifdef HAVE_BROTLI
+  if (c->kind == KIND_BROTLI)
+    BrotliDecoderDestroyInstance (c->br);
+  else
+#endif
   if (c->inited)
     inflateEnd (&c->strm);
   free (c);
@@ -260,9 +373,36 @@ twist_coding_encode (const char *name, const uint8_t *data, size_t len,
   kind = coding_kind (name);
   if (kind == 0)
     return TWIST_ERR_UNSUPPORTED;
+#ifdef HAVE_BROTLI
+  if (kind == KIND_BROTLI)
+    {
+      /* One call: a request body is in memory, and is coded as a whole.  */
+      size_t cap = BrotliEncoderMaxCompressedSize (len);
+      size_t got;
+      uint8_t empty_br = 0;
+      uint8_t *obuf;
+
+      if (cap == 0)
+        return TWIST_ERR_ENCODING;
+      obuf = twist_xmalloc (cap);
+      if (obuf == NULL)
+        return TWIST_ERR_NOMEM;
+      got = cap;
+      if (!BrotliEncoderCompress (BROTLI_QUALITY, BROTLI_LGWIN,
+                                  BROTLI_MODE_GENERIC, len,
+                                  len > 0 ? data : &empty_br, &got, obuf))
+        {
+          free (obuf);
+          return TWIST_ERR_ENCODING;
+        }
+      *out = obuf;
+      *out_n = got;
+      return TWIST_OK;
+    }
+#endif
   if (len > (size_t) ~0u)
     return TWIST_ERR_ENCODING;
-  window = kind == 1 ? 16 + MAX_WBITS : MAX_WBITS;
+  window = kind == KIND_GZIP ? 16 + MAX_WBITS : MAX_WBITS;
   memset (&strm, 0, sizeof strm);
   z = deflateInit2 (&strm, Z_DEFAULT_COMPRESSION, Z_DEFLATED, window, 8,
                     Z_DEFAULT_STRATEGY);

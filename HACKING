@@ -136,9 +136,11 @@ with gcc and -Werror, in the "check" stage of ci/Dockerfile.  The integration
 tests and the fuzzers are not run there.  The Dockerfile builds what twist
 needs and Ubuntu 24.04 does not have (libgcrypt 1.12.4, quickstep and
 foxtrot, the last two from the tip of their main branches), so the same build
-can be had anywhere with docker:
+can be had anywhere with docker, with libbrotli and without it:
 
   docker build --target check -f ci/Dockerfile .
+  docker build --target check -f ci/Dockerfile \
+    --build-arg TWIST_CONFIGURE=--without-brotli .
 
 Fuzzing
 -------
@@ -201,6 +203,10 @@ Building
 quickstep and foxtrot must already be installed, so that pkg-config can
 see quickstep.pc and foxtrot.pc.  foxtrot needs libgcrypt 1.12.4 or later
 and configure checks the pkg-config version, the header and the library
-the loader gives a program.  zlib is required.  No dependency other than
-quickstep, foxtrot (and so libgcrypt), zlib, and GNU readline is added
+the loader gives a program.  zlib is required.  libbrotli is optional: with it
+(libbrotlidec and libbrotlienc, found by pkg-config, HAVE_BROTLI in config.h)
+twist decodes and codes br, and without it br is not a known coding, so the
+default Accept-Encoding is "gzip, deflate".  Both builds are tested: CI builds
+with --with-brotli and with --without-brotli.  No dependency other than
+quickstep, foxtrot (and so libgcrypt), zlib, libbrotli, and GNU readline is added
 without explicit approval.  Readline links into the twist program only.

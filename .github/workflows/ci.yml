@@ -20,9 +20,20 @@ permissions:
 
 jobs:
   unit:
-    name: Unit tests (gcc)
+    name: Unit tests (gcc, ${{ matrix.name }})
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    # libbrotli is optional, so both builds are tested.  With --with-brotli
+    # configure fails if it is not found, and the leg cannot pass by not
+    # testing br.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: with libbrotli
+            configure: --with-brotli
+          - name: without libbrotli
+            configure: --without-brotli
     steps:
       - uses: actions/checkout@v7
 
@@ -53,5 +64,6 @@ jobs:
           build-args: |
             QUICKSTEP_REF=${{ steps.deps.outputs.quickstep }}
             FOXTROT_REF=${{ steps.deps.outputs.foxtrot }}
+            TWIST_CONFIGURE=${{ matrix.configure }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

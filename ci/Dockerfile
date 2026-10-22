@@ -20,8 +20,8 @@ FROM ubuntu:24.04 AS build
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
          autoconf autopoint automake build-essential ca-certificates curl \
-         bzip2 gettext git libgnutls28-dev libreadline-dev libtool \
-         pkg-config texinfo zlib1g-dev \
+         bzip2 gettext git libbrotli-dev libgnutls28-dev libreadline-dev \
+         libtool pkg-config texinfo zlib1g-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # foxtrot needs libgcrypt 1.12.4 or newer, and that needs a newer libgpg-error
@@ -91,9 +91,14 @@ RUN mkdir /deps-foxtrot && cd /deps-foxtrot \
 WORKDIR /src
 COPY . .
 
+# Extra arguments for configure.  The workflow builds with --with-brotli, which
+# fails if libbrotli is not found, and with --without-brotli, so that both
+# builds of the optional dependency are tested.
+ARG TWIST_CONFIGURE=
+
 # Warnings are errors: the tree is expected to build cleanly with gcc.
 RUN ./bootstrap \
-    && ./configure \
+    && ./configure $TWIST_CONFIGURE \
     && make -j"$(nproc)" CFLAGS="-g -O2 -Werror"
 
 # ---- Check: the unit tests --------------------------------------------------

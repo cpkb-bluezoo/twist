@@ -20,12 +20,12 @@ lib_LTLIBRARIES = libtwist.la
 bin_PROGRAMS = twist
 
 AM_CPPFLAGS = -I$(top_srcdir)/include -I$(top_srcdir)/src $(QUICKSTEP_CFLAGS) \
-  $(FOXTROT_CFLAGS) -DLOCALEDIR=\"$(localedir)\"
+  $(FOXTROT_CFLAGS) $(BROTLI_CFLAGS) -DLOCALEDIR=\"$(localedir)\"
 AM_CFLAGS = $(STD_CFLAGS) $(WARN_CFLAGS)
 
 libtwist_la_LDFLAGS = -version-info $(LIBTWIST_LTVERSION) -no-undefined
 libtwist_la_LIBADD = $(QUICKSTEP_LIBS) $(FOXTROT_LIBS) $(ZLIB_LIBS) \
-  $(LTLIBINTL)
+  $(BROTLI_LIBS) $(LTLIBINTL)
 
 ## One library.  Sources are grouped by layer so a new scheme is a
 ## directory, not another file in a flat list.

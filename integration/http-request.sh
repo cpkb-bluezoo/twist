@@ -64,6 +64,17 @@ class H(http.server.BaseHTTPRequestHandler):
             self.send_header(k, v)
         self.end_headers()
         self.wfile.write(body)
+    def do_POST(self):
+        # The body as it came, said to be what the request said it was: a
+        # client that codes the request body and decodes the echo gets its
+        # data back.  The coding of the request and the length are reported.
+        n = int(self.headers.get('Content-Length', '0'))
+        body = self.rfile.read(n)
+        enc = self.headers.get('Content-Encoding')
+        extra = [('X-Seen-Encoding', enc or 'none'), ('X-Seen-Length', str(n))]
+        if enc:
+            extra.append(('Content-Encoding', enc))
+        self.reply(200, body, extra)
     def do_GET(self):
         p = self.path
         if p == '/echo':
@@ -79,6 +90,13 @@ class H(http.server.BaseHTTPRequestHandler):
                 self.reply(200, body)
             except OSError:
                 pass
+        elif p == '/hello-br':
+            self.reply(200, bytes.fromhex('1b3800004477f8f75cf3f75e8b883252b001070e59ac990c3c4ce430c0b6e02067d3013657d7e52718311e627f0825d8a001'), [('Content-Encoding', 'br')])
+        elif p == '/not-br':
+            self.reply(200, b'this is not brotli, it is just text, of some length', [('Content-Encoding', 'br')])
+        elif p == '/zeros-br':
+            # 64 MiB of zeros, in 51 bytes.
+            self.reply(200, bytes.fromhex('cfffff7f002400e2b14072effff9ffff0f8004401c1680eefd3fffffff01900088c302d0bdffcfffff7f001200715800baf7ff'), [('Content-Encoding', 'br')])
         elif p == '/hello-gz':
             self.reply(200, gzip.compress(b'hello gzip\n'), [('Content-Encoding', 'gzip')])
         elif p == '/gz':
@@ -243,6 +261,37 @@ check "$(is "$(get --compressed "$base/hello-gz")" "hello gzip")" \
 n=$(timeout 60 "$TWIST" -s -S --compressed -o /dev/null -w '%{size_download}' \
       "$base/gz" 2>/dev/null)
 check "$(is "$n" 67108864)" "a gzip body of 64 MiB, sent in 64 KB, arrives whole (got $n)"
+
+# Brotli, where it is built in (libbrotli is optional): the response is
+# decoded, a 64 MiB expansion of 51 bytes arrives whole, a request body can be
+# coded and what the server sends back for it decoded again, and the request
+# says that br is accepted.  Without it the header is as it was and br is
+# refused.
+if "$TWIST" --version | grep -q '^Features:.*brotli'; then
+  check "$(is "$(get --compressed "$base/hello-br")" "hello hello hello hello brotli, the small crumb of bread")" \
+    "a br body is decoded"
+  n=$(timeout 60 "$TWIST" -s -S --compressed -o /dev/null -w '%{size_download}' \
+        "$base/zeros-br" 2>/dev/null)
+  check "$(is "$n" 67108864)" "a br body of 64 MiB, sent in 51 bytes, arrives whole (got $n)"
+  check "$(is "$(length_of accept-encoding --compressed)" 17)" \
+    "br, gzip, deflate is what is accepted"
+  data=$(head -c 6000 /dev/zero | tr '\0' 'a')
+  hdrs=$(timeout 20 "$TWIST" -s -S -D - -o /dev/null --content-encoding br -d "$data" "$base/post" 2>/dev/null | tr -d '\r')
+  check "$(is "$(printf %s "$hdrs" | sed -n 's/^X-Seen-Encoding: //p')" br)" \
+    "a request body is sent as br"
+  seen=$(printf %s "$hdrs" | sed -n 's/^X-Seen-Length: //p')
+  check "$([ "${seen:-99999}" -lt 200 ] && echo ok)" "and is smaller for it (got ${seen:-nothing} bytes)"
+  out=$(timeout 20 "$TWIST" -s -S --compressed --content-encoding br -d "$data" "$base/post" 2>/dev/null)
+  check "$(is "$out" "$data")" "and the echo of it is decoded to what was sent"
+  # A body that is not br is an error, status 61.
+  timeout 20 "$TWIST" -s --compressed -o /dev/null "$base/not-br" >/dev/null 2>&1
+  check "$(is $? 61)" "a body that is not br is status 61"
+else
+  check "$(is "$(length_of accept-encoding --compressed)" 13)" \
+    "without brotli, gzip, deflate is what is accepted"
+  timeout 20 "$TWIST" -s --content-encoding br -d x -o /dev/null "$base/post" >/dev/null 2>&1
+  check "$([ $? -ne 0 ] && echo ok)" "and br for a request is refused"
+fi
 
 # What the application will not take is not sent on to it.  A write that
 # fails (a full disk) was ignored by HTTP, which went on and read all of the

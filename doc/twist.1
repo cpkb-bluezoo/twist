@@ -340,15 +340,22 @@ Stop at the first failed URL.  This applies to every URL on the
 command line.
 .TP
 .B \-\-compressed
-Ask for a gzip or deflate response and decompress it.
+Ask for a compressed response and decompress it: br, gzip and deflate, or gzip
+and deflate when twist was built without libbrotli.
+.B twist \-\-version
+says
+.B Features: brotli
+when it was.
 .TP
 .BI \-\-content\-encoding " coding"
 Compress the request body.
 .I coding
 is
-.I gzip
+.IR gzip ,
+.IR deflate ,
 or
-.IR deflate .
+.I br
+when twist has libbrotli.
 The request carries
 .BR Content-Encoding .
 Reset by

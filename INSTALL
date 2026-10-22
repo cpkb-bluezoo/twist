@@ -19,6 +19,11 @@ Dependencies:
   - **foxtrot** - SSH engine (source in ../foxtrot), which needs
     **libgcrypt** 1.12.4 or later
   - **GNU readline** - For interactive input
+  - **libbrotli** - Optional, for the br content coding (--compressed and
+    --content-encoding).  configure uses it when pkg-config finds
+    libbrotlidec and libbrotlienc; --with-brotli makes that an error if not,
+    and --without-brotli never uses it.  Debian/Ubuntu: libbrotli-dev;
+    Fedora/RHEL: brotli-devel; macOS: brew install brotli
 
 Building
 -------

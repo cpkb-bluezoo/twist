@@ -47,6 +47,8 @@ Dependencies
   - libgcrypt 1.12.4 or later, which foxtrot needs, and which the loader
     must find ahead of any older system copy (configure checks this)
   - zlib
+  - libbrotli (libbrotlidec and libbrotlienc), optional, for the br content
+    coding; without it twist asks for and decodes gzip and deflate only
   - GNU readline, for the twist program only
 
 Build and install

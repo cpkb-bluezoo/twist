@@ -135,6 +135,25 @@ AC_CHECK_LIB([z], [inflate],
 LIBS=$tw_save_LIBS
 AC_SUBST([ZLIB_LIBS])
 
+AC_ARG_WITH([brotli],
+  [AS_HELP_STRING([--with-brotli],
+     [support the br content coding with libbrotli @<:@default=check@:>@])],
+  [], [with_brotli=check])
+BROTLI_REQUIRES=
+BROTLI_CFLAGS=
+BROTLI_LIBS=
+AS_IF([test "x$with_brotli" != xno],
+  [PKG_CHECK_MODULES([BROTLI], [libbrotlidec libbrotlienc],
+     [AC_DEFINE([HAVE_BROTLI], [1], [Define if libbrotli is available])
+      BROTLI_REQUIRES="libbrotlidec libbrotlienc"],
+     [BROTLI_CFLAGS=
+      BROTLI_LIBS=
+      AS_IF([test "x$with_brotli" = xyes],
+        [AC_MSG_ERROR([libbrotli not found])])])])
+AC_SUBST([BROTLI_CFLAGS])
+AC_SUBST([BROTLI_LIBS])
+AC_SUBST([BROTLI_REQUIRES])
+
 AC_ARG_WITH([readline],
   [AS_HELP_STRING([--with-readline],
      [link the twist program with GNU Readline @<:@default=check@:>@])],

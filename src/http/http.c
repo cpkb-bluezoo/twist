@@ -967,8 +967,10 @@ request_headers (struct twist_http *h)
   if (easy->accept_encoding != NULL
       && !header_named (easy->headers, "Accept-Encoding"))
     {
+      /* What twist can decode, br first when libbrotli is built in.  */
       const char *v = easy->accept_encoding[0] != 0
-        ? easy->accept_encoding : "gzip, deflate";
+        ? easy->accept_encoding
+        : twist_coding_known ("br") ? "br, gzip, deflate" : "gzip, deflate";
 
       list = add_header (list, "Accept-Encoding: %s", v);
     }

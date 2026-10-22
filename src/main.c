@@ -217,9 +217,9 @@ usage (void)
   fputs (_("  -f, --fail              fail on HTTP errors (400 and above)\n"),
          stdout);
   fputs (_("      --fail-early        stop at the first failed URL\n"), stdout);
-  fputs (_("      --compressed        request a gzip or deflate response\n"),
+  fputs (_("      --compressed        request a compressed response (gzip, deflate or br)\n"),
          stdout);
-  fputs (_("      --content-encoding C  gzip or deflate the request body\n"),
+  fputs (_("      --content-encoding C  compress the request body (gzip, deflate or br)\n"),
          stdout);
   fputs (_("  -k, --insecure          do not check the server's certificate; sftp and\n"
            "                          scp do not check the known_hosts file\n"),
@@ -330,6 +330,9 @@ version (void)
   fputs (_("This is free software: you are free to change and redistribute it.\n"),
          stdout);
   fputs (_("There is NO WARRANTY, to the extent permitted by law.\n"), stdout);
+  /* What this build has that others may not.  */
+  if (twist_coding_known ("br"))
+    printf ("Features: brotli\n");
 }
 
 static int
