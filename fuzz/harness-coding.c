@@ -52,13 +52,23 @@ fuzz_seeds (void (*add) (const void *, size_t))
     }
 }
 
+/* The decoded data is dropped, but each piece is checked to be no larger than
+   promised, and to be there.  */
+static int
+drop (void *user, const uint8_t *data, size_t len)
+{
+  (void) user;
+  if (len == 0 || len > TWIST_CODING_PIECE || data == NULL)
+    abort ();
+  /* Read it all, so that the sanitizers see a piece that is not whole.  */
+  return data[0] + data[len - 1] < 0;
+}
+
 int
 LLVMFuzzerTestOneInput (const uint8_t *data, size_t size)
 {
   struct twist_coding *c = NULL;
   size_t piece, off = 0;
-  uint8_t *out;
-  size_t on;
 
   if (size == 0)
     return 0;
@@ -71,20 +81,11 @@ LLVMFuzzerTestOneInput (const uint8_t *data, size_t size)
     {
       size_t take = piece < size - off ? piece : size - off;
 
-      out = NULL;
-      on = 0;
-      if (twist_coding_feed (c, data + off, take, &out, &on) != TWIST_OK)
-        {
-          free (out);
-          break;
-        }
-      free (out);
+      if (twist_coding_feed (c, data + off, take, drop, NULL) != TWIST_OK)
+        break;
       off += take;
     }
-  out = NULL;
-  on = 0;
-  if (twist_coding_finish (c, &out, &on) == TWIST_OK)
-    free (out);
+  twist_coding_finish (c, drop, NULL);
   twist_coding_free (c);
   return 0;
 }

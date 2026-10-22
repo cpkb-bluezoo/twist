@@ -416,6 +416,7 @@ twist_hpack_encode_request (struct twist_hpack *hp, const char *method,
   uint8_t *buf;
   size_t n = 0;
   size_t cap = 512;
+  size_t i;
   const struct twist_slist *h;
   (void) hp;
 
@@ -469,11 +470,19 @@ twist_hpack_encode_request (struct twist_hpack *hp, const char *method,
       nl = (size_t) (colon - h->data);
       if (nl >= sizeof name)
         continue;
-      memcpy (name, h->data, nl);
+      /* Field names are lower case in HTTP/2 (RFC 9113, section 8.2.1), and a
+         request with a capital in one is malformed: some servers refuse it,
+         and a GOAWAY ends the whole connection.  Values are as given.  */
+      for (i = 0; i < nl; i++)
+        name[i] = h->data[i] >= 'A' && h->data[i] <= 'Z'
+                  ? (char) (h->data[i] + 32) : h->data[i];
       name[nl] = 0;
       val = colon + 1;
       while (*val == ' ')
         val++;
+      /* Connection-specific fields are not sent in HTTP/2 (section 8.2.2).  */
+      if (twist_header_connection_specific (name, nl, val))
+        continue;
       if (n + nl + strlen (val) + 4 > cap)
         {
           free (buf);

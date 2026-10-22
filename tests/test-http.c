@@ -992,6 +992,144 @@ test_hpack_long (void)
   twist_hpack_free (hp);
 }
 
+/* HTTP/2 header field names are lower case (RFC 9113, section 8.2.1) and a
+   request with a capital in one is malformed: the server must refuse it.
+   Most do not, and GitHub's answers a GOAWAY with PROTOCOL_ERROR ("found an
+   upper-case letter in header name"), so every request to raw.githubusercontent.com
+   and docs.github.com failed with "connection closed".  HTTP/3's encoder
+   lowered names; HTTP/2's sent them as given ("User-Agent").  */
+static char hn_names[1024];
+static char hn_values[1024];
+
+static void
+hn_header (void *user, const char *name, size_t name_len, const char *value,
+           size_t value_len)
+{
+  (void) user;
+  if (strlen (hn_names) + name_len + 2 < sizeof hn_names)
+    {
+      strncat (hn_names, name, name_len);
+      strcat (hn_names, " ");
+    }
+  if (strlen (hn_values) + value_len + 2 < sizeof hn_values)
+    {
+      strncat (hn_values, value, value_len);
+      strcat (hn_values, " ");
+    }
+}
+
+static void
+test_hpack_lowercase_names (void)
+{
+  struct twist_hpack *enc = twist_hpack_new ();
+  struct twist_hpack *dec = twist_hpack_new ();
+  struct twist_h1_events ev;
+  struct twist_slist *extra = NULL;
+  uint8_t *out = NULL;
+  size_t n = 0;
+  size_t i;
+  int upper = 0;
+
+  extra = twist_slist_append (extra, "User-Agent: twist/0.1");
+  extra = twist_slist_append (extra, "X-Custom-Header: KeepMyCase");
+  extra = twist_slist_append (extra, "ACCEPT-ENCODING: gzip");
+  extra = twist_slist_append (extra, "Authorization: Bearer AbC");
+  extra = twist_slist_append (extra, ":protocol: websocket");
+  check (enc != NULL && dec != NULL, "hpack handles");
+  check (twist_hpack_encode_request (enc, "GET", "https", "h.example", "/p?Q=1",
+                                     extra, &out, &n) == TWIST_OK, "encode");
+  memset (&ev, 0, sizeof ev);
+  ev.header = hn_header;
+  hn_names[0] = 0;
+  hn_values[0] = 0;
+  check (twist_hpack_decode (dec, out, n, &ev) == TWIST_OK, "decode");
+  for (i = 0; hn_names[i] != 0; i++)
+    if (hn_names[i] >= 'A' && hn_names[i] <= 'Z')
+      upper = 1;
+  check (!upper, "no header name has a capital letter");
+  check (strstr (hn_names, " user-agent ") != NULL
+         && strstr (hn_names, " x-custom-header ") != NULL
+         && strstr (hn_names, " accept-encoding ") != NULL
+         && strstr (hn_names, " authorization ") != NULL
+         && strstr (hn_names, " :protocol ") != NULL,
+         "they are the lower case of what was given");
+  check (strstr (hn_values, "KeepMyCase") != NULL
+         && strstr (hn_values, "Bearer AbC") != NULL
+         && strstr (hn_values, "/p?Q=1") != NULL,
+         "and the values are as given");
+  free (out);
+  twist_slist_free_all (extra);
+  twist_hpack_free (enc);
+  twist_hpack_free (dec);
+}
+
+/* Connection-specific header fields are not sent in HTTP/2 or HTTP/3 (RFC
+   9113 and 9114, section 8.2.2 and 4.2): Connection, Keep-Alive,
+   Proxy-Connection, Transfer-Encoding and Upgrade, and TE except "trailers".
+   A message that has one is malformed, and GitHub's server ends the
+   connection on it, so "-H 'Connection: close'" made every request fail.
+   curl leaves them out.  Anything else is sent.  */
+static void
+test_connection_specific_headers (void)
+{
+  struct twist_hpack *enc = twist_hpack_new ();
+  struct twist_hpack *dec = twist_hpack_new ();
+  struct twist_h1_events ev;
+  struct twist_slist *extra = NULL;
+  uint8_t *out = NULL;
+  size_t n = 0;
+
+  extra = twist_slist_append (extra, "Connection: close");
+  extra = twist_slist_append (extra, "Keep-Alive: timeout=5");
+  extra = twist_slist_append (extra, "Proxy-Connection: keep-alive");
+  extra = twist_slist_append (extra, "Transfer-Encoding: chunked");
+  extra = twist_slist_append (extra, "Upgrade: websocket");
+  extra = twist_slist_append (extra, "TE: gzip");
+  extra = twist_slist_append (extra, "Accept: */*");
+  extra = twist_slist_append (extra, "Te: trailers");
+  extra = twist_slist_append (extra, "X-Connection: stays");
+
+  check (twist_hpack_encode_request (enc, "GET", "https", "h.example", "/",
+                                     extra, &out, &n) == TWIST_OK, "encode");
+  memset (&ev, 0, sizeof ev);
+  ev.header = hn_header;
+  hn_names[0] = 0;
+  hn_values[0] = 0;
+  check (twist_hpack_decode (dec, out, n, &ev) == TWIST_OK, "decode");
+  check (strstr (hn_names, " connection ") == NULL
+         && strstr (hn_names, " keep-alive ") == NULL
+         && strstr (hn_names, " proxy-connection ") == NULL
+         && strstr (hn_names, " transfer-encoding ") == NULL
+         && strstr (hn_names, " upgrade ") == NULL,
+         "HTTP/2 leaves out the connection-specific fields");
+  check (strstr (hn_names, " accept ") != NULL
+         && strstr (hn_names, " x-connection ") != NULL,
+         "and sends the others, even one named like one");
+  check (strstr (hn_names, " te ") != NULL
+         && strstr (hn_values, " trailers ") != NULL
+         && strstr (hn_values, "gzip") == NULL,
+         "TE only with trailers");
+  free (out);
+  out = NULL;
+
+  /* The same for HTTP/3.  */
+  check (twist_qpack_encode_request ("GET", "https", "h.example", "/", extra,
+                                     &out, &n) == TWIST_OK
+         && qp_decode (out, n) == TWIST_OK, "qpack encode");
+  check (!qp_has ("connection", "close") && !qp_has ("keep-alive", "timeout=5")
+         && !qp_has ("proxy-connection", "keep-alive")
+         && !qp_has ("transfer-encoding", "chunked")
+         && !qp_has ("upgrade", "websocket"),
+         "HTTP/3 leaves out the connection-specific fields");
+  check (qp_has ("accept", "*/*") && qp_has ("x-connection", "stays")
+         && qp_has ("te", "trailers") && !qp_has ("te", "gzip"),
+         "and sends the others, TE only with trailers");
+  free (out);
+  twist_slist_free_all (extra);
+  twist_hpack_free (enc);
+  twist_hpack_free (dec);
+}
+
 static void
 test_h2_share (void)
 {
@@ -1134,6 +1272,8 @@ main (void)
   test_cookie_replace ();
   test_cookie_limits ();
   test_hpack_long ();
+  test_hpack_lowercase_names ();
+  test_connection_specific_headers ();
   test_h2_share ();
   test_http_status ();
   test_h1_write_request ();

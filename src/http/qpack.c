@@ -337,6 +337,9 @@ twist_qpack_encode_request (const char *method, const char *scheme,
       val = colon + 1;
       while (*val == ' ')
         val++;
+      /* Connection-specific fields are not sent in HTTP/3 (section 4.2).  */
+      if (twist_header_connection_specific (name, nl, val))
+        continue;
       rc = put_field (buf, cap, &n, name, val);
     }
   if (rc != TWIST_OK)

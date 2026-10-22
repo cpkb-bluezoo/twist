@@ -1246,6 +1246,13 @@ char *twist_strdup (const char *s);
    is none or it does not fit.  */
 int twist_home_dir (char *out, size_t cap);
 int twist_has_ctl (const char *s);
+/* Whether the header field NAME (N bytes, any case) with VALUE is one that
+   HTTP/2 and HTTP/3 do not send: Connection, Keep-Alive, Proxy-Connection,
+   Transfer-Encoding and Upgrade, and TE with anything but "trailers" (RFC
+   9113, section 8.2.2; RFC 9114, section 4.2).  They describe an HTTP/1
+   connection, and a request that has one is malformed.  */
+int twist_header_connection_specific (const char *name, size_t n,
+                                      const char *value);
 void *twist_xmalloc (size_t n);
 size_t twist_write_bytes (twist_write_callback cb, void *user,
                           const void *data, size_t len);

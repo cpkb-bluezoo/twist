@@ -25,6 +25,7 @@
 #include <pwd.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <unistd.h>
 
 void *
@@ -85,6 +86,35 @@ twist_has_ctl (const char *s)
   for (p = (const unsigned char *) s; *p != 0; p++)
     if (*p == '\r' || *p == '\n')
       return 1;
+  return 0;
+}
+
+static int
+name_is (const char *name, size_t n, const char *lit)
+{
+  return strlen (lit) == n && strncasecmp (name, lit, n) == 0;
+}
+
+int
+twist_header_connection_specific (const char *name, size_t n, const char *value)
+{
+  size_t len;
+
+  if (name_is (name, n, "connection") || name_is (name, n, "keep-alive")
+      || name_is (name, n, "proxy-connection")
+      || name_is (name, n, "transfer-encoding") || name_is (name, n, "upgrade"))
+    return 1;
+  if (name_is (name, n, "te"))
+    {
+      if (value == NULL)
+        return 1;
+      while (*value == ' ' || *value == '\t')
+        value++;
+      len = strlen (value);
+      while (len > 0 && (value[len - 1] == ' ' || value[len - 1] == '\t'))
+        len--;
+      return !(len == 8 && strncasecmp (value, "trailers", 8) == 0);
+    }
   return 0;
 }
 

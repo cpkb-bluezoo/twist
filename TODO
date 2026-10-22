@@ -71,12 +71,6 @@ Twist TODO List
           tunnelled as well as the control connection (integration/
           ftp-proxy.sh, with plain ftp).  ftps through a proxy, which runs
           TLS on that tunnel, has not been run.
-  [ ] HTTP/2 against raw.githubusercontent.com (Fastly) fails: every request
-      ends "(52) connection closed" while --http1.1 works and curl gets the
-      response over h2.  It was there before the security fixes of October
-      2026 (the older installed build fails too, differently, with a TLS
-      error).  Not looked into: start with what the server sends after the
-      preface.
   [ ] Cookies (src/http/cookie.c).  No Public Suffix List: a Domain that is a
       top-level domain, or a country code with a generic second level (co.uk,
       com.au), is refused, and anything else is believed (github.io,

@@ -62,7 +62,11 @@ enum twist_error
   TWIST_ERR_RANGE = 19,
   TWIST_ERR_RESUME = 20,
   TWIST_ERR_QUOTE = 21,
-  TWIST_ERR_PROXY = 22
+  TWIST_ERR_PROXY = 22,
+  /* A multi interface function was called from inside a callback: the
+     handle is in use by the call that made the callback, so it cannot be
+     removed or freed there.  Do it after the call returns.  */
+  TWIST_ERR_RECURSIVE = 23
 };
 
 const char *twist_strerror (int err);
