@@ -88,7 +88,7 @@ check "$(case "$(err "$TWIST" -# --no-progress-bar -o /dev/null "$u")" in "$head
 check "$(is "$(COLUMNS=60 err "$TWIST" --no-progress-bar -# -o /dev/null "$u" | vis)" "$want")" "-# after --no-progress-bar"
 
 # Errors are told with the meter off, or not, as -S says.  A file that is not
-# there draws nothing, as with curl.
+# there draws nothing.
 msg="twist: (37) could not open file"
 e=$(err "$TWIST" -o /dev/null "$gone")
 check "$(case "$e" in "$msg"*) echo ok;; esac)" "an error without -s: $e"
@@ -116,7 +116,7 @@ check "$(case "$(cat "$work/err.txt")" in "$heading"*) echo ok;; esac)" "the met
 e=$("$TWIST" "$u" 2>&1 >/dev/null | head -n 1)
 check "$(case "$e" in "  % Total"*) echo ok;; esac)" "a body in a pipe has the meter"
 
-# The body going to a terminal hides the meter, as it does for curl; with -o it
+# The body going to a terminal hides the meter; with -o it
 # does not.  This needs a terminal, which python can make.
 if command -v python3 >/dev/null 2>&1; then
   tty_run () {

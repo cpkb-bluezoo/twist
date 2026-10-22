@@ -24,7 +24,7 @@
 
 #include <stdint.h>
 
-/* The limit is on the average over the whole transfer, as curl's is.  A
+/* The limit is on the average over the whole transfer.  A
    chunk may go when the bytes before it have been earned: LIMIT bytes a
    second since the first question.  So the transfer is ahead of its rate by
    at most one chunk, and with chunks of half a second's worth that is half a

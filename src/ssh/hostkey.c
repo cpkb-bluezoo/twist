@@ -35,7 +35,7 @@
 
 /* Who the server is, and who we are.
 
-   The host key is checked as the curl tool does: against ~/.ssh/known_hosts
+   The host key is checked against ~/.ssh/known_hosts
    unless that is turned off with -k, and a key that is not there, or that
    differs from the one that is, fails the transfer.  There is no
    accept-new.  A fingerprint given with TWISTOPT_SSH_HOST_PUBLIC_KEY_SHA256
@@ -501,7 +501,7 @@ twist_ssh_load_abandon (struct twist_ssh *s)
 
 /* ---- the host key callback ---- */
 
-/* A fingerprint as ssh-keygen prints it or as curl is given one: without
+/* A fingerprint as ssh-keygen prints it or as the option is given one: without
    the "SHA256:" and without padding.  */
 static int
 fingerprint_equal (const char *a, const char *b)

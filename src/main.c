@@ -38,15 +38,15 @@
 #include <unistd.h>
 
 /* The body is written to standard output, or to -o.  Diagnostics go to
-   standard error, or to --stderr.  A transfer's exit status is curl's
-   code for that failure.  A bad command line exits 2.  --help and
+   standard error, or to --stderr.  A transfer's exit status is the code
+   for that failure.  A bad command line exits 2.  --help and
    --version write to standard output and exit 0.  */
 
 static FILE *err_fp;
 static int silent;
 static int show_error;
 /* -#: the bar in place of the meter.  --no-progress-meter: neither.  Both
-   are global, as in curl.  */
+   are global.  */
 static int progress_bar;
 static int no_progress;
 static int fail_early;
@@ -563,7 +563,7 @@ add_urlencode (struct cli_op *op, const char *text)
   return rc;
 }
 
-/* A speed as curl takes it: digits, and a suffix that multiplies by a power
+/* A speed: digits, and a suffix that multiplies by a power
    of 1024 (k, m, g, t, p), in either case.  No fractions, no sign.  */
 static int
 parse_rate (const char *s, uint64_t *out)
@@ -1338,8 +1338,7 @@ run_one (twist_easy *easy, struct cli_op *op, const char *url,
   twist_easy_setopt (easy, TWISTOPT_MAIL_RCPT, op->rcpts);
   twist_easy_setopt (easy, TWISTOPT_MAX_RECV_SPEED_LARGE, op->limit_rate);
   twist_easy_setopt (easy, TWISTOPT_MAX_SEND_SPEED_LARGE, op->limit_rate);
-  /* Only an sftp URL takes them; to any other they mean nothing, as with
-     curl, so a command line of several kinds of URL works.  */
+  /* Only an sftp URL takes them; to any other they mean nothing, so a command line of several kinds of URL works.  */
   twist_easy_setopt (easy, TWISTOPT_QUOTE,
                      strncmp (use_url, "sftp://", 7) == 0 ? op->quote : NULL);
   twist_easy_setopt (easy, TWISTOPT_POSTQUOTE,
@@ -1399,7 +1398,7 @@ run_one (twist_easy *easy, struct cli_op *op, const char *url,
       diag_code (code, detail != NULL ? detail : twist_strerror (rc));
     }
   emit_writeout (op->writeout, easy, code);
-  /* After the message, as curl does it: the bar's line ends last.  */
+  /* After the message: the bar's line ends last.  */
   if (bar_used)
     twist_bar_finish (&bar);
   free (up.p);

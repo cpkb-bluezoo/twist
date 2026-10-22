@@ -107,7 +107,7 @@ parser_fail (struct twist_ftp_parser *p, int err)
 }
 
 /* The size a server gives in its reply to RETR: "(1234 bytes)".  -1 if it
-   gives none.  Curl takes it from there too.  */
+   gives none.  */
 static long long
 reply_size (const char *text, size_t len)
 {

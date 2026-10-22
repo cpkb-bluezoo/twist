@@ -29,13 +29,12 @@
 #include <string.h>
 #include <strings.h>
 
-/* Which proxy a transfer uses, as curl decides it (lib/url.c detect_proxy,
-   lib/noproxy.c): the one it was given, or else the environment's, unless the
-   host is on the list of those that go direct, which is also the
-   application's or the environment's.  */
+/* Which proxy a transfer uses: the one it was given, or else the
+   environment's, unless the host is on the list of those that go direct,
+   which is also the application's or the environment's.  */
 
-/* Whether ADDRESS is within NETWORK/BITS.  BITS 0 is all of it, as curl takes
-   an address with no number.  */
+/* Whether ADDRESS is within NETWORK/BITS.  BITS 0 is all of it: an address
+   with no number names one host.  */
 static int
 cidr4 (const char *address, const char *network, unsigned long bits)
 {

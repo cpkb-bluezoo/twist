@@ -527,7 +527,7 @@ on_header (void *user, const char *name, size_t name_len, const char *value,
       char *end;
       char *copy = ncopy (value, value_len);
 
-      /* A body of a known size.  Curl takes no notice of a size of 0.  */
+      /* A body of a known size.  A size of 0 is not looked at as one.  */
       if (copy != NULL && !h->easy->nobody && !h->ws)
         {
           long long size = strtoll (copy, &end, 10);

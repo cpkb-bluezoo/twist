@@ -23,7 +23,7 @@
 #include <stdio.h>
 
 /* The progress bar of -#, --progress-bar, drawn by the tool from the library's
-   progress callback, as curl's is (src/tool_cb_prg.c): a line of '#' across
+   progress callback: a line of '#' across
    the screen and the percentage when the size is known, and when it is not a
    spaceship (-=O=-) with hash signs flying above it, which moves while data
    comes.  */

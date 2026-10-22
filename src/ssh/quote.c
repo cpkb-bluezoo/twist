@@ -31,7 +31,7 @@
 #include <strings.h>
 #include <time.h>
 
-/* The commands of --quote for sftp, read as the curl tool reads them.  The
+/* The commands of --quote for sftp.  The
    command is the word up to the first space, in any case.  A parameter is a
    word up to a space, or text in double quotes in which a backslash before a
    double quote, a single quote or a backslash stands for that character.

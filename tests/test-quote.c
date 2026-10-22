@@ -28,7 +28,7 @@
 #include <string.h>
 #include <time.h>
 
-/* The commands of --quote for sftp, as the curl tool reads them: the command
+/* The commands of --quote for sftp: the command
    is the word up to the first space, in any case; a parameter is a word, or
    text in double quotes in which \" and \\ stand for the character after the
    backslash.  Single quotes mean nothing.  */

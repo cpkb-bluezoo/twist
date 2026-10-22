@@ -485,7 +485,7 @@ fail (struct twist_sftp_xfer *g, int err, const char *detail)
 }
 
 /* An SFTP status that is not what was wanted.  Missing and forbidden files
-   carry the exit status the curl tool gives them, and so does an upload that
+   carry their own exit statuses, and so does an upload that
    fails for any other reason.  */
 static void
 fail_status (struct twist_sftp_xfer *g, const gf_sftp_response *r)

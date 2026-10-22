@@ -28,7 +28,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* The progress meter, as curl draws it (lib/progress.c): the counters, the
+/* The progress meter: the counters, the
    once-a-second arithmetic of the current speed, and the line
 
      % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
@@ -41,8 +41,7 @@
 
    The clock is the loop's, so that a test can set it.  A timer asks for an
    update when a second has passed with none, so that a transfer that is
-   waiting is still drawn; curl does that by waking its poll after a second
-   with no event.  Every update puts the timer off by a second again, which
+   waiting is still drawn.  Every update puts the timer off by a second again, which
    is done by moving the due time, not the timer.  */
 
 #define TICK_MS 1000u
@@ -53,8 +52,8 @@
 #define TERA (1024LL * GIGA)
 #define PETA (1024LL * TERA)
 
-/* Curl writes into a buffer that holds what the column does, and cuts the
-   rest.  So a number that is too wide for its column loses its end.  */
+/* A number is written into a buffer that holds what its column does, and the
+   rest is cut: a number that is too wide for its column loses its end.  */
 static char *
 fit (char *buf, size_t cap, const char *text)
 {
@@ -364,7 +363,7 @@ reset_counters (struct twist_progress *p)
   p->ulspeed = 0;
 }
 
-/* A file that is not there draws nothing, as curl's does: the heading would
+/* A file that is not there draws nothing: the heading would
    be all there was.  */
 static int
 quiet_scheme (const struct twist_easy *easy)

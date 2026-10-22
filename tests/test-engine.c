@@ -100,7 +100,7 @@ test_url_userinfo (void)
    (fe80::1%eth0), it is written back encoded, and it is not part of the
    authority a Host header names.  */
 /* A connection that is not made in time is given up on: the default is five
-   minutes, as in curl, and 0 means that again.  */
+   minutes, and 0 means that again.  */
 static void
 test_connect_timeout_default (void)
 {
@@ -178,7 +178,7 @@ test_url_ipv6 (void)
   twist_url_free_int (u);
   check (twist_url_parse_int ("sftp://[fe80::1%eth0]/", &u) == TWIST_OK
          && strcmp (u->host, "fe80::1%eth0") == 0,
-         "a zone with a bare percent sign, as curl takes it");
+         "a zone with a bare percent sign");
   twist_url_free_int (u);
   check (twist_url_parse_int ("sftp://[fe80::1%25en%2Dp0]/", &u) == TWIST_OK
          && strcmp (u->host, "fe80::1%en-p0") == 0, "an encoded character");
@@ -439,7 +439,7 @@ test_proxy_http (void)
     const char *msg = twist_proxy_error (p, &st);
 
     check (msg != NULL && strcmp (msg, "CONNECT tunnel failed, response 403")
-           == 0 && st == 56, "with curl's words and status");
+           == 0 && st == 56, "with the words and status of a refusal");
   }
   check (px_feed (p, "x", 1, &used, &ready) == TWIST_ERR_PROXY,
          "and it stays failed");

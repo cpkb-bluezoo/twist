@@ -31,7 +31,7 @@
 
 /* 200 values of the position of the spaceship's escort across the screen,
    in millionths: sin (i / 200 * 2 * pi) * 500000 + 500000 for i = 1 to 200,
-   with pi as 3.1415, as curl has them.  */
+   with pi as 3.1415.  */
 static const unsigned int sinus[] = {
   515704, 531394, 547052, 562664, 578214, 593687, 609068, 624341, 639491,
   654504, 669364, 684057, 698568, 712883, 726989, 740870, 754513, 767906,

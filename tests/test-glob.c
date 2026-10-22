@@ -27,7 +27,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* URL globbing as the curl tool has it: {a,b,c} and [1-10], [a-z], [01-10:2],
+/* URL globbing: {a,b,c} and [1-10], [a-z], [01-10:2],
    the URLs they make in order with the last glob going fastest, a backslash
    to make a special character plain, and #1 in an output name for what the
    first glob was.  */
@@ -150,7 +150,7 @@ test_errors (void)
   check (fails ("{a[1-2]}", "nested brace in URL position 22:"), "a range in a set");
   check (fails ("]x", "unmatched close brace/bracket in URL position 20:"), "a stray bracket");
   check (fails ("}x", "unmatched close brace/bracket in URL position 20:"), "and a stray brace");
-  /* The message shows the URL and where, as curl's does.  */
+  /* The message shows the URL and where.  */
   {
     const char *m = all ("[3-1]");
 
@@ -219,7 +219,7 @@ test_values (void)
   free (name);
   name = twist_glob_name (g, "esc\\#1");
   check (name != NULL && strcmp (name, "esc\\x") == 0,
-         "a backslash does not escape it, as with curl");
+         "a backslash does not escape it");
   free (name);
   twist_glob_free (g);
 }

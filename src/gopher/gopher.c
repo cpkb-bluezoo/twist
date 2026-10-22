@@ -25,7 +25,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* Gopher (RFC 1436) and the URL form curl uses.  The request is one
+/* Gopher (RFC 1436) and its URL form.  The request is one
    selector line.  The first character of the path, after the leading
    slash, is the item type and is not sent.  The rest is percent-decoded
    and sent, with a '?' query kept as part of that line.  The reply is

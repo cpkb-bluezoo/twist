@@ -36,7 +36,7 @@ struct twist_connection;
 struct twist_timer;
 
 /* How long making a connection may take, if nothing else is said: five
-   minutes, as in curl.  */
+   minutes.  */
 #define TWIST_DEFAULT_CONNECT_TIMEOUT_MS 300000L
 struct twist_runtime;
 struct twist_storage;
@@ -87,7 +87,7 @@ struct twist_url
 /* Seconds of history the "current speed" looks back over, plus one.  */
 #define TWIST_PROGRESS_HISTORY 6
 
-/* The counters of one transfer, as curl keeps them, and what the meter needs
+/* The counters of one transfer, and what the meter needs
    to draw itself.  src/engine/progress.c.  */
 struct twist_progress
 {
@@ -627,7 +627,7 @@ void twist_rate_note (struct twist_rate *r, uint64_t n);
    limit if that is less, and at least 1.  */
 size_t twist_rate_chunk (const struct twist_rate *r, size_t max);
 
-/* URL globbing, as the curl tool has it.  A pattern is a URL with {a,b,c}
+/* URL globbing.  A pattern is a URL with {a,b,c}
    (one of these), [1-10] and [a-z] (a range; [01-10] keeps its width, [1-10:3]
    steps) in it.  The URLs it makes come one at a time, in order, the last glob
    going fastest, so a great many of them cost nothing until they are asked
@@ -651,7 +651,7 @@ const char *twist_glob_value (const struct twist_glob *g, size_t n);
 char *twist_glob_name (const struct twist_glob *g, const char *tmpl);
 void twist_glob_free (struct twist_glob *g);
 
-/* Variables, as the curl documentation has them (the tool's --variable and
+/* Variables (the tool's --variable and
    the --expand- options).  A set holds names that are letters, digits and
    underscores, and content that may be any bytes.  */
 struct twist_vars;
@@ -727,7 +727,7 @@ int twist_proxy_opening (struct twist_proxy *proxy, uint8_t **out, size_t *len);
    open.  A refusal is TWIST_ERR_PROXY, and twist_proxy_error says why.  */
 int twist_proxy_feed (struct twist_proxy *proxy, const uint8_t *data,
                       size_t len, size_t *used, int *ready);
-/* The reason for a refusal, and the status the curl tool gives it (56 for a
+/* The reason for a refusal, and the exit status of the tool for it (56 for a
    CONNECT, 97 for SOCKS); NULL if there has been none.  */
 const char *twist_proxy_error (const struct twist_proxy *proxy, int *status);
 void twist_proxy_set_credentials (struct twist_proxy *proxy, const char *user,
@@ -1150,7 +1150,7 @@ int twist_noproxy_match (const char *host, const char *list);
 
 /* ---- progress ---- */
 
-/* Written as curl does it (lib/progress.c).  A transfer calls begin once,
+/* A transfer calls begin once,
    end once, and in between says what it has learned: the size of what it will
    download or upload, and the bytes as they go.  Each of those draws the meter
    or calls the callback if the second has changed.  A redirect is a hop: the

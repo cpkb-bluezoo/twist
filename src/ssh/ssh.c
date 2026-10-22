@@ -403,7 +403,7 @@ twist_ssh_sanitize (uint8_t *out, const uint8_t *in, size_t n)
 
 /* Keyboard-interactive: the server asks questions, and twist has a password.
    It answers one question that is not shown as it is typed with the
-   password, as curl does.  Anything else gets empty answers, so that the
+   password.  Anything else gets empty answers, so that the
    password is not given to a question that might not be asking for it: a
    code, a second question, a name.  Then the method fails, and the others
    are tried.  The count of answers has to be the count of questions, and a
@@ -558,7 +558,7 @@ twist_ssh_begin (struct twist_ssh *s)
        attempt only for a request that carries a signature or a password,
        not for asking whether the server would have a key, so a server that
        turns keys away does not use them up; its own limit decides, as it
-       does for curl and ssh.  */
+       does for ssh.  */
   }
   s->config.client_auth.password = s->password;
   s->events.user = s;

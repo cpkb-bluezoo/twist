@@ -667,7 +667,7 @@ rc=$?
 check "$([ $rc -eq 0 ] && grep -q '^257 ".*" is current directory\.' "$work/hdr" && echo ok)" \
   "pwd goes to the header output (exit $rc)"
 
-# scp does not take them, as with curl.
+# scp does not take them.
 t -k --key "$work/userkey" -Q "mkdir $work/srv/qscp" -o /dev/null \
   "scp://$user@$base$work/srv/small.txt"
 rc=$?
@@ -695,7 +695,7 @@ check "$([ $rc -eq 0 ] && [ -f "$work/srv/qa/qb/g.txt" ] && echo ok)" \
 # 19. --limit-rate.  The file is 700 KB; at 500K a second it takes about 1.4
 # seconds (the last chunk goes at 1.37), where unlimited it takes a few
 # hundredths.  The limit holds for either direction, and the figure is read as
-# curl reads it.
+# a number with a suffix.
 ms () { echo $(( $(date +%s%N) / 1000000 )); }
 t0=$(ms)
 t -k --key "$work/userkey" -o /dev/null "sftp://$user@$base$work/srv/data.bin"
@@ -833,7 +833,7 @@ check "$([ $rc -eq 0 ] && [ "$(cat "$work/v.out")" = hello-world ] && echo ok)" 
 # 21. Proxies.  Through an HTTP CONNECT proxy and a SOCKS5 one, in front of the
 # real sshd.  The server speaks first, so the case that matters is its banner
 # arriving in the same write as the proxy's reply.  A refusal is 56 for
-# CONNECT and 97 for SOCKS, as with curl, and the URLs of one command line
+# CONNECT and 97 for SOCKS, and the URLs of one command line
 # share a tunnel.  Needs python3 for the proxy.
 start_proxy ()
 {

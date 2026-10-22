@@ -25,7 +25,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* MQTT 3.1.1 client, the curl transfer: CONNECT, then either PUBLISH
+/* MQTT 3.1.1 client: CONNECT, then either PUBLISH
    the request body or SUBSCRIBE to the URL topic.  PUBLISH payloads
    are delivered as they arrive and are not stored.  Username and
    password travel in CONNECT, which is the mechanism this protocol

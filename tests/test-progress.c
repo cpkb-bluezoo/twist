@@ -96,10 +96,10 @@ test_max5 (void)
   check (strcmp (twist_progress_max5 (99999, b), "99999") == 0, "5 digits");
   check (strcmp (twist_progress_max5 (100000, b), "  97k") == 0, "100000");
   check (strcmp (twist_progress_max5 (300000, b), " 292k") == 0,
-         "300000 is 292k, as curl shows it");
+         "300000 is 292k");
   check (strcmp (twist_progress_max5 (10239999, b), "9999k") == 0, "9999k");
   check (strcmp (twist_progress_max5 (10240000, b), " 9.7M") == 0, "9.7M");
-  /* Curl's tenths can come to 10, and its buffer cuts the text to five
+  /* The tenths can come to 10, and the buffer cuts the text to five
      columns.  */
   check (strcmp (twist_progress_max5 (104857599, b), "99.10") == 0,
          "the cut tenth");
@@ -151,7 +151,7 @@ test_download (void)
   check (rig_open (&r, 0) == 0, "rig");
   clock_ms = 10500;
   twist_progress_begin (r.easy);
-  /* Begin draws the heading and a line of zeros, as curl does at once.  */
+  /* Begin draws the heading and a line of zeros at once.  */
   snprintf (want, sizeof want,
             "%s\r  0     0    0     0    0     0      0      0 "
             "--:--:-- --:--:-- --:--:--     0", head);
@@ -222,7 +222,7 @@ test_upload (void)
   rig_close (&r);
 }
 
-/* The percentages are of whole numbers, as curl's: a size above 10000 is
+/* The percentages are of whole numbers: a size above 10000 is
    divided by 100 first.  The two ways come to different numbers for 100 bytes
    of 10001.  */
 static void
@@ -237,7 +237,7 @@ test_percent (void)
   clock_ms = 161000;
   twist_progress_downloaded (r.easy, 100);
   check (strstr (rig_text (&r), "\r  1 10001    1   100    0     0 ") != NULL,
-         "1% of 10001 as curl rounds it");
+         "1% of 10001");
   rig_close (&r);
   check (rig_open (&r, 0) == 0, "rig");
   clock_ms = 165000;
@@ -498,8 +498,7 @@ test_tick (void)
   check (strlen (rig_text (&r)) == before, "the timer stops with the transfer");
   rig_close (&r);
 
-  /* Anything that happens puts the timer off by a second, as the poll of
-     curl is: a transfer whose data comes more often than that is drawn
+  /* Anything that happens puts the timer off by a second: a transfer whose data comes more often than that is drawn
      when the data comes, and by nothing else.  */
   check (rig_open (&r, 0) == 0, "rig");
   clock_ms = 150000;

@@ -26,7 +26,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* DICT (RFC 2229) in the URL form curl uses.  The path is one command.
+/* DICT (RFC 2229) in its URL form.  The path is one command.
    d:, define:, and lookup: are DEFINE.  m:, match:, and find: are
    MATCH.  Anything else is sent with ':' turned into a space, which is
    how SHOW DB and the other status commands are written.  The word is

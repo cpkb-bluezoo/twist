@@ -29,7 +29,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* URL globbing, as the curl tool has it:
+/* URL globbing:
 
      {a,b,c}      one of these; no set inside a set
      [1-10]       a range of numbers; [01-10] keeps the width of its start
@@ -42,7 +42,7 @@
    makes it plain text; in a set it escapes any character.  A bracket around an
    IPv6 address is the address and not a range.
 
-   The errors say where in the URL, as curl's do, with the URL and a caret.  */
+   The errors say where in the URL, with the URL and a caret.  */
 
 enum
 {

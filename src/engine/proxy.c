@@ -38,8 +38,7 @@
    was given is the tunnel's, not its own.  An SSH or an SMTP server speaks
    first, so its first bytes can arrive in the same read as the proxy's reply.
 
-   A refusal is told in curl's words and with curl's status: 56 for a CONNECT
-   that failed, 97 for SOCKS.  */
+   A refusal has a status: 56 for a CONNECT that failed, 97 for SOCKS.  */
 
 #define PX_MAX 16384		/* The longest reply from a proxy.  */
 

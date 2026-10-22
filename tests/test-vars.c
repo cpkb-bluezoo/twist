@@ -28,7 +28,7 @@
 #include <string.h>
 #include <unistd.h>
 
-/* Variables as the curl documentation has them: --variable name=text,
+/* Variables: --variable name=text,
    name@file, %name and %name=default for the environment; {{name}} in the
    parameter of an --expand- option, with the functions trim, json, url, b64
    and 64dec after colons.  Undefined is empty.  */

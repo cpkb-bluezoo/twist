@@ -1143,7 +1143,7 @@ test_paths (void)
   server_free (&sv);
 }
 
-/* What the server says about the file reaches the curl tool's status.  */
+/* What the server says about the file reaches the exit status.  */
 static void
 test_file_errors (void)
 {
@@ -1544,7 +1544,7 @@ uploaded_is (const struct server *sv, const uint8_t *expect, size_t n)
 }
 
 /* More than the pipeline holds, from memory and through a read callback.
-   The file is created and truncated, with the mode curl gives a new file.  */
+   The file is created and truncated, with the mode a new file gets.  */
 static void
 test_upload (size_t chunk, int streamed)
 {
@@ -1702,7 +1702,7 @@ test_upload_resume (void)
   server_free (&sv);
 }
 
-/* What goes wrong with an upload, and the curl tool's status for it.  */
+/* What goes wrong with an upload, and the exit status for it.  */
 static void
 test_upload_errors (void)
 {
@@ -2048,7 +2048,7 @@ test_quote_commands (void)
   twist_slist_free_all (pre);
 }
 
-/* pwd writes the server's words to the header callback, as curl does.  */
+/* pwd writes the server's words to the header callback.  */
 static void
 test_quote_pwd (void)
 {
@@ -3121,7 +3121,7 @@ test_agent_login (void)
 }
 
 /* Keys the server does not know come first.  There is no limit of twist's
-   own, as with curl: the server's decides.  */
+   own: the server's decides.  */
 static void
 test_agent_many_keys (void)
 {
@@ -3319,7 +3319,7 @@ kbd_case (unsigned methods, int mode, const char *client_password,
 }
 
 /* A server that asks for the password as a question, and not as the
-   password method, is answered with the password.  curl does the same.  */
+   password method, is answered with the password.  */
 /* The cases that need the state of a test are separate from those that are
    one call of kbd_case, so the large frames are never nested.  */
 static void
@@ -5029,7 +5029,7 @@ test_proxy_refusals (void)
   struct twist_easy *easy;
   char url[200];
 
-  /* CONNECT refused: curl's words, and its status.  */
+  /* CONNECT refused: the words of the refusal, and the status.  */
   check (ts_start (&ts) == 0 && px_start (&px, PX_HTTP_KIND) == 0, "servers");
   px.refuse_http = 403;
   multi = twist_multi_init ();

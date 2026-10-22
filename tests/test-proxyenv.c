@@ -27,7 +27,7 @@
 #include <string.h>
 
 /* The proxy a transfer uses, from what it was given and from the
-   environment, as curl decides it; and the list of hosts that go direct.  */
+   environment; and the list of hosts that go direct.  */
 
 static void
 clear_env (void)
