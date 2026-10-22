@@ -3,11 +3,41 @@ Twist
 
 Copyright (C) 2026 Chris Burdess
 
-Twist is a transfer client for the GNU system.  HTTP/1, HTTP/2, and HTTP/3 are
-implemented, and further schemes plug into the same transfer engine.
-The command line is mostly compatible with curl's: the options, standard
-streams and exit status are the same, so that twist can replace it in
-scripts.
+Twist is a transfer client for the GNU system: a library, libtwist, and a
+command-line program, twist.  The command line is mostly compatible with
+curl's: the options, standard streams and exit status are the same, so that
+twist can replace it in scripts.  The library has handles in the style of
+curl's easy, multi and share interfaces.
+
+Schemes
+-------
+
+Each is a scheme of one transfer engine:
+
+  http, https       HTTP/1, HTTP/2 and HTTP/3
+  ws, wss           WebSocket
+  ftp, ftps         FTP
+  sftp, scp         files over SSH (scp runs over SFTP)
+  smtp, smtps       sending mail
+  imap, imaps       fetching mail and listing mailboxes
+  pop3, pop3s       retrieving mail
+  ldap, ldaps       binding and searching, with the result as LDIF
+  mqtt, mqtts       subscribing and publishing
+  dict              DICT lookups
+  gopher, gophers   Gopher
+  tftp              TFTP
+  file              local files
+
+The schemes with an s added to the protocol's name (https, wss, ftps, smtps,
+imaps, pop3s, ldaps, mqtts, gophers) are TLS from the first byte.  None is
+upgraded to TLS once it has started, so there is no STARTTLS.  telnet,
+rtsp, smb, smbs, rtmp and rtmps are recognised and not implemented; see TODO.
+
+TLS 1.2 and 1.3 and QUIC are quickstep's, and SSH is foxtrot's.  Transfers can
+go through HTTP, HTTPS and SOCKS5 proxies (HTTP/3 through a CONNECT-UDP
+proxy), and host names can be resolved over DNS-over-QUIC, -TLS and -HTTPS as
+well as plain UDP.  The manual is doc/twist.texi ("make info"), and
+doc/twist.1 is the short man page.
 
 Dependencies
 ------------
