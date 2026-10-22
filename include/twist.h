@@ -16,7 +16,7 @@
    License along with this program.  If not, see
    <https://www.gnu.org/licenses/>.  */
 
-/* libtwist, a curl-compatible transfer library.
+/* libtwist, a transfer library.
 
    Transfers are scheme-neutral.  HTTP is the first scheme; the same
    easy/multi/share API carries every later protocol.  The multi
@@ -213,7 +213,7 @@ enum twist_opt
   TWISTOPT_SSH_AGENT_SOCKET = 51,
   /* Commands for an sftp server, as a twist_slist the caller keeps.  QUOTE
      runs before the transfer and POSTQUOTE after one that succeeded.  Each
-     is a command line as the curl tool takes it: chmod, chown, chgrp, atime,
+     is a command line: chmod, chown, chgrp, atime,
      mtime, ln, symlink, mkdir, pwd, rename, rm, rmdir.  A "*" before it lets
      the server refuse it without ending the transfer.  A command that fails
      ends the transfer with TWIST_ERR_QUOTE.  Used with an sftp URL only.  */
@@ -227,7 +227,7 @@ enum twist_opt
      or the SOCKS5 user name and password.  Empty clears it.  */
   TWISTOPT_PROXYUSERPWD = 55,
   /* A long.  1, the default, shows no progress meter and calls no
-     TWISTOPT_XFERINFOFUNCTION; 0 does both.  As CURLOPT_NOPROGRESS.  */
+     TWISTOPT_XFERINFOFUNCTION; 0 does both.  */
   TWISTOPT_NOPROGRESS = 56,
   /* A twist_xferinfo_callback, called as the transfer goes on when
      TWISTOPT_NOPROGRESS is 0.  NULL clears it.  */
@@ -244,10 +244,10 @@ enum twist_opt
   /* Comma-separated hosts that do not go through a proxy: a host name matches
      itself and the names under it, an address matches itself or a network as
      192.168.0.0/16, and * is all hosts.  "" is none.  Without this the
-     environment's no_proxy or NO_PROXY is used.  As CURLOPT_NOPROXY.  */
+     environment's no_proxy or NO_PROXY is used.  */
   TWISTOPT_NOPROXY = 61,
   /* A directory of PEM files of certificate authorities, in addition to
-     TWISTOPT_CAINFO.  As CURLOPT_CAPATH.  */
+     TWISTOPT_CAINFO.  */
   TWISTOPT_CAPATH = 62
 };
 

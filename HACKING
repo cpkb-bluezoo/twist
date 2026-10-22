@@ -74,7 +74,7 @@ What not to put in the loop
 ---------------------------
 
 The loop, the poll backend and the connection do not mention HTTP.
-A new libcurl scheme is a twist_scheme row and a ProtocolHandler (or a
+A new scheme is a twist_scheme row and a ProtocolHandler (or a
 datagram handler, or a storage-pool job).  Listen and dial both pin
 the endpoint to one loop for life.  Secondary connections of one
 transfer (an FTP data socket, another HTTP/3 stream) stay on that loop.
@@ -107,15 +107,15 @@ a virtual clock into the loop).  Anything that dials a peer goes in
 integration/ and skips with exit 77 when the peer is absent.
 integration/ is not a subdirectory of 'make check'.
 
-The progress meter and bar are compared with curl's: the layout and the
-arithmetic in tests/test-progress.c and tests/test-bar.c, with a clock the test
-sets, and the lines curl wrote for the same numbers; what the tool shows and
+The progress meter and bar must match curl's output, since scripts may read
+it: the layout and the arithmetic are in tests/test-progress.c and
+tests/test-bar.c, with a clock the test sets, and the lines curl wrote for the
+same numbers; what the tool shows and
 when in tests/cli-progress.sh, on file:// URLs; the sizes over HTTP in
 integration/http-progress.sh, against a server of python's.  The environment variables are tested in tests/test-proxyenv.c (which proxy,
 and the no-proxy list), tests/test-env.c (the trust store, the key log and
 qlog) and integration/env.sh (the proxies against a server of python's).  To
-compare with
-curl itself, run both on the same URL with COLUMNS set and 2>&1 >/dev/null,
+compare with curl, run both on the same URL with COLUMNS set and 2>&1 >/dev/null,
 and look at the bytes (| od -c or | cat -v).  A hand test of the tool on a
 terminal shows nothing unless the body goes to a file.
 

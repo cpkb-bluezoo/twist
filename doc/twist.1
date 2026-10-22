@@ -28,7 +28,8 @@ A transfer error has the form
 .B twist: (\fIN\fP) \fImessage\fP
 and exits
 .IR N ,
-using curl's status numbers.
+a status from the table under
+.BR "EXIT STATUS" .
 A bad command line exits 2, with no number in parentheses, and a line
 that suggests
 .BR \-\-help .
@@ -91,8 +92,8 @@ These schemes are recognised, but are not implemented, and exit 1:
 .B telnet.
 .SH "PROGRESS METER"
 Twist shows the progress of a transfer on standard error, or on
-.BR \-\-stderr ,
-as curl does: a heading of two lines and then one line that is written over
+.BR \-\-stderr :
+a heading of two lines and then one line that is written over
 and over, with the amount transferred, the speeds, and the time spent and
 left.  The sizes are in bytes, and with the suffixes k, M, G, T and P as
 multiples of 1024.  The columns are the percentage and size of the whole
@@ -180,7 +181,7 @@ decodes base64.
 twist --variable name=smith --expand-url 'https://example.com/{{name}}'
 .fi
 .SH "URL GLOBBING"
-A URL may name many things at once, for any scheme, as with curl.
+A URL may name many things at once, for any scheme.
 .TP
 .BI { a,b,c }
 One of these, in turn.  A set cannot hold a set, and a backslash before a
@@ -668,9 +669,6 @@ step.
 .B \-\-doh-insecure
 Do not verify the DoH server certificate.  This is independent of
 .BR \-k .
-Curl's
-.B \-\-doh-cert-status
-is not supported.
 .TP
 .BI \-\-doq-url " URL"
 DNS-over-QUIC server.
@@ -792,7 +790,7 @@ value, and
 .B SSL_CERT_DIR
 and
 .B SSL_CERT_FILE
-are not looked at.  It is twist's name for curl's CURL_CA_BUNDLE.
+are not looked at.
 .PP
 The names of the certificate variables are looked at only when neither
 .B \-\-cacert
@@ -801,14 +799,11 @@ nor
 is given.  A file or directory that they name and that cannot be read is an
 error.
 .PP
-The variables that name the configuration file of curl (CURL_HOME,
-XDG_CONFIG_HOME, APPDATA, USERPROFILE), its choice of TLS library
-(CURL_SSL_BACKEND) and the shell (SHELL) are not used: twist reads no
-configuration file, and has one TLS library.
-Variables can also be imported by
+Twist reads no configuration file.  Variables can also be imported by
 .B \-\-variable
 .IR %name .
 .SH "EXIT STATUS"
+The numbers are curl's, so that a script that tests them works with either.
 .TP
 .B 0
 The transfer finished.

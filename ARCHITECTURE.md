@@ -2,7 +2,8 @@
 
 ## Overview
 
-Twist is a curl-compatible HTTP client library and CLI tool. The architecture
+Twist is a transfer client library and command-line tool for the GNU system,
+mostly compatible with curl on the command line. The architecture
 follows the patterns established by **Gumdrop** (Java) and **Hopf** (Rust),
 which share a common design philosophy:
 
@@ -242,8 +243,9 @@ twist_loop_watch(loop, fd, TWIST_READABLE, on_readable);
 twist_loop_watch(loop, fd, TWIST_WRITABLE, on_writable);
 ```
 
-This is the same model as libcurl's multi interface
-(`curl_multi_socket_action`).
+The multi interface (`twist_multi_socket_action`) is this model: the
+application's poller says which socket is ready, and asks for the next
+deadline.
 
 ## Platform Support
 
@@ -302,13 +304,13 @@ under that face, so a handler never sees ciphertext.
 ### Listen and Dial Symmetry
 
 Listen and dial are the same operation: register a stream on a reactor and
-keep it there. A curl-shaped library wants that symmetry even more than a
+keep it there. A client library wants that symmetry even more than a
 server does.
 
 ## Transfer engine
 
 The loop and the endpoint do not know which protocol they carry. A transfer
-(one easy handle) is the curl-shaped unit of work:
+(one easy handle) is the unit of work:
 
 - It parses a URL and looks the scheme up in a table.
 - It may own several endpoints, all pinned to the same loop (an HTTP
@@ -348,7 +350,7 @@ in the poll backend.
 
 ## Scheme table
 
-Every libcurl scheme has a row. HTTP is the first row with a real
+Every URL scheme twist knows has a row. HTTP is the first row with a real
 handler. The others stay in the table so the URL parser, the multi
 interface and the CLI accept them and so the implementation that lands
 later is a new `attach` function, not a new reactor.
@@ -377,8 +379,7 @@ subsystem fails with an error that says so. The two schemes differ only in
 what the URL may mean: `scp://` names one file and never lists a
 directory, and shell wildcards are rejected, not expanded.
 
-Host keys are checked against `~/.ssh/known_hosts` by default, as the
-curl tool does. A key that is missing or changed fails the transfer, there
+Host keys are checked against `~/.ssh/known_hosts` by default. A key that is missing or changed fails the transfer, there
 is no accept-new mode, and turning off peer verification (`-k`) skips the
 check. A pinned SHA-256 of the host key is the other way to trust a host.
 Fuzzing (`fuzz/`) rebuilds the library with AddressSanitizer, UBSan and edge
@@ -408,9 +409,8 @@ connection, named for the connection ID. The command line reads `COLUMNS`
 for the bar; `HOME` and `SSH_AUTH_SOCK` are read by the SSH code. The manual's
 Environment chapter is the list.
 
-The progress meter (`src/engine/progress.c`) is libcurl's (`lib/progress.c`):
-counters of what has been downloaded and uploaded, the sizes that are known,
-and an update that runs whenever any of those change. The update takes the
+The progress meter (`src/engine/progress.c`) is made of counters of what has
+been downloaded and uploaded, the sizes that are known, and an update that runs whenever any of those change. The update takes the
 average speeds, and once a second (when the second on the loop's clock
 changes) the speed over the last five seconds, then calls the application's
 `TWISTOPT_XFERINFOFUNCTION` and, if that returns `TWIST_PROGRESSFUNC_CONTINUE`
@@ -422,13 +422,11 @@ it knows with `twist_progress_dl_size`, `twist_progress_ul_size`,
 finishes, and HTTP calls `twist_progress_hop` for a redirect. A timer, which
 does the update after a second with no event, is not set again for each event:
 the due time is moved and the timer, when it fires early, sets itself again.
-The tool's bar (`src/bar.c`) is a callback in this interface, as it is in curl,
-and returns 0 so that the meter is not drawn as well; it takes its clock as an
+The tool's bar (`src/bar.c`) is a callback in this interface, and returns 0 so that the meter is not drawn as well; it takes its clock as an
 argument so that the spaceship can be tested. The tool decides which of them
-there is, as `tool_operate.c` does: neither with `-s`, or when the body is
-written to a terminal.
+there is: neither with `-s`, or when the body is written to a terminal.
 
-Variables (`src/engine/vars.c`) are the curl tool's. `--variable` defines a name
+Variables (`src/engine/vars.c`): `--variable` defines a name
 in a table of byte strings (to ten megabytes), from text, a file, or the
 environment. For each long option that takes a parameter the command line adds
 a twin called `expand-NAME` to the `getopt_long` table, whose value carries a
@@ -439,16 +437,15 @@ content; the result is a string, so a NUL that has not been encoded is an
 error, and a result over the limit is refused before it is built. Globbing is
 done after, on the expanded URL.
 
-URL globbing (`src/engine/glob.c`) is the curl tool's: a pattern is parsed once
+URL globbing (`src/engine/glob.c`): a pattern is parsed once
 into text, sets and ranges, and the URLs come from an odometer one at a time,
 the last glob going fastest, so a range of billions costs nothing until used.
 The command line pairs an `-o` with the URL as written and gives each URL the
 name with `#N` filled in; the transfers are ordinary ones on the operation's
 loop, so SFTP URLs on one server share a session. Errors carry the URL and a
-caret under the place, as curl's do.
+caret under the place.
 
-The connect timeout is one budget for the whole of making a connection, as in
-curl. The mail link (the shared dialer) arms a phase timer for a protocol that
+The connect timeout is one budget for the whole of making a connection. The mail link (the shared dialer) arms a phase timer for a protocol that
 asks (`twist_mail_link_phase_begin`), and the protocol ends it when it is up;
 for SSH that is the login, so a long transfer is not cut off and a kept session
 never starts one. The key exchange is given the same time (`kex_timeout_us`)
@@ -475,7 +472,7 @@ the session from the loop. Only SFTP asks so far; the command line refuses
 Quote commands (`-Q`) and the directories of an upload are requests of the
 SFTP client run in sequence: each is sent when the one before has been
 answered, tagged so that its answer is told from the transfer's. The command
-lines are read by `quote.c` as the curl tool reads them, and a command that
+lines are read by `quote.c`, and a command that
 changes only half of a pair of attributes (the owner or the group, the access
 or modification time) asks for the file's first and sends both. Commands for
 before run when the SFTP client is ready, those for after on the answer to the
@@ -585,7 +582,6 @@ contract from that thread pool.
 libevent or libev are closer to mio, if you use only the poll and the timer
 and ignore bufferevents. For a library whose reason to exist is this I/O
 model, that dependency does not buy much once the poll backend is isolated.
-curl itself grew its own multi loop for the same reason.
 
 ### Not: libevent or libev
 
@@ -594,10 +590,10 @@ kernel readiness API. Crypto stays in quickstep.
 
 ### Process Ownership
 
-Hopf owns the process. A libcurl-shaped library often does not: the
-application already has a poll loop, and the library is a guest in it.
-curl's multi interface exists for that (curl_multi_socket_action tells the
-library a socket became readable; the library does not call epoll itself).
+Hopf owns the process. A library often does not: the application already
+has a poll loop, and the library is a guest in it. The multi interface exists
+for that (twist_multi_socket_action tells the library a socket became
+readable; the library does not call epoll itself).
 
 ## Design Decision: Loop vs Runtime
 
@@ -607,7 +603,7 @@ library a socket became readable; the library does not call epoll itself).
 - **Runtime**: The Hopf arrangement: N loops on N threads, an accept loop, a
   dial round-robin, a storage pool. The CLI uses this.
 - **External driver**: Uses the same Loop from the application's poller, the
-  way nginx or a GUI main loop would drive libcurl.
+  way nginx or a GUI main loop would drive it.
 
 Socket registration is a callback (watch(fd, read, write) / unwatch), not
 a hidden epoll_ctl. Protocol handlers see Endpoint in both modes. They
@@ -678,7 +674,7 @@ DNS queries themselves are UDP sockets on the destination reactor, the way
 Hopf treats the resolver as runtime substrate. getaddrinfo on a reactor
 thread is the bug both codebases are built to avoid.
 
-A curl replacement will grow DoH and its own DNS anyway, so an in-tree
+A transfer client will grow DoH and its own DNS anyway, so an in-tree
 resolver that is just another datagram handler ages better than adopting
 c-ares as architecture. c-ares is a reasonable temporary implementation of
 that same callback, sitting on the storage pool or on the loop's UDP path.

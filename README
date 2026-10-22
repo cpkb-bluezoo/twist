@@ -5,8 +5,9 @@ Copyright (C) 2026 Chris Burdess
 
 Twist is a GNU transfer client.  HTTP/1, HTTP/2, and HTTP/3 are
 implemented, and further schemes plug into the same transfer engine.
-The command line follows curl for the options, standard streams, and
-exit status that the library already supports.
+The command line is mostly compatible with curl's: the options, standard
+streams and exit status are the same, so that twist can stand in for it in
+scripts.
 
 Dependencies
 ------------

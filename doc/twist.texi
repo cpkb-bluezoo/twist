@@ -20,7 +20,7 @@ Documentation License''.
 
 @titlepage
 @title Twist
-@subtitle A curl-compatible transfer library
+@subtitle A transfer library and command-line client
 @author Chris Burdess (@email{dog@@gnu.org})
 @page
 @vskip 0pt plus 1filll
@@ -54,13 +54,11 @@ Documentation License''.
 
 Twist is a transfer library and a small command-line client.  The
 public interface is @code{twist_easy}, @code{twist_multi} and
-@code{twist_share}.  It is not a drop-in replacement for the
-@code{libcurl} ABI: names, constants and header files are Twist's own.
+@code{twist_share}.  Names, constants and header files are Twist's own.
 
 The schemes that are implemented are listed under @ref{Protocols}.
-Every other URL scheme that libcurl offers has a row in the scheme
-table, so a later handler can be added without changing the transfer
-engine.  TLS and QUIC come from
+Schemes that are not yet implemented have a row in the scheme table, so
+a handler can be added without changing the transfer engine.  TLS and QUIC come from
 GNU Quickstep.  The reactor does not start a thread of its own.  A
 transfer's sockets stay on one loop, and QUIC is one UDP socket on
 that same loop.
@@ -93,7 +91,7 @@ error, or to @option{--stderr}.  @option{--help} and @option{--version}
 are written to standard output and exit successfully.
 
 A transfer error has the form @samp{twist: (@var{n}) @var{message}} and
-exits @var{n}, using curl's status numbers.  A bad command line exits
+exits @var{n}, a status from the table below.  A bad command line exits
 2, with no number in parentheses, and suggests @option{--help}.
 @option{-s} hides a transfer diagnostic.  @option{-S} shows it again.
 Several URLs leave the status of the last transfer, unless
@@ -366,7 +364,7 @@ restores the normal resolver.  When @option{--dns-order} is also set,
 that list is used and this URL supplies the @code{doh} step.
 @item --doh-insecure
 Do not verify the DoH server certificate.  This is independent of
-@option{-k}.  Curl's @option{--doh-cert-status} is not supported.
+@option{-k}.
 @item --doq-url @var{url}
 DNS-over-QUIC server.  @code{quic://host} or @code{host}, with an
 optional port (default 853).  The certificate is checked against that
@@ -400,6 +398,8 @@ There is no config file, @option{--fail-with-body}, verbose trace,
 cookie jar, or parallel transfer.
 
 @heading Exit status
+The numbers are curl's, so that a script that tests them works with either.
+
 @table @asis
 @item 0
 The transfer finished.
@@ -534,7 +534,7 @@ These schemes are recognised, but are not implemented, and exit 1:
 @chapter Progress meter
 
 Twist shows the progress of a transfer on standard error, or on
-@option{--stderr}, as curl does: a heading of two lines and then one
+@option{--stderr}: a heading of two lines and then one
 line that is written over and over, with the amount transferred, the
 speeds, and the time spent and left:
 
@@ -645,25 +645,19 @@ is made so that only its owner can read it, and what is in it undoes the
 encryption of the connections: it is for debugging.
 @item TWIST_CA_BUNDLE file name
 If set, it is used as the @option{--cacert} value, and @env{SSL_CERT_DIR} and
-@env{SSL_CERT_FILE} are not looked at.  It is twist's name for curl's
-@env{CURL_CA_BUNDLE}.
+@env{SSL_CERT_FILE} are not looked at.
 @end table
 
 The names of the certificate variables are looked at only when neither
 @option{--cacert} nor @option{--capath} is given.  A file or directory that
 they name and that cannot be read is an error.
 
-The variables that name the configuration file of curl (@env{CURL_HOME},
-@env{XDG_CONFIG_HOME}, @env{APPDATA}, @env{USERPROFILE}), its choice of TLS
-library (@env{CURL_SSL_BACKEND}) and the shell (@env{SHELL}) are not used:
-twist reads no configuration file, and has one TLS library.  Variables can
-also be imported by @option{--variable %@var{name}} (@pxref{Variables}).
+Twist reads no configuration file.  Variables can also be imported by @option{--variable %@var{name}} (@pxref{Variables}).
 
 @node Variables
 @chapter Variables
 
 A command line can set variables and use them in the parameters of options.
-They are the same as curl's.
 
 @example
 twist --variable name=smith --expand-url 'https://example.com/@{@{name@}@}' ...
@@ -733,7 +727,7 @@ should go through @code{url} or be used with @option{-g}.
 @node URL globbing
 @chapter URL globbing
 
-A URL may name many things at once, for every scheme, as with curl:
+A URL may name many things at once, for every scheme:
 
 @table @code
 @item @{a,b,c@}
@@ -773,7 +767,7 @@ status is the last one's.  @option{-g} turns it all off.
 
 Over @code{sftp} the URLs for one server share a connection, so
 @samp{sftp://host/dir/f[1-100].txt} logs in once.  There is no wildcard
-in a remote path, such as @samp{*.txt}, as there is none in curl.
+in a remote path, such as @samp{*.txt}.
 
 @node SFTP and SCP
 @chapter SFTP and SCP
@@ -805,7 +799,7 @@ dot.  @option{-l} gives the names only.
 What a server sends is not trusted with the output: a newline in a file name
 would make a line that is not an entry, and control characters can do as they
 please to a terminal.  So control characters in a listing, and the UTF-8 form
-of the C1 ones, are replaced with @samp{?}.  curl writes them as they come.
+of the C1 ones, are replaced with @samp{?}. 
 
 An @code{scp} URL does not list: it names one file, and a URL that ends in
 @samp{/} exits 78.  A directory that is not there, or a file followed by a
@@ -815,11 +809,11 @@ slash, exits 78 too, and one that may not be listed exits 9.  A range or
 @subheading Upload, resume and ranges
 
 @option{-T @var{file}} uploads a file.  The remote file is created, with mode
-0644 as curl does, and truncated if it is there.  When the URL names a
-directory (it ends in @samp{/}) the file gets the name of the local file, as
-with curl.  Data given with @option{-d} is uploaded the same way.  If the
+0644, and truncated if it is there.  When the URL names a
+directory (it ends in @samp{/}) the file gets the name of the local file.
+Data given with @option{-d} is uploaded the same way.  If the
 file cannot be read part way, the transfer fails with status 26; the remote
-file is left as far as it got, as with curl.  A pipe is read as it delivers
+file is left as far as it got.  A pipe is read as it delivers
 data, and twist does not do anything else while it waits for the next of it.
 
 @option{-C} continues a transfer that stopped.  An upload does not send what
@@ -852,8 +846,8 @@ The key exchange gets the same time, not a limit of its own.
 @option{-x} opens a tunnel to the SSH server through an HTTP proxy
 (@code{CONNECT}) or a SOCKS5 proxy, and the SSH session goes through it.
 Credentials in the proxy's URL, or given with @option{-U}, are sent as Basic
-for HTTP and as a user name and password for SOCKS5.  A refusal is told in
-curl's words and with its status: 56 for a @code{CONNECT} that failed
+for HTTP and as a user name and password for SOCKS5.  A refusal is told
+with a status: 56 for a @code{CONNECT} that failed
 (@samp{CONNECT tunnel failed, response 403}), 97 for SOCKS5 (@samp{Can't
 complete SOCKS5 connection to host. (5)}); a proxy that is not there is 7.
 The server's banner may arrive in the same packet as the proxy's reply, and
@@ -862,8 +856,7 @@ a proxy may say a good deal before it opens the tunnel; both are handled.
 The server is named to the proxy as the URL gives it: a name is sent as a name,
 and an IP address as an address (an IPv6 one in brackets for @code{CONNECT}).
 @code{socks5://} and @code{socks5h://} are the same: twist does not look the
-name up itself before giving it to a SOCKS5 proxy, as curl does for
-@code{socks5://}.  The tunnel is kept for the next URL as a connection is, but
+name up itself before giving it to a SOCKS5 proxy.  The tunnel is kept for the next URL as a connection is, but
 only for the same proxy with the same credentials: a login made through one
 proxy is not used by a transfer through another, or through none.
 
@@ -895,7 +888,7 @@ transfer with status 21 and a message that says which command and why.  A
 command twist cannot read is an error even then.  A @samp{+} before a command
 is refused: it is the form for FTP.
 
-The commands are the ones the curl tool has.  The command is the word up to
+The command is the word up to
 the first space, in any case; a name may be in double quotes to hold spaces,
 with @samp{\"} and @samp{\\} for a quote and a backslash in it.  Single quotes
 mean nothing.  A relative name is the server's to place, in the user's
@@ -934,7 +927,7 @@ is left, and if making them does not help the error is the upload's.
 
 @subheading Rate limits
 
-@option{--limit-rate} limits the average over the transfer, as curl's does.
+@option{--limit-rate} limits the average over the transfer.
 A chunk is sent or asked for when the bytes before it have been earned at the
 limit, so the transfer is ahead by at most one chunk.  A chunk is 32 KiB, or
 half a second's worth of the limit when that is less, so a slow limit gives
@@ -960,7 +953,7 @@ the agent's order, then @file{~/.ssh/id_ed25519}, @file{id_ecdsa} and
 A server may ask for the password as a question (keyboard-interactive login,
 usual with PAM) and not as a password.  twist answers when the server asks
 one question that is not shown as it is typed, and the answer is the
-password, as curl does.  Anything else, such as a verification code or
+password.  Anything else, such as a verification code or
 several questions, is answered with nothing, so the password is not given to
 a question that might not be asking for it; the other ways are then tried, and
 if they fail too the message says what was asked.  With no password, the
@@ -988,7 +981,7 @@ not fatal: the other keys and the password are tried, and if they all fail
 the message says what the agent did.  A server that counts every key it turns
 away as a failed attempt, as @command{sshd} does, allows a limited number of
 keys in the agent to be tried, six unless it is set otherwise.  This is the
-server's limit, as it is for curl and @command{ssh}.
+server's limit, as it is for @command{ssh}.
 
 The key files twist reads are OpenSSH's, PEM and PKCS#8, and PuTTY's version
 3.  @strong{A passphrase-protected key file in the OpenSSH format, which is
@@ -1003,8 +996,7 @@ empty string means no agent.
 
 @subheading The host key
 
-The host key is checked against @file{~/.ssh/known_hosts}, as the curl tool
-does.  Here, and for the key files above, @file{~} is @env{HOME}, or the home
+The host key is checked against @file{~/.ssh/known_hosts}.  Here, and for the key files above, @file{~} is @env{HOME}, or the home
 directory in the password file if @env{HOME} is not set or is empty.  A host that is not in the file, or whose key differs from the one in
 it, fails the transfer (status 60); there is no way to accept a new host
 key by asking.  Add it with @command{ssh-keyscan}, connect once with
