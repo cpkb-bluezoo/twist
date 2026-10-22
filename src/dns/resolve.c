@@ -103,6 +103,10 @@ struct dns_query
   struct twist_dns_addr ddr_doq_addr;
   struct twist_dns_addr ddr_dot_addr;
   char peer_name[256];
+  /* The address of the resolver a DoT or DoQ resolver was discovered from, as
+     text, when this one was: its certificate must be valid for that address
+     too (RFC 9462, section 4.2).  Empty for a resolver the user named.  */
+  char also_name[64];
   char ddr_doq_name[256];
   char ddr_dot_name[256];
   char *doq_text;
@@ -1005,8 +1009,13 @@ dot_connected (struct twist_endpoint *ep)
 
   if (q->done)
     return;
-  rc = twist_connection_start_tls (q->conn, q->peer_name, 1, alpn, 1, q->cainfo, q->capath,
-                                   q->certfile, q->keyfile);
+  rc = twist_connection_require_name (q->conn,
+                                      q->also_name[0] != 0 ? q->also_name
+                                                           : NULL);
+  if (rc == TWIST_OK)
+    rc = twist_connection_start_tls (q->conn, q->peer_name, 1, alpn, 1,
+                                     q->cainfo, q->capath, q->certfile,
+                                     q->keyfile);
   if (rc != TWIST_OK)
     twist_connection_fail (q->conn, rc);
 }
@@ -1051,19 +1060,39 @@ static const struct twist_protocol_handler doq_handler = {
   NULL
 };
 
+/* What a resolver found by discovery has to prove besides its own name:
+   that it speaks for the resolver the discovery was asked of.  That was asked
+   over plain UDP, so anyone who can answer it can name a resolver of their
+   own, with a certificate for that name.  What they cannot have is a
+   certificate for the address that was asked.  A resolver the user named has
+   no second name.  */
+static void
+require_asked_address (struct dns_query *q, int discovered)
+{
+  q->also_name[0] = 0;
+  if (discovered
+      && inet_ntop (AF_INET, &q->sin.sin_addr, q->also_name,
+                    sizeof q->also_name) == NULL)
+    q->also_name[0] = 0;
+}
+
 static int
 connect_doq (struct dns_query *q, const struct twist_dns_addr *addr, int port,
-             const char *name)
+             const char *name, int discovered)
 {
   struct twist_connection *conn = NULL;
   struct twist_endpoint *ep;
+  struct twist_quic_opts opts;
   int rc;
 
   rc = remember_peer (q, name, addr, port);
   if (rc != TWIST_OK)
     return rc;
+  require_asked_address (q, discovered);
+  memset (&opts, 0, sizeof opts);
+  opts.also_name = q->also_name[0] != 0 ? q->also_name : NULL;
   rc = twist_quic_dial (q->loop, q->peer_name, "doq", addr, port, q->cainfo, q->capath,
-                        q->certfile, q->keyfile, 1, NULL, &conn);
+                        q->certfile, q->keyfile, 1, &opts, &conn);
   if (rc != TWIST_OK)
     return rc;
   q->conn = conn;
@@ -1078,12 +1107,13 @@ connect_doq (struct dns_query *q, const struct twist_dns_addr *addr, int port,
 
 static int
 connect_dot (struct dns_query *q, const struct twist_dns_addr *addr, int port,
-             const char *name)
+             const char *name, int discovered)
 {
   int rc = remember_peer (q, name, addr, port);
 
   if (rc != TWIST_OK)
     return rc;
+  require_asked_address (q, discovered);
   q->dot = 1;
   q->sent = 0;
   q->tcp = 0;
@@ -1134,9 +1164,9 @@ on_resolver_addr (void *user, int err, const struct twist_dns_addr *addr)
   if (err == TWIST_OK && addr != NULL)
     {
       if (q->boot == TWIST_DNS_DOQ && q->doq_parsed != NULL)
-        rc = connect_doq (q, addr, q->doq_parsed->port, q->doq_parsed->host);
+        rc = connect_doq (q, addr, q->doq_parsed->port, q->doq_parsed->host, 0);
       else if (q->boot == TWIST_DNS_DOT && q->dot_parsed != NULL)
-        rc = connect_dot (q, addr, q->dot_parsed->port, q->dot_parsed->host);
+        rc = connect_dot (q, addr, q->dot_parsed->port, q->dot_parsed->host, 0);
     }
   if (rc != TWIST_OK && q->loop != NULL)
     twist_loop_post (q->loop, fallback_cb, q);
@@ -1170,7 +1200,7 @@ open_doq (struct dns_query *q)
         }
       if (literal (q->doq_parsed->host, &lit) == 1)
         return connect_doq (q, &lit.addr, q->doq_parsed->port,
-                            q->doq_parsed->host);
+                            q->doq_parsed->host, 0);
       q->boot = TWIST_DNS_DOQ;
       return twist_dns_resolve (q->loop, q->doq_parsed->host, &udp, 1,
                                 on_resolver_addr, q);
@@ -1179,7 +1209,8 @@ open_doq (struct dns_query *q)
     return start_ddr (q);
   if (!q->ddr_doq)
     return TWIST_ERR_UNSUPPORTED;
-  return connect_doq (q, &q->ddr_doq_addr, q->ddr_doq_port, q->ddr_doq_name);
+  return connect_doq (q, &q->ddr_doq_addr, q->ddr_doq_port, q->ddr_doq_name,
+                      1);
 }
 
 static int
@@ -1199,7 +1230,7 @@ open_dot (struct dns_query *q)
         }
       if (literal (q->dot_parsed->host, &lit) == 1)
         return connect_dot (q, &lit.addr, q->dot_parsed->port,
-                            q->dot_parsed->host);
+                            q->dot_parsed->host, 0);
       q->boot = TWIST_DNS_DOT;
       return twist_dns_resolve (q->loop, q->dot_parsed->host, &udp, 1,
                                 on_resolver_addr, q);
@@ -1208,7 +1239,8 @@ open_dot (struct dns_query *q)
     return start_ddr (q);
   if (!q->ddr_dot)
     return TWIST_ERR_UNSUPPORTED;
-  return connect_dot (q, &q->ddr_dot_addr, q->ddr_dot_port, q->ddr_dot_name);
+  return connect_dot (q, &q->ddr_dot_addr, q->ddr_dot_port, q->ddr_dot_name,
+                      1);
 }
 
 static void
@@ -1228,9 +1260,11 @@ after_ddr (void *user)
     }
   cur = q->plan[q->plan_i - 1];
   if (cur == TWIST_DNS_DOQ && q->ddr_doq)
-    rc = connect_doq (q, &q->ddr_doq_addr, q->ddr_doq_port, q->ddr_doq_name);
+    rc = connect_doq (q, &q->ddr_doq_addr, q->ddr_doq_port, q->ddr_doq_name,
+                      1);
   else if (cur == TWIST_DNS_DOT && q->ddr_dot)
-    rc = connect_dot (q, &q->ddr_dot_addr, q->ddr_dot_port, q->ddr_dot_name);
+    rc = connect_dot (q, &q->ddr_dot_addr, q->ddr_dot_port, q->ddr_dot_name,
+                      1);
   if (rc == TWIST_OK)
     return;
   if (rc == TWIST_ERR_NOMEM || rc == TWIST_ERR_INVAL || rc == TWIST_ERR_URL)
@@ -1419,7 +1453,8 @@ resolve (struct twist_loop *loop, const char *host, const int *order,
   have_doh = doh_url != NULL && doh_url[0] != 0;
   have_doq = doq_url != NULL && doq_url[0] != 0;
   have_dot = dot_url != NULL && dot_url[0] != 0;
-  if (twist_dns_plan_for (order, norder, have_doh, plan, 4, &np) != TWIST_OK)
+  if (twist_dns_plan_for (order, norder, have_doh, have_doq, have_dot, plan, 4,
+                          &np) != TWIST_OK)
     {
       cache_abort (cache, loop, host, !want_https && cache != NULL,
                    TWIST_ERR_INVAL);

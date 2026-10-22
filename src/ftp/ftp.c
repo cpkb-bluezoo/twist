@@ -74,6 +74,8 @@ struct twist_ftp
   struct twist_connection *ctrl;
   struct twist_connection *data;
   struct twist_proxy *proxy;
+  /* The data connection's own tunnel through the same proxy.  */
+  struct twist_proxy *data_proxy;
   struct twist_endpoint *ep;
   struct twist_timer *timer;
   struct twist_dns_addr peer;
@@ -543,14 +545,62 @@ dial_tcp (struct twist_ftp *f, struct twist_connection **slot,
 static const struct twist_protocol_handler ftp_ctrl_handler;
 static const struct twist_protocol_handler ftp_data_handler;
 
+/* The data connection is a connection of its own, and goes where the control
+   connection goes: through the proxy, to the server and the port it named.
+   Made directly it connects from the client's own address, past the proxy,
+   which gives the client away if the proxy is there to hide it, and fails if
+   the proxy is the only way out.  The server is named, not the address the
+   server gave in its reply (which is ignored, as for the control peer), and
+   the proxy looks it up as it did for the control connection.  */
+static int
+new_data_proxy (struct twist_ftp *f)
+{
+  int kind = TWIST_PROXY_NONE;
+  char *phost = NULL;
+  char *puser = NULL;
+  char *ppass = NULL;
+  int pport = 0;
+  int rc = TWIST_OK;
+
+  if (twist_proxy_parse (twist_easy_proxy (f->easy), &kind, &phost, &pport,
+                         &puser, &ppass) != TWIST_OK)
+    return TWIST_ERR_URL;
+  f->data_proxy = twist_proxy_new (kind, phost, pport, &ftp_data_handler);
+  if (f->data_proxy == NULL)
+    rc = TWIST_ERR_NOMEM;
+  else
+    {
+      twist_proxy_set_target (f->data_proxy, f->easy->url->host, f->data_port);
+      twist_proxy_configure (f->data_proxy, f->easy, puser, ppass);
+      twist_proxy_set_user (f->data_proxy, f);
+    }
+  free (phost);
+  free (puser);
+  if (ppass != NULL)
+    {
+      memset (ppass, 0, strlen (ppass));
+      free (ppass);
+    }
+  return rc;
+}
+
 static void
 dial_data (struct twist_ftp *f)
 {
   int rc;
 
   f->state = FTP_DIAL;
-  rc = dial_tcp (f, &f->data, &ftp_data_handler, f, &f->data_addr,
-                 f->data_port);
+  if (f->proxy != NULL)
+    {
+      /* f->peer is the proxy's address, and f->dial_port its port.  */
+      rc = new_data_proxy (f);
+      if (rc == TWIST_OK)
+        rc = dial_tcp (f, &f->data, twist_proxy_handler (f->data_proxy),
+                       f->data_proxy, &f->peer, f->dial_port);
+    }
+  else
+    rc = dial_tcp (f, &f->data, &ftp_data_handler, f, &f->data_addr,
+                   f->data_port);
   if (rc != TWIST_OK)
     ftp_complete (f, rc);
 }
@@ -1121,6 +1171,7 @@ twist_ftp_free (void *p)
   twist_connection_free (f->ctrl);
   twist_connection_free (f->data);
   twist_proxy_free (f->proxy);
+  twist_proxy_free (f->data_proxy);
   twist_ftp_parser_free (f->parser);
   free (f->dial_host);
   free (f);

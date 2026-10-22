@@ -758,7 +758,7 @@ if grep -q '^00000000000000000000000000000001 ' /proc/net/if_inet6 2>/dev/null; 
   check "$([ $rc -eq 0 ] && grep -q small.txt "$work/list" && echo ok)" "a listing over [::1] (exit $rc)"
 
   t --key "$work/userkey" -w '%{url_effective}' -o /dev/null "sftp://$user@$b6$work/srv/small.txt" > "$work/eff"
-  check "$(grep -q "@\[::1\]:$port/" "$work/eff" && echo ok)" "the effective URL keeps the brackets ($(cat "$work/eff"))"
+  check "$(grep -q "//\[::1\]:$port/" "$work/eff" && echo ok)" "the effective URL keeps the brackets ($(cat "$work/eff"))"
 
   # The address of this host, not in known_hosts under that name.
   printf '127.0.0.1 %s\n' "$hostpub" > "$work/home/.ssh/known_hosts"

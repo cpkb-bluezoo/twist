@@ -25,6 +25,7 @@
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -308,6 +309,20 @@ http_complete (struct twist_http *h, int err)
   if (err == TWIST_OK)
     http_park (h);
   twist_easy_finish (h->easy, err);
+}
+
+int
+twist_http_redirect_scheme_ok (const char *scheme)
+{
+  static const char *const ok[] = { "http", "https", "ws", "wss" };
+  size_t i;
+
+  if (scheme == NULL)
+    return 0;
+  for (i = 0; i < sizeof ok / sizeof ok[0]; i++)
+    if (strcasecmp (scheme, ok[i]) == 0)
+      return 1;
+  return 0;
 }
 
 int
@@ -751,19 +766,21 @@ deliver_body (struct twist_http *h, const uint8_t *data, size_t len)
     twist_write_bytes (h->easy->write_cb, h->easy->write_data, data, len);
 }
 
+/* Decoded data, in pieces, from the coding; see twist_coding_sink.  */
+static int
+coding_sink (void *user, const uint8_t *data, size_t len)
+{
+  deliver_body (user, data, len);
+  return 0;
+}
+
 static void
 release_coding (struct twist_http *h)
 {
-  uint8_t *tail = NULL;
-  size_t n = 0;
-
   if (h->coding == NULL)
     return;
   if (h->decode_err == 0)
-    h->decode_err = twist_coding_finish (h->coding, &tail, &n);
-  if (h->decode_err == 0 && n > 0)
-    deliver_body (h, tail, n);
-  free (tail);
+    h->decode_err = twist_coding_finish (h->coding, coding_sink, h);
   twist_coding_free (h->coding);
   h->coding = NULL;
 }
@@ -784,19 +801,10 @@ on_body (void *user, const uint8_t *data, size_t len)
     return;
   if (h->coding != NULL)
     {
-      uint8_t *plain = NULL;
-      size_t n = 0;
-      int rc = twist_coding_feed (h->coding, data, len, &plain, &n);
+      int rc = twist_coding_feed (h->coding, data, len, coding_sink, h);
 
       if (rc != TWIST_OK)
-        {
-          h->decode_err = rc;
-          free (plain);
-          return;
-        }
-      if (n > 0)
-        deliver_body (h, plain, n);
-      free (plain);
+        h->decode_err = rc;
       return;
     }
   deliver_body (h, data, len);
@@ -839,23 +847,47 @@ arm_parsers (struct twist_http *h)
   return TWIST_OK;
 }
 
+/* Add to LIST a header line made from FMT, as long as it is.  A token, a
+   cookie or a URL is whatever length the caller has, and a line cut off at
+   some size would be sent as if it were whole.  */
+static struct twist_slist *
+add_header (struct twist_slist *list, const char *fmt, ...)
+{
+  struct twist_slist *grown;
+  va_list ap;
+  char *line;
+  int n;
+
+  va_start (ap, fmt);
+  n = vsnprintf (NULL, 0, fmt, ap);
+  va_end (ap);
+  if (n < 0)
+    return list;
+  line = twist_xmalloc ((size_t) n + 1);
+  if (line == NULL)
+    return list;
+  va_start (ap, fmt);
+  vsnprintf (line, (size_t) n + 1, fmt, ap);
+  va_end (ap);
+  grown = twist_slist_append (list, line);
+  free (line);
+  return grown != NULL ? grown : list;
+}
+
 static struct twist_slist *
 request_headers (struct twist_http *h)
 {
   struct twist_easy *easy = h->easy;
   struct twist_slist *list = NULL;
   struct twist_slist *scan;
-  char buf[512];
   const char *ua = easy->useragent != NULL ? easy->useragent : "twist/0.1";
 
-  snprintf (buf, sizeof buf, "User-Agent: %s", ua);
-  list = twist_slist_append (list, buf);
+  list = add_header (list, "User-Agent: %s", ua);
   if (!h->strip_auth && h->auth_line != NULL)
     list = twist_slist_append (list, h->auth_line);
   else if (!h->strip_auth && easy->bearer != NULL)
     {
-      snprintf (buf, sizeof buf, "Authorization: Bearer %s", easy->bearer);
-      list = twist_slist_append (list, buf);
+      list = add_header (list, "Authorization: Bearer %s", easy->bearer);
     }
   else if (!h->strip_auth && easy->username != NULL
            && (easy->auth == 0 || (easy->auth & TWISTAUTH_BASIC) != 0)
@@ -870,8 +902,7 @@ request_headers (struct twist_http *h)
     }
   if (!h->strip_auth && easy->cookie != NULL)
     {
-      snprintf (buf, sizeof buf, "Cookie: %s", easy->cookie);
-      list = twist_slist_append (list, buf);
+      list = add_header (list, "Cookie: %s", easy->cookie);
     }
   else if (easy->share != NULL && easy->share->jar != NULL)
     {
@@ -886,13 +917,11 @@ request_headers (struct twist_http *h)
     }
   if (easy->range != NULL)
     {
-      snprintf (buf, sizeof buf, "Range: bytes=%s", easy->range);
-      list = twist_slist_append (list, buf);
+      list = add_header (list, "Range: bytes=%s", easy->range);
     }
   if (easy->referer != NULL)
     {
-      snprintf (buf, sizeof buf, "Referer: %s", easy->referer);
-      list = twist_slist_append (list, buf);
+      list = add_header (list, "Referer: %s", easy->referer);
     }
   for (scan = easy->headers; scan != NULL; scan = scan->next)
     {
@@ -906,19 +935,11 @@ request_headers (struct twist_http *h)
       const char *v = easy->accept_encoding[0] != 0
         ? easy->accept_encoding : "gzip, deflate";
 
-      if (strlen (v) + 18 < sizeof buf)
-        {
-          snprintf (buf, sizeof buf, "Accept-Encoding: %s", v);
-          list = twist_slist_append (list, buf);
-        }
+      list = add_header (list, "Accept-Encoding: %s", v);
     }
   if (easy->content_encoding != NULL
-      && !header_named (easy->headers, "Content-Encoding")
-      && strlen (easy->content_encoding) + 19 < sizeof buf)
-    {
-      snprintf (buf, sizeof buf, "Content-Encoding: %s", easy->content_encoding);
-      list = twist_slist_append (list, buf);
-    }
+      && !header_named (easy->headers, "Content-Encoding"))
+    list = add_header (list, "Content-Encoding: %s", easy->content_encoding);
   if (h->offered_h2c)
     {
       list = twist_slist_append (list, "Connection: Upgrade, HTTP2-Settings");
@@ -942,8 +963,7 @@ request_headers (struct twist_http *h)
       list = twist_slist_append (list, "Upgrade: websocket");
       list = twist_slist_append (list, "Connection: Upgrade");
       list = twist_slist_append (list, "Sec-WebSocket-Version: 13");
-      snprintf (buf, sizeof buf, "Sec-WebSocket-Key: %s", h->ws_key);
-      list = twist_slist_append (list, buf);
+      list = add_header (list, "Sec-WebSocket-Key: %s", h->ws_key);
     }
   return list;
 }
@@ -1263,10 +1283,23 @@ http_message_done (void *user)
           http_complete (h, TWIST_ERR_URL);
           return;
         }
+      if (!twist_http_redirect_scheme_ok (next->scheme))
+        {
+          char msg[96];
+
+          /* The same refusal as curl's: the transfer is not carried to a
+             scheme this handler does not speak.  */
+          snprintf (msg, sizeof msg, _("redirect to \"%.20s\" is not followed"),
+                    next->scheme != NULL ? next->scheme : "");
+          twist_easy_set_error (easy, twist_strdup (msg));
+          twist_url_free_int (next);
+          http_complete (h, TWIST_ERR_UNSUPPORTED);
+          return;
+        }
       twist_url_free_int (easy->url);
       easy->url = next;
       free (easy->effective_url);
-      easy->effective_url = twist_url_format (next);
+      easy->effective_url = twist_url_effective (next);
       easy->redirs++;
       if (use_get)
         h->suppress_body = 1;
@@ -2039,7 +2072,7 @@ http_begin (struct twist_http *h)
         url->port = 443;
       h->https = 1;
       free (easy->effective_url);
-      easy->effective_url = twist_url_format (url);
+      easy->effective_url = twist_url_effective (url);
     }
   if (!h->origin_set && url->host != NULL && url->host[0] != 0)
     {

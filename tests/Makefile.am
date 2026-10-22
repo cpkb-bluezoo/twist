@@ -45,6 +45,7 @@ test_dict_SOURCES = test-dict.c check.c feed.c body.c
 test_tftp_SOURCES = test-tftp.c check.c body.c
 test_file_SOURCES = test-file.c check.c
 test_tls_SOURCES = test-tls.c check.c
+test_tls_LDADD = $(LDADD) $(QUICKSTEP_LIBS)
 test_errors_SOURCES = test-errors.c check.c
 test_coding_SOURCES = test-coding.c
 test_ssh_SOURCES = test-ssh.c check.c

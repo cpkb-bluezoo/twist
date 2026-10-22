@@ -41,6 +41,124 @@
    name and the password themselves, and what is written back is encoded
    again.  An encoded CR, LF or NUL is no better than a raw one: the name
    goes into FTP and SMTP commands.  */
+/* BASE_TEXT resolved against REF is EXPECT, written as twist_url_format
+   writes it (with the port).  */
+static void
+resolves (const char *base_text, const char *ref, const char *expect)
+{
+  struct twist_url *base = NULL;
+  struct twist_url *out = NULL;
+  char *text = NULL;
+  int ok;
+
+  ok = twist_url_parse_int (base_text, &base) == TWIST_OK
+       && twist_url_resolve_int (base, ref, &out) == TWIST_OK
+       && (text = twist_url_format (out)) != NULL
+       && strcmp (text, expect) == 0;
+  if (!ok)
+    fprintf (stderr, "  %s + \"%s\" gave %s, wanted %s\n", base_text, ref,
+             text != NULL ? text : "(nothing)", expect);
+  check (ok, "a reference resolves as RFC 3986 says");
+  free (text);
+  twist_url_free_int (out);
+  twist_url_free_int (base);
+}
+
+/* RFC 3986 section 5.4, the normal and the abnormal examples, with base
+   http://a/b/c/d;p?q, and what a redirect really sends: an authority
+   (//host/path), a query that holds a URL, an IPv6 origin, and a reference
+   longer than any fixed buffer.  A relative Location from a server is
+   hostile input, and these were resolved wrongly: //host stayed on the
+   origin, a bracketed origin failed to resolve, ?y and #s lost the last path
+   segment, a reference was cut off at 2 KiB, and .. stayed in the path.  */
+static void
+test_url_resolve (void)
+{
+  static const char base[] = "http://a/b/c/d;p?q";
+  static const struct { const char *ref, *want; } v[] = {
+    { "g", "/b/c/g" }, { "./g", "/b/c/g" }, { "g/", "/b/c/g/" },
+    { "/g", "/g" }, { "?y", "/b/c/d;p?y" }, { "g?y", "/b/c/g?y" },
+    { "#s", "/b/c/d;p?q" }, { "g#s", "/b/c/g" }, { "g?y#s", "/b/c/g?y" },
+    { ";x", "/b/c/;x" }, { "g;x", "/b/c/g;x" }, { "g;x?y#s", "/b/c/g;x?y" },
+    { "", "/b/c/d;p?q" }, { ".", "/b/c/" }, { "./", "/b/c/" },
+    { "..", "/b/" }, { "../", "/b/" }, { "../g", "/b/g" }, { "../..", "/" },
+    { "../../", "/" }, { "../../g", "/g" },
+    { "../../../g", "/g" }, { "../../../../g", "/g" }, { "/./g", "/g" },
+    { "/../g", "/g" }, { "g.", "/b/c/g." }, { ".g", "/b/c/.g" },
+    { "g..", "/b/c/g.." }, { "..g", "/b/c/..g" }, { "./../g", "/b/g" },
+    { "./g/.", "/b/c/g/" }, { "g/./h", "/b/c/g/h" }, { "g/../h", "/b/c/h" },
+    { "g;x=1/./y", "/b/c/g;x=1/y" }, { "g;x=1/../y", "/b/c/y" },
+    { "g?y/./x", "/b/c/g?y/./x" }, { "g?y/../x", "/b/c/g?y/../x" },
+    { "g#s/./x", "/b/c/g" }, { "g#s/../x", "/b/c/g" }
+  };
+  struct twist_url *b = NULL;
+  struct twist_url *out = NULL;
+  char *long_ref;
+  char want[64];
+  size_t i;
+
+  for (i = 0; i < sizeof v / sizeof v[0]; i++)
+    {
+      snprintf (want, sizeof want, "http://a:80%s", v[i].want);
+      resolves (base, v[i].ref, want);
+    }
+  /* An authority, which is another host, and not a path on this one.  */
+  resolves (base, "//g", "http://g:80/");
+  resolves (base, "//g/p?x=1", "http://g:80/p?x=1");
+  resolves (base, "//g:8080/p", "http://g:8080/p");
+  resolves ("https://a/b", "//h/x", "https://h:443/x");
+  /* Absolute.  */
+  resolves (base, "https://x.example/y", "https://x.example:443/y");
+  /* A query that has a URL in it is still a query.  */
+  resolves (base, "/landed?next=http://other.example/",
+            "http://a:80/landed?next=http://other.example/");
+  resolves (base, "g?next=http://other.example/",
+            "http://a:80/b/c/g?next=http://other.example/");
+  /* An origin that is an IPv6 address, or has no path.  */
+  resolves ("http://[::1]:8080/a/b", "/c", "http://[::1]:8080/c");
+  resolves ("http://[::1]:8080/a/b", "d", "http://[::1]:8080/a/d");
+  resolves ("http://[::1]:8080/a/b", "//[::2]/e", "http://[::2]:80/e");
+  resolves ("http://h", "x", "http://h:80/x");
+  resolves ("http://h?q=1", "?r=2", "http://h:80/?r=2");
+
+  /* Longer than any buffer: whole, not cut off.  */
+  long_ref = malloc (5001);
+  check (long_ref != NULL, "long ref");
+  memset (long_ref, 'p', 5000);
+  long_ref[0] = '/';
+  long_ref[5000] = 0;
+  check (twist_url_parse_int (base, &b) == TWIST_OK
+         && twist_url_resolve_int (b, long_ref, &out) == TWIST_OK
+         && out->path != NULL && strlen (out->path) == 5000,
+         "a long reference is resolved whole");
+  twist_url_free_int (out);
+  twist_url_free_int (b);
+  free (long_ref);
+}
+
+/* A URL that names a host has one.  "http://" parsed, and the transfer then
+   waited, resolving the empty name, until its timeout.  A file has none.  */
+static void
+test_url_empty_host (void)
+{
+  struct twist_url *u = NULL;
+
+  check (twist_url_parse_int ("http://", &u) == TWIST_ERR_URL, "http://");
+  check (twist_url_parse_int ("http:///x", &u) == TWIST_ERR_URL, "http:///x");
+  check (twist_url_parse_int ("https://:8443/x", &u) == TWIST_ERR_URL,
+         "no host before a port");
+  check (twist_url_parse_int ("http://u@/x", &u) == TWIST_ERR_URL,
+         "only a user name");
+  check (twist_url_parse_int ("sftp://u@/x", &u) == TWIST_ERR_URL,
+         "sftp too");
+  check (twist_url_parse_int ("file:///tmp/x", &u) == TWIST_OK
+         && u->host != NULL && u->host[0] == 0, "a file has no host");
+  twist_url_free_int (u);
+  u = NULL;
+  check (twist_url_parse_int ("http://h/x", &u) == TWIST_OK, "a host is fine");
+  twist_url_free_int (u);
+}
+
 static void
 test_url_userinfo (void)
 {
@@ -164,6 +282,25 @@ test_url_ipv6 (void)
          && strcmp (buf, "[fe80::1%25eth0]") == 0, "with the zone");
   check (twist_url_host_text (u, 0, buf, sizeof buf) == TWIST_OK
          && strcmp (buf, "[fe80::1]") == 0, "and without it, for a Host header");
+  twist_url_free_int (u);
+  /* The URL reported back has no credentials in it.  */
+  check (twist_url_parse_int ("http://alice:s3cret@h.example:8080/p?q=1", &u)
+         == TWIST_OK, "a URL with credentials");
+  text = twist_url_effective (u);
+  check (text != NULL && strcmp (text, "http://h.example:8080/p?q=1") == 0,
+         "the effective URL has neither user nor password");
+  free (text);
+  text = twist_url_format (u);
+  check (text != NULL
+         && strcmp (text, "http://alice:s3cret@h.example:8080/p?q=1") == 0,
+         "and the full form still has both");
+  free (text);
+  twist_url_free_int (u);
+  check (twist_url_parse_int ("sftp://u@[::1]:2222/p", &u) == TWIST_OK, "user");
+  text = twist_url_effective (u);
+  check (text != NULL && strcmp (text, "sftp://[::1]:2222/p") == 0,
+         "a user name alone is left out too");
+  free (text);
   twist_url_free_int (u);
   /* A URL with no port, such as a file, is written without one.  */
   check (twist_url_parse_int ("file:///tmp/x%20y", &u) == TWIST_OK, "file");
@@ -848,6 +985,101 @@ timeout_easy (int port)
    released against the loop.  So the state must be released when the easy
    handle leaves the loop, not later with the handle: by then the loop is
    gone and the release reads freed memory.  */
+/* The multi interface called from a callback.  A write callback runs inside
+   the delivery of the transfer's own data, so a handle removed or cleaned up
+   there is freed under the code that called it.  curl forbids this and
+   answers CURLM_RECURSIVE_API_CALL; so does twist, with
+   TWIST_ERR_RECURSIVE, and the transfer goes on and ends as it would have.  */
+static twist_multi *cb_multi;
+static twist_easy *cb_easy;
+static int cb_remove_rc;
+static int cb_calls;
+static size_t cb_bytes;
+
+static size_t
+call_multi_in_callback (char *ptr, size_t size, size_t nmemb, void *user)
+{
+  (void) ptr;
+  (void) user;
+  cb_calls++;
+  cb_bytes += size * nmemb;
+  if (cb_calls == 1)
+    {
+      cb_remove_rc = twist_multi_remove_handle (cb_multi, cb_easy);
+      /* Not freed either, since it is still in use; this must not crash.  */
+      twist_easy_cleanup (cb_easy);
+    }
+  return size * nmemb;
+}
+
+static void
+test_multi_from_callback (void)
+{
+  char path[] = "/tmp/twist-recursive-XXXXXX";
+  char url[128];
+  char block[1024];
+  struct timespec nap = { 0, 5000000 };
+  int fd = mkstemp (path);
+  int running = 1;
+  int i;
+  int result = -1;
+  twist_easy *seen = NULL;
+  int msgs = 0;
+
+  check (fd >= 0, "a file to read");
+  if (fd < 0)
+    return;
+  memset (block, 'x', sizeof block);
+  for (i = 0; i < 8; i++)
+    if (write (fd, block, sizeof block) != (ssize_t) sizeof block)
+      abort ();
+  close (fd);
+  snprintf (url, sizeof url, "file://%s", path);
+
+  cb_multi = twist_multi_init ();
+  cb_easy = twist_easy_init ();
+  cb_remove_rc = -99;
+  cb_calls = 0;
+  cb_bytes = 0;
+  twist_easy_setopt (cb_easy, TWISTOPT_URL, url);
+  twist_easy_setopt (cb_easy, TWISTOPT_WRITEFUNCTION, call_multi_in_callback);
+  check (twist_multi_add_handle (cb_multi, cb_easy) == TWIST_OK, "add");
+  for (i = 0; i < 400 && running > 0; i++)
+    {
+      twist_multi_perform (cb_multi, &running);
+      nanosleep (&nap, NULL);
+    }
+  check (cb_calls > 0, "the write callback ran");
+  check (cb_remove_rc == TWIST_ERR_RECURSIVE,
+         "removing the handle from a callback is refused");
+  check (cb_easy->multi == cb_multi, "so it is still in its multi");
+  check (running == 0 && cb_easy->done && cb_bytes == 8 * sizeof block,
+         "and the transfer ended with all its data");
+  twist_multi_info_read (cb_multi, &msgs, &seen, &result);
+  check (seen == cb_easy && result == TWIST_OK, "and reported success");
+  check (twist_multi_remove_handle (cb_multi, cb_easy) == TWIST_OK,
+         "it can be removed once the call has returned");
+  twist_multi_cleanup (cb_multi);
+  twist_easy_cleanup (cb_easy);
+  unlink (path);
+}
+
+/* A handle cleaned up while it is still in a multi leaves it first, as curl's
+   does.  It used to stay in the list as a pointer to freed memory, which
+   twist_multi_cleanup then read.  */
+static void
+test_cleanup_handle_in_multi (void)
+{
+  twist_multi *multi = twist_multi_init ();
+  twist_easy *easy = twist_easy_init ();
+
+  twist_easy_setopt (easy, TWISTOPT_URL, "file:///nonexistent/twist");
+  check (twist_multi_add_handle (multi, easy) == TWIST_OK, "add");
+  twist_easy_cleanup (easy);
+  check (multi->n_easies == 0, "a cleaned up handle left its multi");
+  twist_multi_cleanup (multi);
+}
+
 static void
 test_release_transfer (void)
 {
@@ -1275,6 +1507,8 @@ main (void)
   test_url ();
   test_url_userinfo ();
   test_url_ipv6 ();
+  test_url_resolve ();
+  test_url_empty_host ();
   test_connect_timeout_default ();
   test_http_ipv6_host ();
   test_scheme ();
@@ -1284,6 +1518,8 @@ main (void)
   test_conn_pool ();
   test_multi_perform ();
   test_release_transfer ();
+  test_multi_from_callback ();
+  test_cleanup_handle_in_multi ();
   test_home_dir ();
   test_pool_completion_at_cleanup ();
   test_pool_eviction_stays_on_the_loop ();

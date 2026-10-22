@@ -46,7 +46,24 @@ struct twist_tls
   gq_tls_session session;
   int have_session;
   gq_tls_session offered;
+  /* A second name the certificate must be valid for, or NULL.  */
+  char *also_name;
 };
+
+/* Both names, against the same authorities: what verify_peer is when a
+   second name is required (the built-in check covers one).  */
+static int
+tls_verify_names (void *user, const gq_slice *chain, size_t n,
+                  const char *server_name)
+{
+  struct twist_tls *t = twist_connection_tls (user);
+
+  (void) server_name;
+  if (t == NULL)
+    return -1;
+  return twist_verify_chain_names (t->trust, chain, n, t->server_name,
+                                   t->also_name);
+}
 
 static int
 tls_write (void *user, const uint8_t *data, size_t len)
@@ -131,6 +148,7 @@ tls_free (void *p)
   gq_trust_free (t->trust);
   twist_client_auth_free (t->auth);
   free (t->server_name);
+  free (t->also_name);
   free (t);
 }
 
@@ -162,6 +180,15 @@ tls_start (struct twist_connection *conn, const struct twist_tls_want *want)
       return rc;
     }
   t->server_name = twist_strdup (want->server_name);
+  if (want->also_name != NULL)
+    {
+      t->also_name = twist_strdup (want->also_name);
+      if (t->also_name == NULL)
+        {
+          tls_free (t);
+          return TWIST_ERR_NOMEM;
+        }
+    }
   for (i = 0; i < want->n_alpn && i < 2; i++)
     {
       size_t n = strlen (want->alpn[i]);
@@ -208,6 +235,8 @@ tls_start (struct twist_connection *conn, const struct twist_tls_want *want)
   /* -k: the chain is not looked at.  */
   if (!want->verify)
     ev.verify_peer = twist_verify_accept;
+  else if (t->also_name != NULL)
+    ev.verify_peer = tls_verify_names;
   rc = gq_tlsauto_client_new (&t->tls, &cfg, &ev, 0);
   if (rc != GQ_OK)
     {

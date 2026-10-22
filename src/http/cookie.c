@@ -70,6 +70,19 @@ twist_jar_free (struct twist_jar *jar)
   free (jar);
 }
 
+size_t
+twist_jar_count (const struct twist_jar *jar)
+{
+  const struct twist_cookie *c;
+  size_t n = 0;
+
+  if (jar == NULL)
+    return 0;
+  for (c = jar->head; c != NULL; c = c->next)
+    n++;
+  return n;
+}
+
 static char *
 tokdup (const char *s, size_t n)
 {
@@ -116,6 +129,91 @@ path_match (const char *req, const char *cookie_path)
   return req[n] == 0 || req[n] == '/' || cookie_path[n - 1] == '/';
 }
 
+/* RFC 6265, section 6.1: at least 4096 bytes of name and value in a cookie,
+   50 cookies for a domain and 3000 in all.  A server cannot make the jar
+   hold more than these, and the oldest go first.  */
+#define JAR_COOKIE_MAX 4096
+#define JAR_DOMAIN_MAX 50
+#define JAR_TOTAL_MAX 3000
+
+static void
+cookie_free (struct twist_cookie *c)
+{
+  if (c == NULL)
+    return;
+  free (c->name);
+  free (c->value);
+  free (c->domain);
+  free (c->path);
+  free (c);
+}
+
+/* Whether HOST is an IP address, which a cookie matches only as a whole: no
+   address is a suffix of another's.  */
+static int
+host_is_address (const char *host)
+{
+  const char *p;
+
+  if (strchr (host, ':') != NULL || host[0] == '[')
+    return 1;
+  for (p = host; *p != 0; p++)
+    if (*p != '.' && (*p < '0' || *p > '9'))
+      return 0;
+  return host[0] != 0;
+}
+
+/* Whether DOMAIN, with no leading dot, is a public suffix as far as can be
+   told without a list of them: a top-level domain, or a country code with a
+   generic second level, such as co.uk and com.au.  A cookie set for one is
+   sent to every host under it.  The Public Suffix List is the proper way,
+   and misses nothing the way this does (github.io, blogspot.com); it is a
+   dependency to decide (see TODO).  */
+static int
+looks_like_public_suffix (const char *domain)
+{
+  static const char *const generic[] = {
+    "ac", "co", "com", "ed", "edu", "go", "gob", "gov", "gv", "mil", "ne",
+    "net", "nom", "or", "org", "sch"
+  };
+  const char *dot = strchr (domain, '.');
+  size_t i;
+  size_t first;
+
+  if (dot == NULL)
+    return 1;
+  if (strchr (dot + 1, '.') != NULL)
+    return 0;
+  if (strlen (dot + 1) != 2)
+    return 0;
+  first = (size_t) (dot - domain);
+  for (i = 0; i < sizeof generic / sizeof generic[0]; i++)
+    if (strlen (generic[i]) == first
+        && strncasecmp (domain, generic[i], first) == 0)
+      return 1;
+  return 0;
+}
+
+/* Take out and free the oldest cookie of DOMAIN, or of any domain if DOMAIN
+   is NULL.  The jar is newest first.  */
+static void
+evict_oldest (struct twist_jar *jar, const char *domain)
+{
+  struct twist_cookie **victim = NULL;
+  struct twist_cookie **link;
+
+  for (link = &jar->head; *link != NULL; link = &(*link)->next)
+    if (domain == NULL || strcasecmp ((*link)->domain, domain) == 0)
+      victim = link;
+  if (victim != NULL)
+    {
+      struct twist_cookie *gone = *victim;
+
+      *victim = gone->next;
+      cookie_free (gone);
+    }
+}
+
 int
 twist_jar_store (struct twist_jar *jar, const char *set_cookie,
                  const char *host, const char *path, int https)
@@ -123,10 +221,12 @@ twist_jar_store (struct twist_jar *jar, const char *set_cookie,
   const char *semi;
   const char *eq;
   struct twist_cookie *c;
+  struct twist_cookie **link;
   char *pair;
   char *scan;
+  size_t in_domain = 0;
+  size_t total = 0;
 
-  (void) https;
   if (jar == NULL || set_cookie == NULL || host == NULL)
     return TWIST_ERR_INVAL;
   semi = strchr (set_cookie, ';');
@@ -146,21 +246,13 @@ twist_jar_store (struct twist_jar *jar, const char *set_cookie,
   c->host_only = 1;
   if (c->name == NULL || c->value == NULL || c->domain == NULL || c->path == NULL)
     {
-      free (c->name);
-      free (c->value);
-      free (c->domain);
-      free (c->path);
-      free (c);
+      cookie_free (c);
       return TWIST_ERR_NOMEM;
     }
   pair = twist_strdup (set_cookie);
   if (pair == NULL)
     {
-      free (c->name);
-      free (c->value);
-      free (c->domain);
-      free (c->path);
-      free (c);
+      cookie_free (c);
       return TWIST_ERR_NOMEM;
     }
   scan = pair;
@@ -187,41 +279,96 @@ twist_jar_store (struct twist_jar *jar, const char *set_cookie,
       scan = attr;
     }
   free (pair);
-  if (twist_has_ctl (c->name) || twist_has_ctl (c->value))
+  if (c->domain == NULL || c->path == NULL)
     {
-      free (c->name);
-      free (c->value);
-      free (c->domain);
-      free (c->path);
-      free (c);
+      cookie_free (c);
+      return TWIST_ERR_NOMEM;
+    }
+  if (twist_has_ctl (c->name) || twist_has_ctl (c->value)
+      || strlen (c->name) + strlen (c->value) > JAR_COOKIE_MAX)
+    {
+      cookie_free (c);
       return TWIST_ERR_PROTOCOL;
     }
-  if (c->domain != NULL && c->domain[0] == '.')
+  /* Whoever can rewrite a response over http can set any cookie in it, so
+     one that says it is only for https is not believed from there.  */
+  if (c->secure && !https)
     {
-      char *stripped = twist_strdup (c->domain + 1);
+      cookie_free (c);
+      return TWIST_ERR_PROTOCOL;
+    }
+  if (c->domain[0] == '.')
+    memmove (c->domain, c->domain + 1, strlen (c->domain));
+  if (c->domain[0] == 0 || !domain_match (host, c->domain, 0))
+    {
+      cookie_free (c);
+      return TWIST_ERR_PROTOCOL;
+    }
+  if (!c->host_only)
+    {
+      int exact = strcasecmp (host, c->domain) == 0;
 
-      if (stripped == NULL)
+      if (host_is_address (host))
         {
-          free (c->name);
-          free (c->value);
-          free (c->domain);
-          free (c->path);
-          free (c);
-          return TWIST_ERR_NOMEM;
+          /* An address is no one's suffix.  */
+          if (!exact)
+            {
+              cookie_free (c);
+              return TWIST_ERR_PROTOCOL;
+            }
+          c->host_only = 1;
         }
-      free (c->domain);
-      c->domain = stripped;
+      else if (looks_like_public_suffix (c->domain))
+        {
+          /* Not for everyone under it; a host that is itself such a name
+             (localhost) may keep one for itself.  */
+          if (!exact)
+            {
+              cookie_free (c);
+              return TWIST_ERR_PROTOCOL;
+            }
+          c->host_only = 1;
+        }
     }
-  if (c->domain == NULL || c->domain[0] == 0
-      || !domain_match (host, c->domain, 0))
+
+  /* The same cookie (name, domain and path) replaces the old one, which an
+     insecure origin may not do to a Secure one.  */
+  for (link = &jar->head; *link != NULL; link = &(*link)->next)
     {
-      free (c->name);
-      free (c->value);
-      free (c->domain);
-      free (c->path);
-      free (c);
-      return TWIST_ERR_PROTOCOL;
+      struct twist_cookie *old = *link;
+
+      if (strcmp (old->name, c->name) == 0
+          && strcasecmp (old->domain, c->domain) == 0
+          && strcmp (old->path, c->path) == 0)
+        {
+          if (old->secure && !https)
+            {
+              cookie_free (c);
+              return TWIST_ERR_PROTOCOL;
+            }
+          c->next = old->next;
+          *link = c;
+          cookie_free (old);
+          return TWIST_OK;
+        }
     }
+  {
+    struct twist_cookie *k;
+
+    for (k = jar->head; k != NULL; k = k->next)
+      {
+        total++;
+        if (strcasecmp (k->domain, c->domain) == 0)
+          in_domain++;
+      }
+  }
+  if (in_domain >= JAR_DOMAIN_MAX)
+    {
+      evict_oldest (jar, c->domain);
+      total--;
+    }
+  if (total >= JAR_TOTAL_MAX)
+    evict_oldest (jar, NULL);
   c->next = jar->head;
   jar->head = c;
   return TWIST_OK;

@@ -775,6 +775,172 @@ test_h3_long_frames (void)
   twist_h3_free (h);
 }
 
+/* What the jar takes, and from whom.  A cookie is a claim by a server to be
+   sent to others, so the jar decides which claims it believes.  A server at
+   attacker.com that sets Domain=com has the cookie sent to every .com host
+   (and a fixation of a session on every site under a registry suffix); a
+   response over plain http that sets a Secure cookie is no more to be
+   believed than whoever rewrote it on the way; a repeated cookie replaces
+   the old one and does not pile up beside it; and a server cannot make the
+   jar grow without bound.  */
+static int
+cookie_sent_to (struct twist_jar *jar, const char *host, const char *path,
+                int https, const char *want)
+{
+  char *hdr = NULL;
+  int found;
+
+  if (twist_jar_header (jar, host, path, https, &hdr) != TWIST_OK)
+    return 0;
+  found = hdr != NULL && strstr (hdr, want) != NULL;
+  free (hdr);
+  return found;
+}
+
+static void
+test_cookie_domains (void)
+{
+  struct twist_jar *jar = twist_jar_new ();
+
+  /* A registry suffix is not a domain for a cookie.  */
+  check (twist_jar_store (jar, "evil=1; Domain=com", "attacker.com", "/", 1)
+         == TWIST_ERR_PROTOCOL, "Domain=com is refused");
+  check (!cookie_sent_to (jar, "victim.com", "/", 1, "evil=1"),
+         "and is not sent to another .com host");
+  check (twist_jar_store (jar, "evil=1; Domain=.com", "attacker.com", "/", 1)
+         == TWIST_ERR_PROTOCOL, "nor with a leading dot");
+  check (twist_jar_store (jar, "s=1; Domain=co.uk", "a.co.uk", "/", 1)
+         == TWIST_ERR_PROTOCOL, "Domain=co.uk is refused");
+  check (twist_jar_store (jar, "s=1; Domain=com.au", "a.com.au", "/", 1)
+         == TWIST_ERR_PROTOCOL, "and com.au");
+  check (!cookie_sent_to (jar, "b.co.uk", "/", 1, "s=1"), "not sent on");
+  check (twist_jar_store (jar, "s=1; Domain=example.co.uk", "www.example.co.uk",
+                          "/", 1) == TWIST_OK, "a domain under co.uk is fine");
+  check (cookie_sent_to (jar, "shop.example.co.uk", "/", 1, "s=1"),
+         "and sent to its hosts");
+  check (!cookie_sent_to (jar, "other.co.uk", "/", 1, "s=1"),
+         "and not to its neighbours");
+  check (twist_jar_store (jar, "t=1; Domain=example.com", "www.example.com",
+                          "/", 1) == TWIST_OK, "an ordinary domain is fine");
+  /* A host that is itself the suffix may keep a cookie for itself.  */
+  check (twist_jar_store (jar, "h=1; Domain=localhost", "localhost", "/", 1)
+         == TWIST_OK, "localhost for localhost");
+  check (cookie_sent_to (jar, "localhost", "/", 1, "h=1"), "is sent there");
+  check (!cookie_sent_to (jar, "x.localhost", "/", 1, "h=1"),
+         "and only there");
+  check (twist_jar_store (jar, "i=1; Domain=intranet", "app.intranet", "/", 1)
+         == TWIST_ERR_PROTOCOL, "a single label from another host is refused");
+
+  /* An address matches only itself, never as a suffix.  */
+  check (twist_jar_store (jar, "ip=1; Domain=0.0.1", "127.0.0.1", "/", 1)
+         == TWIST_ERR_PROTOCOL, "a suffix of an IPv4 address is refused");
+  check (twist_jar_store (jar, "ip=1; Domain=127.0.0.1", "127.0.0.1", "/", 1)
+         == TWIST_OK, "its own address is fine");
+  check (!cookie_sent_to (jar, "8.0.0.1", "/", 1, "ip=1"),
+         "and is sent to no other");
+  twist_jar_free (jar);
+}
+
+static void
+test_cookie_secure (void)
+{
+  struct twist_jar *jar = twist_jar_new ();
+
+  check (twist_jar_store (jar, "s=plain; Secure", "example.com", "/", 0)
+         == TWIST_ERR_PROTOCOL, "a Secure cookie over http is refused");
+  check (!cookie_sent_to (jar, "example.com", "/", 1, "s=plain"),
+         "and is not kept");
+  check (twist_jar_store (jar, "s=safe; Secure", "example.com", "/", 1)
+         == TWIST_OK, "over https it is kept");
+  check (!cookie_sent_to (jar, "example.com", "/", 0, "s=safe"),
+         "and sent over https only");
+  check (cookie_sent_to (jar, "example.com", "/", 1, "s=safe"), "there");
+  /* Nor can http overwrite it, with or without the attribute.  */
+  check (twist_jar_store (jar, "s=fixed", "example.com", "/", 0)
+         == TWIST_ERR_PROTOCOL, "http does not overwrite a Secure cookie");
+  check (cookie_sent_to (jar, "example.com", "/", 1, "s=safe")
+         && !cookie_sent_to (jar, "example.com", "/", 1, "s=fixed"),
+         "which keeps its value");
+  twist_jar_free (jar);
+}
+
+static void
+test_cookie_replace (void)
+{
+  struct twist_jar *jar = twist_jar_new ();
+  char *hdr = NULL;
+
+  check (twist_jar_store (jar, "a=1", "example.com", "/", 1) == TWIST_OK, "a=1");
+  check (twist_jar_store (jar, "a=2", "example.com", "/", 1) == TWIST_OK, "a=2");
+  check (twist_jar_count (jar) == 1, "the same cookie is replaced");
+  check (twist_jar_header (jar, "example.com", "/", 1, &hdr) == TWIST_OK
+         && hdr != NULL && strstr (hdr, "a=2") != NULL
+         && strstr (hdr, "a=1") == NULL, "and the new value is the one sent");
+  free (hdr);
+  check (twist_jar_store (jar, "a=3; Path=/x", "example.com", "/", 1)
+         == TWIST_OK, "another path");
+  check (twist_jar_count (jar) == 2, "is another cookie");
+  check (twist_jar_store (jar, "A=4", "example.com", "/", 1) == TWIST_OK,
+         "a name is case sensitive");
+  check (twist_jar_count (jar) == 3, "so it is another");
+  twist_jar_free (jar);
+}
+
+static void
+test_cookie_limits (void)
+{
+  struct twist_jar *jar = twist_jar_new ();
+  char name[32];
+  char *big;
+  char host[64];
+  char *hdr = NULL;
+  int i;
+  int n = 0;
+  char *p;
+
+  /* One cookie is no more than 4096 bytes of name and value.  */
+  big = malloc (5000);
+  check (big != NULL, "buffer");
+  memset (big, 'v', 4999);
+  big[4999] = 0;
+  memcpy (big, "k=", 2);
+  check (twist_jar_store (jar, big, "example.com", "/", 1) == TWIST_ERR_PROTOCOL,
+         "a cookie of 5 KB is refused");
+  big[4096] = 0;
+  check (twist_jar_store (jar, big, "example.com", "/", 1) == TWIST_OK,
+         "one of 4 KB is kept");
+  free (big);
+
+  /* A host keeps no more than 50.  */
+  for (i = 0; i < 200; i++)
+    {
+      snprintf (name, sizeof name, "c%d=v", i);
+      twist_jar_store (jar, name, "many.example", "/", 1);
+    }
+  check (twist_jar_header (jar, "many.example", "/", 1, &hdr) == TWIST_OK
+         && hdr != NULL, "many");
+  for (p = hdr; p != NULL && (p = strstr (p, "=v")) != NULL; p += 2)
+    n++;
+  free (hdr);
+  check (n == 50, "a host keeps its 50 newest");
+  hdr = NULL;
+  check (twist_jar_header (jar, "many.example", "/", 1, &hdr) == TWIST_OK
+         && hdr != NULL && strstr (hdr, "c199=v") != NULL
+         && strstr (hdr, "c0=v") == NULL, "and the oldest are the ones dropped");
+  free (hdr);
+  twist_jar_free (jar);
+
+  /* And the jar as a whole no more than 3000, however many hosts.  */
+  jar = twist_jar_new ();
+  for (i = 0; i < 5000; i++)
+    {
+      snprintf (host, sizeof host, "h%d.example", i);
+      twist_jar_store (jar, "k=v", host, "/", 1);
+    }
+  check (twist_jar_count (jar) == 3000, "the jar holds 3000 at most");
+  twist_jar_free (jar);
+}
+
 static void
 test_cookie (void)
 {
@@ -963,6 +1129,10 @@ main (void)
   test_qpack_static_index ();
   test_qpack ();
   test_cookie ();
+  test_cookie_domains ();
+  test_cookie_secure ();
+  test_cookie_replace ();
+  test_cookie_limits ();
   test_hpack_long ();
   test_h2_share ();
   test_http_status ();

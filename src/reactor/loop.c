@@ -428,16 +428,36 @@ dispatch_fd (struct twist_loop *loop, int fd, int readable, int writable)
     twist_connection_on_writable (slot->conn);
 }
 
+/* Everything the loop runs may call the application, so the handle of a
+   multi is marked as in a call for as long as it does.  */
+static void
+calls_begin (struct twist_loop *loop)
+{
+  if (loop->multi != NULL)
+    loop->multi->in_call++;
+}
+
+static void
+calls_end (struct twist_loop *loop)
+{
+  if (loop->multi != NULL)
+    loop->multi->in_call--;
+}
+
 void
 twist_loop_on_readable (struct twist_loop *loop, int fd)
 {
+  calls_begin (loop);
   dispatch_fd (loop, fd, 1, 0);
+  calls_end (loop);
 }
 
 void
 twist_loop_on_writable (struct twist_loop *loop, int fd)
 {
+  calls_begin (loop);
   dispatch_fd (loop, fd, 0, 1);
+  calls_end (loop);
 }
 
 static void
@@ -457,12 +477,27 @@ fire_aux (struct twist_loop *loop, uint64_t now_ms)
 void
 twist_loop_on_timer (struct twist_loop *loop, uint64_t now_ms)
 {
+  calls_begin (loop);
   twist_timer_heap_fire (loop->timers, now_ms);
   fire_aux (loop, now_ms);
+  calls_end (loop);
 }
+
+static int run_once_ms (struct twist_loop *loop, int wait_ms);
 
 int
 twist_loop_run_once_ms (struct twist_loop *loop, int wait_ms)
+{
+  int rc;
+
+  calls_begin (loop);
+  rc = run_once_ms (loop, wait_ms);
+  calls_end (loop);
+  return rc;
+}
+
+static int
+run_once_ms (struct twist_loop *loop, int wait_ms)
 {
   struct twist_poll_event ev[TWIST_POLL_BATCH];
   uint64_t now;

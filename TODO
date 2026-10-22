@@ -67,6 +67,32 @@ Twist TODO List
           end of the file, as it is for ftp, so a truncated transfer is not
           noticed (the size in the 150 reply is parsed and not used for this).
         - no CCC, and no PROT C or PROT S choice: PROT P or nothing.
+        - through an http:// or socks5:// proxy the data connection is
+          tunnelled as well as the control connection (integration/
+          ftp-proxy.sh, with plain ftp).  ftps through a proxy, which runs
+          TLS on that tunnel, has not been run.
+  [ ] HTTP/2 against raw.githubusercontent.com (Fastly) fails: every request
+      ends "(52) connection closed" while --http1.1 works and curl gets the
+      response over h2.  It was there before the security fixes of October
+      2026 (the older installed build fails too, differently, with a TLS
+      error).  Not looked into: start with what the server sends after the
+      preface.
+  [ ] Cookies (src/http/cookie.c).  No Public Suffix List: a Domain that is a
+      top-level domain, or a country code with a generic second level (co.uk,
+      com.au), is refused, and anything else is believed (github.io,
+      blogspot.com).  Using libpsl is a dependency decision.  Expires and
+      Max-Age are not read: a cookie lives as long as the jar, and a
+      Max-Age=0 does not delete.  SameSite and HttpOnly are not looked at.
+  [ ] Redirects.  A redirect is followed only to http, https, ws and wss; there
+      is no --proto-redir to change that.
+  [ ] Discovered resolvers (RFC 9462).  A DoT or DoQ resolver found with a
+      _dns.resolver.arpa query must have a certificate valid for the address
+      that was asked as well as for its own name (twist_verify_chain_names,
+      tested with a certificate in tests/test-tls.c).  The wiring from the
+      resolver through twist_connection_require_name and the quic option has
+      no test that runs it: the nameserver is read from /etc/resolv.conf, so a
+      fake one cannot be put in front of twist without root.  The lookup of a
+      named resolver's own host name still uses plain UDP, as it must.
   [ ] The HTTP pool's key is the loop, scheme, host, port and proxy; it has
       nothing of the TLS settings (verification, CA, client certificate,
       pinning).  A multi handle or share whose handles differ in them can

@@ -82,7 +82,9 @@ multi_watch (void *user, int fd, int interest)
       if (interest & TWIST_INTEREST_WRITE)
         what |= TWIST_POLL_OUT;
     }
+  multi->in_call++;
   multi->socket_cb (NULL, fd, what, multi->socket_user, NULL);
+  multi->in_call--;
 }
 
 /* Remember that POOL, which is not ours, holds or may hold connections
@@ -117,6 +119,11 @@ twist_multi_cleanup (twist_multi *multi)
   size_t i;
 
   if (multi == NULL)
+    return;
+  /* Not from a callback: the handles and the loop are in use by the call
+     that made it.  What is not freed here is not freed at all, which is
+     better than freed under a running call.  */
+  if (multi->in_call > 0)
     return;
   /* Transfer state releases its connection against the loop and the pool,
      so it goes first, while both are alive.  */
@@ -153,8 +160,12 @@ twist_multi_cleanup (twist_multi *multi)
 int
 twist_multi_add_handle (twist_multi *multi, twist_easy *easy)
 {
+  int rc;
+
   if (multi == NULL || easy == NULL)
     return TWIST_ERR_INVAL;
+  if (multi->in_call > 0)
+    return TWIST_ERR_RECURSIVE;
   if (easy->multi != NULL)
     return TWIST_ERR_INVAL;
   if (multi->n_easies == multi->easies_cap)
@@ -172,7 +183,10 @@ twist_multi_add_handle (twist_multi *multi, twist_easy *easy)
   if (easy->share != NULL)
     twist_multi_note_pool (multi, easy->share->pool);
   easy->done = 0;
-  return twist_transfer_start (easy);
+  multi->in_call++;
+  rc = twist_transfer_start (easy);
+  multi->in_call--;
+  return rc;
 }
 
 int
@@ -182,10 +196,17 @@ twist_multi_remove_handle (twist_multi *multi, twist_easy *easy)
 
   if (multi == NULL || easy == NULL)
     return TWIST_ERR_INVAL;
+  /* curl's answer too, CURLM_RECURSIVE_API_CALL: from a callback the handle
+     is in use by the code that called it, and releasing its connection would
+     free what that code is still running on.  */
+  if (multi->in_call > 0)
+    return TWIST_ERR_RECURSIVE;
   for (i = 0; i < multi->n_easies; i++)
     if (multi->easies[i] == easy)
       {
+        multi->in_call++;
         twist_easy_release_transfer (easy);
+        multi->in_call--;
         multi->easies[i] = multi->easies[multi->n_easies - 1];
         multi->n_easies--;
         easy->multi = NULL;
@@ -214,6 +235,8 @@ twist_multi_perform (twist_multi *multi, int *running)
 
   if (multi == NULL)
     return TWIST_ERR_INVAL;
+  if (multi->in_call > 0)
+    return TWIST_ERR_RECURSIVE;
   rc = twist_loop_run_once_ms (multi->loop, 0);
   if (running != NULL)
     *running = count_running (multi);
@@ -227,6 +250,8 @@ twist_multi_socket_action (twist_multi *multi, int fd, int ev, int *running)
 
   if (multi == NULL)
     return TWIST_ERR_INVAL;
+  if (multi->in_call > 0)
+    return TWIST_ERR_RECURSIVE;
   now = twist_loop_now (multi->loop);
   if (fd == TWIST_SOCKET_TIMEOUT)
     twist_loop_on_timer (multi->loop, now);

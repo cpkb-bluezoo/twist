@@ -150,6 +150,21 @@ twist_verify_accept (void *user, const gq_slice *chain, size_t n,
   return 0;
 }
 
+int
+twist_verify_chain_names (const struct gq_trust *trust, const gq_slice *chain,
+                          size_t n, const char *name, const char *also)
+{
+  enum gq_cert_error why;
+
+  if (trust == NULL || chain == NULL || n == 0)
+    return -1;
+  if (gq_trust_verify_chain (trust, chain, n, name, &why) != GQ_OK)
+    return -1;
+  if (also != NULL && gq_trust_verify_chain (trust, chain, n, also, &why) != GQ_OK)
+    return -1;
+  return 0;
+}
+
 /* The key log: the file named by SSLKEYLOGFILE gets a line for each secret of
    a connection, in the format that Wireshark reads.  Each line is written
    whole, with one write to a file opened to append, so that connections of

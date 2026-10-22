@@ -42,6 +42,8 @@ test_errors (void)
                  twist_strerror (TWIST_ERR_RESUME)) != 0, "range distinct");
   check (strcmp (twist_strerror (TWIST_ERR_RESUME),
                  twist_strerror (TWIST_ERR_ABORTED)) != 0, "resume distinct");
+  check (strcmp (twist_strerror (TWIST_ERR_RECURSIVE),
+                 twist_strerror (TWIST_ERR_INVAL)) != 0, "recursive distinct");
   easy = twist_easy_init ();
   check (easy != NULL && twist_easy_error (easy) == NULL, "no detail");
   twist_easy_set_error (easy, twist_strdup ("could not open file /no/such"));

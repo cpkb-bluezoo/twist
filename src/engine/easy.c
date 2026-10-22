@@ -162,6 +162,12 @@ twist_easy_cleanup (twist_easy *easy)
 {
   if (easy == NULL)
     return;
+  /* A handle in a multi leaves it first, as curl's does.  From a callback
+     that is refused, and the handle is not freed: it is in use by the call
+     that made the callback.  */
+  if (easy->multi != NULL
+      && twist_multi_remove_handle (easy->multi, easy) != TWIST_OK)
+    return;
   easy_clear (easy);
   free (easy);
 }
@@ -565,7 +571,7 @@ twist_transfer_start (struct twist_easy *easy)
         }
     }
   free (easy->effective_url);
-  easy->effective_url = twist_url_format (easy->url);
+  easy->effective_url = twist_url_effective (easy->url);
   scheme = twist_scheme_by_name (easy->url->scheme);
   if (scheme == NULL || (scheme->flags & TWIST_SCHEME_READY) == 0)
     {

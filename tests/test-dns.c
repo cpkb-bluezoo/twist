@@ -381,11 +381,36 @@ test_doh (void)
   free (http);
   custom[0] = TWIST_DNS_UDP;
   custom[1] = TWIST_DNS_DOQ;
-  check (twist_dns_plan_for (NULL, 0, 1, plan, 4, &np) == TWIST_OK
+  check (twist_dns_plan_for (NULL, 0, 1, 0, 0, plan, 4, &np) == TWIST_OK
          && np == 1 && plan[0] == TWIST_DNS_DOH, "doh replaces");
-  check (twist_dns_plan_for (custom, 2, 1, plan, 4, &np) == TWIST_OK
+  check (twist_dns_plan_for (custom, 2, 1, 0, 0, plan, 4, &np) == TWIST_OK
          && np == 2 && plan[0] == TWIST_DNS_UDP && plan[1] == TWIST_DNS_DOQ,
          "doh keeps order");
+  /* A resolver the user named is the only one asked.  A DoT or DoQ resolver
+     that is down, or that an attacker has made unreachable, must not make the
+     names go out in the clear to the resolv.conf server instead: that is
+     what asking for an encrypted resolver was to prevent.  Plain UDP is there
+     only when no resolver was named, or the user lists it.  */
+  check (twist_dns_plan_for (NULL, 0, 0, 0, 1, plan, 4, &np) == TWIST_OK
+         && np == 1 && plan[0] == TWIST_DNS_DOT, "a DoT resolver alone");
+  check (twist_dns_plan_for (NULL, 0, 0, 1, 0, plan, 4, &np) == TWIST_OK
+         && np == 1 && plan[0] == TWIST_DNS_DOQ, "a DoQ resolver alone");
+  check (twist_dns_plan_for (NULL, 0, 0, 1, 1, plan, 4, &np) == TWIST_OK
+         && np == 2 && plan[0] == TWIST_DNS_DOQ && plan[1] == TWIST_DNS_DOT,
+         "DoQ then DoT");
+  check (twist_dns_plan_for (NULL, 0, 1, 1, 1, plan, 4, &np) == TWIST_OK
+         && np == 3 && plan[0] == TWIST_DNS_DOQ && plan[1] == TWIST_DNS_DOT
+         && plan[2] == TWIST_DNS_DOH, "and DoH, never UDP");
+  check (twist_dns_plan_for (NULL, 0, 0, 0, 0, plan, 4, &np) == TWIST_OK
+         && np == 4 && plan[3] == TWIST_DNS_UDP,
+         "none named: the default, which ends in UDP");
+  custom[0] = TWIST_DNS_DOT;
+  custom[1] = TWIST_DNS_UDP;
+  check (twist_dns_plan_for (custom, 2, 0, 0, 1, plan, 4, &np) == TWIST_OK
+         && np == 2 && plan[0] == TWIST_DNS_DOT && plan[1] == TWIST_DNS_UDP,
+         "UDP when the user asks for it");
+  custom[0] = TWIST_DNS_UDP;
+  custom[1] = TWIST_DNS_DOQ;
   check (twist_dns_bootstrap_plan (NULL, 0, plan, 4, &np) == TWIST_OK
          && np == 3 && plan[0] == TWIST_DNS_DOQ && plan[1] == TWIST_DNS_DOT
          && plan[2] == TWIST_DNS_UDP, "doh bootstrap");

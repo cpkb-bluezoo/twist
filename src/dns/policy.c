@@ -129,16 +129,30 @@ twist_dns_transport_plan (const int *user, size_t nuser, int *out,
   return *n > 0 ? TWIST_OK : TWIST_ERR_INVAL;
 }
 
+/* The transports to try.  With an order from the user, that.  With none,
+   and a resolver named (DoQ, DoT or DoH URL), those and only those, in the
+   default order: plain UDP is not added.  The user asked for an encrypted
+   resolver, and one that is down, or that an attacker made unreachable by
+   dropping packets, must not send every name in the clear to the nameserver
+   in resolv.conf instead.  Only when nothing was named is the default
+   order used, which ends in UDP, and that is the opportunistic case.  */
 int
-twist_dns_plan_for (const int *user, size_t nuser, int have_doh, int *out,
-                    size_t cap, size_t *n)
+twist_dns_plan_for (const int *user, size_t nuser, int have_doh, int have_doq,
+                    int have_dot, int *out, size_t cap, size_t *n)
 {
-  if (have_doh && (user == NULL || nuser == 0))
+  if ((have_doh || have_doq || have_dot) && (user == NULL || nuser == 0))
     {
-      if (out == NULL || n == NULL || cap < 1)
+      size_t k = 0;
+
+      if (out == NULL || n == NULL || cap < 3)
         return TWIST_ERR_INVAL;
-      out[0] = TWIST_DNS_DOH;
-      *n = 1;
+      if (have_doq)
+        out[k++] = TWIST_DNS_DOQ;
+      if (have_dot)
+        out[k++] = TWIST_DNS_DOT;
+      if (have_doh)
+        out[k++] = TWIST_DNS_DOH;
+      *n = k;
       return TWIST_OK;
     }
   return twist_dns_transport_plan (user, nuser, out, cap, n);

@@ -27,6 +27,7 @@
 #include <pthread.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <signal.h>
 #include <sys/socket.h>
 #ifdef __GLIBC__
 # include <malloc.h>
@@ -643,6 +644,94 @@ test_stale_event (void)
          "the same when the waker was already readable");
 }
 
+/* The ceiling on a plain socket, which is read by another path than the one
+   the test above feeds.  A handler that will not take what it has been
+   given, and does not pause, cannot make progress once its buffer is full:
+   the connection has to fail, as the other path does, and not sit holding
+   the buffer until some timeout.  */
+static void
+test_inbound_ceiling_socket (void)
+{
+  struct twist_loop *loop = twist_loop_new (0);
+  struct twist_connection *c = twist_connection_new (loop);
+  uint8_t *blob = calloc (1, 1 << 20);
+  int sv[2];
+  int i;
+
+  if (loop == NULL || c == NULL || blob == NULL
+      || socketpair (AF_UNIX, SOCK_STREAM, 0, sv) != 0)
+    abort ();
+  fcntl (sv[0], F_SETFL, O_NONBLOCK);
+  fcntl (sv[1], F_SETFL, O_NONBLOCK);
+  cap_err = 0;
+  twist_connection_set_handler (c, &cap_hold_handler);
+  twist_connection_set_fd (c, sv[0]);
+  twist_connection_connected (c);
+  for (i = 0; i < 50 && cap_err == 0; i++)
+    {
+      if (write (sv[1], blob, 1 << 20) < 0)
+        {
+          /* A full socket is fine.  */
+        }
+      twist_loop_run_once_ms (loop, 10);
+    }
+  check (cap_err == TWIST_ERR_PROTOCOL,
+         "a full buffer on a socket that is not paused fails");
+  twist_connection_free (c);
+  twist_loop_free (loop);
+  close (sv[1]);
+  free (blob);
+}
+
+/* A server that closes while twist is still sending must not kill twist.  A
+   write to a stream socket whose peer has gone raises SIGPIPE, whose default
+   is to end the process with no message and no exit status of its own
+   (141), with the partial output left behind.  The write has to fail with
+   EPIPE instead, and the transfer with an error.  */
+static volatile sig_atomic_t sigpipes;
+
+static void
+count_sigpipe (int sig)
+{
+  (void) sig;
+  sigpipes++;
+}
+
+static void
+test_write_to_gone_peer (void)
+{
+  struct sigaction sa;
+  struct sigaction old;
+  struct twist_loop *loop = twist_loop_new (0);
+  struct twist_connection *c = twist_connection_new (loop);
+  int sv[2];
+  int i;
+
+  if (loop == NULL || c == NULL
+      || socketpair (AF_UNIX, SOCK_STREAM, 0, sv) != 0)
+    abort ();
+  memset (&sa, 0, sizeof sa);
+  sa.sa_handler = count_sigpipe;
+  sigemptyset (&sa.sa_mask);
+  sigaction (SIGPIPE, &sa, &old);
+  sigpipes = 0;
+  fcntl (sv[0], F_SETFL, O_NONBLOCK);
+  twist_connection_set_handler (c, &stale_handler);
+  twist_connection_set_fd (c, sv[0]);
+  twist_connection_connected (c);
+  close (sv[1]);
+  for (i = 0; i < 3; i++)
+    {
+      twist_connection_queue_out (c, (const uint8_t *) "data", 4);
+      twist_loop_run_once_ms (loop, 10);
+    }
+  sigaction (SIGPIPE, &old, NULL);
+  check (sigpipes == 0, "a write to a peer that has gone raises no SIGPIPE");
+  twist_connection_free (c);
+  twist_loop_free (loop);
+  close (sv[0]);
+}
+
 int
 main (void)
 {
@@ -654,5 +743,7 @@ main (void)
   test_connection_owner ();
   test_inbound_ceiling ();
   test_stale_event ();
+  test_write_to_gone_peer ();
+  test_inbound_ceiling_socket ();
   return tests_finish ();
 }

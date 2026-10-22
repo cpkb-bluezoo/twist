@@ -112,11 +112,12 @@ test_dict (void)
          "dict lf");
   twist_easy_cleanup (easy);
   easy = twist_easy_init ();
-  check (twist_url_parse_int ("dict:///d:word", &easy->url) == TWIST_OK,
-         "dict host url");
+  /* A URL with no host is refused when it is parsed, so the handler is
+     never given one.  */
+  check (twist_url_parse_int ("dict:///d:word", &easy->url) == TWIST_ERR_URL
+         && easy->url == NULL, "dict host url");
   d = twist_dict_new (easy, 0);
-  check (d != NULL && easy->done && easy->result == TWIST_ERR_URL,
-         "dict host");
+  check (d == NULL, "dict host");
   twist_easy_cleanup (easy);
   easy = twist_easy_init ();
   check (twist_url_parse_int ("dict://127.0.0.1/d:hello", &easy->url)

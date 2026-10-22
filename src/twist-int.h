@@ -222,6 +222,11 @@ struct twist_multi
   size_t done_cap;
   size_t done_off;
   long last_timeout;
+  /* How many calls into the application (write, header, progress, socket and
+     timer callbacks) are under way from this handle's loop.  While there is
+     one, a transfer's own state is in use by the code that made it, so the
+     multi interface refuses to be called again (TWIST_ERR_RECURSIVE).  */
+  int in_call;
   struct twist_storage *storage;
   struct twist_pool *pool;
   struct twist_dns_cache *dns;
@@ -348,6 +353,10 @@ int twist_connection_start_tls (struct twist_connection *conn,
                                 const char *const *alpn, size_t n_alpn,
                                 const char *cafile, const char *capath,
                                 const char *certfile, const char *keyfile);
+/* Before TLS starts on CONN: the server's certificate must be valid for NAME
+   as well as for the name TLS is started with.  NULL clears it.  */
+int twist_connection_require_name (struct twist_connection *conn,
+                                   const char *name);
 /* As twist_connection_start_tls, offering the TLS session of SESSION_FROM,
    if it has one, so that the handshake resumes it.  The peer authenticated
    in that session is the one authenticated here, so it is for the same
@@ -378,6 +387,10 @@ struct twist_tls_want
      (a data connection that resumes the session of its control connection,
      which FTPS servers commonly insist on).  NULL: a full handshake.  */
   struct twist_connection *resume_from;
+  /* A second name the certificate must be valid for: the address of the
+     resolver that a DoT or DoQ resolver was discovered from (RFC 9462,
+     section 4.2).  NULL: only SERVER_NAME.  */
+  const char *also_name;
 };
 
 struct gq_tls_config;
@@ -394,6 +407,13 @@ int twist_trust_load (struct gq_trust *trust, const char *cafile,
    for -k, which is not to check the peer.  */
 int twist_verify_accept (void *user, const gq_slice *chain, size_t n,
                          const char *server_name);
+/* Whether CHAIN (N DER certificates, leaf first) is valid against TRUST for
+   NAME and, if ALSO is not NULL, for ALSO as well (a DNS name, or an IP
+   address as text).  0 if so, nonzero if not.  The callback of a handshake
+   that has to prove two identities, as a resolver found by discovery does.  */
+int twist_verify_chain_names (const struct gq_trust *trust,
+                              const gq_slice *chain, size_t n,
+                              const char *name, const char *also);
 int twist_keylog_wanted (void);
 void twist_keylog_write (void *user, const char *line);
 struct twist_client_auth;
@@ -426,6 +446,9 @@ extern int (*twist_quic_connect_fn) (struct twist_easy *easy,
    datagrams that come back are given to twist_quic_feed.  */
 struct twist_quic_opts
 {
+  /* A second name the certificate must be valid for (RFC 9462, section 4.2),
+     or NULL.  */
+  const char *also_name;
   int datagrams;
   int (*send) (void *user, const uint8_t *data, size_t len);
   void *send_user;
@@ -486,6 +509,7 @@ void twist_url_free_int (struct twist_url *url);
 int twist_url_resolve_int (const struct twist_url *base, const char *ref,
                            struct twist_url **out);
 char *twist_url_format (const struct twist_url *url);
+char *twist_url_effective (const struct twist_url *url);
 /* The host of URL as it is written in a URL or a Host header: an IPv6
    address in brackets.  WITH_ZONE keeps the interface of a link-local address
    (encoded, as RFC 6874 has it), and a Host header does not name one.  */
@@ -634,6 +658,7 @@ int twist_dns_resolve_service_easy (struct twist_easy *easy, const char *host,
                                                 const struct twist_dns_service *svc),
                                     void *user);
 int twist_dns_plan_for (const int *user, size_t nuser, int have_doh,
+                        int have_doq, int have_dot,
                         int *out, size_t cap, size_t *n);
 int twist_dns_bootstrap_plan (const int *user, size_t nuser, int *out,
                               size_t cap, size_t *n);
@@ -915,13 +940,25 @@ int twist_qpack_encode_request (const char *method, const char *scheme,
 struct twist_coding;
 int twist_coding_known (const char *name);
 int twist_coding_open (struct twist_coding **out, const char *name);
+/* Decoded data goes to a sink in pieces of at most TWIST_CODING_PIECE bytes,
+   as it is produced, and is not accumulated: what a small input expands to is
+   the peer's choice, and memory must not follow it.  The sink returns 0 to go
+   on; anything else stops the decoding with TWIST_ERR_ABORTED.  */
+#define TWIST_CODING_PIECE 16384
+typedef int (*twist_coding_sink) (void *user, const uint8_t *data, size_t len);
 int twist_coding_feed (struct twist_coding *c, const uint8_t *data, size_t len,
-                       uint8_t **out, size_t *out_n);
-int twist_coding_finish (struct twist_coding *c, uint8_t **out, size_t *out_n);
+                       twist_coding_sink sink, void *user);
+int twist_coding_finish (struct twist_coding *c, twist_coding_sink sink,
+                         void *user);
 void twist_coding_free (struct twist_coding *c);
 int twist_coding_encode (const char *name, const uint8_t *in, size_t n,
                          uint8_t **out, size_t *out_n);
 
+/* Whether a redirect may go to SCHEME: http, https, ws and wss, the schemes
+   this handler speaks.  The transfer stays on the HTTP handler whatever the
+   Location says, so any other scheme would be an HTTP request to a host and
+   port the server chose, and file:// an empty host that never resolves.  */
+int twist_http_redirect_scheme_ok (const char *scheme);
 int twist_http_should_redirect (int status, const char *method, int follow,
                                 long redirs, long maxredirs, int *use_get);
 /* 1 when a redirect must not replay credentials or a body.  */
@@ -932,6 +969,8 @@ int twist_http_status_result (int failonerror, int status);
 /* ---- cookies, auth, share ---- */
 
 struct twist_jar *twist_jar_new (void);
+/* How many cookies the jar holds.  */
+size_t twist_jar_count (const struct twist_jar *jar);
 void twist_jar_free (struct twist_jar *jar);
 int twist_jar_store (struct twist_jar *jar, const char *set_cookie,
                      const char *host, const char *path, int https);

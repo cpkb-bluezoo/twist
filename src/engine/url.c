@@ -266,6 +266,14 @@ twist_url_parse_int (const char *input, struct twist_url **out)
           u->host[endhost - host] = 0;
           p = endhost;
         }
+      /* A scheme that names a host has one.  Without it the transfer would
+         wait, resolving the empty name, until its timeout.  A file names
+         none.  */
+      if (u->host[0] == 0 && strcmp (u->scheme, "file") != 0)
+        {
+          url_clear (u);
+          return TWIST_ERR_URL;
+        }
       if (*p == ':')
         {
           char *end = NULL;
@@ -493,8 +501,8 @@ twist_url_host_text (const struct twist_url *url, int with_zone, char *buf,
   return n >= 0 && (size_t) n < cap ? TWIST_OK : TWIST_ERR_NOMEM;
 }
 
-char *
-twist_url_format (const struct twist_url *url)
+static char *
+format_url (const struct twist_url *url, int with_userinfo)
 {
   char buf[2048];
   char user[768] = "", password[768] = "";
@@ -503,9 +511,10 @@ twist_url_format (const struct twist_url *url)
 
   if (url == NULL || url->scheme == NULL)
     return NULL;
-  if ((url->user != NULL && userinfo_escape (url->user, user, sizeof user) < 0)
-      || (url->password != NULL
-          && userinfo_escape (url->password, password, sizeof password) < 0))
+  if (with_userinfo
+      && ((url->user != NULL && userinfo_escape (url->user, user, sizeof user) < 0)
+          || (url->password != NULL
+              && userinfo_escape (url->password, password, sizeof password) < 0)))
     return NULL;
   if (twist_url_host_text (url, 1, host, sizeof host) != TWIST_OK)
     return NULL;
@@ -514,9 +523,9 @@ twist_url_format (const struct twist_url *url)
   n = snprintf (buf, sizeof buf, "%s://%s%s%s%s%s%s%s%s%s",
                 url->scheme,
                 user,
-                url->password != NULL ? ":" : "",
+                with_userinfo && url->password != NULL ? ":" : "",
                 password,
-                url->user != NULL ? "@" : "",
+                with_userinfo && url->user != NULL ? "@" : "",
                 host,
                 portbuf,
                 url->path != NULL ? url->path : "/",
@@ -525,6 +534,21 @@ twist_url_format (const struct twist_url *url)
   if (n < 0 || (size_t) n >= sizeof buf)
     return NULL;
   return twist_strdup (buf);
+}
+
+/* The URL as text, with its credentials: what parses back to the same URL.  */
+char *
+twist_url_format (const struct twist_url *url)
+{
+  return format_url (url, 1);
+}
+
+/* The URL as text for reporting (the effective URL of a transfer, which a
+   script may log): without the user name and password, as curl reports it.  */
+char *
+twist_url_effective (const struct twist_url *url)
+{
+  return format_url (url, 0);
 }
 
 int
@@ -551,69 +575,203 @@ twist_url_proxy_target (const struct twist_url *url, char *buf, size_t cap)
   return TWIST_OK;
 }
 
+/* Remove the last segment, and the slash before it, from OUT[0..*O).  */
+static void
+drop_last_segment (char *out, size_t *o)
+{
+  while (*o > 0 && out[*o - 1] != '/')
+    (*o)--;
+  if (*o > 0)
+    (*o)--;
+}
+
+/* RFC 3986, section 5.2.4: the path with its "." and ".." segments taken out,
+   in a new string.  A ".." that would go above the root stops at it.  */
+static char *
+remove_dot_segments (const char *in)
+{
+  char *out = twist_xmalloc (strlen (in) + 2);
+  const char *p = in;
+  size_t o = 0;
+
+  if (out == NULL)
+    return NULL;
+  while (*p != 0)
+    {
+      if (strncmp (p, "../", 3) == 0)
+        p += 3;
+      else if (strncmp (p, "./", 2) == 0)
+        p += 2;
+      else if (strncmp (p, "/./", 3) == 0)
+        p += 2;
+      else if (strcmp (p, "/.") == 0)
+        p = "/";
+      else if (strncmp (p, "/../", 4) == 0)
+        {
+          p += 3;
+          drop_last_segment (out, &o);
+        }
+      else if (strcmp (p, "/..") == 0)
+        {
+          p = "/";
+          drop_last_segment (out, &o);
+        }
+      else if (strcmp (p, ".") == 0 || strcmp (p, "..") == 0)
+        p += strlen (p);
+      else
+        {
+          /* The first segment, with the slash that starts it.  */
+          if (*p == '/')
+            out[o++] = *p++;
+          while (*p != 0 && *p != '/')
+            out[o++] = *p++;
+        }
+    }
+  out[o] = 0;
+  return out;
+}
+
+/* How long the scheme of REF is, with the colon, if it starts with one: a
+   letter, then letters, digits, "+", "-" and ".", then ":".  0 if it does
+   not, and it is a relative reference.  */
+static size_t
+scheme_length (const char *ref)
+{
+  size_t i;
+
+  if (!isalpha ((unsigned char) ref[0]))
+    return 0;
+  for (i = 1; isalnum ((unsigned char) ref[i]) || ref[i] == '+'
+              || ref[i] == '-' || ref[i] == '.'; i++)
+    ;
+  return ref[i] == ':' ? i + 1 : 0;
+}
+
+/* A reference, such as a Location header, resolved against BASE as RFC 3986
+   section 5.2 says, into OUT.  The reference is from a server and is any
+   length and any shape, so nothing here is of a fixed size.  The user name
+   and password of BASE are not carried to a reference that has no authority
+   of its own.  The fragment is dropped, as it is never sent.  */
 int
 twist_url_resolve_int (const struct twist_url *base, const char *ref,
                        struct twist_url **out)
 {
-  struct twist_url *abs;
+  const char *bpath;
+  const char *query = NULL;
+  size_t qlen = 0;
+  size_t plen;
+  char hosttext[512];
+  char portbuf[16] = "";
+  char *path = NULL;
+  char *text;
+  size_t n;
   int rc;
 
   if (ref == NULL)
     return TWIST_ERR_URL;
-  if (strstr (ref, "://") != NULL)
+  if (scheme_length (ref) > 0)
     return twist_url_parse_int (ref, out);
-  if (base == NULL)
+  if (base == NULL || base->scheme == NULL)
     return TWIST_ERR_URL;
-  rc = twist_url_parse_int (ref[0] == '/' ? "http://h/" : "http://h/b", &abs);
-  if (rc != TWIST_OK)
-    return rc;
-  /* Rebuild from the base and the reference path.  */
-  {
-    char buf[2048];
-    const char *path;
-    char *dir;
-    const char *slash;
 
-    if (ref[0] == '/')
-      path = ref;
-    else
-      {
-        dir = twist_strdup (base->path != NULL ? base->path : "/");
-        if (dir == NULL)
-          {
-            twist_url_free_int (abs);
-            return TWIST_ERR_NOMEM;
-          }
-        slash = strrchr (dir, '/');
-        if (slash != NULL)
-          {
-            char *joined;
-            size_t dn = (size_t) (slash - dir + 1);
-            joined = twist_xmalloc (dn + strlen (ref) + 1);
-            if (joined == NULL)
-              {
-                free (dir);
-                twist_url_free_int (abs);
-                return TWIST_ERR_NOMEM;
-              }
-            memcpy (joined, dir, dn);
-            memcpy (joined + dn, ref, strlen (ref) + 1);
-            path = joined;
-            snprintf (buf, sizeof buf, "%s://%s:%d%s", base->scheme,
-                      base->host != NULL ? base->host : "", base->port, path);
-            free (joined);
-            free (dir);
-            twist_url_free_int (abs);
-            return twist_url_parse_int (buf, out);
-          }
-        free (dir);
-        path = ref;
-      }
-    snprintf (buf, sizeof buf, "%s://%s:%d%s", base->scheme,
-              base->host != NULL ? base->host : "", base->port, path);
-    twist_url_free_int (abs);
-    return twist_url_parse_int (buf, out);
-  }
+  /* An authority of its own: another host, in the scheme of the base.  */
+  if (ref[0] == '/' && ref[1] == '/')
+    {
+      n = strlen (base->scheme) + 1 + strlen (ref) + 1;
+      text = twist_xmalloc (n);
+      if (text == NULL)
+        return TWIST_ERR_NOMEM;
+      snprintf (text, n, "%s:%s", base->scheme, ref);
+      rc = twist_url_parse_int (text, out);
+      free (text);
+      return rc;
+    }
+
+  /* The path and the query of the reference.  */
+  plen = strcspn (ref, "?#");
+  if (ref[plen] == '?')
+    {
+      query = ref + plen + 1;
+      qlen = strcspn (query, "#");
+    }
+  bpath = base->path != NULL ? base->path : "";
+
+  if (plen == 0)
+    {
+      path = twist_strdup (bpath[0] != 0 ? bpath : "/");
+      if (query == NULL && base->query != NULL)
+        {
+          query = base->query;
+          qlen = strlen (query);
+        }
+    }
+  else
+    {
+      char *merged;
+
+      if (ref[0] == '/')
+        {
+          merged = twist_xmalloc (plen + 1);
+          if (merged != NULL)
+            {
+              memcpy (merged, ref, plen);
+              merged[plen] = 0;
+            }
+        }
+      else
+        {
+          /* The base's path up to its last slash, then the reference's.  */
+          const char *slash = strrchr (bpath, '/');
+          size_t dn = slash != NULL ? (size_t) (slash - bpath) + 1 : 1;
+
+          merged = twist_xmalloc (dn + plen + 1);
+          if (merged != NULL)
+            {
+              if (slash != NULL)
+                memcpy (merged, bpath, dn);
+              else
+                merged[0] = '/';
+              memcpy (merged + dn, ref, plen);
+              merged[dn + plen] = 0;
+            }
+        }
+      if (merged == NULL)
+        return TWIST_ERR_NOMEM;
+      path = remove_dot_segments (merged);
+      free (merged);
+    }
+  if (path == NULL)
+    return TWIST_ERR_NOMEM;
+
+  rc = twist_url_host_text (base, 1, hosttext, sizeof hosttext);
+  if (rc != TWIST_OK)
+    {
+      free (path);
+      return rc;
+    }
+  if (base->port > 0)
+    snprintf (portbuf, sizeof portbuf, ":%d", base->port);
+  n = strlen (base->scheme) + 3 + strlen (hosttext) + strlen (portbuf)
+      + strlen (path) + qlen + 2;
+  text = twist_xmalloc (n);
+  if (text == NULL)
+    {
+      free (path);
+      return TWIST_ERR_NOMEM;
+    }
+  snprintf (text, n, "%s://%s%s%s", base->scheme, hosttext, portbuf, path);
+  if (query != NULL)
+    {
+      size_t at = strlen (text);
+
+      text[at] = '?';
+      memcpy (text + at + 1, query, qlen);
+      text[at + 1 + qlen] = 0;
+    }
+  free (path);
+  rc = twist_url_parse_int (text, out);
+  free (text);
+  return rc;
 }
 
 int

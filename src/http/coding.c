@@ -59,28 +59,6 @@ twist_coding_known (const char *name)
 }
 
 static int
-grow (uint8_t **buf, size_t *cap, size_t need)
-{
-  size_t ncap = *cap == 0 ? 256 : *cap;
-  uint8_t *p;
-
-  if (need <= *cap)
-    return TWIST_OK;
-  while (ncap < need)
-    {
-      if (ncap > (size_t) -1 / 2)
-        return TWIST_ERR_NOMEM;
-      ncap *= 2;
-    }
-  p = realloc (*buf, ncap);
-  if (p == NULL)
-    return TWIST_ERR_NOMEM;
-  *buf = p;
-  *cap = ncap;
-  return TWIST_OK;
-}
-
-static int
 decoder_init (struct twist_coding *c, int window)
 {
   int z;
@@ -122,90 +100,84 @@ twist_coding_open (struct twist_coding **out, const char *name)
   return TWIST_OK;
 }
 
+/* Hand one piece of decoded output to the sink.  */
 static int
-inflate_chunk (struct twist_coding *c, uint8_t *in, size_t n,
-               uint8_t **out, size_t *out_n)
+emit (twist_coding_sink sink, void *user, const uint8_t *buf, size_t n)
 {
-  size_t cap = 0;
-  size_t have = 0;
-  uint8_t *buf = NULL;
+  if (n == 0)
+    return TWIST_OK;
+  return sink (user, buf, n) != 0 ? TWIST_ERR_ABORTED : TWIST_OK;
+}
 
-  *out = NULL;
-  *out_n = 0;
-  c->strm.next_in = in;
+/* Inflate IN, N bytes, handing the output on in pieces of no more than
+   TWIST_CODING_PIECE as it is produced.  Nothing is accumulated: what a
+   small input expands to (a thousand to one) is never held, only passed on,
+   so memory does not depend on what the peer sends.  */
+static int
+inflate_chunk (struct twist_coding *c, const uint8_t *in, size_t n,
+               twist_coding_sink sink, void *user)
+{
+  uint8_t buf[TWIST_CODING_PIECE];
+  size_t delivered = 0;
+  /* zlib reads its input and does not write it, but takes it as non-const.  */
+  union { const uint8_t *in; Bytef *zin; } src;
+
+  src.in = in;
+  c->strm.next_in = src.zin;
   c->strm.avail_in = (uInt) n;
-  c->strm.next_out = NULL;
-  c->strm.avail_out = 0;
   for (;;)
     {
+      size_t produced;
       int z;
+      int rc;
 
-      if (c->strm.avail_out == 0)
-        {
-          if (grow (&buf, &cap, have + 256) != TWIST_OK)
-            {
-              free (buf);
-              return TWIST_ERR_NOMEM;
-            }
-          c->strm.next_out = buf + have;
-          c->strm.avail_out = (uInt) (cap - have);
-        }
+      c->strm.next_out = buf;
+      c->strm.avail_out = sizeof buf;
       z = inflate (&c->strm, Z_NO_FLUSH);
-      have = cap - c->strm.avail_out;
+      produced = sizeof buf - c->strm.avail_out;
+      if (z == Z_DATA_ERROR && c->kind == 2 && !c->raw && !c->started
+          && delivered == 0 && produced == 0)
+        {
+          /* deflate that has no zlib header is raw: once, from the start.  */
+          inflateEnd (&c->strm);
+          c->inited = 0;
+          if (decoder_init (c, -MAX_WBITS) != TWIST_OK)
+            return TWIST_ERR_ENCODING;
+          c->raw = 1;
+          c->strm.next_in = src.zin;
+          c->strm.avail_in = (uInt) n;
+          continue;
+        }
+      rc = emit (sink, user, buf, produced);
+      if (rc != TWIST_OK)
+        return rc;
+      delivered += produced;
       if (z == Z_STREAM_END)
         {
           c->ended = 1;
           break;
         }
-      if (z == Z_OK || (z == Z_BUF_ERROR && c->strm.avail_in == 0))
+      if (z == Z_OK)
         {
-          if (c->strm.avail_in == 0)
+          /* Output that filled the piece exactly may leave more behind.  */
+          if (c->strm.avail_in == 0 && c->strm.avail_out != 0)
             break;
           continue;
         }
-      if (z == Z_DATA_ERROR && c->kind == 2 && !c->raw && !c->started
-          && have == 0)
-        {
-          int window = -MAX_WBITS;
-
-          inflateEnd (&c->strm);
-          c->inited = 0;
-          free (buf);
-          buf = NULL;
-          cap = 0;
-          have = 0;
-          if (decoder_init (c, window) != TWIST_OK)
-            return TWIST_ERR_ENCODING;
-          c->raw = 1;
-          c->strm.next_in = in;
-          c->strm.avail_in = (uInt) n;
-          continue;
-        }
-      free (buf);
+      if (z == Z_BUF_ERROR && c->strm.avail_in == 0)
+        break;
       return z == Z_MEM_ERROR ? TWIST_ERR_NOMEM : TWIST_ERR_ENCODING;
     }
   c->started = 1;
-  if (have == 0)
-    {
-      free (buf);
-      buf = NULL;
-    }
-  *out = buf;
-  *out_n = have;
   return TWIST_OK;
 }
 
 int
 twist_coding_feed (struct twist_coding *c, const uint8_t *data, size_t len,
-                   uint8_t **out, size_t *out_n)
+                   twist_coding_sink sink, void *user)
 {
-  uint8_t *copy;
-  int rc;
-
-  if (c == NULL || out == NULL || out_n == NULL)
+  if (c == NULL || sink == NULL)
     return TWIST_ERR_INVAL;
-  *out = NULL;
-  *out_n = 0;
   if (!c->inited)
     return TWIST_ERR_ENCODING;
   if (c->ended)
@@ -214,61 +186,46 @@ twist_coding_feed (struct twist_coding *c, const uint8_t *data, size_t len,
     return TWIST_ERR_ENCODING;
   if (len == 0)
     return TWIST_OK;
-  copy = twist_xmalloc (len);
-  if (copy == NULL)
-    return TWIST_ERR_NOMEM;
-  memcpy (copy, data, len);
-  rc = inflate_chunk (c, copy, len, out, out_n);
-  free (copy);
-  return rc;
+  return inflate_chunk (c, data, len, sink, user);
 }
 
 int
-twist_coding_finish (struct twist_coding *c, uint8_t **out, size_t *out_n)
+twist_coding_finish (struct twist_coding *c, twist_coding_sink sink,
+                     void *user)
 {
-  uint8_t *buf = NULL;
-  size_t cap = 0;
-  size_t have = 0;
+  uint8_t buf[TWIST_CODING_PIECE];
   uint8_t empty;
 
-  if (c == NULL || out == NULL || out_n == NULL)
+  if (c == NULL || sink == NULL)
     return TWIST_ERR_INVAL;
-  *out = NULL;
-  *out_n = 0;
   if (!c->inited)
     return TWIST_ERR_ENCODING;
   if (c->ended)
     return TWIST_OK;
-  c->strm.next_out = NULL;
-  c->strm.avail_out = 0;
   c->strm.next_in = &empty;
   c->strm.avail_in = 0;
   for (;;)
     {
+      size_t produced;
       int z;
+      int rc;
 
-      if (c->strm.avail_out == 0)
-        {
-          if (grow (&buf, &cap, have + 64) != TWIST_OK)
-            {
-              free (buf);
-              return TWIST_ERR_NOMEM;
-            }
-          c->strm.next_out = buf + have;
-          c->strm.avail_out = (uInt) (cap - have);
-        }
+      c->strm.next_out = buf;
+      c->strm.avail_out = sizeof buf;
       z = inflate (&c->strm, Z_FINISH);
-      have = cap - c->strm.avail_out;
+      produced = sizeof buf - c->strm.avail_out;
+      rc = emit (sink, user, buf, produced);
+      if (rc != TWIST_OK)
+        return rc;
       if (z == Z_STREAM_END)
         {
           c->ended = 1;
-          *out = buf;
-          *out_n = have;
           return TWIST_OK;
         }
+      /* Output that filled the piece may leave more.  Otherwise, with no
+         input left and no end, the body was cut short.  */
       if (z == Z_OK || (z == Z_BUF_ERROR && c->strm.avail_out == 0))
         continue;
-      free (buf);
       return z == Z_MEM_ERROR ? TWIST_ERR_NOMEM : TWIST_ERR_ENCODING;
     }
 }

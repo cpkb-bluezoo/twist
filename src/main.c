@@ -169,6 +169,8 @@ cli_status (int err, const char *url)
       return 21;
     case TWIST_ERR_PROXY:
       return 97;
+    case TWIST_ERR_RECURSIVE:
+      return 93;
     case TWIST_ERR_HOSTKEY:
       return 60;
     case TWIST_ERR_ENCODING:

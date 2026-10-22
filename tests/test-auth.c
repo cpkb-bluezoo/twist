@@ -54,6 +54,21 @@ test_auth (void)
          && use_get == 0, "307");
   check (twist_http_should_redirect (302, "GET", 1, 5, 5, &use_get) == 0,
          "max");
+  /* A redirect is followed only to the schemes this transfer speaks.  */
+  check (twist_http_redirect_scheme_ok ("http") == 1
+         && twist_http_redirect_scheme_ok ("https") == 1
+         && twist_http_redirect_scheme_ok ("HTTPS") == 1
+         && twist_http_redirect_scheme_ok ("ws") == 1
+         && twist_http_redirect_scheme_ok ("wss") == 1, "redirect schemes");
+  check (twist_http_redirect_scheme_ok ("file") == 0
+         && twist_http_redirect_scheme_ok ("sftp") == 0
+         && twist_http_redirect_scheme_ok ("scp") == 0
+         && twist_http_redirect_scheme_ok ("ftp") == 0
+         && twist_http_redirect_scheme_ok ("gopher") == 0
+         && twist_http_redirect_scheme_ok ("dict") == 0
+         && twist_http_redirect_scheme_ok ("") == 0
+         && twist_http_redirect_scheme_ok (NULL) == 0,
+         "no redirect to anything else");
   check (twist_http_redirect_sensitive ("bank.example", 1, "bank.example", 1)
          == 0, "same origin");
   check (twist_http_redirect_sensitive ("Bank.Example", 1, "bank.example", 1)

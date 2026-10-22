@@ -69,6 +69,9 @@ struct twist_connection
   void (*owner_resume) (void *);
   char alpn[32];
   size_t alpn_len;
+  /* A second name the server's certificate has to be valid for, which
+     twist_connection_start_tls passes on (see twist_connection_require_name).  */
+  char *also_name;
   struct twist_timer *connect_timer;
 };
 
@@ -89,11 +92,23 @@ default_read (void *user, uint8_t *buf, size_t len)
   return read (c->fd, buf, len);
 }
 
+/* A write to a stream socket whose peer has gone raises SIGPIPE, which ends
+   the process with no message.  A server can close while we are still
+   sending, so the write must fail with EPIPE and the transfer with an error.
+   MSG_NOSIGNAL does that for one write; where it does not exist (the BSDs
+   and macOS) SO_NOSIGPIPE does it for the socket, set in
+   twist_connection_set_fd.  */
+#ifdef MSG_NOSIGNAL
+# define TWIST_SEND_FLAGS MSG_NOSIGNAL
+#else
+# define TWIST_SEND_FLAGS 0
+#endif
+
 static ssize_t
 default_write (void *user, const uint8_t *buf, size_t len)
 {
   struct twist_connection *c = user;
-  return write (c->fd, buf, len);
+  return send (c->fd, buf, len, TWIST_SEND_FLAGS);
 }
 
 static size_t
@@ -345,6 +360,7 @@ twist_connection_free (struct twist_connection *c)
     free (c->inbuf);
   free (c->outbuf);
   free (c->app);
+  free (c->also_name);
   free (c);
 }
 
@@ -367,6 +383,14 @@ twist_connection_set_handler (struct twist_connection *c,
 void
 twist_connection_set_fd (struct twist_connection *c, int fd)
 {
+#ifdef SO_NOSIGPIPE
+  if (fd >= 0)
+    {
+      int on = 1;
+
+      setsockopt (fd, SOL_SOCKET, SO_NOSIGPIPE, &on, sizeof on);
+    }
+#endif
   c->fd = fd;
   refresh_interest (c);
 }
@@ -632,6 +656,15 @@ twist_connection_on_readable (struct twist_connection *c)
         {
           c->in_len += (size_t) n;
           deliver (c, &c->inbuf, &c->in_off, &c->in_len, &c->in_cap);
+          /* As in feed_buf: a full buffer that the handler neither emptied
+             nor paused on cannot make progress, and left alone it would sit
+             here, holding the buffer, until the transfer's own timeout.  */
+          if (c->in_len >= TWIST_IN_CEILING && !c->paused && !c->failed
+              && !c->closing)
+            {
+              twist_connection_fail (c, TWIST_ERR_PROTOCOL);
+              break;
+            }
           refresh_interest (c);
         }
       else if (n > 0)
@@ -730,6 +763,24 @@ twist_endpoint_loop (struct twist_endpoint *ep)
   return ep->conn->loop;
 }
 
+/* Before TLS starts on C: the server's certificate has to be valid for NAME
+   as well as for the name TLS is started with.  NULL clears it.  */
+int
+twist_connection_require_name (struct twist_connection *c, const char *name)
+{
+  char *copy = NULL;
+
+  if (name != NULL)
+    {
+      copy = twist_strdup (name);
+      if (copy == NULL)
+        return TWIST_ERR_NOMEM;
+    }
+  free (c->also_name);
+  c->also_name = copy;
+  return TWIST_OK;
+}
+
 int
 twist_connection_start_tls (struct twist_connection *c, const char *server_name,
                             int verify, const char *const *alpn, size_t n_alpn,
@@ -763,5 +814,6 @@ twist_connection_start_tls_resuming (struct twist_connection *c,
   want.certfile = certfile;
   want.keyfile = keyfile;
   want.resume_from = session_from;
+  want.also_name = c->also_name;
   return twist_tls_start_fn (c, &want);
 }

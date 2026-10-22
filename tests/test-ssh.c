@@ -4349,7 +4349,7 @@ test_ipv6_literal (void)
     char *eff = NULL;
 
     twist_easy_getinfo (easy, TWISTINFO_EFFECTIVE_URL, &eff);
-    check (eff != NULL && strstr (eff, "@[::1]:") != NULL,
+    check (eff != NULL && strstr (eff, "//[::1]:") != NULL,
            "the effective URL keeps the brackets");
   }
 

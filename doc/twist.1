@@ -703,6 +703,17 @@ DoQ and DoT are used when the system resolver advertises them, or when
 or
 .B \-\-dot-url
 names a server.
+When one of
+.BR \-\-doq-url ,
+.B \-\-dot-url
+or
+.B \-\-doh-url
+names a server and this option is not given, only the named servers are asked,
+in that order, and plain UDP is not: a server that is down, or that has been
+made unreachable, ends the lookup and does not send the name to the system
+resolver in the clear.  List
+.B udp
+to allow it.
 UDP retries over TCP when the answer is truncated.
 A host that is an IPv4 or IPv6 address is used as that address.
 .TP

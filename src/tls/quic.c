@@ -38,6 +38,8 @@
 
 struct twist_quic
 {
+  /* A second name the certificate must be valid for, or NULL.  */
+  char *also_name;
   struct twist_connection *twist;
   struct twist_loop *loop;
   gq_endpoint *ep;
@@ -833,6 +835,7 @@ quic_free (void *p)
     fclose (q->qlog);
   gq_trust_free (q->trust);
   twist_client_auth_free (q->auth);
+  free (q->also_name);
   free (q->server_name);
   free (q->dg);
   {
@@ -891,6 +894,19 @@ quic_qlog (void *user, const struct gq_conn *conn, uint64_t time_us,
              fields);
 }
 
+/* Both names against the same authorities: verify_peer when a second name
+   is required, since the built-in check covers one.  */
+static int
+quic_verify_names (void *user, const gq_slice *chain, size_t n,
+                   const char *server_name)
+{
+  struct twist_quic *q = user;
+
+  (void) server_name;
+  return twist_verify_chain_names (q->trust, chain, n, q->server_name,
+                                   q->also_name);
+}
+
 static void
 fill_events (gq_conn_events *ev, struct twist_quic *q)
 {
@@ -918,6 +934,8 @@ fill_events (gq_conn_events *ev, struct twist_quic *q)
   /* -k: the chain is not looked at.  */
   if (!q->verify)
     ev->verify_peer = twist_verify_accept;
+  else if (q->also_name != NULL)
+    ev->verify_peer = quic_verify_names;
   ev->ticket = ev_ticket;
 }
 
@@ -1018,6 +1036,15 @@ twist_quic_dial (struct twist_loop *loop, const char *server_name,
       q->datagrams = opts->datagrams;
       q->carrier = opts->send;
       q->carrier_user = opts->send_user;
+      if (opts->also_name != NULL)
+        {
+          q->also_name = twist_strdup (opts->also_name);
+          if (q->also_name == NULL)
+            {
+              quic_free (q);
+              return TWIST_ERR_NOMEM;
+            }
+        }
     }
   q->server_name = twist_strdup (server_name);
   memcpy (q->alpn_mem, alpn, alpn_len);
