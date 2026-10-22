@@ -687,6 +687,27 @@ Accepted for compatibility with curl.  Nothing is shared under it, because TLS
 sessions are not kept.
 @end table
 
+@heading The cookie jar
+
+A handle that has a share keeps the cookies that responses set and sends them
+back.  A cookie is sent to the host that set it, or, if it had a @code{Domain},
+to that domain and the hosts under it; to the paths under its @code{Path}; and
+over @code{https} only if it was marked @code{Secure}.  A @code{Secure} cookie
+is not believed when it comes over @code{http}, and cannot replace one that
+came over @code{https}.  A @code{Domain} that the host is not under is refused,
+and so is one that is an IP address other than the host's own.  A
+@code{Domain} that is a top-level domain, or a country code with a generic
+second level such as @samp{co.uk} or @samp{com.au}, is refused unless it is
+the host's own name, and then the cookie is for that host alone.  There is no
+Public Suffix List, so a name such as @samp{github.io} is believed.
+
+A cookie with a control character in it, or more than 4096 bytes of name and
+value, is refused.  The jar holds at most 50 cookies for a domain and 3000 in
+all, and the oldest go first.  @code{Expires} and @code{Max-Age} are not read:
+a cookie lives as long as the share does, and @code{Max-Age=0} does not delete
+it.  @code{SameSite} and @code{HttpOnly} are not looked at.  The command-line
+program keeps no jar.
+
 @heading Threads
 
 Handles that are driven from one thread need no lock, and none is taken.  For
@@ -777,6 +798,12 @@ The body is written to standard output, or to the file named by
 error, or to @option{--stderr}.  @option{--help} and @option{--version}
 are written to standard output and exit successfully.
 
+A password, token or passphrase given as an argument (@option{-u},
+@option{-U}, @option{--oauth2-bearer} and @option{--pass}) is blanked in the
+list of arguments that @command{ps} shows once twist has taken it, as curl's
+is.  A cookie given with @option{-b}, and a header given with @option{-H},
+are not.
+
 A transfer error has the form @samp{twist: (@var{n}) @var{message}} and
 exits @var{n}, a status from the table below.  A bad command line exits
 2, with no number in parentheses, and suggests @option{--help}.
@@ -790,19 +817,21 @@ Several URLs leave the status of the last transfer, unless
 Print a help message on standard output and exit successfully.
 @item --version
 Print version and licensing information on standard output and exit
-successfully.
+successfully.  A @samp{Features:} line names the optional libraries that
+twist was built with, @samp{brotli} for libbrotli.
 @item -o @var{file}
 @itemx --output @var{file}
 Write the response body to @var{file}.  @code{-} is standard output.
 @item -O
 @itemx --remote-name
-Write the body to the last segment of the URL path.
+Write the body to the last segment of the URL path.  A last segment of
+@samp{-} is a file called @file{-}, not standard output.
 @item --output-dir @var{dir}
 Directory for a relative @option{-o} or @option{-O} name.  Reset by
 @option{--next}.
 @item --create-dirs
-Create missing parent directories for @option{-o} and @option{-O}.
-Reset by @option{--next}.
+Create missing parent directories for @option{-o} and @option{-O}, with mode
+0750 whatever the umask is.  Reset by @option{--next}.
 @item -X @var{method}
 @itemx --request @var{method}
 Request method.
@@ -843,7 +872,17 @@ Write response headers before the body.
 Write response headers to @var{file}.  @code{-} is standard output.
 @item -L
 @itemx --location
-Follow redirections.
+Follow redirections, up to @option{--max-redirs} of them.  A redirect goes
+only to @code{http}, @code{https}, @code{ws} or @code{wss}.  One to another
+scheme is exit status 1, and one to a URL that names no host, such as
+@samp{http://}, is exit status 3.  The @code{Location} is resolved against the
+URL as RFC 3986 section 5.2 says.  A 301, 302 or 303 is followed with GET and
+no body, and a 307 or 308 keeps the method.  A redirect to another host, or
+from @code{https} to @code{http}, does not take the credentials along: the
+user name and password, @option{--oauth2-bearer}, @option{-b}, the
+@code{Authorization}, @code{Proxy-Authorization} and @code{Cookie} headers
+of @option{-H}, and the request body are left out of the request that
+follows.
 @item --max-redirs @var{n}
 Redirect limit.  The default is 50, and @minus{}1 is no limit.  A redirect after
 the @var{n}th is exit status 47, and 0 refuses the first.
@@ -957,9 +996,10 @@ for @option{-d} or @option{-T}.
 Referer header.
 @item -r @var{range}
 @itemx --range @var{range}
-Byte range.  For @code{sftp} and @code{scp} it is @samp{@var{first}-@var{last}},
-@samp{@var{first}-}, or @samp{-@var{count}} for the last @var{count} bytes
-(@pxref{SFTP and SCP}).
+Byte range.  For @code{sftp}, @code{scp} and @code{file} it is
+@samp{@var{first}-@var{last}}, @samp{@var{first}-}, or @samp{-@var{count}} for
+the last @var{count} bytes, one range only (@pxref{SFTP and SCP}).  A range
+that starts at or past the end of a file is exit status 33.
 @item -l
 @itemx --list-only
 List the names only, one to a line, not the server's long form, when the URL
@@ -1027,7 +1067,9 @@ Print @var{format} on standard output after the body.
 @code{@{size_download@}}, @code{@{url_effective@}},
 @code{@{content_type@}}, @code{@{exitcode@}}, and @code{@{errormsg@}}
 are replaced.  @code{\n}, @code{\r}, @code{\t}, and @code{%%} are
-recognised.  An unknown @code{@{name@}} is empty.
+recognised.  An unknown @code{@{name@}} is empty.  @code{@{url_effective@}} is
+the URL the transfer ended on, after any redirect, and has no user name or
+password in it, so that a log of it holds no secret.
 @item --url @var{url}
 A URL to fetch.  It is the same as a URL given without an option, and can be
 given as an expansion (@option{--expand-url}).
@@ -1118,7 +1160,10 @@ DNS-over-QUIC server.  @code{quic://host} or @code{host}, with an
 optional port (default 853).  The certificate is checked against that
 host.  The host name is resolved with UDP.  An empty URL clears it.
 Without this option, DoQ uses the address and name from a
-@code{_dns.resolver.arpa} SVCB record (DDR).
+@code{_dns.resolver.arpa} SVCB record (DDR).  The certificate of a resolver
+found that way must be valid for the name in the record and also for the
+address of the resolver it was found from (RFC 9462 section 4.2), so a record
+that sends a lookup elsewhere is refused.
 @item --dot-url @var{url}
 DNS-over-TLS server.  @code{tls://host} or @code{host}, with an optional
 port (default 853).  Same discovery rules as @option{--doq-url}.
@@ -1250,7 +1295,11 @@ TLS after it starts.
 Looks up a word with a DICT server: DEFINE, MATCH or SHOW, chosen by
 the URL path.  The reply is written until the server closes.
 @item file
-Reads the local file named by the URL path.
+Reads the local file named by the URL path.  The path is percent-decoded, and
+a NUL in it is a malformed URL (exit status 3).  The host is empty,
+@samp{localhost} or @samp{127.0.0.1}, and any other is exit status 3.  Only a
+regular file is read: a FIFO, a device or a directory is refused with exit
+status 37, and is not waited on.  @option{-r} takes part of the file.
 @item ftp, ftps
 Downloads a file, or lists a directory when the URL path ends in a
 slash.  @code{ftps} is TLS from the first byte (port 990); @code{ftp}
@@ -1268,7 +1317,14 @@ Sends the selector from the URL and writes the reply until the server
 closes.
 @item http, https
 HTTP/1.0, HTTP/1.1, HTTP/2 and HTTP/3, as the @option{--http*} options
-and the server allow.
+and the server allow.  Over HTTP/2 and HTTP/3 the header names are sent in
+lower case, and the fields that belong to an HTTP/1 connection are left out of
+the request, as RFC 9113 section 8.2.2 asks: @code{Connection},
+@code{Keep-Alive}, @code{Proxy-Connection}, @code{Transfer-Encoding},
+@code{Upgrade}, and @code{TE} unless its value is @samp{trailers}.  Even so a
+header of @option{-H} that is one of them is not an error.
+@option{--unix-socket} and @option{--abstract-unix-socket} send the request
+over a Unix socket.
 @item imap, imaps
 Fetches a message from a mailbox, or lists the mailboxes.
 @item ldap, ldaps
@@ -1307,6 +1363,21 @@ when the server advertises none.  Use the scheme with the @code{s}.
 These schemes are recognised, but are not implemented, and exit 1:
 @code{rtmp}, @code{rtmps}, @code{rtsp}, @code{smb}, @code{smbs} and
 @code{telnet}.
+
+@heading URLs
+
+A host is a name made of letters, digits and the characters of a name, with a
+dot, a hyphen or an underscore, or an IPv4 address, or an IPv6 address in
+brackets.  A name in UTF-8 is taken.  A space or control character, a
+backslash, a percent sign, or one of @samp{| ^ ` < > " @{ @}} in the host, a port
+that is not only digits or is above 65535, and anything after the closing
+bracket of an IPv6 address other than a port, make a URL malformed: exit status
+3.  An empty port, as in @samp{http://host:/}, is the default one.
+
+The path and the query of a request are sent percent-encoded: a space or a byte
+above 0x7f is written @samp{%@var{XX}}, and an escape that is there already is
+not encoded again.  A request line has no space in it that is not the
+separator.
 
 @node Progress meter
 @chapter Progress meter
@@ -1429,6 +1500,17 @@ If set, it is used as the @option{--cacert} value, and @env{SSL_CERT_DIR} and
 The names of the certificate variables are looked at only when neither
 @option{--cacert} nor @option{--capath} is given.  A file or directory that
 they name and that cannot be read is an error.
+
+A process that has more rights than the user who started it does not read the
+environment at all, for any of the variables above that name a file, a
+directory, a socket or a server: @env{HOME}, the proxy variables and
+@env{NO_PROXY}, @env{QLOGDIR}, @env{SSH_AUTH_SOCK}, @env{SSL_CERT_DIR},
+@env{SSL_CERT_FILE}, @env{SSLKEYLOGFILE} and @env{TWIST_CA_BUNDLE}.  That is
+a program that is set-user-ID or set-group-ID, one whose real and effective
+IDs differ, and one that the kernel started with more rights (file
+capabilities).  Whoever can set a variable for such a program can otherwise
+send it to a proxy of their choosing, make it trust their certificates, or
+have it write its keys to a file.  Options still work.
 
 Twist reads no configuration file.  Variables can also be imported by @option{--variable %@var{name}} (@pxref{Variables}).
 

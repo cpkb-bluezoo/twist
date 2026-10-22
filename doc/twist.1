@@ -30,6 +30,19 @@ and exits
 .IR N ,
 a status from the table under
 .BR "EXIT STATUS" .
+A password, token or passphrase given as an argument
+.RB ( \-u ,
+.BR \-U ,
+.B \-\-oauth2\-bearer
+and
+.BR \-\-pass )
+is blanked in the list of arguments that
+.BR ps (1)
+shows once twist has taken it, as curl's is.  A cookie given with
+.BR \-b ,
+and a header given with
+.BR \-H ,
+are not.
 A bad command line exits 2, with no number in parentheses, and a line
 that suggests
 .BR \-\-help .
@@ -50,7 +63,12 @@ A URL scheme selects the protocol.  The scheme with an \fBs\fR is the same proto
 Looks up a word with a DICT server: DEFINE, MATCH or SHOW, chosen by the URL path.  The reply is written until the server closes.
 .TP
 .B file
-Reads the local file named by the URL path.
+Reads the local file named by the URL path.  The path is percent-decoded, and a
+NUL in it is a malformed URL (exit 3).  The host is empty, localhost or
+127.0.0.1, and any other exits 3.  Only a regular file is read: a FIFO, a
+device or a directory is refused with exit 37, and is not waited on.
+.B \-r
+takes part of the file.
 .TP
 .B ftp, ftps
 Downloads a file, or lists a directory when the URL path ends in a slash.  \fBftps\fR is TLS from the first byte (port 990), and its data connection is protected too (PBSZ 0 and PROT P), resuming the session of the control connection; a server that will not protect it ends the transfer with status 35.  \fBftp\fR is never upgraded.
@@ -59,7 +77,7 @@ Downloads a file, or lists a directory when the URL path ends in a slash.  \fBft
 Sends the selector from the URL and writes the reply until the server closes.
 .TP
 .B http, https
-HTTP/1.0, HTTP/1.1, HTTP/2 and HTTP/3, as the \fB\-\-http*\fR options and the server allow.
+HTTP/1.0, HTTP/1.1, HTTP/2 and HTTP/3, as the \fB\-\-http*\fR options and the server allow.  Over HTTP/2 and HTTP/3 the header names are sent in lower case, and the fields that belong to an HTTP/1 connection are left out of the request, as RFC 9113 section 8.2.2 asks: Connection, Keep\-Alive, Proxy\-Connection, Transfer\-Encoding, Upgrade, and TE unless its value is \fItrailers\fR.  A header of \fB\-H\fR that is one of them is not an error.  \fB\-\-unix\-socket\fR and \fB\-\-abstract\-unix\-socket\fR send the request over a Unix socket.
 .TP
 .B imap, imaps
 Fetches a message from a mailbox, or lists the mailboxes.
@@ -97,6 +115,22 @@ These schemes are recognised, but are not implemented, and exit 1:
 .B rtsp,
 .B smb, smbs,
 .B telnet.
+.SH URLS
+A host is a name made of letters, digits and the characters of a name, with a
+dot, a hyphen or an underscore, or an IPv4 address, or an IPv6 address in
+brackets.  A name in UTF-8 is taken.  A space or control character, a
+backslash, a percent sign, or one of
+.B | ^ ` < > " { }
+in the host, a port that is not only digits or is above 65535, and anything
+after the closing bracket of an IPv6 address other than a port, make a URL
+malformed: exit status 3.  An empty port, as in
+.IR http://host:/ ,
+is the default one.
+.PP
+The path and the query of a request are sent percent-encoded: a space or a byte
+above 0x7f is written
+.BI % XX \fR,
+and an escape that is there already is not encoded again.
 .SH "PROGRESS METER"
 Twist shows the progress of a transfer on standard error, or on
 .BR \-\-stderr :
@@ -240,7 +274,11 @@ Print a help message on standard output and exit successfully.
 .TP
 .B \-\-version
 Print version and license information on standard output and exit
-successfully.
+successfully.  A
+.B Features:
+line names the optional libraries that twist was built with,
+.B brotli
+for libbrotli.
 .TP
 .BI \-o ", " \-\-output " file"
 Write the body to \fIfile\fR.
@@ -248,7 +286,11 @@ Write the body to \fIfile\fR.
 is standard output.
 .TP
 .B \-O, \-\-remote\-name
-Write the body to the last segment of the URL path.
+Write the body to the last segment of the URL path.  A last segment of
+.I \-
+is a file called
+.IR \- ,
+not standard output.
 .TP
 .BI \-\-output\-dir " dir"
 Directory for a relative
@@ -262,8 +304,8 @@ name.  Reset by
 Create missing parent directories for
 .B \-o
 and
-.BR \-O .
-Reset by
+.BR \-O ,
+with mode 0750 whatever the umask is.  Reset by
 .BR \-\-next .
 .TP
 .BI \-X ", " \-\-request " method"
@@ -323,7 +365,20 @@ Write response headers to \fIfile\fR.
 is standard output.
 .TP
 .B \-L, \-\-location
-Follow redirections.
+Follow redirections, up to
+.B \-\-max\-redirs
+of them.  A redirect goes only to http, https, ws or wss.  One to another
+scheme exits 1, and one to a URL that names no host, such as
+.IR http:// ,
+exits 3.  The Location is resolved against the URL as RFC 3986 section 5.2
+says.  A 301, 302 or 303 is followed with GET and no body, and a 307 or 308
+keeps the method.  A redirect to another host, or from https to http, does not
+take the credentials along: the user name and password,
+.BR \-\-oauth2\-bearer ,
+.BR \-b ,
+the Authorization, Proxy-Authorization and Cookie headers of
+.BR \-H ,
+and the request body are left out of the request that follows.
 .TP
 .BI \-\-max\-redirs " n"
 Redirect limit.  The default is 50, and \-1 is no limit.  A redirect after the
@@ -494,14 +549,14 @@ or
 Referer header.
 .TP
 .BI \-r ", " \-\-range " range"
-Byte range.  For sftp and scp it is
+Byte range.  For sftp, scp and file it is
 .IR first\-last ,
 .IR first\- ,
 or
 .IR \-count
 for the last
 .I count
-bytes.  A range that starts beyond the end of the file exits 33.
+bytes, one range only.  A range that starts beyond the end of the file exits 33.
 .TP
 .B \-l, \-\-list\-only
 List the names only, one to a line, not the server's long form, when the URL
@@ -604,7 +659,9 @@ Print \fIformat\fR on standard output after the body.
 .BR %{exitcode} ,
 and
 .B %{errormsg}
-are replaced.
+are replaced.  \fB%{url_effective}\fR is the URL the transfer ended on, after
+any redirect, and has no user name or password in it, so that a log of it holds
+no secret.
 .BR \en ,
 .BR \er ,
 .BR \et ,
@@ -779,7 +836,10 @@ checked against that host.  The host name is resolved with UDP.  An
 empty URL clears it.  Without this option, DoQ uses the address and
 name from a
 .B _dns.resolver.arpa
-SVCB record.
+SVCB record.  The certificate of a resolver found that way must be valid for
+the name in the record and also for the address of the resolver it was found
+from (RFC 9462 section 4.2), so a record that sends a lookup elsewhere is
+refused.
 .TP
 .BI \-\-dot-url " URL"
 DNS-over-TLS server.
@@ -898,6 +958,25 @@ nor
 .B \-\-capath
 is given.  A file or directory that they name and that cannot be read is an
 error.
+.PP
+A process that has more rights than the user who started it does not read the
+environment at all, for any of the variables above that name a file, a
+directory, a socket or a server:
+.BR HOME ,
+the proxy variables and
+.BR NO_PROXY ,
+.BR QLOGDIR ,
+.BR SSH_AUTH_SOCK ,
+.BR SSL_CERT_DIR ,
+.BR SSL_CERT_FILE ,
+.B SSLKEYLOGFILE
+and
+.BR TWIST_CA_BUNDLE .
+That is a program that is set-user-ID or set-group-ID, one whose real and
+effective IDs differ, and one that the kernel started with more rights (file
+capabilities).  Whoever can set a variable for such a program can otherwise send
+it to a proxy of their choosing, make it trust their certificates, or have it
+write its keys to a file.  Options still work.
 .PP
 Twist reads no configuration file.  Variables can also be imported by
 .B \-\-variable
