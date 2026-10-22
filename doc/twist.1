@@ -899,6 +899,14 @@ The connection failed.
 .B 8
 The server's reply could not be used.
 .TP
+.B 18
+The transfer ended before all of the data the server announced had come.
+.TP
+.B 21
+A
+.B \-\-quote
+command of an sftp transfer failed.
+.TP
 .B 22
 \fB\-\-fail\fP was set and the HTTP status is 400 or above.
 .TP
@@ -949,6 +957,10 @@ Too many redirects.
 .B 52
 The server closed before sending any data.
 .TP
+.B 56
+A proxy refused a CONNECT or CONNECT\-UDP tunnel, with a status such as 403
+or 407.
+.TP
 .B 61
 The content encoding could not be decoded.
 .TP
@@ -993,6 +1005,13 @@ The sftp or scp server could not do what was asked.
 .TP
 .B 81
 The operation could not be started.
+.TP
+.B 93
+A function of the multi interface was called from inside a callback.  Only a
+program that uses the library can cause this.
+.TP
+.B 97
+A SOCKS5 proxy refused the connection or could not complete it.
 .SH AUTHOR
 Chris Burdess.
 .SH SEE ALSO

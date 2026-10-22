@@ -2,6 +2,8 @@
 @setfilename twist.info
 @settitle Twist
 
+@include version.texi
+
 @copying
 This manual is for Twist (version @value{VERSION}), a transfer library
 and command-line program.
@@ -461,6 +463,10 @@ The host name could not be resolved.
 The connection failed.
 @item 8
 The server's reply could not be used.
+@item 18
+The transfer ended before all of the data the server announced had come.
+@item 21
+A @option{--quote} command of an @code{sftp} transfer failed.
 @item 22
 @option{--fail} and the HTTP status is 400 or above.
 @item 23
@@ -492,6 +498,9 @@ A bad argument was passed to the library.
 Too many redirects.
 @item 52
 The server closed before sending any data.
+@item 56
+A proxy refused a @code{CONNECT} or @code{CONNECT-UDP} tunnel, with a
+status such as 403 or 407.
 @item 61
 The content encoding could not be decoded.
 @item 9
@@ -522,6 +531,11 @@ The file does not exist on the @code{sftp} or @code{scp} server.
 The @code{sftp} or @code{scp} server could not do what was asked.
 @item 81
 The operation could not be started.
+@item 93
+A function of the multi interface was called from inside a callback.  Only
+a program that uses the library can cause this.
+@item 97
+A SOCKS5 proxy refused the connection or could not complete it.
 @end table
 
 @node Protocols
