@@ -1,0 +1,57 @@
+name: CI
+
+# Builds twist with gcc, warnings as errors, and runs "make check", the unit
+# tests, in the "check" stage of ci/Dockerfile.  The Dockerfile also builds
+# what twist needs and Ubuntu 24.04 does not have: the libgcrypt that foxtrot
+# needs, and quickstep and foxtrot themselves.
+#
+# It runs on every push to a branch, main or any other, and not on a tag.  It
+# does not run the integration tests (make check-integration), which need
+# peers on the network and skip without them, or the fuzzers (make
+# check-fuzz).
+
+on:
+  push:
+    branches:
+      - '**'
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    name: Unit tests (gcc)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+
+      # quickstep and foxtrot are built from the tip of their main branches.
+      # The commit is named to the build, so that a change to either is a
+      # change to the layers that build it and the cache does not hand back an
+      # old build, while the layers that build libgpg-error and libgcrypt,
+      # which do not change from one push to the next, come from the cache.
+      - name: Find the commits of quickstep and foxtrot
+        id: deps
+        run: |
+          set -e
+          for r in quickstep foxtrot; do
+            sha=$(git ls-remote "https://github.com/cpkb-bluezoo/$r.git" refs/heads/main | cut -f1)
+            test -n "$sha"
+            echo "$r=$sha" >> "$GITHUB_OUTPUT"
+          done
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Build and run make check with gcc
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ci/Dockerfile
+          target: check
+          push: false
+          build-args: |
+            QUICKSTEP_REF=${{ steps.deps.outputs.quickstep }}
+            FOXTROT_REF=${{ steps.deps.outputs.foxtrot }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

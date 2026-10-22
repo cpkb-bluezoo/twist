@@ -128,6 +128,18 @@ compare with curl, run both on the same URL with COLUMNS set and 2>&1 >/dev/null
 and look at the bytes (| od -c or | cat -v).  A hand test of the tool on a
 terminal shows nothing unless the body goes to a file.
 
+Continuous integration
+----------------------
+
+.github/workflows/ci.yml runs "make check" on every push to a branch, built
+with gcc and -Werror, in the "check" stage of ci/Dockerfile.  The integration
+tests and the fuzzers are not run there.  The Dockerfile builds what twist
+needs and Ubuntu 24.04 does not have (libgcrypt 1.12.4, quickstep and
+foxtrot, the last two from the tip of their main branches), so the same build
+can be had anywhere with docker:
+
+  docker build --target check -f ci/Dockerfile .
+
 Fuzzing
 -------
 
