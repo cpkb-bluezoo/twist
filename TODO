@@ -54,6 +54,19 @@ Twist TODO List
           with the password.  A prompt on the terminal
           would need a way for the application to be asked.
       Requires libgcrypt >= 1.12.4.
+  [ ] ftps (src/ftp/ftp.c).  The control connection is TLS from the first byte
+      and the data connection is protected (PBSZ 0, PROT P) and resumes the
+      control session.  Left:
+        - explicit TLS (AUTH TLS) for ftp:// URLs, and --ssl-reqd.  ftp is
+          never upgraded.
+        - session reuse needs a TLS 1.3 ticket from the control connection.
+          Against a TLS 1.2 server, or one that gave none, the data
+          connection does a full handshake, and a server that requires
+          reuse then refuses it.
+        - a data connection that ends without a close_notify is taken as the
+          end of the file, as it is for ftp, so a truncated transfer is not
+          noticed (the size in the 150 reply is parsed and not used for this).
+        - no CCC, and no PROT C or PROT S choice: PROT P or nothing.
   [ ] The HTTP pool's key is the loop, scheme, host, port and proxy; it has
       nothing of the TLS settings (verification, CA, client certificate,
       pinning).  A multi handle or share whose handles differ in them can

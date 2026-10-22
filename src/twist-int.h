@@ -348,6 +348,17 @@ int twist_connection_start_tls (struct twist_connection *conn,
                                 const char *const *alpn, size_t n_alpn,
                                 const char *cafile, const char *capath,
                                 const char *certfile, const char *keyfile);
+/* As twist_connection_start_tls, offering the TLS session of SESSION_FROM,
+   if it has one, so that the handshake resumes it.  The peer authenticated
+   in that session is the one authenticated here, so it is for the same
+   server name only.  */
+int twist_connection_start_tls_resuming (struct twist_connection *conn,
+                                         struct twist_connection *session_from,
+                                         const char *server_name, int verify,
+                                         const char *const *alpn, size_t n_alpn,
+                                         const char *cafile, const char *capath,
+                                         const char *certfile,
+                                         const char *keyfile);
 const char *twist_connection_alpn (struct twist_connection *conn,
                                    size_t *len);
 void twist_connection_read_finished (struct twist_connection *conn);
@@ -363,6 +374,10 @@ struct twist_tls_want
   const char *capath;
   const char *certfile;
   const char *keyfile;
+  /* A connection whose TLS session is offered for resumption, if it has one
+     (a data connection that resumes the session of its control connection,
+     which FTPS servers commonly insist on).  NULL: a full handshake.  */
+  struct twist_connection *resume_from;
 };
 
 struct gq_tls_config;
@@ -513,6 +528,10 @@ void twist_ftp_data_eof (struct twist_ftp *ftp);
 const char *twist_ftp_command (const struct twist_ftp *ftp);
 int twist_ftp_data_port (const struct twist_ftp *ftp);
 const char *twist_ftp_data_host (const struct twist_ftp *ftp);
+/* Whether the data connection is to be protected (PROT P, RFC 4217): the
+   server has agreed, so the data connection runs TLS before any transfer
+   command is sent on the control connection.  */
+int twist_ftp_data_protected (const struct twist_ftp *ftp);
 
 /* A complete control line.  text is a slice of the chunk passed to
    receive and is not retained.  final is 1 on the last line of a

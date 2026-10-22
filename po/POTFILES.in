@@ -4,6 +4,7 @@ src/engine/glob.c
 src/engine/proxy.c
 src/engine/vars.c
 src/file/file.c
+src/ftp/ftp.c
 src/mail/dial.c
 src/http/http.c
 src/ssh/agent.c

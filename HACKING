@@ -116,7 +116,9 @@ integration/http-progress.sh, against a server of python's.  The environment var
 and the no-proxy list), tests/test-env.c (the trust store, the key log and
 qlog), integration/env.sh (the proxies against a server of python's) and
 integration/proxy-https.sh (https proxies, of node's, in front of an origin of
-python's; the sftp case is in integration/ssh-openssh.sh).  HTTP/3, direct and
+python's; the sftp case is in integration/ssh-openssh.sh; ftps, with a
+server of python's that takes the data connection at RETR and starts TLS on it
+after its 150 reply, as vsftpd does, is integration/ftps.sh).  HTTP/3, direct and
 through a CONNECT-UDP proxy, has unit tests only: tests/test-template.c and
 tests/test-masque.c, with the QUIC glue under tests/test-env.c.  No peer for
 it is in the tree, since the only one that exists is written in Go.  Tests and

@@ -57,6 +57,8 @@ enum
   FTP_GREET = 0,
   FTP_USER,
   FTP_PASS,
+  FTP_PBSZ,
+  FTP_PROT,
   FTP_TYPE,
   FTP_EPSV,
   FTP_PASV,
@@ -80,6 +82,11 @@ struct twist_ftp
   int dial_port;
   int live;
   int implicit_tls;
+  /* The server has agreed to PROT P: the data connection runs TLS.  */
+  int prot_p;
+  /* The handshake on the data connection is done, and the server has been
+     verified as for the control connection.  */
+  int data_secure;
   int state;
   int finished;
   int list;
@@ -585,6 +592,36 @@ open_data (struct twist_ftp *f, const char *text, size_t len, int epsv)
   dial_data (f);
 }
 
+/* The login is done.  On ftps the data connection is protected before
+   anything is transferred (RFC 4217): PBSZ 0, then PROT P.  Left at the
+   default, PROT C, the password would be encrypted and the file not.  */
+static void
+ftp_logged_in (struct twist_ftp *f)
+{
+  const char *cmd = "TYPE I\r\n";
+
+  f->state = FTP_TYPE;
+  if (f->implicit_tls)
+    {
+      f->state = FTP_PBSZ;
+      cmd = "PBSZ 0\r\n";
+    }
+  if (ftp_send (f, "%s", cmd) != TWIST_OK)
+    ftp_complete (f, TWIST_ERR_PROTOCOL);
+}
+
+/* A server that will not protect the data connection ends the transfer.  The
+   file is not fetched in the clear instead: whoever is on the path could have
+   made the server say no.  */
+static void
+ftp_protect_refused (struct twist_ftp *f)
+{
+  twist_easy_set_error (f->easy,
+                        twist_strdup (_("the server will not protect the data "
+                                        "connection (PBSZ and PROT P)")));
+  ftp_complete (f, TWIST_ERR_TLS);
+}
+
 static void
 ftp_on_reply (void *user, int code, int final, const char *text, size_t len)
 {
@@ -618,9 +655,7 @@ ftp_on_reply (void *user, int code, int final, const char *text, size_t len)
     case FTP_USER:
       if (code == 230)
         {
-          f->state = FTP_TYPE;
-          if (ftp_send (f, "TYPE I\r\n") != TWIST_OK)
-            ftp_complete (f, TWIST_ERR_PROTOCOL);
+          ftp_logged_in (f);
           return;
         }
       if (code != 331)
@@ -644,6 +679,25 @@ ftp_on_reply (void *user, int code, int final, const char *text, size_t len)
           ftp_complete (f, TWIST_ERR_AUTH);
           return;
         }
+      ftp_logged_in (f);
+      return;
+    case FTP_PBSZ:
+      if (code / 100 != 2)
+        {
+          ftp_protect_refused (f);
+          return;
+        }
+      f->state = FTP_PROT;
+      if (ftp_send (f, "PROT P\r\n") != TWIST_OK)
+        ftp_complete (f, TWIST_ERR_PROTOCOL);
+      return;
+    case FTP_PROT:
+      if (code / 100 != 2)
+        {
+          ftp_protect_refused (f);
+          return;
+        }
+      f->prot_p = 1;
       f->state = FTP_TYPE;
       if (ftp_send (f, "TYPE I\r\n") != TWIST_OK)
         ftp_complete (f, TWIST_ERR_PROTOCOL);
@@ -771,15 +825,53 @@ ftp_error (struct twist_endpoint *ep, int error)
     ftp_complete (f, error);
 }
 
+/* The data connection is up.  If it is to be protected, TLS starts on it
+   here, and the transfer command is sent at once: a server takes the data
+   connection when it gets the command, and starts its side of the handshake
+   after its 150 reply, so waiting for the handshake first would be waiting
+   for a command that is never sent.  Nothing is exposed by that.  The server
+   cannot send the file but through TLS, and one that does not prove itself
+   ends the transfer.  The name it must prove is the host of the URL, as for
+   the control connection, and not the address of the data connection, which
+   the server chose.  */
 static void
 ftp_data_connected (struct twist_endpoint *ep)
 {
   struct twist_ftp *f = ep->user_data;
+  int rc;
 
   if (f->finished)
     return;
+  if (f->prot_p)
+    {
+      /* Resuming the session of the control connection, which servers
+         commonly require of the data connection (vsftpd, ProFTPD and
+         FileZilla Server do unless told not to).  */
+      rc = twist_connection_start_tls_resuming (ep->conn, f->ctrl,
+                                                f->easy->url->host,
+                                                f->easy->verifypeer, NULL, 0,
+                                                f->easy->cainfo,
+                                                f->easy->capath,
+                                                f->easy->sslcert,
+                                                f->easy->sslkey);
+      if (rc != TWIST_OK)
+        {
+          ftp_complete (f, rc);
+          return;
+        }
+    }
   if (ftp_send_transfer (f) != TWIST_OK)
     ftp_complete (f, TWIST_ERR_PROTOCOL);
+}
+
+static void
+ftp_data_secure (struct twist_endpoint *ep, const char *alpn, size_t alpn_len)
+{
+  struct twist_ftp *f = ep->user_data;
+
+  (void) alpn;
+  (void) alpn_len;
+  f->data_secure = 1;
 }
 
 static size_t
@@ -795,6 +887,14 @@ ftp_data_disconnected (struct twist_endpoint *ep, int error)
 
   if (f->finished)
     return;
+  if (f->prot_p && !f->data_secure)
+    {
+      /* Gone before the handshake finished: nothing was received that was
+         protected, so that is a failure to protect it, not an empty file.  */
+      ftp_complete (f, error != TWIST_OK && error != TWIST_ERR_CLOSED
+                       ? error : TWIST_ERR_TLS);
+      return;
+    }
   if (error != TWIST_OK && error != TWIST_ERR_CLOSED && !f->retr_sent)
     ftp_complete (f, error);
   else
@@ -825,7 +925,7 @@ static const struct twist_protocol_handler ftp_data_handler = {
   ftp_data_connected,
   ftp_data_receive,
   ftp_data_disconnected,
-  NULL,
+  ftp_data_secure,
   ftp_data_error,
   NULL,
   NULL
@@ -892,6 +992,12 @@ twist_ftp_set_peer (struct twist_ftp *f, const struct twist_dns_addr *peer)
 {
   if (f != NULL && peer != NULL)
     f->peer = *peer;
+}
+
+int
+twist_ftp_data_protected (const struct twist_ftp *f)
+{
+  return f != NULL && f->prot_p;
 }
 
 const char *

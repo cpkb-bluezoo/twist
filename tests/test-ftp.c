@@ -271,10 +271,131 @@ test_ftp_session (void)
   }
 }
 
+/* A feed of replies, ending at the first command the client then sends.  */
+static struct twist_ftp *
+ftps_start (const char *url, twist_easy **easy_out)
+{
+  twist_easy *easy = twist_easy_init ();
+  struct twist_ftp *f;
+
+  check (easy != NULL, "ftps easy");
+  check (twist_url_parse_int (url, &easy->url) == TWIST_OK, "ftps url");
+  f = twist_ftp_new (easy, 0);
+  check (f != NULL, "ftps handle");
+  *easy_out = easy;
+  return f;
+}
+
+/* ftps runs TLS on the control connection from the start, and the data
+   connection has to be protected as well (RFC 4217): PBSZ 0 and then PROT P,
+   after login and before anything is transferred.  Without them the
+   password is encrypted and the file is not.  A server that will not protect
+   the data connection ends the transfer, and no transfer command is sent: the
+   file is not fetched in the clear instead.  ftp is as it was.  */
+static void
+test_ftps_session (void)
+{
+  size_t split;
+
+  for (split = 1; split <= 40; split += 39)
+    {
+      twist_easy *easy;
+      struct twist_ftp *f = ftps_start ("ftps://alice:secret@127.0.0.1/f.txt",
+                                        &easy);
+
+      feed_session (f, "220 ready\r\n", split);
+      check (strcmp (twist_ftp_command (f), "USER alice\r\n") == 0, "ftps user");
+      feed_session (f, "331 need pass\r\n", split);
+      check (strcmp (twist_ftp_command (f), "PASS secret\r\n") == 0, "ftps pass");
+      feed_session (f, "230 ok\r\n", split);
+      check (strcmp (twist_ftp_command (f), "PBSZ 0\r\n") == 0,
+             "PBSZ 0 follows the login");
+      check (!twist_ftp_data_protected (f), "not protected before PROT P");
+      feed_session (f, "200 PBSZ=0\r\n", split);
+      check (strcmp (twist_ftp_command (f), "PROT P\r\n") == 0,
+             "PROT P follows PBSZ");
+      check (!twist_ftp_data_protected (f), "not protected until it is agreed");
+      feed_session (f, "200 PROT now Private\r\n", split);
+      check (twist_ftp_data_protected (f), "protected once agreed");
+      check (strcmp (twist_ftp_command (f), "TYPE I\r\n") == 0,
+             "the transfer goes on after PROT P");
+      feed_session (f, "200 Type set.\r\n", split);
+      check (strcmp (twist_ftp_command (f), "EPSV\r\n") == 0, "ftps epsv");
+      check (!easy->done, "ftps still going");
+      twist_easy_cleanup (easy);
+    }
+
+  /* No password asked for: still protected before anything else.  */
+  {
+    twist_easy *easy;
+    struct twist_ftp *f = ftps_start ("ftps://127.0.0.1/f.txt", &easy);
+
+    feed_session (f, "220 ready\r\n230 in\r\n", 1);
+    check (strcmp (twist_ftp_command (f), "PBSZ 0\r\n") == 0,
+           "PBSZ 0 after a login with no password");
+    twist_easy_cleanup (easy);
+  }
+
+  /* The server will not set the buffer size, or will not protect the data.  */
+  {
+    twist_easy *easy;
+    struct twist_ftp *f = ftps_start ("ftps://127.0.0.1/f.txt", &easy);
+
+    feed_session (f, "220 ready\r\n230 in\r\n", 1);
+    feed_session (f, "534 no\r\n", 1);
+    check (easy->done && easy->result == TWIST_ERR_TLS, "PBSZ refused fails");
+    check (strcmp (twist_ftp_command (f), "PBSZ 0\r\n") == 0,
+           "and nothing more is sent");
+    check (!twist_ftp_data_protected (f), "and nothing is protected");
+    twist_easy_cleanup (easy);
+  }
+  {
+    twist_easy *easy;
+    struct twist_ftp *f = ftps_start ("ftps://127.0.0.1/f.txt", &easy);
+
+    feed_session (f, "220 ready\r\n230 in\r\n200 ok\r\n", 1);
+    check (strcmp (twist_ftp_command (f), "PROT P\r\n") == 0, "PROT P sent");
+    feed_session (f, "534 Request denied for policy reasons.\r\n", 1);
+    check (easy->done && easy->result == TWIST_ERR_TLS,
+           "PROT P refused fails the transfer");
+    check (strcmp (twist_ftp_command (f), "PROT P\r\n") == 0,
+           "no TYPE, EPSV or RETR follows");
+    check (!twist_ftp_data_protected (f), "the data is not left unprotected");
+    twist_easy_cleanup (easy);
+  }
+  /* Only a 2xx agrees.  */
+  {
+    twist_easy *easy;
+    struct twist_ftp *f = ftps_start ("ftps://127.0.0.1/f.txt", &easy);
+
+    feed_session (f, "220 ready\r\n230 in\r\n200 ok\r\n", 1);
+    feed_session (f, "336 more\r\n", 1);
+    check (easy->done && easy->result == TWIST_ERR_TLS,
+           "a reply that is not 2xx to PROT P fails");
+    twist_easy_cleanup (easy);
+  }
+
+  /* Plain ftp sends neither.  */
+  {
+    twist_easy *easy = twist_easy_init ();
+    struct twist_ftp *f;
+
+    check (twist_url_parse_int ("ftp://127.0.0.1/f.txt", &easy->url)
+           == TWIST_OK, "ftp url");
+    f = twist_ftp_new (easy, 0);
+    feed_session (f, "220 ready\r\n230 in\r\n", 1);
+    check (strcmp (twist_ftp_command (f), "TYPE I\r\n") == 0,
+           "ftp goes straight to TYPE after login");
+    check (!twist_ftp_data_protected (f), "ftp does not protect the data");
+    twist_easy_cleanup (easy);
+  }
+}
+
 int
 main (void)
 {
   test_ftp_parser ();
   test_ftp_session ();
+  test_ftps_session ();
   return tests_finish ();
 }

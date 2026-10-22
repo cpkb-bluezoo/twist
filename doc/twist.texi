@@ -535,7 +535,15 @@ Reads the local file named by the URL path.
 @item ftp, ftps
 Downloads a file, or lists a directory when the URL path ends in a
 slash.  @code{ftps} is TLS from the first byte (port 990); @code{ftp}
-is never upgraded.
+is never upgraded.  On @code{ftps} the data connection is protected as
+well (RFC 4217): after login twist sends @code{PBSZ 0} and @code{PROT P},
+runs TLS on each data connection, and checks the server against the host
+of the URL as it does the control connection (@option{-k} turns both
+off).  The data connection resumes the TLS session of the control
+connection when the server gave a ticket for it, since servers commonly
+insist on that.  A server that will not protect the data connection ends
+the transfer with status 35; the file is never fetched unprotected
+instead.
 @item gopher, gophers
 Sends the selector from the URL and writes the reply until the server
 closes.

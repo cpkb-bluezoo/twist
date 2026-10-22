@@ -39,6 +39,13 @@ struct twist_tls
   uint8_t alpn_mem[2][16];
   size_t n_alpn;
   char *server_name;
+  /* The last session ticket the server gave, for a connection that resumes
+     it, and a copy of the one this connection offered (the handshake is given
+     a pointer to it, so it must outlive the handshake and not change under
+     it).  Both are secrets.  */
+  gq_tls_session session;
+  int have_session;
+  gq_tls_session offered;
 };
 
 static int
@@ -76,8 +83,15 @@ tls_connected (void *user, const gq_tls_info *info)
 static int
 tls_ticket (void *user, const gq_tls_ticket *ticket)
 {
-  (void) user;
-  (void) ticket;
+  struct twist_tls *t = twist_connection_tls (user);
+
+  /* Kept for a connection that resumes this one's session.  A ticket too
+     large to keep is not an error: that connection does a full handshake.  */
+  if (t != NULL && ticket != NULL)
+    {
+      gq_tls_session_wipe (&t->session);
+      t->have_session = gq_tls_session_store (&t->session, ticket) == GQ_OK;
+    }
   return 0;
 }
 
@@ -112,6 +126,8 @@ tls_free (void *p)
   if (t == NULL)
     return;
   gq_tlsauto_free (t->tls);
+  gq_tls_session_wipe (&t->session);
+  gq_tls_session_wipe (&t->offered);
   gq_trust_free (t->trust);
   twist_client_auth_free (t->auth);
   free (t->server_name);
@@ -170,6 +186,16 @@ tls_start (struct twist_connection *conn, const struct twist_tls_want *want)
   if (twist_keylog_wanted ())
     cfg.keylog = twist_keylog_write;
   twist_client_auth_apply (t->auth, &cfg);
+  if (want->resume_from != NULL)
+    {
+      struct twist_tls *from = twist_connection_tls (want->resume_from);
+
+      if (from != NULL && from->have_session)
+        {
+          t->offered = from->session;
+          cfg.resume = &t->offered;
+        }
+    }
   memset (&ev, 0, sizeof ev);
   ev.user = conn;
   ev.write = tls_write;

@@ -736,6 +736,19 @@ twist_connection_start_tls (struct twist_connection *c, const char *server_name,
                             const char *cafile, const char *capath,
                             const char *certfile, const char *keyfile)
 {
+  return twist_connection_start_tls_resuming (c, NULL, server_name, verify,
+                                              alpn, n_alpn, cafile, capath,
+                                              certfile, keyfile);
+}
+
+int
+twist_connection_start_tls_resuming (struct twist_connection *c,
+                                     struct twist_connection *session_from,
+                                     const char *server_name, int verify,
+                                     const char *const *alpn, size_t n_alpn,
+                                     const char *cafile, const char *capath,
+                                     const char *certfile, const char *keyfile)
+{
   struct twist_tls_want want;
 
   if (twist_tls_start_fn == NULL)
@@ -749,5 +762,6 @@ twist_connection_start_tls (struct twist_connection *c, const char *server_name,
   want.capath = capath;
   want.certfile = certfile;
   want.keyfile = keyfile;
+  want.resume_from = session_from;
   return twist_tls_start_fn (c, &want);
 }
