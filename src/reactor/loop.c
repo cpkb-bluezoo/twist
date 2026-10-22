@@ -515,12 +515,7 @@ run_once_ms (struct twist_loop *loop, int wait_ms)
     return TWIST_OK;
   now = twist_loop_now (loop);
   timeout = twist_loop_next_timeout (loop, now);
-  if (loop->multi != NULL && loop->multi->timer_cb != NULL
-      && timeout != loop->multi->last_timeout)
-    {
-      loop->multi->last_timeout = timeout;
-      loop->multi->timer_cb (loop->multi, timeout, loop->multi->timer_user);
-    }
+  twist_multi_notify_timer (loop->multi);
   if (wait_ms >= 0)
     timeout = wait_ms;
   n = twist_poll_wait (loop->poll, ev, TWIST_POLL_BATCH, (int) timeout);

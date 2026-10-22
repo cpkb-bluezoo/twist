@@ -171,6 +171,9 @@ enum twist_opt
   TWISTOPT_MAX_RECV_SPEED_LARGE = 31,
   TWISTOPT_MAX_SEND_SPEED_LARGE = 32,
   TWISTOPT_COOKIE = 33,
+  /* The name of a Unix socket in the abstract namespace (Linux), without the
+     leading NUL, to connect to in place of the host and port of the URL.  See
+     TWISTOPT_UNIX_SOCKET, which this replaces and is replaced by.  */
   TWISTOPT_ABSTRACT_UNIX_SOCKET = 34,
   /* Comma-separated DNS transports.  Default is doq,dot,doh,udp.  */
   TWISTOPT_DNS_ORDER = 35,
@@ -270,7 +273,15 @@ enum twist_opt
      be other than TWISTOPT_PROXY's.  Without it an https proxy has
      https://HOST:PORT/.well-known/masque/udp/{target_host}/{target_port}/.
      A template that is not one is refused.  NULL or "" clears it.  */
-  TWISTOPT_PROXY_TEMPLATE_UDP = 65
+  TWISTOPT_PROXY_TEMPLATE_UDP = 65,
+  /* The path of a Unix socket to connect to in place of the host and port of
+     the URL, for http, https, ws and wss.  The URL still gives the Host
+     header, the request target and the name that TLS checks.  Proxies are not
+     used, and HTTP/3 is not possible.  Another scheme fails with
+     TWIST_ERR_UNSUPPORTED.  A path (or a name, see
+     TWISTOPT_ABSTRACT_UNIX_SOCKET) too long for the socket address is
+     TWIST_ERR_INVAL.  NULL or "" clears it, and clears an abstract name.  */
+  TWISTOPT_UNIX_SOCKET = 66
 };
 
 enum twist_dns_transport

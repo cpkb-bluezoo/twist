@@ -151,6 +151,10 @@ struct twist_easy
   long timeout_ms;
   long connect_timeout_ms;
   char *proxy;
+  /* Connect to this Unix socket, and not to the host and port of the URL: a
+     path, or with unix_abstract a name in the abstract namespace.  */
+  char *unix_path;
+  int unix_abstract;
   int http_version;
   int dns_order[4];
   int dns_order_n;
@@ -221,7 +225,7 @@ struct twist_multi
   size_t n_done;
   size_t done_cap;
   size_t done_off;
-  long last_timeout;
+  long long last_deadline;
   /* How many calls into the application (write, header, progress, socket and
      timer callbacks) are under way from this handle's loop.  While there is
      one, a transfer's own state is in use by the code that made it, so the
@@ -798,6 +802,7 @@ void twist_pool_set_lock (struct twist_pool *pool, int enabled);
 size_t twist_pool_count (struct twist_pool *pool);
 void twist_pool_drop_loop (struct twist_pool *pool, struct twist_loop *loop);
 void twist_multi_note_pool (struct twist_multi *multi, struct twist_pool *pool);
+void twist_multi_notify_timer (struct twist_multi *multi);
 
 enum twist_proxy_kind
 {

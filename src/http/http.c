@@ -25,12 +25,15 @@
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <errno.h>
 #include <stdarg.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
 #include <sys/socket.h>
+#include <sys/un.h>
 
 #include <quickstep/crypto.h>
 #include <quickstep/status.h>
@@ -78,6 +81,17 @@ struct twist_http
   int how;
   int have_peer;
   int falling;
+  /* Commands posted to the loop that hold this record (http_post).  The
+     record outlives a free until they have run.  */
+  int posted;
+  int dead;
+  /* A redirect has been taken and its restart is posted.  The connection
+     the response came on may close before the restart runs, which is not a
+     failure of the transfer, and may not be used again; restart_keep is
+     whether the server meant to keep it, and conn_lost whether it did not.  */
+  int restarting;
+  int restart_keep;
+  int conn_lost;
   int h3_gave_up;
   int fail_err;
   int https_port;
@@ -222,6 +236,7 @@ http_pool_key (struct twist_http *h, char *buf, size_t cap)
   struct twist_url *url;
   int port;
   const char *proxy;
+  char sock[160];
   int n;
 
   if (h->easy == NULL || h->easy->url == NULL || h->easy->loop == NULL)
@@ -229,6 +244,13 @@ http_pool_key (struct twist_http *h, char *buf, size_t cap)
   url = h->easy->url;
   port = url->port > 0 ? url->port : twist_url_default_port (url->scheme);
   proxy = twist_easy_proxy (h->easy);
+  if (h->easy->unix_path != NULL)
+    {
+      /* The socket is where the connection goes, as a proxy would be.  */
+      snprintf (sock, sizeof sock, "unix:%c%s",
+                h->easy->unix_abstract ? '@' : '/', h->easy->unix_path);
+      proxy = sock;
+    }
   if (proxy == NULL)
     proxy = "-";
   n = snprintf (buf, cap, "%p|%s|%s|%d|%s", (void *) h->easy->loop,
@@ -612,6 +634,8 @@ on_header (void *user, const char *name, size_t name_len, const char *value,
       int h3 = twist_alt_svc_h3 (value, value_len, &port, &clear);
       const char *host = h->easy->url != NULL ? h->easy->url->host : NULL;
 
+      if (h->easy->unix_path != NULL)
+        host = NULL;
       if (host != NULL && clear)
         twist_origin_set_h3 (h->easy, host, 0, 0);
       else if (host != NULL && h3)
@@ -1197,11 +1221,40 @@ send_request (struct twist_http *h)
   return rc;
 }
 
+/* Post FN to the loop, to run with H.  The transfer can be freed before it
+   runs (its handle is removed, or the loop is drained after the handle was
+   cleaned up), and the command would then run on freed memory: the record is
+   kept until the commands that hold it are done, and they start with
+   http_posted_done.  */
+static int
+http_post (struct twist_http *h, void (*fn) (void *))
+{
+  if (twist_loop_post (h->easy->loop, fn, h) != TWIST_OK)
+    return TWIST_ERR_NOMEM;
+  h->posted++;
+  return TWIST_OK;
+}
+
+/* A posted command has come up.  True when the transfer was freed meanwhile,
+   and the command is to do nothing; the last such command frees the record.  */
+static int
+http_posted_done (struct twist_http *h)
+{
+  h->posted--;
+  if (!h->dead)
+    return 0;
+  if (h->posted == 0)
+    free (h);
+  return 1;
+}
+
 static void
 http_auth_again (void *user)
 {
   struct twist_http *h = user;
 
+  if (http_posted_done (h))
+    return;
   h->sent = 0;
   if (arm_parsers (h) != TWIST_OK)
     {
@@ -1216,12 +1269,19 @@ static void
 http_restart (void *user)
 {
   struct twist_http *h = user;
-  struct twist_connection *c = h->conn;
+  struct twist_connection *c;
   int same = 0;
   int port = 0;
 
+  if (http_posted_done (h))
+    return;
+  h->restarting = 0;
+  /* Completed meanwhile (a timeout): it stays so.  */
+  if (h->finished)
+    return;
+  c = h->conn;
   if (h->easy->url != NULL && h->dial_host != NULL
-      && h->easy->url->host != NULL
+      && h->easy->url->host != NULL && h->restart_keep && !h->conn_lost
       && strcmp (h->dial_host, h->easy->url->host) == 0 && h->mode == HTTP_H1)
     {
       port = h->easy->url->port > 0
@@ -1282,6 +1342,7 @@ http_message_done (void *user)
   struct twist_http *h = user;
   struct twist_easy *easy = h->easy;
   int use_get = 0;
+  int redirect = 0;
   const char *host = easy->url != NULL ? easy->url->host : NULL;
 
   release_coding (h);
@@ -1346,13 +1407,26 @@ http_message_done (void *user)
           free (h->auth_line);
           h->auth_line = hdr;
           h->auth_tries++;
-          twist_loop_post (easy->loop, http_auth_again, h);
+          if (http_post (h, http_auth_again) != TWIST_OK)
+            http_complete (h, TWIST_ERR_NOMEM);
           return;
         }
     }
-  if (h->location != NULL
-      && twist_http_should_redirect (h->status, easy->method, easy->follow,
-                                     easy->redirs, easy->maxredirs, &use_get))
+  if (h->location != NULL)
+    redirect = twist_http_should_redirect (h->status, easy->method,
+                                           easy->follow, easy->redirs,
+                                           easy->maxredirs, &use_get);
+  if (redirect < 0)
+    {
+      char msg[96];
+
+      snprintf (msg, sizeof msg, _("Maximum (%ld) redirects followed"),
+                easy->maxredirs);
+      twist_easy_set_error (easy, twist_strdup (msg));
+      http_complete (h, TWIST_ERR_REDIRECT);
+      return;
+    }
+  if (redirect > 0)
     {
       struct twist_url *next = NULL;
       if (twist_url_resolve_int (easy->url, h->location, &next) != TWIST_OK)
@@ -1392,7 +1466,12 @@ http_message_done (void *user)
       else
         h->strip_auth = 0;
       twist_progress_hop (easy);
-      twist_loop_post (easy->loop, http_restart, h);
+      h->restarting = 1;
+      h->conn_lost = 0;
+      h->restart_keep = h->mode == HTTP_H1 && h->h1 != NULL
+                        && twist_h1_keep (h->h1);
+      if (http_post (h, http_restart) != TWIST_OK)
+        http_complete (h, TWIST_ERR_NOMEM);
       return;
     }
   http_complete (h, TWIST_OK);
@@ -1456,6 +1535,8 @@ h3_fallback (void *user)
   struct twist_http *h = user;
   struct twist_connection *c;
 
+  if (http_posted_done (h))
+    return;
   if (h->finished)
     return;
   h->falling = 0;
@@ -1488,7 +1569,8 @@ http_fail (struct twist_http *h, int err)
       h->falling = 1;
       h->h3_gave_up = 1;
       h->fail_err = err;
-      twist_loop_post (h->easy->loop, h3_fallback, h);
+      if (http_post (h, h3_fallback) != TWIST_OK)
+        http_complete (h, TWIST_ERR_NOMEM);
       return;
     }
   http_complete (h, err);
@@ -1550,6 +1632,11 @@ http_disconnected (struct twist_endpoint *ep, int error)
 {
   struct twist_http *h = http_of (ep);
 
+  if (h->restarting)
+    {
+      h->conn_lost = 1;
+      return;
+    }
   if (!h->finished)
     http_fail (h, error != TWIST_OK ? error : TWIST_ERR_CLOSED);
 }
@@ -1559,6 +1646,11 @@ http_error (struct twist_endpoint *ep, int error)
 {
   struct twist_http *h = http_of (ep);
 
+  if (h->restarting)
+    {
+      h->conn_lost = 1;
+      return;
+    }
   if (!h->finished)
     http_fail (h, error);
 }
@@ -1733,7 +1825,7 @@ prepare_dial (struct twist_http *h)
           puser = ppass = NULL;
         }
     }
-  else if (twist_easy_proxy (easy) != NULL)
+  else if (twist_easy_proxy (easy) != NULL && easy->unix_path == NULL)
     {
       int prc = twist_proxy_parse (twist_easy_proxy (easy), &kind, &phost,
                                    &pport, &puser, &ppass);
@@ -1887,6 +1979,46 @@ http_reuse (struct twist_http *h)
   return 1;
 }
 
+/* Connect to the Unix socket the handle names (TWISTOPT_UNIX_SOCKET), the path
+   or the abstract name, which starts with the NUL byte that says so.  */
+static int
+dial_unix (struct twist_http *h)
+{
+  struct twist_easy *easy = h->easy;
+  struct sockaddr_un sa;
+  size_t len = strlen (easy->unix_path);
+  size_t salen;
+  char msg[160];
+  int rc;
+
+  memset (&sa, 0, sizeof sa);
+  sa.sun_family = AF_UNIX;
+  if (easy->unix_abstract)
+    {
+      if (len + 1 > sizeof sa.sun_path)
+        return TWIST_ERR_INVAL;
+      memcpy (sa.sun_path + 1, easy->unix_path, len);
+      salen = offsetof (struct sockaddr_un, sun_path) + 1 + len;
+    }
+  else
+    {
+      if (len + 1 > sizeof sa.sun_path)
+        return TWIST_ERR_INVAL;
+      memcpy (sa.sun_path, easy->unix_path, len + 1);
+      salen = offsetof (struct sockaddr_un, sun_path) + len + 1;
+    }
+  errno = 0;
+  rc = twist_connection_connect (h->conn, &sa, salen,
+                                 (uint64_t) easy->connect_timeout_ms);
+  if (rc != TWIST_OK)
+    {
+      snprintf (msg, sizeof msg, _("could not connect to Unix socket %s%s"),
+                easy->unix_abstract ? "@" : "", easy->unix_path);
+      twist_easy_set_error (easy, twist_strdup (msg));
+    }
+  return rc;
+}
+
 static void
 dial (struct twist_http *h, const struct twist_dns_addr *addr)
 {
@@ -1934,6 +2066,13 @@ dial (struct twist_http *h, const struct twist_dns_addr *addr)
     {
       ep->user_data = h;
       twist_connection_set_handler (h->conn, &h->handler);
+    }
+  if (h->easy->unix_path != NULL)
+    {
+      rc = dial_unix (h);
+      if (rc != TWIST_OK)
+        http_fail (h, rc);
+      return;
     }
   if (addr->family == 6)
     {
@@ -2095,7 +2234,9 @@ on_resolved (void *user, int err, const struct twist_dns_service *svc)
   for (i = 0; i < svc->nalpn; i++)
     if (strcmp (svc->alpn[i], "h3") == 0)
       rr_h3 = 1;
-  cached = twist_origin_h3 (h->easy, host, &cached_port);
+  /* A Unix socket is not somewhere HTTP/3 can be found or advertised.  */
+  cached = h->easy->unix_path != NULL ? 0
+    : twist_origin_h3 (h->easy, host, &cached_port);
   if (h->https && svc->have_https && !rr_h3)
     twist_origin_set_h3 (h->easy, host, 0, 0);
   else if (h->https && rr_h3)
@@ -2104,6 +2245,13 @@ on_resolved (void *user, int err, const struct twist_dns_service *svc)
   if (twist_http_discover (h->easy->http_version, h->https, svc->have_https,
                            rr_h3, cached, &h->how) != TWIST_OK)
     {
+      http_complete (h, TWIST_ERR_UNSUPPORTED);
+      return;
+    }
+  if (h->easy->unix_path != NULL && h->how == TWIST_DISC_H3)
+    {
+      twist_easy_set_error (h->easy, twist_strdup (_("HTTP/3 cannot go over "
+                                                     "a Unix socket")));
       http_complete (h, TWIST_ERR_UNSUPPORTED);
       return;
     }
@@ -2122,7 +2270,7 @@ on_resolved (void *user, int err, const struct twist_dns_service *svc)
   if (h->how == TWIST_DISC_H3 && !rr_h3 && cached_port > 0 && h->https_port <= 0)
     h->https_port = cached_port;
   h->watch_alt = h->https && !svc->have_https && h->how != TWIST_DISC_H3
-                 && cached != -1;
+                 && cached != -1 && h->easy->unix_path == NULL;
   apply_how (h);
   start_attempt (h);
 }
@@ -2164,7 +2312,8 @@ http_begin (struct twist_http *h)
     twist_loop_schedule (easy->loop,
                          twist_loop_now (easy->loop) + (uint64_t) easy->timeout_ms,
                          on_timeout, h, &h->timer);
-  if (h->https && easy->http_version == TWIST_HTTP_VERSION_3ONLY)
+  if (h->https && easy->http_version == TWIST_HTTP_VERSION_3ONLY
+      && easy->unix_path == NULL)
     {
       char *ph, *pu, *pp, *pt;
       int pport, plan;
@@ -2194,6 +2343,23 @@ http_begin (struct twist_http *h)
           http_complete (h, TWIST_ERR_UNSUPPORTED);
           return;
         }
+    }
+  if (easy->unix_path != NULL)
+    {
+      /* The host is not looked up: the socket is where it is.  */
+      struct twist_dns_service svc;
+
+      if (easy->http_version == TWIST_HTTP_VERSION_3ONLY)
+        {
+          twist_easy_set_error (easy, twist_strdup (_("HTTP/3 cannot go over "
+                                                      "a Unix socket")));
+          http_complete (h, TWIST_ERR_UNSUPPORTED);
+          return;
+        }
+      memset (&svc, 0, sizeof svc);
+      svc.addr.family = 4;
+      on_resolved (h, TWIST_OK, &svc);
+      return;
     }
   {
     int rc = twist_dns_resolve_service_easy (easy, url->host, on_resolved, h);
@@ -2263,6 +2429,11 @@ http_free (void *p)
       free (h->tun_pass);
     }
   free (h->hdr_line);
+  if (h->posted > 0)
+    {
+      h->dead = 1;
+      return;
+    }
   free (h);
 }
 
@@ -2296,17 +2467,23 @@ twist_http_attach (struct twist_easy *easy)
   return h->finished ? easy->result : TWIST_OK;
 }
 
+/* 1 to follow the redirect, 0 when the response is not one to follow (not a
+   redirect, or the transfer does not follow them), and -1 when it is one and
+   the limit is reached: curl's CURLE_TOO_MANY_REDIRECTS.  A limit below 0 is
+   no limit.  */
 int
 twist_http_should_redirect (int status, const char *method, int follow,
                             long redirs, long maxredirs, int *use_get)
 {
   (void) method;
   *use_get = 0;
-  if (!follow || redirs >= maxredirs)
+  if (!follow)
     return 0;
   if (status != 301 && status != 302 && status != 303
       && status != 307 && status != 308)
     return 0;
+  if (maxredirs >= 0 && redirs >= maxredirs)
+    return -1;
   /* 301, 302, and 303 replay as GET.  307 and 308 keep the method.  */
   if (status == 301 || status == 302 || status == 303)
     *use_get = 1;

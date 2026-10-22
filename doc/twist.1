@@ -326,7 +326,9 @@ is standard output.
 Follow redirections.
 .TP
 .BI \-\-max\-redirs " n"
-Redirect limit.  The default is 50.
+Redirect limit.  The default is 50, and \-1 is no limit.  A redirect after the
+.IR n th
+is exit status 47, and 0 refuses the first.
 .TP
 .B \-f, \-\-fail
 Fail the transfer when the HTTP status is 400 or above.  The body is
@@ -448,6 +450,24 @@ and
 and
 .B \-\-noproxy ""
 turns them off.
+.TP
+.BI \-\-unix\-socket " path"
+Connect to the Unix socket
+.I path
+in place of the host and port of the URL, for http, https, ws and wss.  The URL
+still gives the Host header, the request target, and for https the name that
+the certificate must have.  The host is not looked up, a redirect to another
+host goes to the same socket, and no proxy is used, whether it is given with
+.B \-x
+or by the environment.  HTTP/3 is not possible over a socket, and a URL of
+another scheme is exit status 1.  A socket that is not there is exit status 7.
+.TP
+.BI \-\-abstract\-unix\-socket " name"
+The same for a socket in the abstract namespace of Linux.
+.I name
+has no NUL byte before it.  This and
+.B \-\-unix\-socket
+replace each other.
 .TP
 .BI \-U ", " \-\-proxy\-user " user:password"
 The user name and password for the proxy, if its URL has none.

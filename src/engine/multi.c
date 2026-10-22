@@ -41,7 +41,7 @@ twist_multi_init (void)
       return NULL;
     }
   multi->own_loop = 1;
-  multi->last_timeout = -2;
+  multi->last_deadline = -2;
   multi->storage = twist_storage_new (2, 32);
   if (multi->storage == NULL)
     {
@@ -84,6 +84,34 @@ multi_watch (void *user, int fd, int interest)
     }
   multi->in_call++;
   multi->socket_cb (NULL, fd, what, multi->socket_user, NULL);
+  multi->in_call--;
+}
+
+/* Tell the program's timer callback the time to the loop's next deadline, when
+   the deadline is not the one it was last told of (the time to it is always
+   running down, so the deadline is what is compared).  Called wherever the deadline can have
+   moved: when the loop is about to wait, and after each call that drives it or
+   changes its handles, so that a program that uses twist_multi_socket_action
+   alone, and never waits in the loop, is told as well.  A multi call from the
+   callback is refused, as from any other.  */
+void
+twist_multi_notify_timer (struct twist_multi *multi)
+{
+  uint64_t now;
+  long timeout;
+  long long deadline;
+
+  if (multi == NULL || multi->timer_cb == NULL || multi->loop == NULL)
+    return;
+  now = twist_loop_now (multi->loop);
+  timeout = twist_loop_next_timeout (multi->loop, now);
+  /* None is -1, and one that is due already is 0.  */
+  deadline = timeout > 0 ? (long long) now + timeout : timeout;
+  if (deadline == multi->last_deadline)
+    return;
+  multi->last_deadline = deadline;
+  multi->in_call++;
+  multi->timer_cb (multi, timeout, multi->timer_user);
   multi->in_call--;
 }
 
@@ -186,6 +214,7 @@ twist_multi_add_handle (twist_multi *multi, twist_easy *easy)
   multi->in_call++;
   rc = twist_transfer_start (easy);
   multi->in_call--;
+  twist_multi_notify_timer (multi);
   return rc;
 }
 
@@ -211,6 +240,7 @@ twist_multi_remove_handle (twist_multi *multi, twist_easy *easy)
         multi->n_easies--;
         easy->multi = NULL;
         easy->loop = NULL;
+        twist_multi_notify_timer (multi);
         return TWIST_OK;
       }
   return TWIST_ERR_INVAL;
@@ -264,6 +294,7 @@ twist_multi_socket_action (twist_multi *multi, int fd, int ev, int *running)
     }
   if (running != NULL)
     *running = count_running (multi);
+  twist_multi_notify_timer (multi);
   return TWIST_OK;
 }
 

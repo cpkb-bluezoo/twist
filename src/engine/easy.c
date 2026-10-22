@@ -20,12 +20,15 @@
 # include <config.h>
 #endif
 
+#include "gettext.h"
 #include "twist-int.h"
 
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 
 static char *
 opt_strdup (const char *s)
@@ -119,6 +122,7 @@ easy_clear (struct twist_easy *easy)
       free (easy->bearer);
     }
   free (easy->proxy);
+  free (easy->unix_path);
   free (easy->noproxy);
   free (easy->capath);
   free (easy->proxy_cainfo);
@@ -259,6 +263,26 @@ twist_easy_setopt (twist_easy *easy, int opt, ...)
       break;
     case TWISTOPT_CAINFO:
       replace (&easy->cainfo, va_arg (ap, const char *));
+      break;
+    case TWISTOPT_UNIX_SOCKET:
+    case TWISTOPT_ABSTRACT_UNIX_SOCKET:
+      {
+        const char *s = va_arg (ap, const char *);
+        int abstract = opt == TWISTOPT_ABSTRACT_UNIX_SOCKET;
+        struct sockaddr_un probe;
+
+        if (s != NULL && s[0] == 0)
+          s = NULL;
+        /* The address has room for the path and its NUL, or for the NUL that
+           starts an abstract name and the name.  */
+        if (s != NULL && strlen (s) + (abstract ? 0 : 1) > sizeof probe.sun_path - (abstract ? 1 : 0))
+          {
+            rc = TWIST_ERR_INVAL;
+            break;
+          }
+        replace (&easy->unix_path, s);
+        easy->unix_abstract = s != NULL && abstract;
+      }
       break;
     case TWISTOPT_RESUME_FROM:
       easy->resume_from = va_arg (ap, long long);
@@ -592,6 +616,19 @@ twist_transfer_start (struct twist_easy *easy)
   scheme = twist_scheme_by_name (easy->url->scheme);
   if (scheme == NULL || (scheme->flags & TWIST_SCHEME_READY) == 0)
     {
+      twist_easy_finish (easy, TWIST_ERR_UNSUPPORTED);
+      return TWIST_ERR_UNSUPPORTED;
+    }
+  /* A Unix socket is the HTTP handler's, and another scheme would otherwise
+     go to the host and port as if it had not been asked for.  */
+  if (easy->unix_path != NULL && strcmp (easy->url->scheme, "http") != 0
+      && strcmp (easy->url->scheme, "https") != 0
+      && strcmp (easy->url->scheme, "ws") != 0
+      && strcmp (easy->url->scheme, "wss") != 0)
+    {
+      twist_easy_set_error (easy, twist_strdup (_("a Unix socket is for http, "
+                                                  "https, ws and wss URLs "
+                                                  "only")));
       twist_easy_finish (easy, TWIST_ERR_UNSUPPORTED);
       return TWIST_ERR_UNSUPPORTED;
     }

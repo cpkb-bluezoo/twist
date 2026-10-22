@@ -257,8 +257,18 @@ A string: the response codings to accept.  An empty string is @samp{gzip} and
 @item TWISTOPT_CONTENT_ENCODING
 A string, @samp{gzip} or @samp{deflate}: compress the request body.  Any other
 coding is @code{TWIST_ERR_UNSUPPORTED}.  An empty string clears it.
+@item TWISTOPT_UNIX_SOCKET
+A string: the path of a Unix socket to connect to in place of the host and port
+of the URL, for @code{http}, @code{https}, @code{ws} and @code{wss}.  The URL
+still gives the @code{Host} header, the request target and the name that TLS
+checks.  The host is not looked up and no proxy is used.  HTTP/3 is not possible
+over a socket, and another scheme fails with @code{TWIST_ERR_UNSUPPORTED}.  A
+path too long for a socket address is @code{TWIST_ERR_INVAL}.  @code{NULL} or an
+empty string clears it.
 @item TWISTOPT_ABSTRACT_UNIX_SOCKET
-Declared, and not implemented: setting it returns @code{TWIST_ERR_UNSUPPORTED}.
+A string: the same for a socket in the abstract namespace of Linux, named
+without the NUL byte that starts it.  It replaces
+@code{TWISTOPT_UNIX_SOCKET}, and is replaced by it.
 @end table
 
 @subheading Redirects, failure and limits
@@ -267,8 +277,9 @@ Declared, and not implemented: setting it returns @code{TWIST_ERR_UNSUPPORTED}.
 @item TWISTOPT_FOLLOWLOCATION
 A long: follow redirects.
 @item TWISTOPT_MAXREDIRS
-A long: how many to follow, 50 by default.  At the limit the redirect is not
-followed, and its response is the result.
+A long: how many to follow, 50 by default.  A redirect after that many ends the
+transfer with @code{TWIST_ERR_REDIRECT}, and 0 refuses the first.  A value below
+0 is no limit.
 @item TWISTOPT_FAILONERROR
 A long: an HTTP status of 400 or more ends the transfer with
 @code{TWIST_ERR_HTTP}, and the body is not delivered.
@@ -473,10 +484,11 @@ value is not used.
 
 Called when the next deadline of the loop changes, with the time to it in
 milliseconds, or @minus{}1 for none.  It is called from inside
-@code{twist_multi_perform}.  A program that drives a multi handle with
-@code{twist_multi_socket_action} alone does not get it, and asks
-@code{twist_multi_timeout} after each call instead.  The return value is not
-used.
+@code{twist_multi_add_handle}, @code{twist_multi_remove_handle},
+@code{twist_multi_perform} and @code{twist_multi_socket_action}, after the call
+has done its work.  The program arranges to call
+@code{twist_multi_socket_action} with @code{TWIST_SOCKET_TIMEOUT} when the time
+is up.  The return value is not used.
 @end deftp
 
 @strong{Calls from a callback.}  From inside a callback, @code{twist_multi_add_handle},
@@ -826,7 +838,8 @@ Write response headers to @var{file}.  @code{-} is standard output.
 @itemx --location
 Follow redirections.
 @item --max-redirs @var{n}
-Redirect limit.  The default is 50.
+Redirect limit.  The default is 50, and @minus{}1 is no limit.  A redirect after
+the @var{n}th is exit status 47, and 0 refuses the first.
 @item -f
 @itemx --fail
 Fail the transfer when the HTTP status is 400 or above, and do not
@@ -907,6 +920,18 @@ not @samp{www.notlocal.com}.  An address matches itself, or a network as
 @samp{192.168.0.0/16}.  @samp{*} is every host, which is to use no proxy.
 This overrides the environment's @env{no_proxy} and @env{NO_PROXY}, and
 @option{--noproxy ""} turns them off.
+@item --unix-socket @var{path}
+Connect to the Unix socket @var{path} in place of the host and port of the URL,
+for @code{http}, @code{https}, @code{ws} and @code{wss}.  The URL still gives
+the @code{Host} header, the request target, and for @code{https} the name that
+the certificate must have.  The host is not looked up, a redirect to another
+host goes to the same socket, and no proxy is used, whether it is given with
+@option{-x} or by the environment.  HTTP/3 is not possible over a socket, and
+a URL of another scheme is exit status 1.  A socket that is not there is exit
+status 7.
+@item --abstract-unix-socket @var{name}
+The same for a socket in the abstract namespace of Linux.  @var{name} has no
+NUL byte before it.  This and @option{--unix-socket} replace each other.
 @item -U @var{user:password}
 @itemx --proxy-user @var{user:password}
 The user name and password for the proxy, if its URL has none.

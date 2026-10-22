@@ -84,6 +84,19 @@ class H(http.server.BaseHTTPRequestHandler):
         elif p == '/gz':
             # 64 MiB of zeros, in about 64 KB.
             self.reply(200, gzip.compress(bytes(64 * 1024 * 1024), 1), [('Content-Encoding', 'gzip')])
+        elif p.startswith('/hops/') or p.startswith('/closing/'):
+            # /hops/N redirects N times and then answers; /closing/N does the
+            # same and shuts the connection after each redirect.
+            pre, n = p.rsplit('/', 1)
+            n = int(n)
+            if n > 0:
+                extra = [('Location', '%s/%d' % (pre, n - 1))]
+                if pre == '/closing':
+                    extra.append(('Connection', 'close'))
+                    self.close_connection = True
+                self.reply(302, b'', extra)
+            else:
+                self.reply(200, b'end')
         elif p.startswith('/redir/'):
             loc = urllib.parse.unquote(p[len('/redir/'):])
             self.reply(302, b'', [('Location', loc)])
@@ -185,6 +198,43 @@ check "$(is "$(get -L "$base/redir/%2Flanded%3Fnext%3Dhttp%3A%2F%2Fx.example%2F"
 # One with dots in it is cleaned.
 check "$(is "$(get -L "$base/redir/..%2F..%2Fa%2F.%2Fb" | cut -d' ' -f2)" "/a/b")" \
   "dot segments in a redirect are removed"
+
+# A server that closes the connection after a redirect (many do) is not an
+# error: the next request goes on a new connection.  It ended with "connection
+# closed" (52), and then crashed when the transfer was freed.
+out=$(timeout 20 "$TWIST" -s -S -L -w ' %{http_code}' "$base/closing/3" 2>&1)
+check "$(is "$out" "end 200")" \
+  "a redirect that closes the connection is followed (got: $out)"
+out=$(timeout 20 "$TWIST" -s -S -L -w ' %{http_code}' "$base/closing/1" 2>&1)
+check "$(is "$out" "end 200")" "and one hop of it (got: $out)"
+
+# The redirect limit: --max-redirs N follows N redirects, and a redirect after
+# that is exit status 47, as curl's is.  It delivered the redirect's own
+# response and said it had worked.  -1 is no limit, and the default is 50.
+redirs ()
+{
+  lim=$1; url=$2
+  if [ -n "$lim" ]; then
+    timeout 20 "$TWIST" -s -L --max-redirs "$lim" -o /dev/null "$url" 2>/dev/null
+  else
+    timeout 20 "$TWIST" -s -L -o /dev/null "$url" 2>/dev/null
+  fi
+  echo $?
+}
+check "$(is "$(redirs 3 "$base/hops/3")" 0)" "three redirects are followed with a limit of 3"
+check "$(is "$(redirs 3 "$base/hops/4")" 47)" "a fourth is exit status 47"
+check "$(is "$(redirs 0 "$base/hops/1")" 47)" "a limit of 0 refuses the first redirect"
+check "$(is "$(redirs 0 "$base/hops/0")" 0)" "and has nothing to say to a page that is not one"
+check "$(is "$(redirs -1 "$base/hops/60")" 0)" "a limit of -1 is no limit"
+out=$(timeout 20 "$TWIST" -s -L --max-redirs -1 -w ' %{http_code}' "$base/hops/60" 2>&1)
+check "$(is "$out" "end 200")" "and all 60 redirects are followed (got: $out)"
+check "$(is "$(redirs '' "$base/hops/50")" 0)" "the default limit is 50: 50 are followed"
+check "$(is "$(redirs '' "$base/hops/51")" 47)" "and the 51st is not"
+timeout 20 "$TWIST" -s -o /dev/null "$base/hops/3" 2>/dev/null
+check "$(is $? 0)" "without -L a redirect is just the response"
+msg=$(timeout 20 "$TWIST" -s -S -L --max-redirs 3 -o /dev/null "$base/hops/4" 2>&1)
+check "$(is "$msg" "twist: (47) Maximum (3) redirects followed")" \
+  "the words are curl's (got: $msg)"
 
 # A coded body is decoded as it comes, and a small one that expands to a great
 # deal is delivered whole, in pieces, not held.

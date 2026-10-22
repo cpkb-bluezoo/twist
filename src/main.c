@@ -235,6 +235,10 @@ usage (void)
          stdout);
   fputs (_("      --noproxy LIST      hosts that do not go through a proxy\n"),
          stdout);
+  fputs (_("      --unix-socket PATH  connect to a Unix socket for http and https\n"),
+         stdout);
+  fputs (_("      --abstract-unix-socket NAME  the same, in the abstract namespace\n"),
+         stdout);
   fputs (_("  -x, --proxy URL         proxy (http://, https:// or socks5://), may hold\n"
            "                          user:password@\n"), stdout);
   fputs (_("      --proxy-cacert FILE CA bundle for an https proxy\n"), stdout);
@@ -1680,6 +1684,8 @@ main (int argc, char **argv)
     { "proxy-insecure", no_argument, NULL, 47 },
     { "proxy-template-udp", required_argument, NULL, 48 },
     { "noproxy", required_argument, NULL, 45 },
+    { "unix-socket", required_argument, NULL, 49 },
+    { "abstract-unix-socket", required_argument, NULL, 50 },
     { "proxy", required_argument, NULL, 'x' },
     { "proxy-user", required_argument, NULL, 'U' },
     { "user-agent", required_argument, NULL, 'A' },
@@ -1944,6 +1950,18 @@ main (int argc, char **argv)
           break;
         case 45:
           twist_easy_setopt (op->easy, TWISTOPT_NOPROXY, optarg);
+          break;
+        case 49:
+        case 50:
+          if (twist_easy_setopt (op->easy, c == 49
+                                 ? TWISTOPT_UNIX_SOCKET
+                                 : TWISTOPT_ABSTRACT_UNIX_SOCKET, optarg)
+              != TWIST_OK)
+            {
+              diag (_("the Unix socket name is too long"));
+              suggest ();
+              status = 2;
+            }
           break;
         case 46:
           twist_easy_setopt (op->easy, TWISTOPT_PROXY_CAINFO, optarg);

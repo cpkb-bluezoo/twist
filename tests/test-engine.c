@@ -1330,6 +1330,132 @@ test_release_transfer (void)
   close (fd);
 }
 
+/* The timer callback tells a program driving the multi handle with
+   twist_multi_socket_action when to call it next.  It was called only from
+   twist_multi_perform, so such a program never heard from it.  It is called
+   when the deadline changes, after adding a handle and after each
+   twist_multi_socket_action, and not from inside itself.  */
+static int timer_calls;
+static long timer_last;
+static long timer_first;
+static int timer_recursive_rc;
+
+static int
+on_multi_timer (twist_multi *multi, long ms, void *user)
+{
+  (void) user;
+  if (timer_calls++ == 0)
+    timer_first = ms;
+  timer_last = ms;
+  timer_recursive_rc = twist_multi_perform (multi, NULL);
+  return 0;
+}
+
+static void
+test_multi_timer_callback (void)
+{
+  struct timespec nap = { 0, 5000000 };
+  int port = 0;
+  int fd = listen_loopback (&port);
+  twist_multi *multi;
+  twist_easy *easy;
+  long ms = -2;
+  int running = 1;
+  int calls;
+  int i;
+
+  check (fd >= 0, "timer listener");
+  multi = twist_multi_init ();
+  easy = timeout_easy (port);
+  twist_multi_setopt (multi, TWISTMOPT_TIMERFUNCTION, on_multi_timer);
+  check (twist_multi_add_handle (multi, easy) == TWIST_OK, "timer add");
+  check (timer_calls >= 1 && timer_first > 0,
+         "the timer callback hears of the deadline of a new handle");
+  calls = timer_calls;
+  twist_multi_timeout (multi, &ms);
+  check (ms <= timer_last && timer_last - ms < 100,
+         "and what it was told is what twist_multi_timeout says");
+  check (timer_recursive_rc == TWIST_ERR_RECURSIVE,
+         "a multi call from inside it is refused");
+  for (i = 0; i < 400 && running > 0; i++)
+    {
+      twist_multi_socket_action (multi, TWIST_SOCKET_TIMEOUT, 0, &running);
+      nanosleep (&nap, NULL);
+    }
+  check (running == 0, "the handle ended, with socket_action alone");
+  check (timer_calls > calls, "the callback was told again as the deadline moved");
+  twist_multi_timeout (multi, &ms);
+  check ((ms < 0 && timer_last < 0)
+         || (ms >= 0 && timer_last >= 0 && ms <= timer_last
+             && timer_last - ms < 100),
+         "the last thing it was told is the deadline now");
+  twist_multi_remove_handle (multi, easy);
+  twist_multi_cleanup (multi);
+  twist_easy_cleanup (easy);
+  close (fd);
+}
+
+/* A Unix socket in place of the host and port of the URL (TWISTOPT_UNIX_SOCKET
+   and the abstract form).  The data path is in integration/http-unix.sh; here,
+   what is refused and what is not looked up.  */
+static void
+test_unix_socket_options (void)
+{
+  twist_easy *easy = twist_easy_init ();
+  char big[200];
+
+  memset (big, 'a', sizeof big - 1);
+  big[sizeof big - 1] = 0;
+  check (twist_easy_setopt (easy, TWISTOPT_UNIX_SOCKET, "/tmp/twist.sock")
+         == TWIST_OK, "a socket path");
+  check (twist_easy_setopt (easy, TWISTOPT_ABSTRACT_UNIX_SOCKET, "twist")
+         == TWIST_OK, "an abstract name");
+  check (twist_easy_setopt (easy, TWISTOPT_UNIX_SOCKET, big) == TWIST_ERR_INVAL,
+         "a path too long for the address is refused");
+  check (twist_easy_setopt (easy, TWISTOPT_ABSTRACT_UNIX_SOCKET, big)
+         == TWIST_ERR_INVAL, "and so is a name");
+  check (twist_easy_setopt (easy, TWISTOPT_UNIX_SOCKET, NULL) == TWIST_OK
+         && twist_easy_setopt (easy, TWISTOPT_ABSTRACT_UNIX_SOCKET, "")
+         == TWIST_OK, "NULL and an empty string clear it");
+  twist_easy_cleanup (easy);
+
+  /* The URL's host is not looked up: a name that cannot be resolved fails to
+     connect to the socket, which is not there.  */
+  easy = twist_easy_init ();
+  twist_easy_setopt (easy, TWISTOPT_URL, "http://no-such-host.invalid/");
+  twist_easy_setopt (easy, TWISTOPT_UNIX_SOCKET, "/nonexistent/twist.sock");
+  check (twist_easy_perform (easy) == TWIST_ERR_CONNECT,
+         "the host of the URL is not looked up");
+  twist_easy_cleanup (easy);
+
+  /* Proxies are not used.  */
+  easy = twist_easy_init ();
+  twist_easy_setopt (easy, TWISTOPT_URL, "http://no-such-host.invalid/");
+  twist_easy_setopt (easy, TWISTOPT_PROXY, "http://no-such-proxy.invalid:3128");
+  twist_easy_setopt (easy, TWISTOPT_UNIX_SOCKET, "/nonexistent/twist.sock");
+  check (twist_easy_perform (easy) == TWIST_ERR_CONNECT,
+         "nor is a proxy used or looked up");
+  twist_easy_cleanup (easy);
+
+  /* Only the schemes of the HTTP handler.  */
+  easy = twist_easy_init ();
+  twist_easy_setopt (easy, TWISTOPT_URL, "ftp://no-such-host.invalid/x");
+  twist_easy_setopt (easy, TWISTOPT_UNIX_SOCKET, "/nonexistent/twist.sock");
+  check (twist_easy_perform (easy) == TWIST_ERR_UNSUPPORTED,
+         "another scheme is refused, not sent over TCP");
+  twist_easy_cleanup (easy);
+
+  /* No QUIC over a Unix socket.  */
+  easy = twist_easy_init ();
+  twist_easy_setopt (easy, TWISTOPT_URL, "https://no-such-host.invalid/");
+  twist_easy_setopt (easy, TWISTOPT_HTTP_VERSION,
+                     (long) TWIST_HTTP_VERSION_3ONLY);
+  twist_easy_setopt (easy, TWISTOPT_UNIX_SOCKET, "/nonexistent/twist.sock");
+  check (twist_easy_perform (easy) == TWIST_ERR_UNSUPPORTED,
+         "HTTP/3 is refused");
+  twist_easy_cleanup (easy);
+}
+
 /* A person's home: $HOME if it says, else what the password file says.
    They differ when something sets $HOME to somewhere else, and lack of it
    (a cron job, a stripped environment) must not mean having no home.  */
@@ -1717,6 +1843,8 @@ main (void)
   test_multi_from_callback ();
   test_share_data_locks ();
   test_cleanup_handle_in_multi ();
+  test_multi_timer_callback ();
+  test_unix_socket_options ();
   test_home_dir ();
   test_pool_completion_at_cleanup ();
   test_pool_eviction_stays_on_the_loop ();

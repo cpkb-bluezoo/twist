@@ -52,8 +52,19 @@ test_auth (void)
          && use_get == 1, "301");
   check (twist_http_should_redirect (307, "POST", 1, 0, 5, &use_get) == 1
          && use_get == 0, "307");
-  check (twist_http_should_redirect (302, "GET", 1, 5, 5, &use_get) == 0,
+  /* At the limit a redirect is not followed and the transfer is told so (-1),
+     which is not the same as a response that is not a redirect (0).  A limit
+     below 0 is none.  */
+  check (twist_http_should_redirect (302, "GET", 1, 5, 5, &use_get) == -1,
          "max");
+  check (twist_http_should_redirect (302, "GET", 1, 0, 0, &use_get) == -1,
+         "max 0");
+  check (twist_http_should_redirect (200, "GET", 1, 5, 5, &use_get) == 0,
+         "not a redirect at the limit");
+  check (twist_http_should_redirect (302, "GET", 0, 5, 5, &use_get) == 0,
+         "not following");
+  check (twist_http_should_redirect (302, "GET", 1, 1000, -1, &use_get) == 1,
+         "no limit");
   /* A redirect is followed only to the schemes this transfer speaks.  */
   check (twist_http_redirect_scheme_ok ("http") == 1
          && twist_http_redirect_scheme_ok ("https") == 1
