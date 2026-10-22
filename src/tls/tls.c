@@ -179,6 +179,9 @@ tls_start (struct twist_connection *conn, const struct twist_tls_want *want)
   ev.early_data = tls_early;
   ev.early_data_result = tls_early_result;
   ev.closed = tls_closed;
+  /* -k: the chain is not looked at.  */
+  if (!want->verify)
+    ev.verify_peer = twist_verify_accept;
   rc = gq_tlsauto_client_new (&t->tls, &cfg, &ev, 0);
   if (rc != GQ_OK)
     {

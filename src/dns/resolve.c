@@ -1063,7 +1063,7 @@ connect_doq (struct dns_query *q, const struct twist_dns_addr *addr, int port,
   if (rc != TWIST_OK)
     return rc;
   rc = twist_quic_dial (q->loop, q->peer_name, "doq", addr, port, q->cainfo, q->capath,
-                        q->certfile, q->keyfile, &conn);
+                        q->certfile, q->keyfile, 1, &conn);
   if (rc != TWIST_OK)
     return rc;
   q->conn = conn;

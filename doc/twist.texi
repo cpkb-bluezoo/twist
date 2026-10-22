@@ -177,8 +177,10 @@ Compress the request body.  @var{coding} is @code{gzip} or
 by @option{--next}.
 @item -k
 @itemx --insecure
-Accepted for compatibility with curl.  The TLS engine still checks the
-configured trust store.  For @code{sftp} and @code{scp} it skips the
+Do not check the certificate of the server for TLS, including HTTP/3: any
+chain is accepted, whoever it names.  A file or directory of authorities that
+the environment names and that cannot be read does not matter then.  For
+@code{sftp} and @code{scp} it skips the
 @file{known_hosts} check (@pxref{SFTP and SCP}); a fingerprint given with
 @option{--hostpubsha256} is still checked.
 @item -x @var{url}

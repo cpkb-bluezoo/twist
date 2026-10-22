@@ -345,7 +345,9 @@ Reset by
 .BR \-\-next .
 .TP
 .B \-k, \-\-insecure
-Accept the option.  The TLS engine still checks the trust store.
+Do not check the certificate of the server for TLS, including HTTP/3: any
+chain is accepted, whoever it names.  A file or directory of authorities that
+the environment names and that cannot be read does not matter then.
 For sftp and scp it skips the
 .I known_hosts
 check; a fingerprint given with

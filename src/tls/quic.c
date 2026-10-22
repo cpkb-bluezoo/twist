@@ -45,6 +45,7 @@ struct twist_quic
   gq_trust *trust;
   struct twist_client_auth *auth;
   gq_tls_config tls;
+  int verify;
   FILE *qlog;
   int qlog_tried;
   gq_slice alpn;
@@ -764,6 +765,9 @@ fill_events (gq_conn_events *ev, struct twist_quic *q)
   ev->preferred_address = ev_preferred;
   ev->early_data_result = ev_early;
   ev->new_token = ev_token;
+  /* -k: the chain is not looked at.  */
+  if (!q->verify)
+    ev->verify_peer = twist_verify_accept;
   ev->ticket = ev_ticket;
 }
 
@@ -828,7 +832,7 @@ int
 twist_quic_dial (struct twist_loop *loop, const char *server_name,
                  const char *alpn, const struct twist_dns_addr *addr,
                  int port, const char *cafile, const char *capath,
-                 const char *certfile, const char *keyfile,
+                 const char *certfile, const char *keyfile, int verify,
                  struct twist_connection **out)
 {
   struct twist_quic *q;
@@ -856,6 +860,7 @@ twist_quic_dial (struct twist_loop *loop, const char *server_name,
   if (q == NULL)
     return TWIST_ERR_NOMEM;
   q->loop = loop;
+  q->verify = verify;
   q->fd = -1;
   q->server_name = twist_strdup (server_name);
   memcpy (q->alpn_mem, alpn, alpn_len);
@@ -990,7 +995,7 @@ quic_connect (struct twist_easy *easy, struct twist_connection **out)
     return TWIST_ERR_RESOLVE;
   return twist_quic_dial (easy->loop, easy->url->host, "h3", &addr,
                           easy->url->port, easy->cainfo, easy->capath, easy->sslcert,
-                          easy->sslkey, out);
+                          easy->sslkey, easy->verifypeer, out);
 }
 
 int

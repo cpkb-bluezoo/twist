@@ -363,6 +363,10 @@ int twist_trust_load (struct gq_trust *trust, const char *cafile,
                       const char *capath, int verify);
 /* SSLKEYLOGFILE: whether it is set, and the callback that writes a line to it
    (gq_tls_config.keylog).  */
+/* Accepts any chain (gq_tlsconn_events.verify_peer, gq_conn_events.verify_peer):
+   for -k, which is not to check the peer.  */
+int twist_verify_accept (void *user, const gq_slice *chain, size_t n,
+                         const char *server_name);
 int twist_keylog_wanted (void);
 void twist_keylog_write (void *user, const char *line);
 struct twist_client_auth;
@@ -387,7 +391,7 @@ extern int (*twist_quic_connect_fn) (struct twist_easy *easy,
 int twist_quic_dial (struct twist_loop *loop, const char *server_name,
                      const char *alpn, const struct twist_dns_addr *addr,
                      int port, const char *cafile, const char *capath,
-                     const char *certfile, const char *keyfile,
+                     const char *certfile, const char *keyfile, int verify,
                      struct twist_connection **out);
 int twist_quic_open_stream (struct twist_connection *conn);
 int twist_quic_can_open (struct twist_connection *conn);
