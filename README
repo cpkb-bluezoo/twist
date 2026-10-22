@@ -3,10 +3,10 @@ Twist
 
 Copyright (C) 2026 Chris Burdess
 
-Twist is a GNU transfer client.  HTTP/1, HTTP/2, and HTTP/3 are
+Twist is a transfer client for the GNU system.  HTTP/1, HTTP/2, and HTTP/3 are
 implemented, and further schemes plug into the same transfer engine.
 The command line is mostly compatible with curl's: the options, standard
-streams and exit status are the same, so that twist can stand in for it in
+streams and exit status are the same, so that twist can replace it in
 scripts.
 
 Dependencies
@@ -18,8 +18,6 @@ Dependencies
     must find ahead of any older system copy (configure checks this)
   - zlib
   - GNU readline, for the twist program only
-
-Nothing else is added without explicit approval.
 
 Build and install
 -----------------
