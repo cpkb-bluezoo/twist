@@ -11,7 +11,7 @@ AM_TESTS_ENVIRONMENT = \
 	LD_LIBRARY_PATH="`$(PKG_CONFIG) --variable=libdir quickstep`:`$(PKG_CONFIG) --variable=libdir foxtrot`:$$LD_LIBRARY_PATH"; \
 	export LD_LIBRARY_PATH;
 
-TESTS = skip-network.sh ssh-openssh.sh
-check_SCRIPTS = skip-network.sh ssh-openssh.sh
+TESTS = skip-network.sh ssh-openssh.sh http-progress.sh
+check_SCRIPTS = skip-network.sh ssh-openssh.sh http-progress.sh
 
-EXTRA_DIST = skip-network.sh ssh-openssh.sh proxy-peer.py
+EXTRA_DIST = skip-network.sh ssh-openssh.sh http-progress.sh proxy-peer.py

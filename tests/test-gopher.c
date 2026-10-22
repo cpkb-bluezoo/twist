@@ -88,6 +88,8 @@ test_gopher (void)
   feed_bin (gopher_recv, g, menu, sizeof menu, 1);
   check (mail_body_len == sizeof menu
          && memcmp (mail_body, menu, sizeof menu) == 0, "gopher body");
+  check (easy->progress.downloaded == (long long) sizeof menu,
+         "gopher progress");
   check (!easy->done, "gopher still open");
   twist_gopher_closed (g, TWIST_ERR_CLOSED);
   check (easy->done && easy->result == TWIST_OK, "gopher close");

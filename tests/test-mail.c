@@ -179,6 +179,8 @@ test_mail (void)
         check (strcmp (twist_smtp_command (smtp), stuffed) == 0, "smtp body");
         feed_n (smtp_recv, smtp, "250 queued\r\n", split);
         check (easy->done && easy->result == TWIST_OK, "smtp done");
+        check (easy->progress.ul_known && easy->progress.size_ul == 8
+               && easy->progress.uploaded == 8, "smtp progress");
         check (strcmp (twist_smtp_command (smtp), "QUIT\r\n") == 0, "quit");
         twist_easy_cleanup (easy);
         easy = twist_easy_init ();
@@ -205,6 +207,7 @@ test_mail (void)
     check (easy->done && easy->result == TWIST_OK, "pop done");
     check (mail_body_len == 7 && memcmp (mail_body, "hello\r\n", 7) == 0,
            "pop body");
+    check (easy->progress.downloaded == 7, "pop progress");
     twist_easy_cleanup (easy);
   }
   {
@@ -239,6 +242,9 @@ test_mail (void)
     check (easy->done && easy->result == TWIST_OK, "imap done");
     check (mail_body_len == 5 && memcmp (mail_body, "hello", 5) == 0,
            "imap body");
+    /* The size is the literal's.  */
+    check (easy->progress.dl_known && easy->progress.size_dl == 5
+           && easy->progress.downloaded == 5, "imap progress");
     twist_easy_cleanup (easy);
   }
 }

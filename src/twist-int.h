@@ -26,6 +26,7 @@
 
 #include <quickstep/frame.h>
 
+#include <stdio.h>
 #include <sys/types.h>
 
 #define TWIST_IN_CEILING (256u * 1024u)
@@ -81,6 +82,40 @@ struct twist_url
   int port;
   int port_set;
   int path_set;
+};
+
+/* Seconds of history the "current speed" looks back over, plus one.  */
+#define TWIST_PROGRESS_HISTORY 6
+
+/* The counters of one transfer, as curl keeps them, and what the meter needs
+   to draw itself.  src/engine/progress.c.  */
+struct twist_progress
+{
+  int hide;			/* TWISTOPT_NOPROGRESS; 1 by default.  */
+  FILE *err;			/* NULL: standard error.  */
+  twist_xferinfo_callback xferinfo;
+  void *xferinfo_data;
+  int begun;			/* Between begin and end.  */
+  int headers_out;		/* The two heading lines are written.  */
+  int shown;			/* The meter has drawn at least once.  */
+  int aborted;			/* The callback said stop.  */
+  uint64_t start_ms;
+  long long size_dl;
+  long long size_ul;
+  int dl_known;
+  int ul_known;
+  long long downloaded;
+  long long uploaded;
+  long long dlspeed;		/* Average, bytes a second.  */
+  long long ulspeed;
+  long long current_speed;	/* Over the last few seconds.  */
+  long long timespent_us;
+  long long lastshow;		/* The second of the last drawing; -1: none.  */
+  unsigned speeder_n;
+  long long speeder[TWIST_PROGRESS_HISTORY];
+  uint64_t speeder_ms[TWIST_PROGRESS_HISTORY];
+  struct twist_timer *tick;
+  uint64_t tick_due;		/* A second after the last update.  */
 };
 
 struct twist_easy
@@ -159,6 +194,8 @@ struct twist_easy
   void (*xfer_free) (void *xfer);
   uint64_t recv_stamp_ms;
   uint64_t recv_bytes_window;
+  long long infilesize;		/* TWISTOPT_INFILESIZE; -1: not known.  */
+  struct twist_progress progress;
 };
 
 struct twist_multi
@@ -1078,5 +1115,31 @@ int twist_easy_finish (struct twist_easy *easy, int result);
 int twist_easy_perform_in (struct twist_multi *multi, struct twist_easy *easy);
 void twist_easy_release_transfer (struct twist_easy *easy);
 int twist_transfer_start (struct twist_easy *easy);
+
+/* ---- progress ---- */
+
+/* Written as curl does it (lib/progress.c).  A transfer calls begin once,
+   end once, and in between says what it has learned: the size of what it will
+   download or upload, and the bytes as they go.  Each of those draws the meter
+   or calls the callback if the second has changed.  A redirect is a hop: the
+   line is finished, the sizes are forgotten and the counters start again.  */
+void twist_progress_begin (struct twist_easy *easy);
+void twist_progress_end (struct twist_easy *easy, int result);
+void twist_progress_hop (struct twist_easy *easy);
+void twist_progress_dl_size (struct twist_easy *easy, long long size);
+void twist_progress_ul_size (struct twist_easy *easy, long long size);
+void twist_progress_downloaded (struct twist_easy *easy, size_t n);
+/* N bytes of the body have been given to the application: counted for
+   TWISTINFO_SIZE_DOWNLOAD, and for the progress.  */
+void twist_easy_downloaded (struct twist_easy *easy, size_t n);
+/* How much the transfer will upload, from the postfields or the application
+   (TWISTOPT_INFILESIZE); -1 if that is not known.  */
+long long twist_easy_upload_size (const struct twist_easy *easy);
+void twist_progress_uploaded (struct twist_easy *easy, size_t n);
+int twist_progress_update (struct twist_easy *easy);
+void twist_progress_release (struct twist_easy *easy);
+/* The pieces, for the tests.  BUF takes 6 bytes, and 10.  */
+char *twist_progress_max5 (long long bytes, char *buf);
+char *twist_progress_time2str (long long seconds, char *buf);
 
 #endif /* TWIST_INT_H */

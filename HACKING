@@ -107,6 +107,15 @@ a virtual clock into the loop).  Anything that dials a peer goes in
 integration/ and skips with exit 77 when the peer is absent.
 integration/ is not a subdirectory of 'make check'.
 
+The progress meter and bar are compared with curl's: the layout and the
+arithmetic in tests/test-progress.c and tests/test-bar.c, with a clock the test
+sets, and the lines curl wrote for the same numbers; what the tool shows and
+when in tests/cli-progress.sh, on file:// URLs; the sizes over HTTP in
+integration/http-progress.sh, against a server of python's.  To compare with
+curl itself, run both on the same URL with COLUMNS set and 2>&1 >/dev/null,
+and look at the bytes (| od -c or | cat -v).  A hand test of the tool on a
+terminal shows nothing unless the body goes to a file.
+
 Fuzzing
 -------
 

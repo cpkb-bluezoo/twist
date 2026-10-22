@@ -258,7 +258,7 @@ deliver (struct twist_mqtt *m, const uint8_t *data, size_t len)
     return TWIST_OK;
   if (easy->write_cb == NULL)
     {
-      easy->size_download += len;
+      twist_easy_downloaded (easy, len);
       return TWIST_OK;
     }
   while (off < len)
@@ -275,7 +275,7 @@ deliver (struct twist_mqtt *m, const uint8_t *data, size_t len)
         return TWIST_ERR_ABORTED;
       off += chunk;
     }
-  easy->size_download += len;
+  twist_easy_downloaded (easy, len);
   return TWIST_OK;
 }
 
@@ -351,6 +351,7 @@ after_connack (struct twist_mqtt *m)
       rc = body_len (m->easy, &payload, &owned, &plen);
       if (rc != TWIST_OK)
         return rc;
+      twist_progress_ul_size (m->easy, (long long) plen);
       hdr[n++] = 0x30;
       rc = put_varint (hdr, sizeof hdr, &n, 2 + tlen + plen);
       if (rc == TWIST_OK)
@@ -369,6 +370,7 @@ after_connack (struct twist_mqtt *m)
       free (owned);
       if (rc != TWIST_OK)
         return rc;
+      twist_progress_uploaded (m->easy, plen);
       rc = mqtt_out (m, disc, sizeof disc, 0);
       if (rc != TWIST_OK)
         return rc;

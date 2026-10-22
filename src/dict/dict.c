@@ -333,7 +333,7 @@ deliver (struct twist_dict *d, const uint8_t *data, size_t len)
     d->saw = 1;
   if (easy->write_cb == NULL || len == 0)
     {
-      easy->size_download += len;
+      twist_easy_downloaded (easy, len);
       return TWIST_OK;
     }
   while (off < len)
@@ -350,7 +350,7 @@ deliver (struct twist_dict *d, const uint8_t *data, size_t len)
         return TWIST_ERR_ABORTED;
       off += chunk;
     }
-  easy->size_download += len;
+  twist_easy_downloaded (easy, len);
   return TWIST_OK;
 }
 

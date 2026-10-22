@@ -91,6 +91,15 @@ typedef size_t (*twist_read_callback) (char *ptr, size_t size, size_t nmemb,
    if it were whole.  sftp and scp honour it.  */
 #define TWIST_READFUNC_ABORT ((size_t) 0x10000000)
 
+/* The progress callback.  TOTAL is 0 where the size is not known.  Returning
+   0 goes on and leaves the drawing to the callback; returning
+   TWIST_PROGRESSFUNC_CONTINUE goes on and has the library draw its own
+   meter as well; anything else stops the transfer with TWIST_ERR_ABORTED.  */
+typedef int (*twist_xferinfo_callback) (void *clientp, long long dltotal,
+                                        long long dlnow, long long ultotal,
+                                        long long ulnow);
+#define TWIST_PROGRESSFUNC_CONTINUE 0x10000001
+
 typedef struct twist_easy twist_easy;
 typedef struct twist_multi twist_multi;
 typedef struct twist_share twist_share;
@@ -209,7 +218,22 @@ enum twist_opt
   /* "user:password" for the proxy (TWISTOPT_PROXY), if the proxy's URL has
      none.  Used to open a tunnel (CONNECT, or SOCKS5), as Basic credentials
      or the SOCKS5 user name and password.  Empty clears it.  */
-  TWISTOPT_PROXYUSERPWD = 55
+  TWISTOPT_PROXYUSERPWD = 55,
+  /* A long.  1, the default, shows no progress meter and calls no
+     TWISTOPT_XFERINFOFUNCTION; 0 does both.  As CURLOPT_NOPROGRESS.  */
+  TWISTOPT_NOPROGRESS = 56,
+  /* A twist_xferinfo_callback, called as the transfer goes on when
+     TWISTOPT_NOPROGRESS is 0.  NULL clears it.  */
+  TWISTOPT_XFERINFOFUNCTION = 57,
+  /* The pointer that is passed to TWISTOPT_XFERINFOFUNCTION.  */
+  TWISTOPT_XFERINFODATA = 58,
+  /* A FILE * that the progress meter is written to.  NULL, the default, is
+     standard error.  Twist does not close it.  */
+  TWISTOPT_STDERR = 59,
+  /* A long long: how many bytes TWISTOPT_READFUNCTION will give, if the
+     application knows.  It is for the progress only; no request carries it.
+     -1, the default, is not known.  */
+  TWISTOPT_INFILESIZE = 60
 };
 
 enum twist_dns_transport

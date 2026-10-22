@@ -106,6 +106,28 @@ parser_fail (struct twist_ftp_parser *p, int err)
     p->ev.failure (p->ev.user, err);
 }
 
+/* The size a server gives in its reply to RETR: "(1234 bytes)".  -1 if it
+   gives none.  Curl takes it from there too.  */
+static long long
+reply_size (const char *text, size_t len)
+{
+  size_t i;
+
+  for (i = 0; i < len; i++)
+    {
+      long long n = 0;
+      size_t j = i + 1;
+
+      if (text[i] != '(' || j >= len || !isdigit ((unsigned char) text[j]))
+        continue;
+      while (j < len && isdigit ((unsigned char) text[j]) && n < (1LL << 55))
+        n = n * 10 + (text[j++] - '0');
+      if (j + 6 <= len && memcmp (text + j, " bytes", 6) == 0)
+        return n;
+    }
+  return -1;
+}
+
 static int
 parse_code (const uint8_t *line, size_t n, int *code, int *dash,
             const uint8_t **text, size_t *text_len)
@@ -662,7 +684,11 @@ ftp_on_reply (void *user, int code, int final, const char *text, size_t len)
     case FTP_WAIT:
       if (code == 125 || code == 150)
         {
+          long long size = f->list ? -1 : reply_size (text, len);
+
           f->state = FTP_WAIT;
+          if (size >= 0)
+            twist_progress_dl_size (f->easy, size);
           return;
         }
       if (code == 226 || code == 250)
@@ -829,12 +855,12 @@ twist_ftp_data (struct twist_ftp *f, const uint8_t *data, size_t len)
                                     data, len);
       if (accepted < len)
         {
-          f->easy->size_download += accepted;
+          twist_easy_downloaded (f->easy, accepted);
           ftp_complete (f, TWIST_ERR_ABORTED);
           return len;
         }
     }
-  f->easy->size_download += len;
+  twist_easy_downloaded (f->easy, len);
   return len;
 }
 

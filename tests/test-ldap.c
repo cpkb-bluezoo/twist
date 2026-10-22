@@ -83,6 +83,8 @@ test_ldap (void)
   check (easy->done && easy->result == TWIST_OK, "ldap done");
   check (mail_body_len == sizeof ldif - 1
          && memcmp (mail_body, ldif, mail_body_len) == 0, "ldif");
+  check (easy->progress.downloaded == (long long) mail_body_len,
+         "ldap progress");
   cmd = twist_ldap_command (ldap, &n);
   check (has_bytes (cmd, n, "\x42", 1), "unbind");
   twist_easy_cleanup (easy);

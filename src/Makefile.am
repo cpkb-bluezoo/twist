@@ -67,6 +67,7 @@ libtwist_la_SOURCES = \
   engine/multi.c \
   engine/glob.c \
   engine/pool.c \
+  engine/progress.c \
   engine/rate.c \
   engine/proxy.c \
   engine/vars.c \
@@ -114,7 +115,7 @@ libtwist_la_SOURCES = \
   tls/quic.c \
   tls/tls.c
 
-twist_SOURCES = main.c
+twist_SOURCES = bar.c bar.h main.c
 twist_LDADD = libtwist.la $(READLINE_LIBS)
 
 ## For fuzz/fuzz.sh, which compiles the library again with sanitizers and

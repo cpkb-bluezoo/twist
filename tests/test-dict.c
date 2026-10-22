@@ -127,6 +127,8 @@ test_dict (void)
   feed_bin (dict_recv, d, reply, sizeof reply - 1, 1);
   check (mail_body_len == sizeof reply - 1
          && memcmp (mail_body, reply, mail_body_len) == 0, "dict body");
+  check (easy->progress.downloaded == (long long) mail_body_len,
+         "dict progress");
   check (!easy->done, "dict still open");
   twist_dict_closed (d, TWIST_ERR_CLOSED);
   check (easy->done && easy->result == TWIST_OK, "dict close");

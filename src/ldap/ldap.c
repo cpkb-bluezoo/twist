@@ -599,7 +599,7 @@ emit_bytes (struct twist_ldap *l, const void *data, size_t n)
     return TWIST_OK;
   if (easy->write_cb == NULL)
     {
-      easy->size_download += n;
+      twist_easy_downloaded (easy, n);
       return TWIST_OK;
     }
   while (off < n)
@@ -616,7 +616,7 @@ emit_bytes (struct twist_ldap *l, const void *data, size_t n)
         return TWIST_ERR_ABORTED;
       off += chunk;
     }
-  easy->size_download += n;
+  twist_easy_downloaded (easy, n);
   return TWIST_OK;
 }
 

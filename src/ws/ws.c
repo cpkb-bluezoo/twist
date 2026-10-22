@@ -253,12 +253,12 @@ deliver (struct twist_ws *w, const uint8_t *data, size_t len)
   if (easy == NULL || len == 0)
     {
       if (easy != NULL)
-        easy->size_download += len;
+        twist_easy_downloaded (easy, len);
       return TWIST_OK;
     }
   if (easy->write_cb == NULL)
     {
-      easy->size_download += len;
+      twist_easy_downloaded (easy, len);
       return TWIST_OK;
     }
   while (off < len)
@@ -275,7 +275,7 @@ deliver (struct twist_ws *w, const uint8_t *data, size_t len)
         return TWIST_ERR_ABORTED;
       off += chunk;
     }
-  easy->size_download += len;
+  twist_easy_downloaded (easy, len);
   return TWIST_OK;
 }
 

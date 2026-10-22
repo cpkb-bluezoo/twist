@@ -168,6 +168,8 @@ test_tftp (void)
   check (!easy->done, "tftp put open");
   twist_tftp_receive (t, ack1, sizeof ack1);
   check (easy->done && easy->result == TWIST_OK, "tftp put done");
+  check (easy->progress.ul_known && easy->progress.size_ul == 3
+         && easy->progress.uploaded == 3, "tftp upload progress");
   easy->postfields = NULL;
   twist_easy_cleanup (easy);
 
@@ -196,6 +198,7 @@ test_tftp (void)
   twist_tftp_receive (t, data_hi, sizeof data_hi);
   test_tftp_is (t, ack1, sizeof ack1, "tftp ack hi");
   check (mail_body_len == 2 && memcmp (mail_body, "hi", 2) == 0, "tftp body");
+  check (easy->progress.downloaded == 2, "tftp download progress");
   check (easy->done && easy->result == TWIST_OK, "tftp get done");
   twist_easy_cleanup (easy);
 

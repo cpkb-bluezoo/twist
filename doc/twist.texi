@@ -41,6 +41,7 @@ Documentation License''.
 * Library::
 * Invocation::
 * Protocols::
+* Progress meter::
 * Variables::
 * URL globbing::
 * SFTP and SCP::
@@ -249,11 +250,19 @@ lookup, the TCP connect, a proxy, and the SSH handshake up to the login
 (@pxref{SFTP and SCP}).  Up to three decimal places are accepted.
 @item -s
 @itemx --silent
-Hide the transfer diagnostic.  The exit status is unchanged.
+Hide the progress meter and the transfer diagnostic.  The exit status
+is unchanged.  @option{--no-silent} undoes it.
 @item -S
 @itemx --show-error
-Show the transfer diagnostic when @option{-s} was also given.  The
-last of @option{-s} and @option{-S} wins.
+Show the transfer diagnostic when @option{-s} was also given, in either
+order.  @option{--no-show-error} undoes it.
+@item -#
+@itemx --progress-bar
+Show the progress as a bar in place of the meter (@pxref{Progress
+meter}).  @option{--no-progress-bar} undoes it.
+@item --no-progress-meter
+Hide the progress meter and the bar, and leave the diagnostics alone.
+@option{--progress-meter} undoes it.
 @item --stderr @var{file}
 Write diagnostics to @var{file}.  @code{-} keeps standard error.  This
 applies to every URL.
@@ -288,7 +297,8 @@ Accepted.  No config file is read.
 @item --next
 Start a separate transfer for the following URL.  Options after it do
 not inherit the previous URL's method, body, headers, output, proxy,
-user, or timeouts.  @option{-s}, @option{-S}, @option{--stderr}, and
+user, or timeouts.  @option{-s}, @option{-S}, @option{-#},
+@option{--no-progress-meter}, @option{--stderr}, and
 @option{--fail-early} still apply.  A URL is required before
 @option{--next}.
 @item -E @var{file}
@@ -367,9 +377,8 @@ uploads one.  The transfer offers block size 512 and retransmits a
 lost packet.  A proxy is not used.  A server error packet exits 68
 through 74.
 
-There is no progress meter, config file, URL globbing,
-@option{--fail-with-body}, verbose trace, cookie jar, or parallel
-transfer.
+There is no config file, @option{--fail-with-body}, verbose trace,
+cookie jar, or parallel transfer.
 
 @heading Exit status
 @table @asis
@@ -501,6 +510,59 @@ written.
 These schemes are recognised, but are not implemented, and exit 1:
 @code{rtmp}, @code{rtmps}, @code{rtsp}, @code{smb}, @code{smbs} and
 @code{telnet}.
+
+@node Progress meter
+@chapter Progress meter
+
+Twist shows the progress of a transfer on standard error, or on
+@option{--stderr}, as curl does: a heading of two lines and then one
+line that is written over and over, with the amount transferred, the
+speeds, and the time spent and left:
+
+@example
+  % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
+                                 Dload  Upload   Total   Spent    Left  Speed
+100 80000  100 80000    0     0  40000      0  0:00:02  0:00:02 --:--:-- 40000
+@end example
+
+The sizes are in bytes, and with the suffixes k, M, G, T and P as
+multiples of 1024.  The columns are the percentage and size of the whole
+transfer, the percentage and amount received, the percentage and amount
+sent, the average download and upload speeds, the time the transfer will
+take, the time it has taken and the time it has left, and the speed
+over the last few seconds.  Where a size is not known, the percentages
+are 0 and the times @samp{--:--:--}.  The line is drawn when the second
+changes, after a second with nothing to draw, and once more at the end.
+The end of the line is a newline.
+
+The meter is not shown when the body is written to a terminal, since
+it would mix with it: a download, or an upload to HTTP, with no
+@option{-o} or @option{-O}, on a terminal.  It is not shown with
+@option{-s} or @option{--no-progress-meter}.  @option{-#} draws a bar
+instead: a line of @samp{#} signs across the screen and the percentage
+when the size is known, and when it is not a spaceship with hash signs
+flying above it.  The width is that of the terminal, or the environment
+variable @env{COLUMNS} if that is a number from 21 to 9999, and 79 if
+neither is known.  The bar ends its line after any error message.
+
+A size is known for the body of an HTTP response that has
+Content-Length, a file, an FTP download whose server says how big it is,
+an sftp or scp download, an IMAP message, and the data sent with
+@option{-d}, @option{-T}, or an SMTP, MQTT, TFTP or sftp upload.  A
+redirect finishes the line, and the next response starts again at 0.
+
+@option{-s}, @option{-S}, @option{-#}, @option{--no-progress-meter} and
+@option{--stderr} apply to every URL, also after @option{--next}.
+
+A program that uses the library gets the same from
+@code{TWISTOPT_NOPROGRESS} (1 by default, which shows nothing),
+@code{TWISTOPT_STDERR}, and a callback of its own,
+@code{TWISTOPT_XFERINFOFUNCTION}, which is given the totals and counts
+about once a second and when anything changes.  The callback returns 0
+to draw nothing, @code{TWIST_PROGRESSFUNC_CONTINUE} to have the library
+draw its meter as well, and anything else to stop the transfer with
+@code{TWIST_ERR_ABORTED}.  @code{TWISTOPT_INFILESIZE} says how much an
+upload with a read function will give.
 
 @node Variables
 @chapter Variables

@@ -95,6 +95,7 @@ test_ws (void)
   feed_bin (ws_recv, ws, hello, sizeof hello, 1);
   check (mail_body_len == 5 && memcmp (mail_body, "Hello", 5) == 0,
          "ws text");
+  check (easy->progress.downloaded == 5, "ws progress");
   feed_bin (ws_recv, ws, ping, sizeof ping, 1);
   check (ws_out_n == 7 && (ws_out[0] & 0x0f) == 0x0a
          && (ws_out[1] & 0x80) != 0

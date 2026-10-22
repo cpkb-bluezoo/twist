@@ -140,7 +140,7 @@ body_sink (void *user, const uint8_t *data, size_t len)
 
   if (easy->write_cb == NULL || len == 0)
     {
-      easy->size_download += len;
+      twist_easy_downloaded (easy, len);
       return 0;
     }
   {
@@ -160,7 +160,7 @@ body_sink (void *user, const uint8_t *data, size_t len)
         off += chunk;
       }
   }
-  easy->size_download += len;
+  twist_easy_downloaded (easy, len);
   return 0;
 }
 

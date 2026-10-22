@@ -520,6 +520,21 @@ on_header (void *user, const char *name, size_t name_len, const char *value,
           h->easy->http_code = code;
         }
     }
+  else if (name_len == 14 && strncasecmp (name, "content-length", 14) == 0)
+    {
+      char *end;
+      char *copy = ncopy (value, value_len);
+
+      /* A body of a known size.  Curl takes no notice of a size of 0.  */
+      if (copy != NULL && !h->easy->nobody && !h->ws)
+        {
+          long long size = strtoll (copy, &end, 10);
+
+          if (end != copy && size > 0)
+            twist_progress_dl_size (h->easy, size);
+        }
+      free (copy);
+    }
   else if (name_len == 8 && strncasecmp (name, "location", 8) == 0)
     {
       free (h->location);
@@ -746,6 +761,8 @@ on_body (void *user, const uint8_t *data, size_t len)
       twist_ws_receive (h->wsess, data, len);
       return;
     }
+  /* What came over the wire, before it is decoded.  */
+  twist_progress_downloaded (h->easy, len);
   if (h->decode_err != 0)
     return;
   if (h->coding != NULL)
@@ -1038,6 +1055,12 @@ send_request (struct twist_http *h)
   if (rc == TWIST_OK)
     {
       h->sent = 1;
+      /* The body is counted as sent when it is handed to the connection.  */
+      if (body_len > 0)
+        {
+          twist_progress_ul_size (h->easy, (long long) body_len);
+          twist_progress_uploaded (h->easy, body_len);
+        }
       if (h->sess == NULL && h->easy != NULL && h->easy->multi != NULL
           && (h->mode == HTTP_H2 || h->mode == HTTP_H3) && h->conn != NULL)
         {
@@ -1237,6 +1260,7 @@ http_message_done (void *user)
         }
       else
         h->strip_auth = 0;
+      twist_progress_hop (easy);
       twist_loop_post (easy->loop, http_restart, h);
       return;
     }

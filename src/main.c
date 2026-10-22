@@ -21,6 +21,7 @@
 #endif
 
 #include "gettext.h"
+#include "bar.h"
 #include "twist-int.h"
 
 #include <ctype.h>
@@ -43,7 +44,11 @@
 
 static FILE *err_fp;
 static int silent;
-static int show_error = 1;
+static int show_error;
+/* -#: the bar in place of the meter.  --no-progress-meter: neither.  Both
+   are global, as in curl.  */
+static int progress_bar;
+static int no_progress;
 static int fail_early;
 
 struct cli_item
@@ -248,9 +253,16 @@ usage (void)
   fputs (_("      --oauth2-bearer T   Bearer token\n"), stdout);
   fputs (_("  -m, --max-time SECONDS  whole transfer limit\n"), stdout);
   fputs (_("      --connect-timeout S connect limit, in seconds\n"), stdout);
-  fputs (_("  -s, --silent            hide the error message\n"), stdout);
+  fputs (_("  -s, --silent            hide the progress meter and the error message\n"),
+         stdout);
   fputs (_("  -S, --show-error        show the error message with -s\n"),
          stdout);
+  fputs (_("  -#, --progress-bar      show a bar in place of the progress meter\n"),
+         stdout);
+  fputs (_("      --no-progress-meter hide the progress meter, not the messages\n"),
+         stdout);
+  fputs (_("      --no-silent, --no-show-error, --no-progress-bar,\n"
+           "      --progress-meter    undo the option\n"), stdout);
   fputs (_("      --stderr FILE       diagnostics go to FILE\n"), stdout);
   /* TRANSLATORS: The %{name} tokens are literal.  Keep the doubled
      percent signs.  */
@@ -261,8 +273,8 @@ usage (void)
          stdout);
   fputs (_("  -q, --disable           accepted; no config file is read\n"),
          stdout);
-  fputs (_("      --next              start a new URL; only -s, -S, --stderr\n"
-           "                          and --fail-early carry over\n"),
+  fputs (_("      --next              start a new URL; only -s, -S, -#, --stderr,\n"
+           "                          --no-progress-meter and --fail-early carry over\n"),
          stdout);
   fputs (_("      --http1.0           use HTTP/1.0\n"), stdout);
   fputs (_("      --http1.1           use HTTP/1.1\n"), stdout);
@@ -1047,6 +1059,18 @@ size_of_file (const char *path)
   return (long long) st.st_size;
 }
 
+/* Whether a body is written for this transfer: a download, or an upload to
+   HTTP, which answers.  A tty gets no progress meter in that case, as the
+   meter would be mixed up with it.  */
+static int
+output_expected (const char *url, const char *upload)
+{
+  if (upload == NULL)
+    return 1;
+  return strncasecmp (url, "http://", 7) == 0
+         || strncasecmp (url, "https://", 8) == 0;
+}
+
 static int
 run_one (twist_easy *easy, struct cli_op *op, const char *url,
          const char *output, int remote, const char *upload)
@@ -1068,6 +1092,9 @@ run_one (twist_easy *easy, struct cli_op *op, const char *url,
   const char *body_mode = "wb";
   long long resume = 0;
   struct cli_headers hdrs;
+  struct twist_bar bar;
+  int bar_used = 0;
+  int hide_progress;
   int rc;
   int code;
   const char *detail;
@@ -1268,6 +1295,34 @@ run_one (twist_easy *easy, struct cli_op *op, const char *url,
   twist_easy_setopt (easy, TWISTOPT_CUSTOMREQUEST, method);
   twist_easy_setopt (easy, TWISTOPT_NOBODY, op->head ? 1L : 0L);
   twist_easy_setopt (easy, TWISTOPT_POSTFIELDS, payload);
+  {
+    /* What an upload from a file comes to, for the progress.  */
+    struct stat ust;
+    long long usize = -1;
+
+    if (streaming && fstat (ustream.fd, &ust) == 0 && S_ISREG (ust.st_mode))
+      usize = (long long) ust.st_size;
+    twist_easy_setopt (easy, TWISTOPT_INFILESIZE, usize);
+  }
+  /* The meter is drawn unless -s or --no-progress-meter says not, or the
+     body is going to the terminal.  -# draws a bar instead.  */
+  hide_progress = silent || no_progress
+                  || (body == stdout && output_expected (use_url, upload)
+                      && isatty (fileno (stdout)));
+  twist_easy_setopt (easy, TWISTOPT_STDERR, err_fp);
+  twist_easy_setopt (easy, TWISTOPT_NOPROGRESS, hide_progress ? 1L : 0L);
+  if (progress_bar && !hide_progress)
+    {
+      twist_bar_init (&bar, err_fp, op->resume_set ? resume : 0);
+      bar_used = 1;
+      twist_easy_setopt (easy, TWISTOPT_XFERINFOFUNCTION, twist_bar_callback);
+      twist_easy_setopt (easy, TWISTOPT_XFERINFODATA, &bar);
+    }
+  else
+    {
+      twist_easy_setopt (easy, TWISTOPT_XFERINFOFUNCTION, NULL);
+      twist_easy_setopt (easy, TWISTOPT_XFERINFODATA, NULL);
+    }
   twist_easy_setopt (easy, TWISTOPT_READFUNCTION,
                      streaming ? read_upload : NULL);
   twist_easy_setopt (easy, TWISTOPT_READDATA, streaming ? &ustream : NULL);
@@ -1325,6 +1380,8 @@ run_one (twist_easy *easy, struct cli_op *op, const char *url,
       snprintf (msg, sizeof msg, _("could not read %s"), upload);
       diag_code (26, msg);
       emit_writeout (op->writeout, easy, 26);
+      if (bar_used)
+        twist_bar_finish (&bar);
       free (up.p);
       free (query_url);
       free (named_url);
@@ -1338,6 +1395,9 @@ run_one (twist_easy *easy, struct cli_op *op, const char *url,
       diag_code (code, detail != NULL ? detail : twist_strerror (rc));
     }
   emit_writeout (op->writeout, easy, code);
+  /* After the message, as curl does it: the bar's line ends last.  */
+  if (bar_used)
+    twist_bar_finish (&bar);
   free (up.p);
   free (query_url);
   free (named_url);
@@ -1589,13 +1649,19 @@ main (int argc, char **argv)
     { "list-only", no_argument, NULL, 'l' },
     { "quote", required_argument, NULL, 'Q' },
     { "ftp-create-dirs", no_argument, NULL, 34 },
-    { "limit-rate", required_argument, NULL, 35 },
+    { "limit-rate", required_argument, NULL, 43 },
     { "cookie", required_argument, NULL, 'b' },
     { "oauth2-bearer", required_argument, NULL, 29 },
     { "max-time", required_argument, NULL, 'm' },
     { "connect-timeout", required_argument, NULL, 19 },
     { "silent", no_argument, NULL, 's' },
+    { "no-silent", no_argument, NULL, 38 },
     { "show-error", no_argument, NULL, 'S' },
+    { "no-show-error", no_argument, NULL, 39 },
+    { "progress-bar", no_argument, NULL, '#' },
+    { "no-progress-bar", no_argument, NULL, 40 },
+    { "progress-meter", no_argument, NULL, 41 },
+    { "no-progress-meter", no_argument, NULL, 42 },
     { "stderr", required_argument, NULL, 21 },
     { "write-out", required_argument, NULL, 'w' },
     { "globoff", no_argument, NULL, 'g' },
@@ -1682,7 +1748,7 @@ main (int argc, char **argv)
           continue;
         }
       c = getopt_long (argc, argv,
-                       "+:o:X:H:d:Lkx:A:u:Iw:fE:hm:e:r:b:sSOT:GgiD:qC:lQ:U:",
+                       "+:o:X:H:d:Lkx:A:u:Iw:fE:hm:e:r:b:sS#OT:GgiD:qC:lQ:U:",
                        expandable, NULL);
       if (c == -1)
         break;
@@ -1842,7 +1908,7 @@ main (int argc, char **argv)
         case 34:
           op->ftp_create_dirs = 1;
           break;
-        case 35:
+        case 43:
           if (parse_rate (optarg, &op->limit_rate) != 0)
             {
               diag (_("numerical parameter expected"));
@@ -1976,10 +2042,27 @@ main (int argc, char **argv)
           break;
         case 's':
           silent = 1;
-          show_error = 0;
+          break;
+        case 38:
+          silent = 0;
           break;
         case 'S':
           show_error = 1;
+          break;
+        case 39:
+          show_error = 0;
+          break;
+        case '#':
+          progress_bar = 1;
+          break;
+        case 40:
+          progress_bar = 0;
+          break;
+        case 41:
+          no_progress = 0;
+          break;
+        case 42:
+          no_progress = 1;
           break;
         case 21:
           if (strcmp (optarg, "-") != 0)

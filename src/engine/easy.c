@@ -55,6 +55,9 @@ twist_easy_init (void)
   easy->doh_verifypeer = 1;
   easy->http_version = TWIST_HTTP_VERSION_NONE;
   easy->auth = TWISTAUTH_BASIC;
+  easy->progress.hide = 1;
+  easy->infilesize = -1;
+  easy->progress.lastshow = -1;
   return easy;
 }
 
@@ -76,6 +79,9 @@ twist_easy_release_transfer (struct twist_easy *easy)
 {
   void *xfer = easy->xfer;
   void (*xfer_free) (void *) = easy->xfer_free;
+
+  /* Its timer is the loop's, which this handle is about to leave.  */
+  twist_progress_release (easy);
 
   easy->xfer = NULL;
   easy->xfer_free = NULL;
@@ -385,6 +391,21 @@ twist_easy_setopt (twist_easy *easy, int opt, ...)
     case TWISTOPT_DOH_SSL_VERIFYPEER:
       easy->doh_verifypeer = va_arg (ap, long) != 0;
       break;
+    case TWISTOPT_INFILESIZE:
+      easy->infilesize = va_arg (ap, long long);
+      break;
+    case TWISTOPT_NOPROGRESS:
+      easy->progress.hide = va_arg (ap, long) != 0;
+      break;
+    case TWISTOPT_XFERINFOFUNCTION:
+      easy->progress.xferinfo = va_arg (ap, twist_xferinfo_callback);
+      break;
+    case TWISTOPT_XFERINFODATA:
+      easy->progress.xferinfo_data = va_arg (ap, void *);
+      break;
+    case TWISTOPT_STDERR:
+      easy->progress.err = va_arg (ap, FILE *);
+      break;
     case TWISTOPT_ACCEPT_ENCODING:
       replace (&easy->accept_encoding, va_arg (ap, const char *));
       break;
@@ -471,6 +492,7 @@ twist_easy_finish (struct twist_easy *easy, int result)
     return TWIST_OK;
   easy->done = 1;
   easy->result = result;
+  twist_progress_end (easy, result);
   if (easy->multi != NULL)
     return push_done (easy->multi, easy, result);
   return TWIST_OK;
@@ -506,6 +528,7 @@ twist_transfer_start (struct twist_easy *easy)
       return TWIST_ERR_UNSUPPORTED;
     }
   easy->done = 0;
+  twist_progress_begin (easy);
   rc = scheme->attach (easy);
   if (rc != TWIST_OK && !easy->done)
     twist_easy_finish (easy, rc);

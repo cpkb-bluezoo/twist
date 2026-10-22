@@ -201,7 +201,7 @@ test_ftp_session (void)
     "230 Logged in.\r\n"
     "200 Type set.\r\n"
     "229 Entering Extended Passive Mode (|||40000|)\r\n"
-    "150 Opening data connection.\r\n";
+    "150 Opening BINARY mode data connection for file.txt (5 bytes).\r\n";
   size_t n = sizeof talk - 1;
   size_t split;
 
@@ -231,6 +231,9 @@ test_ftp_session (void)
       check (easy->done && easy->result == TWIST_OK, "ftp done");
       check (easy->http_code == 226, "ftp code");
       check (easy->size_download == 5 && ftp_body_len == 5, "ftp body");
+      /* The progress: the size from the reply, and the bytes.  */
+      check (easy->progress.dl_known && easy->progress.size_dl == 5
+             && easy->progress.downloaded == 5, "ftp progress");
       check (memcmp (ftp_body, "hello", 5) == 0, "ftp bytes");
       twist_easy_cleanup (easy);
     }
@@ -261,6 +264,9 @@ test_ftp_session (void)
     check (strcmp (twist_ftp_command (f), "LIST pub\r\n") == 0, "list");
     check (strcmp (twist_ftp_data_host (f), "127.0.0.1") == 0, "pasv host");
     check (twist_ftp_data_port (f) == 1930, "pasv port");
+    /* A listing has no size, even when the server puts a number in its text.  */
+    feed_session (f, "150 Here comes the directory listing (99 bytes).\r\n", 1);
+    check (!easy->progress.dl_known, "a listing has no size");
     twist_easy_cleanup (easy);
   }
 }

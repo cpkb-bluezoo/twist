@@ -66,6 +66,9 @@ struct twist_file
   int abandoned;
   int inflight;
   size_t total;
+  long long size;		/* From the worker, under MU.  */
+  int size_known;
+  int size_noted;
   int err;
   struct file_chunk slot[FILE_PIPELINE];
 };
@@ -161,6 +164,20 @@ file_on_loop (void *user)
       pthread_mutex_unlock (&f->mu);
       return;
     }
+  if (!f->size_noted)
+    {
+      long long size = -1;
+
+      pthread_mutex_lock (&f->mu);
+      if (f->size_known)
+        size = f->size;
+      pthread_mutex_unlock (&f->mu);
+      if (size >= 0)
+        {
+          f->size_noted = 1;
+          twist_progress_dl_size (easy, size);
+        }
+    }
   if (c->data != NULL && c->len > 0 && f->err == TWIST_OK && err == TWIST_OK
       && easy->write_cb != NULL)
     {
@@ -169,7 +186,10 @@ file_on_loop (void *user)
       if (got < c->len)
         err = TWIST_ERR_ABORTED;
       else
-        f->total += c->len;
+        {
+          f->total += c->len;
+          twist_progress_downloaded (easy, c->len);
+        }
     }
   free (c->data);
   c->data = NULL;
@@ -306,6 +326,10 @@ file_work (void *arg)
       msg = file_errmsg (path, 0);
       goto done;
     }
+  pthread_mutex_lock (&f->mu);
+  f->size = (long long) st.st_size;
+  f->size_known = 1;
+  pthread_mutex_unlock (&f->mu);
   for (;;)
     {
       char buf[FILE_CHUNK];

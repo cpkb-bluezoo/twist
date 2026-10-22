@@ -10,3 +10,5 @@ Version 0.1 - unreleased
     WebSocket, Gopher, DICT, TFTP, and FILE
   * quickstep is an installed library found by pkg-config
   * gzip and deflate request and response coding, via zlib
+  * the progress meter and the bar (-#), as curl's, and the library's
+    TWISTOPT_XFERINFOFUNCTION

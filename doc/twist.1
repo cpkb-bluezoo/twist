@@ -89,6 +89,46 @@ These schemes are recognised, but are not implemented, and exit 1:
 .B rtsp,
 .B smb, smbs,
 .B telnet.
+.SH "PROGRESS METER"
+Twist shows the progress of a transfer on standard error, or on
+.BR \-\-stderr ,
+as curl does: a heading of two lines and then one line that is written over
+and over, with the amount transferred, the speeds, and the time spent and
+left.  The sizes are in bytes, and with the suffixes k, M, G, T and P as
+multiples of 1024.  The columns are the percentage and size of the whole
+transfer, the percentage and amount received, the percentage and amount sent,
+the average download and upload speeds, the time the transfer will take, the
+time it has taken and the time it has left, and the speed over the last few
+seconds.  Where a size is not known, the percentages are 0 and the times
+\fB\-\-:\-\-:\-\-\fR.
+The line is drawn when the second changes, after a second with nothing to
+draw, and once more at the end, and the end of the line is a newline.
+.PP
+The meter is not shown when the body is written to a terminal, since it would
+mix with it: a download, or an upload to HTTP, with no
+.B \-o
+or
+.BR \-O ,
+on a terminal.  It is not shown with
+.B \-s
+or
+.BR \-\-no\-progress\-meter .
+.B \-#
+draws a bar instead, a line of # signs across the screen and the percentage
+when the size is known, and when it is not a spaceship with hash signs flying
+above it.
+The width is that of the terminal, or the environment variable
+.BR COLUMNS ,
+if that is a number from 21 to 9999, and 79 if neither is known.
+The bar ends its line after any error message.
+.PP
+A size is known for the body of an HTTP response that has Content-Length, a
+file, an FTP download whose server says how big it is, an sftp or scp
+download, an IMAP message, and the data sent with
+.BR \-d ,
+.B \-T
+or an SMTP, MQTT, TFTP or sftp upload.  A redirect finishes the line, and the
+next response starts again at 0.
 .SH VARIABLES
 A command line can set variables and use them in the parameters of options.
 .TP
@@ -413,16 +453,27 @@ For sftp and scp it covers the lookup, the TCP connect, a proxy and the SSH
 handshake up to the login.
 .TP
 .B \-s, \-\-silent
-Hide the transfer diagnostic.  The exit status is unchanged.
+Hide the progress meter and the transfer diagnostic.  The exit status is
+unchanged.
+.B \-\-no\-silent
+undoes it.
 .TP
 .B \-S, \-\-show\-error
 Show the transfer diagnostic when
 .B \-s
-was also given.  The last of
-.B \-s
-and
-.B \-S
-wins.
+was also given, in either order.
+.B \-\-no\-show\-error
+undoes it.
+.TP
+.B \-#, \-\-progress\-bar
+Show the progress as a bar in place of the meter.
+.B \-\-no\-progress\-bar
+undoes it.
+.TP
+.B \-\-no\-progress\-meter
+Hide the progress meter and the bar, and leave the diagnostics alone.
+.B \-\-progress\-meter
+undoes it.
 .TP
 .BI \-\-stderr " file"
 Write diagnostics to \fIfile\fR.
@@ -466,6 +517,8 @@ not inherit the previous URL's method, body, headers, output, proxy,
 user, or timeouts.
 .BR \-s ,
 .BR \-S ,
+.BR \-# ,
+.BR \-\-no\-progress\-meter ,
 .BR \-\-stderr ,
 and
 .B \-\-fail\-early
@@ -604,7 +657,7 @@ or
 with an optional port.  The default port is 853.  Discovery matches
 .BR \-\-doq-url .
 .PP
-There is no progress meter, config file, URL globbing,
+There is no config file,
 .BR \-\-fail\-with\-body ,
 verbose trace, cookie jar, or parallel transfer.
 .SH "EXIT STATUS"

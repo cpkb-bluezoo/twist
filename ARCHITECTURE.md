@@ -394,6 +394,26 @@ The first pass found a signed overflow in the HTTP/2 flow-control windows, a
 read past the QPACK static table, and in HPACK a table that counted entries
 and not bytes, no handling of size updates, and leaks on error paths.
 
+The progress meter (`src/engine/progress.c`) is libcurl's (`lib/progress.c`):
+counters of what has been downloaded and uploaded, the sizes that are known,
+and an update that runs whenever any of those change. The update takes the
+average speeds, and once a second (when the second on the loop's clock
+changes) the speed over the last five seconds, then calls the application's
+`TWISTOPT_XFERINFOFUNCTION` and, if that returns `TWIST_PROGRESSFUNC_CONTINUE`
+or there is none, writes the meter line. `TWISTOPT_NOPROGRESS` is 1 until the
+application says otherwise, so a library user sees nothing. A handler says what
+it knows with `twist_progress_dl_size`, `twist_progress_ul_size`,
+`twist_easy_downloaded` and `twist_progress_uploaded`; the engine calls
+`twist_progress_begin` when a transfer starts and `twist_progress_end` when it
+finishes, and HTTP calls `twist_progress_hop` for a redirect. A timer, which
+does the update after a second with no event, is not set again for each event:
+the due time is moved and the timer, when it fires early, sets itself again.
+The tool's bar (`src/bar.c`) is a callback in this interface, as it is in curl,
+and returns 0 so that the meter is not drawn as well; it takes its clock as an
+argument so that the spaceship can be tested. The tool decides which of them
+there is, as `tool_operate.c` does: neither with `-s`, or when the body is
+written to a terminal.
+
 Variables (`src/engine/vars.c`) are the curl tool's. `--variable` defines a name
 in a table of byte strings (to ten megabytes), from text, a file, or the
 environment. For each long option that takes a parameter the command line adds

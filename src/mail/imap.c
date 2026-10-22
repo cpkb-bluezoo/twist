@@ -185,7 +185,7 @@ deliver (struct twist_imap *m, const uint8_t *data, size_t len)
     return TWIST_OK;
   if (easy->write_cb == NULL)
     {
-      easy->size_download += len;
+      twist_easy_downloaded (easy, len);
       return TWIST_OK;
     }
   {
@@ -205,7 +205,7 @@ deliver (struct twist_imap *m, const uint8_t *data, size_t len)
         off += chunk;
       }
   }
-  easy->size_download += len;
+  twist_easy_downloaded (easy, len);
   return TWIST_OK;
 }
 
@@ -380,6 +380,8 @@ on_line (struct twist_imap *m, const uint8_t *line, size_t n)
     {
       m->literal = lit;
       m->in_fetch = m->state == I_FETCH;
+      if (m->in_fetch)
+        twist_progress_dl_size (m->easy, (long long) lit);
     }
   if (!is_tagged (m, line, n, &ok))
     return;

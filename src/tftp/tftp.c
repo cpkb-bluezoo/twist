@@ -262,6 +262,8 @@ build_request (struct twist_tftp *t)
                       ? (size_t) t->easy->postfieldsize
                       : strlen (t->easy->postfields);
     }
+  if (t->upload && twist_easy_upload_size (t->easy) >= 0)
+    twist_progress_ul_size (t->easy, twist_easy_upload_size (t->easy));
   t->kind = t->upload ? OP_WRQ : OP_RRQ;
   t->pkt[0] = 0;
   t->pkt[1] = (uint8_t) t->kind;
@@ -302,7 +304,7 @@ deliver (struct twist_tftp *t, const uint8_t *data, size_t len)
 
   if (easy->write_cb == NULL || len == 0)
     {
-      easy->size_download += len;
+      twist_easy_downloaded (easy, len);
       return TWIST_OK;
     }
   while (off < len)
@@ -319,7 +321,7 @@ deliver (struct twist_tftp *t, const uint8_t *data, size_t len)
         return TWIST_ERR_ABORTED;
       off += chunk;
     }
-  easy->size_download += len;
+  twist_easy_downloaded (easy, len);
   return TWIST_OK;
 }
 
@@ -364,6 +366,7 @@ fill_data (struct twist_tftp *t)
   t->payload = n;
   t->pkt_len = 4 + n;
   t->kind = OP_DATA;
+  twist_progress_uploaded (t->easy, n);
   return TWIST_OK;
 }
 

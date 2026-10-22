@@ -132,6 +132,8 @@ send_body (struct twist_smtp *s)
   twist_dotout_init (&dot);
   s->cmdlen = 0;
   s->cmd[0] = 0;
+  if (twist_easy_upload_size (easy) >= 0)
+    twist_progress_ul_size (easy, twist_easy_upload_size (easy));
   if (easy->postfields != NULL)
     {
       const char *p = easy->postfields;
@@ -145,6 +147,7 @@ send_body (struct twist_smtp *s)
           rc = twist_dotout_write (&dot, (const uint8_t *) p, n, body_sink, s);
           if (rc != TWIST_OK)
             return rc;
+          twist_progress_uploaded (easy, n);
           p += n;
           left -= n;
         }
@@ -164,6 +167,7 @@ send_body (struct twist_smtp *s)
           rc = twist_dotout_write (&dot, (const uint8_t *) buf, n, body_sink, s);
           if (rc != TWIST_OK)
             return rc;
+          twist_progress_uploaded (easy, n);
         }
     }
   return twist_dotout_finish (&dot, body_sink, s);

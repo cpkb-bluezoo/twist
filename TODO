@@ -79,6 +79,26 @@ Twist TODO List
       be driven by a fuzzed server session; the Set-Cookie/HSTS persistence;
       and the file scheme.  A fuzzer of a whole transfer, with a scripted peer
       on a socketpair, would reach the connection and handler glue.
+  [ ] The progress meter is curl's (see HACKING).  Left out, or different:
+        - an upload is counted when the body is handed to the connection (HTTP,
+          SMTP, MQTT, TFTP), not when the socket has taken it; sftp counts when
+          the server has acknowledged a write, as curl does.  A large POST on a
+          slow link is at 100% sooner than curl shows it.
+        - no size is known for POP3, LDAP, DICT, Gopher, WebSocket, MQTT or a
+          directory listing; curl has none for them either, and for FTP it
+          asks the server (SIZE) where twist takes the number the reply to
+          RETR may carry.
+        - an HTTP response that is coded (--compressed) is counted by its
+          bytes on the wire, as curl does, against a Content-Length that is
+          also of the coded body; TWISTINFO_SIZE_DOWNLOAD is the decoded.
+        - sftp and scp ask for the size of the file (one more round trip) only
+          when the meter is on.
+        - no parallel transfers, so none of curl's parallel meter.
+        - the tool's -s, -S, -# and --progress-meter have their --no- forms;
+          the other boolean options do not yet.
+        - --stderr - keeps standard error; curl writes to standard output.
+        - curl's warning that binary output is going to a terminal is not
+          here.
   [ ] URL globbing is done for URLs and for -o names (#N).  curl also globs
       the file given to -T ({a,b} there, with #N in the URL), and --output-dir
       does not take #N.  Neither is done here: -T takes the name as written.

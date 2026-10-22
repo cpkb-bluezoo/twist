@@ -712,7 +712,7 @@ deliver (struct twist_sftp_xfer *g)
               return 0;
             }
         }
-      e->size_download += sl->got;
+      twist_easy_downloaded (e, sl->got);
       g->next_out += sl->got;
       drop_slot (g, sl);
       if (g->has_end && g->next_out >= g->end)
@@ -791,6 +791,12 @@ got_size (struct twist_sftp_xfer *g, const gf_sftp_response *r)
 
   if (r->type == GF_FXP_STATUS)
     {
+      /* Asked only for the progress: the transfer goes on without a size.  */
+      if (!g->check_resume && !g->suffix)
+        {
+          pump_reads (g);
+          return;
+        }
       fail_status (g, r);
       return;
     }
@@ -823,6 +829,14 @@ got_size (struct twist_sftp_xfer *g, const gf_sftp_response *r)
           deliver (g);
           return;
         }
+    }
+  if (have)
+    {
+      uint64_t last = g->has_end && g->end < size ? g->end : size;
+
+      twist_progress_dl_size (g->ssh->easy,
+                              last > g->start ? (long long) (last - g->start)
+                              : 0);
     }
   if (g->has_end && g->start >= g->end)
     {
@@ -958,6 +972,12 @@ pump_writes (struct twist_sftp_xfer *g)
 static void
 begin_writes (struct twist_sftp_xfer *g)
 {
+  long long total = twist_easy_upload_size (g->ssh->easy);
+
+  if (total >= 0)
+    twist_progress_ul_size (g->ssh->easy,
+                            total > (long long) g->skip
+                            ? total - (long long) g->skip : 0);
   if (discard_source (g) != 0)
     {
       fail (g, TWIST_ERR_RESUME,
@@ -982,6 +1002,8 @@ write_response (struct twist_sftp_xfer *g, const gf_sftp_response *r)
     }
   if (g->outstanding > 0)
     g->outstanding--;
+  /* An upload counts as sent when the server has it.  */
+  twist_progress_uploaded (g->ssh->easy, (size_t) ((uintptr_t) r->tag - TAG_WRITE));
   pump_writes (g);
 }
 
@@ -1022,7 +1044,7 @@ write_entry (struct twist_sftp_xfer *g, const gf_sftp_name *name)
       fail (g, TWIST_ERR_ABORTED, NULL);
       return 0;
     }
-  e->size_download += n;
+  twist_easy_downloaded (e, n);
   free (line);
   return 1;
 }
@@ -1506,7 +1528,7 @@ sftp_response (void *user, const gf_sftp_response *r)
         ask_more_names (g);
       else if (g->put)
         begin_writes (g);
-      else if (g->check_resume || g->suffix)
+      else if (g->check_resume || g->suffix || !g->ssh->easy->progress.hide)
         {
           if (sent (g, gf_sftp_client_fstat (g->client, g->handle, g->hlen, TAG_FSTAT,
                                     NULL)) != GF_OK)

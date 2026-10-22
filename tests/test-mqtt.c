@@ -71,6 +71,7 @@ test_mqtt (void)
   feed_bin (mqtt_recv, mqtt, publish, sizeof publish, 1);
   check (mail_body_len == 5 && memcmp (mail_body, "hello", 5) == 0,
          "mqtt payload");
+  check (easy->progress.downloaded == 5, "mqtt progress");
   feed_bin (mqtt_recv, mqtt, disc, sizeof disc, 1);
   check (easy->done && easy->result == TWIST_OK, "mqtt done");
   twist_easy_cleanup (easy);
@@ -83,6 +84,8 @@ test_mqtt (void)
   feed_bin (mqtt_recv, mqtt, connack, sizeof connack, 1);
   cmd = twist_mqtt_command (mqtt, &n);
   check (easy->done && easy->result == TWIST_OK, "published");
+  check (easy->progress.ul_known && easy->progress.size_ul == 4
+         && easy->progress.uploaded == 4, "mqtt upload progress");
   check (has_bytes (cmd, n, "ping", 4)
          && n >= 2 && cmd[n - 2] == 0xe0 && cmd[n - 1] == 0x00, "pub bytes");
   twist_easy_cleanup (easy);
