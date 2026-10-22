@@ -130,14 +130,8 @@ check "$(is "$(http_proxy=$px get --noproxy '*' "$u")" direct)" "--noproxy *"
 check "$(is "$(http_proxy=$px NO_PROXY=127.0.0.1 get --noproxy example.com "$u")" proxy)" "--noproxy instead of NO_PROXY"
 check "$(is "$(http_proxy=$px NO_PROXY=127.0.0.1 get --noproxy "" "$u")" proxy)" "--noproxy \"\" turns NO_PROXY off"
 
-# Does twist get through a TLS handshake with this server at all?  The
-# checks of certificates need it to; they are left out if it does not, which is
-# a matter for the TLS client and not for the variables.
-tu="https://127.0.0.1:$tport/x"
-if [ "$(timeout 10 "$TWIST" -s -S --cacert "$work/cert.pem" "$tu" 2>/dev/null)" != direct ]; then
-  echo "env: twist cannot make a TLS connection to python's server; skipping the certificate checks" >&2
-else
 # A certificate that is not trusted: the transfer is refused.
+tu="https://127.0.0.1:$tport/x"
 "$TWIST" -s -o /dev/null "$tu" 2>/dev/null
 check "$([ $? -ne 0 ] && echo ok)" "a certificate nobody trusts is refused"
 check "$(is "$(get --cacert "$work/cert.pem" "$tu")" direct)" "--cacert"
@@ -174,7 +168,6 @@ check "$(grep -q '^CLIENT_HANDSHAKE_TRAFFIC_SECRET ' "$work/keys" 2>/dev/null &&
 rm -f "$work/keys"
 get --cacert "$work/cert.pem" "$tu" >/dev/null
 check "$([ ! -e "$work/keys" ] && echo ok)" "no file without the variable"
-fi
 
 [ $fail -eq 0 ] || exit 1
 exit 0

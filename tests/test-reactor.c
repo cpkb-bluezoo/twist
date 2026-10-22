@@ -366,6 +366,49 @@ test_connection (void)
   twist_loop_free (loop);
 }
 
+static int sec_calls;
+static size_t sec_len;
+
+static void
+sec_established (struct twist_endpoint *ep, const char *alpn, size_t len)
+{
+  (void) ep;
+  (void) alpn;
+  sec_calls++;
+  sec_len = len;
+}
+
+static const struct twist_protocol_handler sec_handler = {
+  NULL,
+  NULL,
+  NULL,
+  sec_established,
+  NULL,
+  NULL,
+  NULL
+};
+
+/* A server that does not negotiate a protocol (python's, or any that has no
+   ALPN configured) still finishes the handshake, and the protocol must be told
+   that it can speak: HTTP sends its request then, so one that is not told
+   waits for ever.  */
+static void
+test_security_without_alpn (void)
+{
+  struct twist_loop *loop = twist_loop_new (1);
+  struct twist_connection *c = twist_connection_new (loop);
+
+  check (c != NULL, "connection");
+  twist_connection_set_handler (c, &sec_handler);
+  sec_calls = 0;
+  twist_connection_set_alpn (c, NULL, 0);
+  check (sec_calls == 1 && sec_len == 0, "told of TLS with no protocol");
+  twist_connection_set_alpn (c, "h2", 2);
+  check (sec_calls == 2 && sec_len == 2, "and with one");
+  twist_connection_free (c);
+  twist_loop_free (loop);
+}
+
 static int cap_err;
 static size_t cap_got;
 
@@ -451,6 +494,7 @@ main (void)
   test_cmdq ();
   test_cmdq_producers ();
   test_connection ();
+  test_security_without_alpn ();
   test_inbound_ceiling ();
   return tests_finish ();
 }

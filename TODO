@@ -103,17 +103,14 @@ Twist TODO List
       name for CURL_CA_BUNDLE, and curl's name is not read.  SSL_CERT_DIR
       is read as a directory of PEM files by name (.pem, .crt, .cer or a
       c_rehash name), not through OpenSSL's rules.
-  [ ] -k does not turn certificate checking off for TLS: nothing sets
-      verify_peer in quickstep's hooks, and TWISTOPT_SSL_VERIFYPEER only
-      decides whether a trust bundle that cannot be loaded is an error.
-      HTTP/3 (twist_quic_dial) has no verify argument at all.  Found while
-      testing the certificate variables.
-  [ ] TLS to an OpenSSL or Python server does not finish: with a trusted
-      certificate the transfer hangs, and with an untrusted one it fails with
-      35, whether or not -k is given.  openssl s_server -msg shows the client
-      closing after the server's flight.  Found while testing the certificate
-      variables; the certificate checks of integration/env.sh are skipped when
-      a probe of this fails.
+  [ ] -k does not turn certificate checking off for TLS.  quickstep's
+      gq_tlsconn and QUIC connections take no verify_peer callback (only the
+      bare gq_tls sink and DTLS do), so twist cannot tell them to accept a
+      chain: an untrusted certificate is refused with 35 whatever -k says.
+      TWISTOPT_SSL_VERIFYPEER only decides whether a trust bundle that cannot
+      be loaded is an error.  HTTP/3 (twist_quic_dial) has no verify argument
+      at all.  Needs a verify_peer (and user pointer) in gq_tls_config,
+      passed into the sink by tlsconn.c and conn.c.
   [ ] URL globbing is done for URLs and for -o names (#N).  curl also globs
       the file given to -T ({a,b} there, with #N in the URL), and --output-dir
       does not take #N.  Neither is done here: -T takes the name as written.

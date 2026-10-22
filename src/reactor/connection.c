@@ -398,7 +398,8 @@ twist_connection_set_alpn (struct twist_connection *c, const char *alpn,
     memcpy (c->alpn, alpn, len);
   c->alpn[len] = 0;
   c->alpn_len = len;
-  if (len > 0 && c->handler.security_established != NULL)
+  /* With no protocol too: that the handshake is done is what is told.  */
+  if (c->handler.security_established != NULL)
     c->handler.security_established (&c->ep, c->alpn, c->alpn_len);
 }
 
