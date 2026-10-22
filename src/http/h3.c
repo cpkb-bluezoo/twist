@@ -43,6 +43,8 @@ struct twist_h3
 {
   struct twist_h1_events ev;
   int failed;
+  uint64_t data_left;		/* Of the DATA frame being read.  */
+  uint64_t skip_left;		/* Of a frame being passed over.  */
   struct twist_h3_stream *active;
   struct twist_h3_stream *free_list;
   size_t n_alloc;
@@ -205,10 +207,42 @@ twist_h3_receive (struct twist_h3 *h, const uint8_t *data, size_t len)
       uint64_t type = 0;
       uint64_t length = 0;
 
+      /* A DATA frame can be of any size, and its bytes go on as they come; so
+         can the payload of a frame that is passed over.  */
+      if (h->data_left > 0 || h->skip_left > 0)
+        {
+          uint64_t *left = h->data_left > 0 ? &h->data_left : &h->skip_left;
+          size_t n = len - off;
+
+          if ((uint64_t) n > *left)
+            n = (size_t) *left;
+          if (left == &h->data_left && h->ev.body != NULL)
+            h->ev.body (h->ev.user, data + off, n);
+          *left -= n;
+          off += n;
+          continue;
+        }
       if (!peek_varint (data + off, len - off, &tn, &type))
         break;
       if (!peek_varint (data + off + tn, len - off - tn, &ln, &length))
         break;
+      if (type == H3_DATA)
+        {
+          if (take_stream (h) == NULL)
+            {
+              h3_fail (h, TWIST_ERR_NOMEM);
+              break;
+            }
+          off += tn + ln;
+          h->data_left = length;
+          continue;
+        }
+      if (type != H3_HEADERS && type != H3_SETTINGS && type != H3_GOAWAY)
+        {
+          off += tn + ln;
+          h->skip_left = length;
+          continue;
+        }
       if (length > H3_MAX_LEN)
         {
           h3_fail (h, TWIST_ERR_PROTOCOL);

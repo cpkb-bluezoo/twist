@@ -236,6 +236,8 @@ usage (void)
   fputs (_("      --proxy-cacert FILE CA bundle for an https proxy\n"), stdout);
   fputs (_("      --proxy-insecure    do not check the certificate of an https proxy\n"),
          stdout);
+  fputs (_("      --proxy-template-udp T  URI template of a CONNECT-UDP proxy (HTTP/3)\n"),
+         stdout);
   fputs (_("  -U, --proxy-user U:P    user and password for the proxy\n"), stdout);
   fputs (_("      --url URL           a URL to fetch\n"), stdout);
   fputs (_("      --variable N=TEXT   set a variable (N@FILE, %N for the environment)\n"),
@@ -1649,6 +1651,7 @@ main (int argc, char **argv)
     { "capath", required_argument, NULL, 44 },
     { "proxy-cacert", required_argument, NULL, 46 },
     { "proxy-insecure", no_argument, NULL, 47 },
+    { "proxy-template-udp", required_argument, NULL, 48 },
     { "noproxy", required_argument, NULL, 45 },
     { "proxy", required_argument, NULL, 'x' },
     { "proxy-user", required_argument, NULL, 'U' },
@@ -1920,6 +1923,25 @@ main (int argc, char **argv)
           break;
         case 47:
           twist_easy_setopt (op->easy, TWISTOPT_PROXY_SSL_VERIFYPEER, 0L);
+          break;
+        case 48:
+          {
+            char why[200];
+
+            if (optarg[0] != 0
+                && twist_template_check (optarg, why, sizeof why) != TWIST_OK)
+              {
+                char msg[300];
+
+                snprintf (msg, sizeof msg, _("option --proxy-template-udp: %s"),
+                          why);
+                diag (msg);
+                suggest ();
+                status = 2;
+              }
+            else
+              twist_easy_setopt (op->easy, TWISTOPT_PROXY_TEMPLATE_UDP, optarg);
+          }
           break;
         case 32:
           twist_easy_setopt (op->easy, TWISTOPT_KEYPASSWD, optarg);

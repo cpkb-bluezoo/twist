@@ -229,6 +229,22 @@ env_proxy (const char *scheme)
   return v;
 }
 
+/* Whether the host of the URL is one that goes direct: on the list given, or
+   else the environment's.  */
+int
+twist_easy_noproxy (const struct twist_easy *easy)
+{
+  const char *noproxy = easy->noproxy_set ? easy->noproxy : NULL;
+
+  if (!easy->noproxy_set)
+    {
+      noproxy = getenv ("no_proxy");
+      if (noproxy == NULL)
+        noproxy = getenv ("NO_PROXY");
+    }
+  return easy->url != NULL && twist_noproxy_match (easy->url->host, noproxy);
+}
+
 const char *
 twist_easy_proxy (const struct twist_easy *easy)
 {

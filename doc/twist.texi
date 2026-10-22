@@ -199,8 +199,30 @@ HTTP/1.1, as ALPN says.  What the target's protocol sends, including its own
 TLS, goes through that tunnel, so the proxy sees where the transfer goes and
 how much, but not what.  Credentials go to it as Basic, in the TLS.  This works
 for every scheme that can use a proxy except @code{ftp} and @code{ftps}, and an
-@code{http://} URL is tunnelled too.  HTTP/3 does not use a proxy yet.  A
-tunnel has a connection to the proxy of its own.
+@code{http://} URL is tunnelled too.  A tunnel has a connection to the proxy of
+its own.
+
+HTTP/3 (@option{--http3-only}) goes through an @code{https://} proxy that
+speaks HTTP/3 and does @code{CONNECT-UDP} (RFC 9298): QUIC to the proxy, a
+@code{CONNECT} on a stream of it that asks for a UDP flow to the target, and the
+target's QUIC packets in HTTP Datagrams (RFC 9297) on that stream.  The target's
+TLS is still its own.  The proxy looks the target up, so its name is not looked
+up here.  A proxy of another kind cannot carry HTTP/3, and then the transfer
+fails, and does not go round the proxy.  The proxy's address is looked up, and
+its certificate checked, as for TCP.  A failure of the proxy's, such as a 403 or
+a 407, is exit status 56.
+@item --proxy-template-udp @var{template}
+The URI Template (RFC 6570) of a proxy that does @code{CONNECT-UDP}: an
+@code{https://} URI with the variables @code{target_host} and
+@code{target_port}, as in
+@samp{https://proxy.example/masque/@{target_host@}/@{target_port@}/} or
+@samp{https://proxy.example/masque@{?target_host,target_port@}}.  Without it
+the template of @option{-x https://host:port} is
+@samp{https://host:port/.well-known/masque/udp/@{target_host@}/@{target_port@}/}.
+With it and no @option{-x}, the template names the proxy for UDP (HTTP/3), and
+every other transfer is direct.  An invalid template is a usage error (exit
+status 2).  Credentials come from the proxy's URL, the template's authority, or
+@option{-U}.
 @item --proxy-cacert @var{file}
 PEM bundle of the authorities that vouch for an https proxy.  Without it the
 proxy is checked against the same authorities as the target:

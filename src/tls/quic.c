@@ -46,6 +46,11 @@ struct twist_quic
   struct twist_client_auth *auth;
   gq_tls_config tls;
   int verify;
+  int datagrams;		/* HTTP Datagrams (RFC 9297).  */
+  int (*carrier) (void *, const uint8_t *, size_t);
+  void *carrier_user;
+  void (*on_datagram) (void *, const uint8_t *, size_t);
+  void *on_datagram_user;
   FILE *qlog;
   int qlog_tried;
   gq_slice alpn;
@@ -79,6 +84,7 @@ struct twist_quic
 #define QUIC_BATCH 16
 
 static int quic_flush (struct twist_quic *q, uint64_t now_us);
+static int ensure_dg (struct twist_quic *q);
 
 static struct quic_stream *
 qs_cur (struct twist_quic *q)
@@ -127,6 +133,48 @@ ep_connection (void *user, gq_conn *conn)
   (void) conn;
 }
 
+/* HTTP/3 (RFC 9114, 6.2) wants each side to open a control stream and send
+   its SETTINGS on it, and QPACK (RFC 9204, 4.2) an encoder and a decoder
+   stream.  We use no dynamic table and take no blocked streams, which the
+   SETTINGS say; the other two streams stay empty.  With datagrams the
+   setting H3_DATAGRAM (RFC 9297) says so too.  */
+static void
+h3_open_streams (struct twist_quic *q)
+{
+  /* Stream type 0, then a SETTINGS frame (type 4) whose length is that of
+     the settings after it.  */
+#define H3_SETTINGS_BASE \
+    0x01, 0x00,			/* QPACK_MAX_TABLE_CAPACITY 0 */ \
+    0x07, 0x00			/* QPACK_BLOCKED_STREAMS 0 */
+  static const uint8_t control[] = {
+    0x00, 0x04, 4,
+    H3_SETTINGS_BASE
+  };
+  static const uint8_t control_dg[] = {
+    0x00, 0x04, 6,
+    H3_SETTINGS_BASE,
+    0x33, 0x01			/* H3_DATAGRAM 1 (RFC 9297) */
+  };
+#undef H3_SETTINGS_BASE
+  _Static_assert (sizeof control == 3 + 4, "SETTINGS length");
+  _Static_assert (sizeof control_dg == 3 + 6, "SETTINGS length");
+  static const uint8_t encoder[] = { 0x02 };
+  static const uint8_t decoder[] = { 0x03 };
+  uint64_t id = 0;
+
+  if (gq_conn_stream_open (q->conn, 0, &id) == GQ_OK)
+    {
+      if (q->datagrams)
+        gq_conn_stream_write (q->conn, id, control_dg, sizeof control_dg);
+      else
+        gq_conn_stream_write (q->conn, id, control, sizeof control);
+    }
+  if (gq_conn_stream_open (q->conn, 0, &id) == GQ_OK)
+    gq_conn_stream_write (q->conn, id, encoder, sizeof encoder);
+  if (gq_conn_stream_open (q->conn, 0, &id) == GQ_OK)
+    gq_conn_stream_write (q->conn, id, decoder, sizeof decoder);
+}
+
 static void
 ev_connected (void *user, const gq_tls_info *info)
 {
@@ -139,6 +187,8 @@ ev_connected (void *user, const gq_tls_info *info)
       twist_connection_fail (q->twist, TWIST_ERR_TLS);
       return;
     }
+  if (info != NULL && info->alpn_len == 2 && memcmp (info->alpn, "h3", 2) == 0)
+    h3_open_streams (q);
   if (gq_conn_stream_open (q->conn, 1, &id) == GQ_OK)
     qs_add (q, id);
   if (info != NULL)
@@ -165,6 +215,10 @@ ev_stream_data (void *user, uint64_t id, const uint8_t *data, size_t len,
       s->on_data (s->on_user, data, len, fin);
       return 0;
     }
+  /* A stream the server opened (a unidirectional one: its HTTP/3 control
+     stream, and QPACK's) is not the response; nothing here uses them.  */
+  if (s == NULL && (id & 3) == 3)
+    return 0;
   if (len > 0)
     twist_connection_deliver_app (q->twist, data, len);
   if (fin)
@@ -245,16 +299,81 @@ ev_cid_retired (void *user, const uint8_t *cid, size_t len)
 static void
 ev_datagram (void *user, const uint8_t *data, size_t len)
 {
-  struct twist_endpoint *ep;
+  struct twist_quic *q = user;
 
-  (void) data;
-  (void) len;
-  ep = twist_connection_endpoint (((struct twist_quic *) user)->twist);
-  if (ep != NULL)
+  /* Datagrams are given to whoever asked for them.  */
+  if (q->on_datagram != NULL)
+    q->on_datagram (q->on_datagram_user, data, len);
+}
+
+/* The stream the next request goes on (RFC 9298 names the datagrams of a
+   request by it).  UINT64_MAX if there is none.  */
+uint64_t
+twist_quic_stream_id (struct twist_connection *conn)
+{
+  struct twist_quic *q = conn != NULL ? twist_connection_tls (conn) : NULL;
+  struct quic_stream *s = q != NULL ? qs_cur (q) : NULL;
+
+  return s != NULL ? s->id : UINT64_MAX;
+}
+
+int
+twist_quic_datagram_send (struct twist_connection *conn, const uint8_t *data,
+                          size_t len)
+{
+  struct twist_quic *q = conn != NULL ? twist_connection_tls (conn) : NULL;
+  int rc;
+
+  if (q == NULL || q->conn == NULL)
+    return TWIST_ERR_INVAL;
+  rc = gq_conn_datagram_send (q->conn, data, len, NULL);
+  if (rc == GQ_ERR_RANGE || rc == GQ_ERR_BUFSIZE || rc == GQ_ERR_UNAVAILABLE)
+    return TWIST_ERR_AGAIN;
+  if (rc != GQ_OK)
+    return TWIST_ERR_TLS;
+  return quic_flush (q, twist_loop_now (q->loop) * 1000u);
+}
+
+size_t
+twist_quic_datagram_max (struct twist_connection *conn)
+{
+  struct twist_quic *q = conn != NULL ? twist_connection_tls (conn) : NULL;
+
+  return q != NULL && q->conn != NULL ? gq_conn_datagram_max (q->conn) : 0;
+}
+
+void
+twist_quic_on_datagram (struct twist_connection *conn,
+                        void (*cb) (void *, const uint8_t *, size_t),
+                        void *user)
+{
+  struct twist_quic *q = conn != NULL ? twist_connection_tls (conn) : NULL;
+
+  if (q != NULL)
     {
-      /* Datagrams are delivered when a handler asked for them.  */
+      q->on_datagram = cb;
+      q->on_datagram_user = user;
     }
-  (void) ep;
+}
+
+void
+twist_quic_feed (struct twist_connection *conn, const uint8_t *data, size_t len)
+{
+  struct twist_quic *q = conn != NULL ? twist_connection_tls (conn) : NULL;
+  uint64_t now;
+
+  if (q == NULL || q->ep == NULL || len == 0 || len > QUIC_DG)
+    return;
+  if (ensure_dg (q) != TWIST_OK)
+    return;
+  now = twist_loop_now (q->loop) * 1000u;
+  /* The datagram is decrypted where it lies, so it lies in our own.  The
+     batch the sender fills is another part of the same buffer; this is the
+     last slot, which no one fills before it is flushed.  */
+  memcpy (q->dg + (size_t) (QUIC_BATCH - 1) * QUIC_DG, data, len);
+  gq_endpoint_recv (q->ep, now, &q->path,
+                    q->dg + (size_t) (QUIC_BATCH - 1) * QUIC_DG, len);
+  quic_flush (q, now);
 }
 
 static void
@@ -310,11 +429,29 @@ ensure_dg (struct twist_quic *q)
   return q->dg == NULL ? TWIST_ERR_NOMEM : TWIST_OK;
 }
 
+/* The datagrams are the carrier's to take: it is not a socket that can be
+   full, and what it cannot take is a datagram lost, which QUIC is made for.  */
+static int
+carrier_queued (struct twist_quic *q)
+{
+  while (q->dg_i < q->dg_n)
+    {
+      q->carrier (q->carrier_user, q->dg + (size_t) q->dg_i * QUIC_DG,
+                  q->dg_len[q->dg_i]);
+      q->dg_i++;
+    }
+  q->dg_n = 0;
+  q->dg_i = 0;
+  return TWIST_OK;
+}
+
 static int
 send_queued (struct twist_quic *q)
 {
   int left = q->dg_n - q->dg_i;
 
+  if (q->carrier != NULL)
+    return carrier_queued (q);
   if (left <= 0)
     {
       q->dg_n = 0;
@@ -385,7 +522,7 @@ quic_flush (struct twist_quic *q, uint64_t now_us)
 {
   int rc;
 
-  if (q->ep == NULL || q->fd < 0)
+  if (q->ep == NULL || (q->fd < 0 && q->carrier == NULL))
     return TWIST_OK;
   rc = ensure_dg (q);
   if (rc != TWIST_OK)
@@ -402,7 +539,9 @@ quic_flush (struct twist_quic *q, uint64_t now_us)
       q->dg_n -= q->dg_i;
       q->dg_i = 0;
     }
-  while (q->dg_n < QUIC_BATCH)
+  /* With a carrier the last slot is where a datagram that is fed in is
+     decrypted.  */
+  while (q->dg_n < (q->carrier != NULL ? QUIC_BATCH - 1 : QUIC_BATCH))
     {
       size_t len = 0;
       gq_path to;
@@ -833,6 +972,7 @@ twist_quic_dial (struct twist_loop *loop, const char *server_name,
                  const char *alpn, const struct twist_dns_addr *addr,
                  int port, const char *cafile, const char *capath,
                  const char *certfile, const char *keyfile, int verify,
+                 const struct twist_quic_opts *opts,
                  struct twist_connection **out)
 {
   struct twist_quic *q;
@@ -862,6 +1002,12 @@ twist_quic_dial (struct twist_loop *loop, const char *server_name,
   q->loop = loop;
   q->verify = verify;
   q->fd = -1;
+  if (opts != NULL)
+    {
+      q->datagrams = opts->datagrams;
+      q->carrier = opts->send;
+      q->carrier_user = opts->send_user;
+    }
   q->server_name = twist_strdup (server_name);
   memcpy (q->alpn_mem, alpn, alpn_len);
   q->alpn.data = q->alpn_mem;
@@ -892,7 +1038,19 @@ twist_quic_dial (struct twist_loop *loop, const char *server_name,
       return rc;
     }
   twist_client_auth_apply (q->auth, &q->tls);
-  if (addr->family == 4)
+  memset (&ss, 0, sizeof ss);
+  if (q->carrier != NULL)
+    {
+      /* No socket: a path of no meaning, the same for every datagram.  */
+      struct sockaddr_in *sin = (struct sockaddr_in *) &ss;
+
+      sin->sin_family = AF_INET;
+      sin->sin_addr.s_addr = htonl (INADDR_LOOPBACK);
+      sin->sin_port = htons ((uint16_t) (port > 0 ? port : 443));
+      slen = sizeof *sin;
+      family = AF_INET;
+    }
+  else if (addr->family == 4)
     family = AF_INET;
   else if (addr->family == 6)
     family = AF_INET6;
@@ -901,8 +1059,9 @@ twist_quic_dial (struct twist_loop *loop, const char *server_name,
       quic_free (q);
       return TWIST_ERR_RESOLVE;
     }
-  memset (&ss, 0, sizeof ss);
-  if (family == AF_INET)
+  if (q->carrier != NULL)
+    ;
+  else if (family == AF_INET)
     {
       struct sockaddr_in *sin = (struct sockaddr_in *) &ss;
       sin->sin_family = AF_INET;
@@ -919,15 +1078,18 @@ twist_quic_dial (struct twist_loop *loop, const char *server_name,
       sin6->sin6_port = htons ((uint16_t) port);
       slen = sizeof *sin6;
     }
-  fd = socket (family, SOCK_DGRAM, 0);
-  if (fd < 0 || fcntl (fd, F_SETFL, O_NONBLOCK) < 0
-      || fcntl (fd, F_SETFD, FD_CLOEXEC) < 0
-      || connect (fd, (struct sockaddr *) &ss, slen) < 0)
+  if (q->carrier == NULL)
     {
-      if (fd >= 0)
-        close (fd);
-      quic_free (q);
-      return TWIST_ERR_CONNECT;
+      fd = socket (family, SOCK_DGRAM, 0);
+      if (fd < 0 || fcntl (fd, F_SETFL, O_NONBLOCK) < 0
+          || fcntl (fd, F_SETFD, FD_CLOEXEC) < 0
+          || connect (fd, (struct sockaddr *) &ss, slen) < 0)
+        {
+          if (fd >= 0)
+            close (fd);
+          quic_free (q);
+          return TWIST_ERR_CONNECT;
+        }
     }
   q->fd = fd;
   q->path.remote.len = slen > 31 ? 31 : (uint8_t) slen;
@@ -935,17 +1097,29 @@ twist_quic_dial (struct twist_loop *loop, const char *server_name,
   q->twist = twist_connection_new (loop);
   if (q->twist == NULL)
     {
-      close (fd);
+      if (fd >= 0)
+        close (fd);
       quic_free (q);
       return TWIST_ERR_NOMEM;
     }
   twist_connection_set_tls (q->twist, q, quic_free);
-  twist_connection_set_io (q->twist, quic_read, quic_write, q);
-  twist_connection_set_fd (q->twist, fd);
+  if (q->carrier == NULL)
+    {
+      twist_connection_set_io (q->twist, quic_read, quic_write, q);
+      twist_connection_set_fd (q->twist, fd);
+    }
   twist_connection_endpoint (q->twist)->send = quic_app_send;
   twist_connection_endpoint (q->twist)->on_write_ready = quic_socket_ready;
   memset (&ecfg, 0, sizeof ecfg);
   memset (&eev, 0, sizeof eev);
+  /* DATAGRAM frames of up to 64 KiB are taken, if they are wanted.  */
+  if (q->datagrams)
+    ecfg.conn.max_datagram_frame_size = 65535;
+  /* Through a tunnel the packets cannot be larger than what the tunnel's own
+     datagrams hold, which a proxy's path may not yet allow to be more than
+     1200 bytes: ask for no more.  */
+  if (q->carrier != NULL)
+    ecfg.conn.max_udp_payload = 1200;
   {
     const char *qdir = getenv ("QLOGDIR");
 
@@ -995,7 +1169,7 @@ quic_connect (struct twist_easy *easy, struct twist_connection **out)
     return TWIST_ERR_RESOLVE;
   return twist_quic_dial (easy->loop, easy->url->host, "h3", &addr,
                           easy->url->port, easy->cainfo, easy->capath, easy->sslcert,
-                          easy->sslkey, easy->verifypeer, out);
+                          easy->sslkey, easy->verifypeer, NULL, out);
 }
 
 int

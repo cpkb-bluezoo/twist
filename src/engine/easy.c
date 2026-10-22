@@ -105,6 +105,7 @@ easy_clear (struct twist_easy *easy)
   free (easy->noproxy);
   free (easy->capath);
   free (easy->proxy_cainfo);
+  free (easy->proxy_template_udp);
   free (easy->range);
   free (easy->referer);
   free (easy->cookie);
@@ -408,6 +409,21 @@ twist_easy_setopt (twist_easy *easy, int opt, ...)
         const char *s = va_arg (ap, const char *);
 
         replace (&easy->proxy_cainfo, s != NULL && s[0] != 0 ? s : NULL);
+      }
+      break;
+    case TWISTOPT_PROXY_TEMPLATE_UDP:
+      {
+        const char *s = va_arg (ap, const char *);
+        char err[200];
+
+        if (s != NULL && s[0] != 0
+            && twist_template_check (s, err, sizeof err) != TWIST_OK)
+          {
+            twist_easy_set_error (easy, twist_strdup (err));
+            rc = TWIST_ERR_INVAL;
+          }
+        else
+          replace (&easy->proxy_template_udp, s != NULL && s[0] != 0 ? s : NULL);
       }
       break;
     case TWISTOPT_PROXY_SSL_VERIFYPEER:

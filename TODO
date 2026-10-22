@@ -102,12 +102,14 @@ Twist TODO List
       c_rehash name), not through OpenSSL's rules.
   [ ] https proxies (engine/tunnel.c) are done for TCP: TLS to the proxy, then
       CONNECT in HTTP/2 or HTTP/1.1.  Left:
-        - CONNECT-UDP (RFC 9298) over HTTP/3, so that HTTP/3 and DNS over QUIC
-          can use a proxy, with --proxy-template-udp for a template other than
-          https://HOST:PORT/.well-known/masque/udp/{target_host}/{target_port}/.
-          Needs HTTP Datagrams (SETTINGS_H3_DATAGRAM) in the HTTP/3 layer, and a
-          QUIC client that sends over a datagram transport and not a UDP
-          socket.
+        - CONNECT-UDP (RFC 9298, engine/masque.c) is done for HTTP/3, with
+          --proxy-template-udp.  Left: HTTP/3 under a proxy is chosen only by
+          --http3-only (the target's HTTPS record and Alt-Svc are not asked
+          for, since the proxy does the lookup); DNS over QUIC does not use a
+          proxy; the tunnel's packets are at most 1200 bytes (quickstep must
+          send max_udp_payload_size, or a peer's path MTU probes through the
+          tunnel can exceed what the proxy's own datagrams hold, and some
+          proxies then end the flow), and so a larger path MTU is not used.
         - templated CONNECT-TCP (draft-ietf-httpbis-connect-tcp), and
           --proxy-template-tcp for it, when it is an RFC.
         - ftp and ftps through an https proxy (the data connection too).
@@ -117,6 +119,9 @@ Twist TODO List
           carry many.
         - quickstep's gq_tls_free does not free the selected transcript
           (t->tr), so each TLS connection leaks about 1.3 KB.
+  [ ] -D and -i show an HTTP/2 or HTTP/3 response as its pseudo-header
+      ":status: 200" and not as a status line "HTTP/2 200", and -w
+      %{http_version} is empty.
   [ ] URL globbing is done for URLs and for -o names (#N).  Not done: globbing
       the file given to -T ({a,b} there, with #N in the URL), and #N in
       --output-dir.  -T takes the name as written.

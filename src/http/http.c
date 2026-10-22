@@ -54,6 +54,8 @@ struct twist_http
   int https;
   int tunnel;
   int tls_tunnel;		/* Through an https proxy: tunnel.c.  */
+  int masque;			/* HTTP/3 through CONNECT-UDP: masque.c.  */
+  char *tun_tmpl;
   char *tun_user;
   char *tun_pass;
   int tls_on;
@@ -102,6 +104,7 @@ struct twist_http
 };
 
 static void http_begin (struct twist_http *h);
+static void start_quic (struct twist_http *h, const struct twist_dns_addr *addr);
 static void http_connected (struct twist_endpoint *ep);
 static void http_fail (struct twist_http *h, int err);
 static void http_free_parsers (struct twist_http *h);
@@ -241,7 +244,7 @@ http_pool_key (struct twist_http *h, char *buf, size_t cap)
 static int
 via_tunnel (const struct twist_http *h)
 {
-  return (h->proxy != NULL && h->tunnel) || h->tls_tunnel;
+  return (h->proxy != NULL && h->tunnel) || h->tls_tunnel || h->masque;
 }
 
 static void
@@ -1062,6 +1065,10 @@ send_request (struct twist_http *h)
     }
   else if (h->mode == HTTP_H1)
     rc = twist_connection_send_parts (h->conn, out, out_len, body, body_len);
+  else if (h->mode == HTTP_H3)
+    /* A QUIC connection has no TLS layer of its own to send through: its
+       endpoint writes to the request stream.  */
+    rc = twist_endpoint_send (twist_connection_endpoint (h->conn), out, out_len);
   else
     rc = twist_connection_send_parts (h->conn, out, out_len, NULL, 0);
   free (out);
@@ -1464,6 +1471,105 @@ on_timeout (void *user)
   http_complete (h, TWIST_ERR_TIMEOUT);
 }
 
+/* Whether HTTP/3 goes through a CONNECT-UDP proxy (RFC 9298), and if so which:
+   1 with the proxy's host and port, the credentials from its URL and the
+   template (NULL for the default); 0 with no proxy; -1 if there is a proxy and
+   it cannot carry UDP, which is an error, since HTTP/3 may not go round it.
+   A template names the proxy, with its authority; otherwise it is the https
+   proxy.  */
+static int
+masque_plan (struct twist_http *h, char **phost, int *pport, char **puser,
+             char **ppass, char **tmpl)
+{
+  struct twist_easy *easy = h->easy;
+  const char *px = twist_easy_proxy (easy);
+  const char *tp = easy->proxy_template_udp;
+  int kind = TWIST_PROXY_NONE;
+
+  *phost = *puser = *ppass = *tmpl = NULL;
+  *pport = 0;
+  if (twist_easy_noproxy (easy))
+    return 0;
+  if (px != NULL
+      && twist_proxy_parse (px, &kind, phost, pport, puser, ppass) != TWIST_OK)
+    return -1;
+  if (tp == NULL)
+    {
+      if (px == NULL)
+        return 0;
+      if (kind != TWIST_PROXY_HTTPS)
+        {
+          twist_easy_set_error (easy, twist_strdup (_("HTTP/3 through a proxy "
+                                                      "needs an https:// "
+                                                      "proxy (CONNECT-UDP)")));
+          return -1;
+        }
+      return 1;
+    }
+  /* The template's authority is the proxy.  */
+  {
+    char *uri = NULL;
+    char *url = NULL;
+    size_t al;
+    int rc;
+
+    free (*phost);
+    *phost = NULL;
+    if (twist_template_expand (tp, "x", 1, &uri) != TWIST_OK)
+      return -1;
+    al = strcspn (uri + 8, "/?");
+    url = twist_xmalloc (al + 9);
+    if (url == NULL)
+      {
+        free (uri);
+        return -1;
+      }
+    memcpy (url, "https://", 8);
+    memcpy (url + 8, uri + 8, al);
+    url[8 + al] = 0;
+    free (uri);
+    {
+      char *tu = NULL, *tpw = NULL;
+      int tk = 0;
+
+      rc = twist_proxy_parse (url, &tk, phost, pport, &tu, &tpw);
+      free (url);
+      if (rc != TWIST_OK)
+        return -1;
+      /* Credentials written into the template's authority win; else the
+         proxy URL's, if that is an https one.  */
+      if (tu != NULL)
+        {
+          free (*puser);
+          if (*ppass != NULL)
+            {
+              memset (*ppass, 0, strlen (*ppass));
+              free (*ppass);
+            }
+          *puser = tu;
+          *ppass = tpw;
+        }
+      else
+        {
+          free (tpw);
+          if (kind != TWIST_PROXY_HTTPS)
+            {
+              free (*puser);
+              *puser = NULL;
+              if (*ppass != NULL)
+                {
+                  memset (*ppass, 0, strlen (*ppass));
+                  free (*ppass);
+                  *ppass = NULL;
+                }
+            }
+        }
+    }
+    *tmpl = twist_strdup (tp);
+    return *tmpl != NULL ? 1 : -1;
+  }
+}
+
 static int
 prepare_dial (struct twist_http *h)
 {
@@ -1479,6 +1585,9 @@ prepare_dial (struct twist_http *h)
     port = h->https_port;
   h->tunnel = 0;
   h->tls_tunnel = 0;
+  h->masque = 0;
+  free (h->tun_tmpl);
+  h->tun_tmpl = NULL;
   free (h->tun_user);
   h->tun_user = NULL;
   if (h->tun_pass != NULL)
@@ -1489,7 +1598,32 @@ prepare_dial (struct twist_http *h)
     }
   twist_proxy_free (h->proxy);
   h->proxy = NULL;
-  if (h->mode != HTTP_H3 && twist_easy_proxy (easy) != NULL)
+  if (h->mode == HTTP_H3)
+    {
+      int plan = masque_plan (h, &phost, &pport, &puser, &ppass, &h->tun_tmpl);
+
+      if (plan < 0)
+        {
+          free (phost);
+          free (puser);
+          if (ppass != NULL)
+            {
+              memset (ppass, 0, strlen (ppass));
+              free (ppass);
+            }
+          return TWIST_ERR_UNSUPPORTED;
+        }
+      if (plan > 0)
+        {
+          h->masque = 1;
+          dial = phost;
+          port = pport;
+          h->tun_user = puser;
+          h->tun_pass = ppass;
+          puser = ppass = NULL;
+        }
+    }
+  else if (twist_easy_proxy (easy) != NULL)
     {
       int prc = twist_proxy_parse (twist_easy_proxy (easy), &kind, &phost,
                                    &pport, &puser, &ppass);
@@ -1730,7 +1864,10 @@ on_proxy_resolved (void *user, int err, const struct twist_dns_addr *addr)
     }
   h->peer = *addr;
   h->have_peer = 1;
-  dial (h, &h->peer);
+  if (h->masque)
+    start_quic (h, &h->peer);
+  else
+    dial (h, &h->peer);
 }
 
 static void
@@ -1747,6 +1884,26 @@ start_quic (struct twist_http *h, const struct twist_dns_addr *addr)
   if (twist_quic_connect_fn == NULL)
     {
       http_fail (h, TWIST_ERR_UNSUPPORTED);
+      return;
+    }
+  if (h->masque)
+    {
+      struct twist_masque_spec spec;
+
+      memset (&spec, 0, sizeof spec);
+      spec.proxy_host = h->dial_host;
+      spec.proxy_port = h->dial_port;
+      spec.user = h->tun_user;
+      spec.pass = h->tun_pass;
+      spec.tmpl = h->tun_tmpl;
+      spec.host = saved;
+      spec.port = saved_port;
+      rc = twist_masque_connect (easy, &spec, addr, &h->handler, h, &h->conn);
+      if (rc != TWIST_OK)
+        {
+          http_fail (h, rc);
+          return;
+        }
       return;
     }
   literal = twist_strdup (addr->text);
@@ -1783,8 +1940,8 @@ start_attempt (struct twist_http *h)
       http_complete (h, rc);
       return;
     }
-  if (h->mode != HTTP_H3 && h->easy->url->host != NULL
-      && strcmp (h->dial_host, h->easy->url->host) != 0)
+  if ((h->masque || h->mode != HTTP_H3) && h->easy->url->host != NULL
+      && (h->masque || strcmp (h->dial_host, h->easy->url->host) != 0))
     {
       rc = twist_dns_resolve_easy (h->easy, h->dial_host, on_proxy_resolved, h);
       if (rc != TWIST_OK)
@@ -1909,6 +2066,37 @@ http_begin (struct twist_http *h)
     twist_loop_schedule (easy->loop,
                          twist_loop_now (easy->loop) + (uint64_t) easy->timeout_ms,
                          on_timeout, h, &h->timer);
+  if (h->https && easy->http_version == TWIST_HTTP_VERSION_3ONLY)
+    {
+      char *ph, *pu, *pp, *pt;
+      int pport, plan;
+
+      plan = masque_plan (h, &ph, &pport, &pu, &pp, &pt);
+      free (ph);
+      free (pu);
+      if (pp != NULL)
+        {
+          memset (pp, 0, strlen (pp));
+          free (pp);
+        }
+      free (pt);
+      if (plan > 0)
+        {
+          /* The proxy looks the target up; the name is not asked for here.
+             Only the proxy's own address is needed, and that comes later.  */
+          struct twist_dns_service svc;
+
+          memset (&svc, 0, sizeof svc);
+          svc.addr.family = 4;
+          on_resolved (h, TWIST_OK, &svc);
+          return;
+        }
+      if (plan < 0)
+        {
+          http_complete (h, TWIST_ERR_UNSUPPORTED);
+          return;
+        }
+    }
   {
     int rc = twist_dns_resolve_service_easy (easy, url->host, on_resolved, h);
 
@@ -1970,6 +2158,7 @@ http_free (void *p)
   free (h->origin_host);
   free (h->dial_host);
   free (h->tun_user);
+  free (h->tun_tmpl);
   if (h->tun_pass != NULL)
     {
       memset (h->tun_pass, 0, strlen (h->tun_pass));

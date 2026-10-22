@@ -62,6 +62,35 @@ ws_recv (void *obj, const uint8_t *data, size_t len)
 
 static int opened_switch (void *user);
 
+static char h3_names[8][32];
+static char h3_values[8][64];
+static int h3_seen;
+
+static void
+h3_collect (void *user, const char *name, size_t nn, const char *value,
+            size_t vn)
+{
+  (void) user;
+  if (h3_seen < 8)
+    {
+      snprintf (h3_names[h3_seen], sizeof h3_names[0], "%.*s", (int) nn, name);
+      snprintf (h3_values[h3_seen], sizeof h3_values[0], "%.*s", (int) vn,
+                value);
+      h3_seen++;
+    }
+}
+
+static int
+h3_has (const char *name, const char *value)
+{
+  int i;
+
+  for (i = 0; i < h3_seen; i++)
+    if (strcmp (h3_names[i], name) == 0 && strcmp (h3_values[i], value) == 0)
+      return 1;
+  return 0;
+}
+
 static void
 test_ws (void)
 {
@@ -126,10 +155,21 @@ test_ws (void)
                              extra, NULL, 0, &out, &n) == TWIST_OK,
            "h3 connect rc");
     check (out != NULL && out[0] == 0x01, "h3 headers");
-    check (has_bytes (out, n, "CONNECT", 7)
-           && has_bytes (out, n, ":protocol", 9)
-           && has_bytes (out, n, "websocket", 9)
-           && has_bytes (out, n, "https", 5), "h3 connect fields");
+    /* The fields as a decoder reads them: the table's for the method and the
+       scheme, literals for the rest.  out[1] is the length, a byte.  */
+    {
+      struct twist_h1_events cev;
+
+      memset (&cev, 0, sizeof cev);
+      cev.header = h3_collect;
+      h3_seen = 0;
+      check (n > 2 && twist_qpack_decode (out + 2, n - 2, &cev) == TWIST_OK,
+             "h3 fields decode");
+      check (h3_seen == 5 && h3_has (":method", "CONNECT")
+             && h3_has (":scheme", "https") && h3_has (":authority", "example")
+             && h3_has (":path", "/chat") && h3_has (":protocol", "websocket"),
+             "h3 connect fields");
+    }
     free (out);
     twist_slist_free_all (extra);
     ev = test_events ();

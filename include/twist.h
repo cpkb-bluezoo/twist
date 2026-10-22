@@ -256,7 +256,14 @@ enum twist_opt
   /* A long.  0 does not check the certificate of an https proxy; the default,
      1, does.  This is not TWISTOPT_SSL_VERIFYPEER: the target is checked or
      not as that says, and the proxy as this says.  */
-  TWISTOPT_PROXY_SSL_VERIFYPEER = 64
+  TWISTOPT_PROXY_SSL_VERIFYPEER = 64,
+  /* The URI Template of a UDP proxy (RFC 9298), for HTTP/3 through it: an
+     https URI with {target_host} and {target_port}, or the query form
+     {?target_host,target_port}.  Its host and port are the proxy's, and may
+     be other than TWISTOPT_PROXY's.  Without it an https proxy has
+     https://HOST:PORT/.well-known/masque/udp/{target_host}/{target_port}/.
+     A template that is not one is refused.  NULL or "" clears it.  */
+  TWISTOPT_PROXY_TEMPLATE_UDP = 65
 };
 
 enum twist_dns_transport

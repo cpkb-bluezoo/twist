@@ -378,8 +378,35 @@ and on the connection if it speaks only HTTP/1.1, as ALPN says.  What the
 target's protocol sends, including its own TLS, goes through that tunnel, so
 the proxy sees where the transfer goes and how much, but not what.  Credentials
 go to it as Basic, in the TLS.  This works for every scheme that can use a
-proxy except ftp and ftps, and an http:// URL is tunnelled too.  HTTP/3 does
-not use a proxy yet.  A tunnel has a connection to the proxy of its own.
+proxy except ftp and ftps, and an http:// URL is tunnelled too.  A tunnel has a
+connection to the proxy of its own.
+.IP
+HTTP/3 (\fB\-\-http3\-only\fR) goes through an
+.I https://
+proxy that speaks HTTP/3 and does CONNECT\-UDP (RFC 9298): QUIC to the proxy, a
+CONNECT on a stream of it that asks for a UDP flow to the target, and the
+target's QUIC packets in HTTP Datagrams (RFC 9297) on that stream.  The
+target's TLS is still its own.  The proxy looks the target up, so its name is
+not looked up here.  A proxy of another kind cannot carry HTTP/3, and then the
+transfer fails, and does not go round the proxy.  A failure of the proxy's,
+such as a 403 or a 407, is exit status 56.
+.TP
+.BI \-\-proxy\-template\-udp " template"
+The URI Template (RFC 6570) of a proxy that does CONNECT\-UDP: an https:// URI
+with the variables target_host and target_port, as in
+.IR https://proxy.example/masque/{target_host}/{target_port}/ ,
+or
+.IR https://proxy.example/masque{?target_host,target_port} .
+Without it the template of
+.B \-x https://host:port
+is
+.IR https://host:port/.well\-known/masque/udp/{target_host}/{target_port}/ .
+With it and no
+.BR \-x ,
+the template names the proxy for UDP (HTTP/3), and every other transfer is
+direct.  An invalid template is a usage error (exit status 2).  Credentials
+come from the proxy's URL, the template's authority, or
+.BR \-U .
 .TP
 .BI \-\-proxy\-cacert " file"
 PEM bundle of the authorities that vouch for an https proxy.  Without it the

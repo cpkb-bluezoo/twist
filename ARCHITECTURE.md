@@ -409,6 +409,21 @@ owner and no descriptor writes at once what TLS queues. The three places that
 dial (`http.c`, `mail/dial.c`, `ftp.c`) call `twist_tunnel_connect` in place of
 making a TCP connection when the proxy is https.
 
+HTTP/3 through an https proxy is CONNECT-UDP (`src/engine/masque.c`). A QUIC
+connection to the target is made with no socket: `twist_quic_dial` takes a
+`twist_quic_opts` whose `send` is the carrier for its UDP datagrams, and what
+comes back is given to `twist_quic_feed`. The carrier is a second QUIC
+connection, to the proxy, with DATAGRAM frames (RFC 9221) and the HTTP/3
+setting H3_DATAGRAM (RFC 9297). On it one request stream does an extended
+CONNECT (`:protocol connect-udp`, from the URI Template: `template.c`), and
+each packet of the inner connection is a datagram of the quarter stream ID,
+context ID 0 and the packet (`twist_masque_wrap`, `twist_masque_unwrap`).
+Packets are held until the proxy has said yes and its datagrams hold them
+(the inner Initial is 1200 bytes, and the outer path starts at about that), and
+sent again every 10 ms. The inner connection asks for packets of no more than
+1200 bytes. `http.c` picks it (`masque_plan`) for HTTP/3 when there is an https
+proxy or `--proxy-template-udp`, and then does not look up the target.
+
 The environment is read in three places, and only there. `twist_easy_proxy`
 (`src/engine/noproxy.c`) is the proxy a transfer uses: the one it was given,
 or else the environment's for the scheme (`http_proxy` in lower case only, the

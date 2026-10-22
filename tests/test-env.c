@@ -275,7 +275,7 @@ test_qlog (void)
   /* Without the variable: no file.  */
   unsetenv ("QLOGDIR");
   rc = twist_quic_dial (loop, "example.test", "h3", &addr,
-                        ntohs (sin.sin_port), NULL, NULL, NULL, NULL, 1, &conn);
+                        ntohs (sin.sin_port), NULL, NULL, NULL, NULL, 1, NULL, &conn);
   check (rc == TWIST_OK && conn != NULL, "dial without QLOGDIR");
   twist_connection_free (conn);
   d = opendir (dir);
@@ -288,7 +288,7 @@ test_qlog (void)
   setenv ("QLOGDIR", dir, 1);
   conn = NULL;
   rc = twist_quic_dial (loop, "example.test", "h3", &addr,
-                        ntohs (sin.sin_port), NULL, NULL, NULL, NULL, 1, &conn);
+                        ntohs (sin.sin_port), NULL, NULL, NULL, NULL, 1, NULL, &conn);
   check (rc == TWIST_OK && conn != NULL, "dial with QLOGDIR");
   twist_connection_free (conn);
   files = 0;
@@ -341,7 +341,7 @@ test_qlog (void)
   setenv ("QLOGDIR", "/nonexistent/twist/qlog", 1);
   conn = NULL;
   rc = twist_quic_dial (loop, "example.test", "h3", &addr,
-                        ntohs (sin.sin_port), NULL, NULL, NULL, NULL, 1, &conn);
+                        ntohs (sin.sin_port), NULL, NULL, NULL, NULL, 1, NULL, &conn);
   check (rc == TWIST_OK && conn != NULL, "dial with a bad QLOGDIR");
   twist_connection_free (conn);
   unsetenv ("QLOGDIR");

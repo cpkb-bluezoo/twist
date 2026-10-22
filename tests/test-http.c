@@ -563,6 +563,145 @@ test_qpack_static_index (void)
          "and from its last entry");
 }
 
+/* QPACK as RFC 9204 has it: a request is written with the static table and
+   literals, and a section is read with names and values as literals, with
+   Huffman coding, and with indices; the dynamic table is refused.  */
+static char qp_names[12][40];
+static char qp_values[12][512];
+static int qp_seen;
+
+static void
+qp_collect (void *user, const char *name, size_t nn, const char *value,
+            size_t vn)
+{
+  (void) user;
+  if (qp_seen < 12)
+    {
+      snprintf (qp_names[qp_seen], sizeof qp_names[0], "%.*s", (int) nn, name);
+      snprintf (qp_values[qp_seen], sizeof qp_values[0], "%.*s", (int) vn,
+                value);
+      qp_seen++;
+    }
+}
+
+static int
+qp_has (const char *name, const char *value)
+{
+  int i;
+
+  for (i = 0; i < qp_seen; i++)
+    if (strcmp (qp_names[i], name) == 0 && strcmp (qp_values[i], value) == 0)
+      return 1;
+  return 0;
+}
+
+static int
+qp_decode (const uint8_t *data, size_t n)
+{
+  struct twist_h1_events ev;
+
+  memset (&ev, 0, sizeof ev);
+  ev.header = qp_collect;
+  qp_seen = 0;
+  return twist_qpack_decode (data, n, &ev);
+}
+
+static void
+test_qpack (void)
+{
+  uint8_t *out = NULL;
+  size_t n = 0;
+  /* GET https://example.com/ : prefix, :method GET (static 17), :scheme https
+     (23), :authority from static 0 with a literal value, :path / (1).  */
+  static const uint8_t get[] = {
+    0x00, 0x00, 0xd1, 0xd7, 0x50, 0x0b, 'e', 'x', 'a', 'm', 'p', 'l', 'e',
+    '.', 'c', 'o', 'm', 0xc1
+  };
+  /* A literal name and value: x-test: abc.  */
+  static const uint8_t lit[] = {
+    0x00, 0x00, 0x26, 'x', '-', 't', 'e', 's', 't', 0x03, 'a', 'b', 'c'
+  };
+  /* custom-key: custom-value, both Huffman coded (RFC 7541, C.4.3).  The
+     name is 8 bytes: more than the 3-bit prefix holds, so the length goes on
+     into the next byte.  */
+  static const uint8_t huff[] = {
+    0x00, 0x00, 0x2f, 0x01, 0x25, 0xa8, 0x49, 0xe9, 0x5b, 0xa9, 0x7d, 0x7f,
+    0x89, 0x25, 0xa8, 0x49, 0xe9, 0x5b, 0xb8, 0xe8, 0xb4, 0xbf
+  };
+  /* :status 200 (static 25), content-length from static 4 with the value 5,
+     and a name from the static table past the 15 a 4-bit index holds.  */
+  static const uint8_t resp[] = {
+    0x00, 0x00, 0xd9, 0x54, 0x01, '5', 0x5f, 0x00, 0x03, 'G', 'E', 'T'
+  };
+  static const uint8_t dynamic_ric[] = { 0x01, 0x00, 0xd9 };
+  static const uint8_t dynamic_ref[] = { 0x00, 0x00, 0x80 };
+  static const uint8_t post_base[] = { 0x00, 0x00, 0x10 };
+  static const uint8_t cut[] = { 0x00, 0x00, 0x26, 'x', '-' };
+  struct twist_slist *extra = twist_slist_append (NULL, "X-Mixed-Case: v");
+  struct twist_slist *auth;
+  char *big = malloc (400);
+
+  check (twist_qpack_encode_request ("GET", "https", "example.com", "/", NULL,
+                                     &out, &n) == TWIST_OK
+         && n == sizeof get && memcmp (out, get, n) == 0,
+         "a GET is the static table and one literal");
+  free (out);
+  check (twist_qpack_encode_request ("CONNECT", NULL, "h:443", NULL, NULL,
+                                     &out, &n) == TWIST_OK
+         && qp_decode (out, n) == TWIST_OK && qp_seen == 2
+         && qp_has (":method", "CONNECT") && qp_has (":authority", "h:443"),
+         "a CONNECT has no scheme and no path");
+  free (out);
+  twist_slist_append (extra, "x-long: 0");
+  check (twist_qpack_encode_request ("POST", "http", "h", "/p?q=1", extra,
+                                     &out, &n) == TWIST_OK
+         && qp_decode (out, n) == TWIST_OK && qp_has (":method", "POST")
+         && qp_has (":scheme", "http") && qp_has (":path", "/p?q=1")
+         && qp_has ("x-mixed-case", "v"), "literals, and names in lower case");
+  free (out);
+  twist_slist_free_all (extra);
+  /* A value too long for the 7 bits of its length.  */
+  memset (big, 'v', 399);
+  big[399] = 0;
+  auth = twist_slist_append (NULL, "x-big: ");
+  free (auth->data);
+  auth->data = malloc (420);
+  snprintf (auth->data, 420, "x-big: %s", big);
+  check (twist_qpack_encode_request ("GET", "https", "h", "/", auth, &out, &n)
+         == TWIST_OK && qp_decode (out, n) == TWIST_OK && qp_has ("x-big", big),
+         "a value of 399 bytes");
+  free (out);
+  twist_slist_free_all (auth);
+  free (big);
+  auth = twist_slist_append (NULL, "Authorization: Basic eDp5");
+  check (twist_qpack_encode_request ("GET", "https", "h", "/", auth, &out, &n)
+         == TWIST_OK && qp_decode (out, n) == TWIST_OK
+         && qp_has ("authorization", "Basic eDp5")
+         && memchr (out, 0x7f, n) != NULL,
+         "a credential is never indexed (the N bit)");
+  free (out);
+  twist_slist_free_all (auth);
+
+  check (qp_decode (get, sizeof get) == TWIST_OK && qp_seen == 4
+         && qp_has (":authority", "example.com") && qp_has (":path", "/"),
+         "reads what it writes");
+  check (qp_decode (lit, sizeof lit) == TWIST_OK && qp_has ("x-test", "abc"),
+         "a literal name");
+  check (qp_decode (huff, sizeof huff) == TWIST_OK
+         && qp_has ("custom-key", "custom-value"), "Huffman coded literals");
+  check (qp_decode (resp, sizeof resp) == TWIST_OK && qp_has (":status", "200")
+         && qp_has ("content-length", "5") && qp_has (":method", "GET"),
+         "indices, with a value, and past 15");
+  check (qp_decode (dynamic_ric, sizeof dynamic_ric) == TWIST_ERR_PROTOCOL,
+         "a section that needs the dynamic table is refused");
+  check (qp_decode (dynamic_ref, sizeof dynamic_ref) == TWIST_ERR_PROTOCOL,
+         "and a reference to it");
+  check (qp_decode (post_base, sizeof post_base) == TWIST_ERR_PROTOCOL,
+         "and a post-base one");
+  check (qp_decode (cut, sizeof cut) == TWIST_ERR_PROTOCOL,
+         "a section cut short");
+}
+
 static void
 test_h3 (void)
 {
@@ -578,6 +717,61 @@ test_h3 (void)
   check (strcmp (hdr_name, ":status") == 0 && strcmp (hdr_value, "200") == 0,
          "h3 status");
   check (saw_done == 1, "h3 done");
+  twist_h3_free (h);
+}
+
+static size_t big_seen;
+
+static void
+big_body (void *user, const uint8_t *data, size_t len)
+{
+  (void) user;
+  (void) data;
+  big_seen += len;
+}
+
+/* A DATA frame is as long as the server likes (quic-go's are the size of its
+   writes), and a frame of a type that is not known is passed over, whatever
+   its size; neither is held whole.  */
+static void
+test_h3_long_frames (void)
+{
+  struct twist_h1_events ev;
+  struct twist_h3 *h;
+  static uint8_t msg[200100];
+  size_t n = 0;
+  size_t off;
+
+  memset (&ev, 0, sizeof ev);
+  ev.body = big_body;
+  h = twist_h3_new (&ev);
+  /* DATA, length 100000 (a 4-byte varint), then a reserved frame (0x21,
+     length 50000) and a DATA frame of 5.  */
+  msg[n++] = 0x00;
+  msg[n++] = 0x80; msg[n++] = 0x01; msg[n++] = 0x86; msg[n++] = 0xa0;
+  memset (msg + n, 'd', 100000);
+  n += 100000;
+  msg[n++] = 0x21;
+  msg[n++] = 0x80; msg[n++] = 0x00; msg[n++] = 0xc3; msg[n++] = 0x50;
+  memset (msg + n, 'x', 50000);
+  n += 50000;
+  msg[n++] = 0x00; msg[n++] = 0x05;
+  memset (msg + n, 'e', 5);
+  n += 5;
+  big_seen = 0;
+  /* In pieces of 1000 bytes, as the stream gives them.  */
+  for (off = 0; off < n;)
+    {
+      size_t piece = n - off > 1000 ? 1000 : n - off;
+      size_t used = twist_h3_receive (h, msg + off, piece);
+
+      check (used <= piece, "no more than was given");
+      off += used;
+      if (used == 0)
+        break;
+    }
+  check (off == n && big_seen == 100005,
+         "a long DATA frame is delivered as it comes, and a reserved one skipped");
   twist_h3_free (h);
 }
 
@@ -693,10 +887,12 @@ main (void)
   test_h1 ();
   test_h2 ();
   test_h3 ();
+  test_h3_long_frames ();
   test_h2_windows ();
   test_h2_tunnel ();
   test_hpack_table ();
   test_qpack_static_index ();
+  test_qpack ();
   test_cookie ();
   test_hpack_long ();
   test_h2_share ();

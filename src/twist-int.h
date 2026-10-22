@@ -163,6 +163,7 @@ struct twist_easy
   int noproxy_set;
   char *capath;
   char *proxy_cainfo;		/* For an https proxy; else cainfo.  */
+  char *proxy_template_udp;
   int proxy_verifypeer;
   char *mail_from;
   struct twist_slist *mail_rcpt;
@@ -398,11 +399,39 @@ extern int (*twist_tls_send_plain_fn) (struct twist_connection *conn,
                                        const uint8_t *data, size_t len);
 extern int (*twist_quic_connect_fn) (struct twist_easy *easy,
                                      struct twist_connection **out);
+/* What a QUIC connection can be asked for besides the usual.  DATAGRAMS: DATAGRAM
+   frames (RFC 9221) are accepted, and HTTP/3 says H3_DATAGRAM (RFC 9297).  SEND:
+   the UDP datagrams do not go to a socket but to this, which is a carrier such
+   as a CONNECT-UDP tunnel (masque.c); the connection has no descriptor, and the
+   datagrams that come back are given to twist_quic_feed.  */
+struct twist_quic_opts
+{
+  int datagrams;
+  int (*send) (void *user, const uint8_t *data, size_t len);
+  void *send_user;
+};
+
 int twist_quic_dial (struct twist_loop *loop, const char *server_name,
                      const char *alpn, const struct twist_dns_addr *addr,
                      int port, const char *cafile, const char *capath,
                      const char *certfile, const char *keyfile, int verify,
+                     const struct twist_quic_opts *opts,
                      struct twist_connection **out);
+/* Datagrams of a QUIC connection made with opts->datagrams: send one, the
+   largest that can be sent now (0: not allowed yet), and who is given the
+   ones that arrive.  */
+uint64_t twist_quic_stream_id (struct twist_connection *conn);
+int twist_quic_datagram_send (struct twist_connection *conn,
+                              const uint8_t *data, size_t len);
+size_t twist_quic_datagram_max (struct twist_connection *conn);
+void twist_quic_on_datagram (struct twist_connection *conn,
+                             void (*cb) (void *user, const uint8_t *data,
+                                         size_t len),
+                             void *user);
+/* A datagram that came from the carrier of a connection made with
+   opts->send; it is a copy, since QUIC decrypts in place.  */
+void twist_quic_feed (struct twist_connection *conn, const uint8_t *data,
+                      size_t len);
 int twist_quic_open_stream (struct twist_connection *conn);
 int twist_quic_can_open (struct twist_connection *conn);
 void twist_quic_bind (struct twist_connection *conn,
@@ -1160,6 +1189,51 @@ int twist_easy_perform_in (struct twist_multi *multi, struct twist_easy *easy);
 void twist_easy_release_transfer (struct twist_easy *easy);
 int twist_transfer_start (struct twist_easy *easy);
 
+/* ---- the URI Template of a UDP proxy (engine/template.c) ---- */
+
+/* RFC 9298, section 2: an absolute https URI with the variables target_host
+   and target_port, written {name} or, as a query, {?name,name} (RFC 6570).
+   twist_template_check says if TEMPLATE is one, and why not in ERR.
+   twist_template_expand makes the URI for HOST and PORT, with the host's
+   characters percent-encoded (the colons of an IPv6 address too).
+   twist_template_default is the template of a proxy that is given as a host
+   and a port: https://HOST:PORT/.well-known/masque/udp/{target_host}/
+   {target_port}/.  OUT is to be freed.  */
+int twist_template_check (const char *tmpl, char *err, size_t errcap);
+int twist_template_expand (const char *tmpl, const char *host, int port,
+                           char **out);
+int twist_template_default (const char *proxy_host, int proxy_port, char **out);
+
+/* ---- CONNECT-UDP (engine/masque.c) ---- */
+
+struct twist_masque_spec
+{
+  const char *proxy_host;	/* The host and port to dial.  */
+  int proxy_port;
+  const char *user;		/* From the proxy's URL, or NULL: then -U.  */
+  const char *pass;
+  const char *tmpl;		/* NULL: the default for the proxy.  */
+  const char *host;		/* The target: its name and port.  */
+  int port;
+};
+
+/* An HTTP/3 connection to the target through an HTTP/3 proxy that does
+   CONNECT-UDP (RFC 9298): QUIC to the proxy at PROXY_ADDR, an extended CONNECT
+   on a request stream of it, and the target's QUIC packets in HTTP Datagrams
+   on that stream.  OUT is the QUIC connection to the target, for HANDLER and
+   USER as one made directly; the proxy's name for the target is the target's
+   own, which the proxy looks up.  The connection is the caller's to free,
+   which ends the tunnel.  */
+size_t twist_masque_wrap (uint64_t qsid, const uint8_t *payload, size_t len,
+                          uint8_t *out, size_t cap);
+int twist_masque_unwrap (uint64_t qsid, const uint8_t *data, size_t len,
+                         const uint8_t **payload, size_t *plen);
+int twist_masque_connect (struct twist_easy *easy,
+                          const struct twist_masque_spec *spec,
+                          const struct twist_dns_addr *proxy_addr,
+                          const struct twist_protocol_handler *handler,
+                          void *user, struct twist_connection **out);
+
 /* ---- tunnels through an https proxy (engine/tunnel.c) ---- */
 
 struct twist_tunnel_spec
@@ -1196,6 +1270,8 @@ int twist_tunnel_connect (struct twist_easy *easy,
 const char *twist_easy_proxy (const struct twist_easy *easy);
 /* Whether HOST is on a no_proxy LIST.  */
 int twist_noproxy_match (const char *host, const char *list);
+/* Whether the URL's host is on the list of those that go direct.  */
+int twist_easy_noproxy (const struct twist_easy *easy);
 
 /* ---- progress ---- */
 

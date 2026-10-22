@@ -67,6 +67,7 @@ libtwist_la_SOURCES = \
   engine/multi.c \
   engine/glob.c \
   engine/pool.c \
+  engine/masque.c \
   engine/noproxy.c \
   engine/progress.c \
   engine/rate.c \
@@ -74,6 +75,7 @@ libtwist_la_SOURCES = \
   engine/vars.c \
   engine/scheme.c \
   engine/share.c \
+  engine/template.c \
   engine/tunnel.c \
   engine/url.c \
   dns/doh.c \
