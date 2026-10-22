@@ -66,7 +66,10 @@ enum twist_error
   /* A multi interface function was called from inside a callback: the
      handle is in use by the call that made the callback, so it cannot be
      removed or freed there.  Do it after the call returns.  */
-  TWIST_ERR_RECURSIVE = 23
+  TWIST_ERR_RECURSIVE = 23,
+  /* The transfer ended before all of what the server said it would send
+     had come (curl's CURLE_PARTIAL_FILE).  */
+  TWIST_ERR_PARTIAL = 24
 };
 
 const char *twist_strerror (int err);
@@ -326,6 +329,15 @@ int twist_multi_setopt (twist_multi *multi, int opt, ...);
 int twist_multi_info_read (twist_multi *multi, int *msgs_left,
                            twist_easy **easy, int *result);
 
+/* What a share holds, and what its locks do.  A share may be given to
+   handles that are driven from one thread, and then no lock is needed or
+   taken.  For handles of several threads, twist_share_setopt turns on a lock
+   for each of these that is to be shared between them: the cookie jar, the
+   DNS answers, the kept connections, the HSTS list and the Alt-Svc list.  The
+   one that is not turned on is not locked, and must not be used by two
+   threads at once.  TWIST_LOCK_DATA_SSL_SESSION is accepted and nothing is
+   shared under it: TLS sessions are not kept.  A handle itself, and a multi
+   handle, are for one thread at a time, as in curl.  */
 #define TWIST_LOCK_DATA_COOKIE (1u << 0)
 #define TWIST_LOCK_DATA_DNS (1u << 1)
 #define TWIST_LOCK_DATA_CONNECT (1u << 2)

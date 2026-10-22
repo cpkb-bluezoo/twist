@@ -250,6 +250,41 @@ test_percent (void)
   rig_close (&r);
 }
 
+/* A server says how long its body is, and may say anything up to the
+   largest number.  Added to the size of an upload that is known, that
+   overflowed, and the meter drew a negative total (and in a build that traps
+   on overflow, stopped the transfer).  The total is the largest number, and
+   no figure is negative.  */
+static void
+test_huge_sizes (void)
+{
+  struct rig r;
+  const char *text;
+
+  check (rig_open (&r, 0) == 0, "rig");
+  clock_ms = 400000;
+  twist_progress_begin (r.easy);
+  twist_progress_ul_size (r.easy, 1000);
+  twist_progress_dl_size (r.easy, 9223372036854775807LL);
+  clock_ms = 401000;
+  twist_progress_downloaded (r.easy, 500);
+  twist_progress_uploaded (r.easy, 100);
+  text = rig_text (&r);
+  check (strstr (text, "\r") != NULL, "a line was drawn");
+  {
+    const char *c;
+    int negative = 0;
+
+    /* "--:--:--" is how an unknown time is shown; a dash before a digit is
+       a negative figure.  */
+    for (c = text; *c != 0; c++)
+      if (*c == '-' && c[1] >= '0' && c[1] <= '9')
+        negative = 1;
+    check (!negative, "no figure of it is negative");
+  }
+  rig_close (&r);
+}
+
 /* The speed over the last five seconds is that of the entry five seconds
    back once there are that many.  */
 static void
@@ -527,6 +562,7 @@ main (void)
   test_unknown_size ();
   test_upload ();
   test_percent ();
+  test_huge_sizes ();
   test_current_speed ();
   test_first_line_speed ();
   test_hidden ();

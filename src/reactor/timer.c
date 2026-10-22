@@ -36,6 +36,10 @@ struct twist_timer
   size_t index;
   struct twist_timer_heap *heap;
   struct twist_timer *free_next;
+  /* The owner's pointer to this timer, if it gave one: cleared when the timer
+     fires, before its callback.  A timer is spent then, and the structure is
+     used again for another, so a pointer kept to it would cancel that one.  */
+  struct twist_timer **slot;
 };
 
 struct twist_timer_heap
@@ -165,6 +169,7 @@ twist_timer_heap_push (struct twist_timer_heap *h, uint64_t deadline,
   t->deadline = deadline;
   t->cb = cb;
   t->user = user;
+  t->slot = out;
   t->heap = h;
   t->index = h->n;
   h->tab[h->n++] = t;
@@ -268,7 +273,11 @@ twist_timer_heap_fire (struct twist_timer_heap *h, uint64_t now)
             h->cancelled--;
         }
       else if (t->cb != NULL)
-        t->cb (t->user);
+        {
+          if (t->slot != NULL && *t->slot == t)
+            *t->slot = NULL;
+          t->cb (t->user);
+        }
       give_timer (h, t);
     }
 }

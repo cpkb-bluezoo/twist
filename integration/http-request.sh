@@ -53,7 +53,7 @@ check ()
 is () { [ "$1" = "$2" ] && echo ok; }
 
 cat > "$work/server.py" <<'PY'
-import gzip, http.server, socketserver, sys, urllib.parse
+import gzip, http.server, socketserver, sys, time, urllib.parse
 class H(http.server.BaseHTTPRequestHandler):
     protocol_version = 'HTTP/1.1'
     def log_message(self, *a): pass
@@ -70,6 +70,15 @@ class H(http.server.BaseHTTPRequestHandler):
             # The length of each header the request carried.
             lines = ['%s %d' % (k.lower(), len(v)) for k, v in self.headers.items()]
             self.reply(200, ('\n'.join(lines) + '\n').encode())
+        elif p == '/stall':
+            time.sleep(8)
+            self.reply(200, b'late')
+        elif p == '/big':
+            body = b'x' * (8 * 1024 * 1024)
+            try:
+                self.reply(200, body)
+            except OSError:
+                pass
         elif p == '/hello-gz':
             self.reply(200, gzip.compress(b'hello gzip\n'), [('Content-Encoding', 'gzip')])
         elif p == '/gz':
@@ -125,6 +134,18 @@ check "$(is "$(length_of range -r "$spec")" $((6 + ${#spec})))" \
 check "$(is "$(length_of x-long -H "X-Long: $tok")" 700)" \
   "a long header of the caller's is sent whole"
 
+# A request target has no space or byte over 0x7f in it: they are percent
+# encoded, as curl does.  "GET /a b HTTP/1.1" is not a request, and some
+# servers answer it as one with a target of "/a".
+check "$(is "$(get "$base/a b")" "6 /a%20b 127.0.0.1:$port")" \
+  "a space in a path is sent as %20"
+check "$(is "$(get "$base/x?q=a b")" "10 /x?q=a%20b 127.0.0.1:$port")" \
+  "and in a query"
+check "$(is "$(get "$base/$(printf '\303\251')")" "7 /%C3%A9 127.0.0.1:$port")" \
+  "a byte over 0x7f is sent as %XX"
+check "$(is "$(get "$base/a%20b")" "6 /a%20b 127.0.0.1:$port")" \
+  "an escape that is already there is not escaped again"
+
 # A long path arrives whole.
 long=$(head -c 1900 /dev/zero | tr '\0' 'p')
 check "$(is "$(get "$base/$long" | cut -d' ' -f1)" 1901)" \
@@ -172,5 +193,40 @@ check "$(is "$(get --compressed "$base/hello-gz")" "hello gzip")" \
 n=$(timeout 60 "$TWIST" -s -S --compressed -o /dev/null -w '%{size_download}' \
       "$base/gz" 2>/dev/null)
 check "$(is "$n" 67108864)" "a gzip body of 64 MiB, sent in 64 KB, arrives whole (got $n)"
+
+# What the application will not take is not sent on to it.  A write that
+# fails (a full disk) was ignored by HTTP, which went on and read all of the
+# body before the tool found the error, and then said "no error".  The
+# transfer stops at the first write that fails, with curl's status and words.
+if [ -w /dev/full ]; then
+  out=$(timeout 30 "$TWIST" -s -S -o /dev/full -w '%{size_download}' "$base/big" 2>&1)
+  rc=$?
+  size=$(printf %s "$out" | sed -n 's/.*[^0-9]\([0-9][0-9]*\)$/\1/p; t; s/^\([0-9][0-9]*\)$/\1/p')
+  check "$(is $rc 23)" "a body that cannot be written is status 23 ($rc)"
+  check "$([ -n "$size" ] && [ "$size" -lt 1048576 ] && echo ok)" \
+    "and it stops at the first write that fails (took ${size:-?} bytes of 8 MiB)"
+  check "$(printf %s "$out" | grep -q 'no error' || echo ok)" \
+    "and does not say 'no error' ($out)"
+fi
+
+# A password on the command line is in the list of arguments that ps shows, for
+# as long as the process lives.  The tool takes its copy and blanks the
+# argument, as curl does, for the options that carry a secret.  (This reads
+# /proc, so it is for systems that have it.)
+if [ -r /proc/self/cmdline ]; then
+  "$TWIST" -s --max-time 6 -u alice:s3cretpw --oauth2-bearer tokensecret \
+    -U puser:ppsecret --pass keysecret "$base/stall" >/dev/null 2>&1 &
+  tp=$!
+  sleep 1
+  cl=$(tr '\0' ' ' < /proc/$tp/cmdline 2>/dev/null)
+  kill $tp 2>/dev/null
+  wait $tp 2>/dev/null
+  check "$([ -n "$cl" ] && echo ok)" "the command line of the running tool could be read"
+  for secret in s3cretpw tokensecret ppsecret keysecret; do
+    case $cl in
+      *$secret*) check bad "the argument list still has the secret $secret" ;;
+    esac
+  done
+fi
 
 [ $fail = 0 ]

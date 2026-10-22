@@ -22,6 +22,7 @@
 
 #include "twist-int.h"
 
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -94,37 +95,120 @@ bad_digest_field (const char *s)
   return s != NULL && (twist_has_ctl (s) || strchr (s, '"') != NULL);
 }
 
+/* The auth-param KEY of the challenge, copied to BUF (CAP bytes), or NULL if
+   there is none or it does not fit.  The challenge is a list of name=value,
+   the value a token or a quoted string: a name is found only where a name
+   begins (not in "cnonce" for "nonce"), never inside a quoted value, and in
+   any case.  */
 static const char *
 param (const char *chal, const char *key, char *buf, size_t cap)
 {
-  const char *p = strstr (chal, key);
-  size_t n;
-  if (p == NULL)
-    return NULL;
-  p += strlen (key);
-  while (*p == ' ' || *p == '=')
-    p++;
-  if (*p == '"')
+  const char *p = chal;
+  size_t kl = strlen (key);
+
+  while (*p != 0)
     {
-      const char *e;
+      const char *name;
+      size_t nl;
+      size_t n = 0;
+      int match;
+
+      while (*p == ' ' || *p == '\t' || *p == ',')
+        p++;
+      name = p;
+      while (*p != 0 && *p != '=' && *p != ',' && *p != ' ' && *p != '\t')
+        p++;
+      nl = (size_t) (p - name);
+      while (*p == ' ' || *p == '\t')
+        p++;
+      if (*p != '=')
+        {
+          /* A word with no value, the scheme "Digest" first of all.  */
+          if (nl == 0 && *p != 0)
+            p++;
+          continue;
+        }
       p++;
-      e = strchr (p, '"');
-      if (e == NULL)
-        return NULL;
-      n = (size_t) (e - p);
+      while (*p == ' ' || *p == '\t')
+        p++;
+      match = nl == kl && strncasecmp (name, key, kl) == 0;
+      if (*p == '"')
+        {
+          p++;
+          while (*p != 0 && *p != '"')
+            {
+              if (*p == '\\' && p[1] != 0)
+                p++;
+              if (match)
+                {
+                  if (n + 1 >= cap)
+                    return NULL;
+                  buf[n] = *p;
+                }
+              n++;
+              p++;
+            }
+          if (*p != '"')
+            return NULL;
+          p++;
+        }
+      else
+        {
+          while (*p != 0 && *p != ',' && *p != ' ' && *p != '\t')
+            {
+              if (match)
+                {
+                  if (n + 1 >= cap)
+                    return NULL;
+                  buf[n] = *p;
+                }
+              n++;
+              p++;
+            }
+        }
+      if (match)
+        {
+          buf[n] = 0;
+          return buf;
+        }
     }
-  else
-    {
-      const char *e = p;
-      while (*e != 0 && *e != ',' && *e != ' ')
-        e++;
-      n = (size_t) (e - p);
-    }
-  if (n + 1 > cap)
+  return NULL;
+}
+
+/* A formatted string of whatever length, in memory of its own.  */
+static char *
+dformat (const char *fmt, ...)
+{
+  va_list ap;
+  char *s;
+  int n;
+
+  va_start (ap, fmt);
+  n = vsnprintf (NULL, 0, fmt, ap);
+  va_end (ap);
+  if (n < 0)
     return NULL;
-  memcpy (buf, p, n);
-  buf[n] = 0;
-  return buf;
+  s = twist_xmalloc ((size_t) n + 1);
+  if (s == NULL)
+    return NULL;
+  va_start (ap, fmt);
+  vsnprintf (s, (size_t) n + 1, fmt, ap);
+  va_end (ap);
+  return s;
+}
+
+/* Hash a string that holds a secret, and wipe it.  */
+static int
+hash_secret (int sha, char *s, char *out, size_t cap)
+{
+  int rc;
+
+  if (s == NULL)
+    return TWIST_ERR_NOMEM;
+  rc = hash_hex (sha, s, out, cap);
+  memset (s, 0, strlen (s));
+  free (s);
+  return rc;
 }
 
 int
@@ -132,22 +216,24 @@ twist_auth_digest (const char *challenge, const char *method, const char *uri,
                    const char *user, const char *pass, unsigned nc,
                    const char *cnonce, char **out)
 {
-  char realm[128], nonce[128], qop[64], algo[32];
-  const char *rp, *np, *qp, *ap;
+  char realm[512], nonce[512], opaque[512], qop[64], algo[32];
+  const char *rp, *np, *qp, *ap, *op;
   char ha1[65], ha2[65], resp[65];
-  char tmp[768];
   char *hdr;
   int sha = 0;
+  int auth;
   int rc;
 
   rp = param (challenge, "realm", realm, sizeof realm);
   np = param (challenge, "nonce", nonce, sizeof nonce);
   qp = param (challenge, "qop", qop, sizeof qop);
   ap = param (challenge, "algorithm", algo, sizeof algo);
+  op = param (challenge, "opaque", opaque, sizeof opaque);
   if (rp == NULL || np == NULL)
     return TWIST_ERR_AUTH;
   if (bad_digest_field (user) || bad_digest_field (uri)
-      || bad_digest_field (realm) || bad_digest_field (nonce))
+      || bad_digest_field (realm) || bad_digest_field (nonce)
+      || bad_digest_field (op))
     return TWIST_ERR_AUTH;
   if (qp != NULL && qop[0] != 0 && !qop_is_auth (qop))
     return TWIST_ERR_UNSUPPORTED;
@@ -155,35 +241,51 @@ twist_auth_digest (const char *challenge, const char *method, const char *uri,
     sha = 1;
   else if (ap != NULL && algo[0] != 0 && strcasecmp (algo, "MD5") != 0)
     return TWIST_ERR_UNSUPPORTED;
-  snprintf (tmp, sizeof tmp, "%s:%s:%s", user, realm, pass);
-  rc = hash_hex (sha, tmp, ha1, sizeof ha1);
+  auth = qp != NULL && qop_is_auth (qop);
+  /* Every string here is made to its own length: the user, the password and
+     the URI are whatever the caller has, and one cut off in a buffer gave a
+     response that matched nothing.  */
+  rc = hash_secret (sha, dformat ("%s:%s:%s", user, realm, pass), ha1,
+                    sizeof ha1);
   if (rc != TWIST_OK)
     return rc;
-  snprintf (tmp, sizeof tmp, "%s:%s", method, uri);
-  rc = hash_hex (sha, tmp, ha2, sizeof ha2);
+  rc = hash_secret (sha, dformat ("%s:%s", method, uri), ha2, sizeof ha2);
   if (rc != TWIST_OK)
     return rc;
-  if (qp != NULL && qop_is_auth (qop))
-    snprintf (tmp, sizeof tmp, "%s:%s:%08x:%s:auth:%s", ha1, nonce, nc,
-              cnonce != NULL ? cnonce : "twist", ha2);
+  if (auth)
+    rc = hash_secret (sha, dformat ("%s:%s:%08x:%s:auth:%s", ha1, nonce, nc,
+                                    cnonce != NULL ? cnonce : "twist", ha2),
+                      resp, sizeof resp);
   else
-    snprintf (tmp, sizeof tmp, "%s:%s:%s", ha1, nonce, ha2);
-  rc = hash_hex (sha, tmp, resp, sizeof resp);
+    rc = hash_secret (sha, dformat ("%s:%s:%s", ha1, nonce, ha2), resp,
+                      sizeof resp);
+  memset (ha1, 0, sizeof ha1);
   if (rc != TWIST_OK)
     return rc;
-  hdr = twist_xmalloc (512);
+  /* The opaque goes back as it came, and the algorithm is named unless it is
+     the default (RFC 7616).  */
+  {
+    char *qpart = auth ? dformat (", qop=auth, nc=%08x, cnonce=\"%s\"", nc,
+                                  cnonce != NULL ? cnonce : "twist")
+                       : twist_strdup ("");
+    char *opart = op != NULL ? dformat (", opaque=\"%s\"", op)
+                             : twist_strdup ("");
+
+    if (qpart == NULL || opart == NULL)
+      {
+        free (qpart);
+        free (opart);
+        return TWIST_ERR_NOMEM;
+      }
+    hdr = dformat ("Authorization: Digest username=\"%s\", realm=\"%s\", "
+                   "nonce=\"%s\", uri=\"%s\"%s, response=\"%s\"%s%s",
+                   user, realm, nonce, uri, qpart, resp,
+                   sha ? ", algorithm=SHA-256" : "", opart);
+    free (qpart);
+    free (opart);
+  }
   if (hdr == NULL)
     return TWIST_ERR_NOMEM;
-  if (qp != NULL && qop_is_auth (qop))
-    snprintf (hdr, 512,
-              "Authorization: Digest username=\"%s\", realm=\"%s\", nonce=\"%s\", uri=\"%s\", qop=auth, nc=%08x, cnonce=\"%s\", response=\"%s\"",
-              user, realm, nonce, uri, nc, cnonce != NULL ? cnonce : "twist",
-              resp);
-  else
-    snprintf (hdr, 512,
-              "Authorization: Digest username=\"%s\", realm=\"%s\", nonce=\"%s\", uri=\"%s\", response=\"%s\"",
-              user, realm, nonce, uri, resp);
   *out = hdr;
   return TWIST_OK;
 }
-

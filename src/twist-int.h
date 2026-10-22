@@ -289,7 +289,9 @@ int twist_loop_schedule (struct twist_loop *loop, uint64_t deadline_ms,
 void twist_timer_cancel (struct twist_timer *timer);
 int twist_loop_post (struct twist_loop *loop, void (*fn) (void *), void *user);
 void twist_loop_drain (struct twist_loop *loop);
-void twist_loop_watch_fd (struct twist_loop *loop, int fd, int interest,
+/* Watch FD for INTEREST for CONN.  0, or an error if it cannot be watched: the
+   poll set has no room, or FD is not a descriptor.  */
+int twist_loop_watch_fd (struct twist_loop *loop, int fd, int interest,
                           struct twist_connection *conn);
 void twist_loop_unwatch_fd (struct twist_loop *loop, int fd);
 struct twist_multi *twist_loop_multi (struct twist_loop *loop);
@@ -465,6 +467,14 @@ int twist_quic_dial (struct twist_loop *loop, const char *server_name,
    ones that arrive.  */
 uint64_t twist_quic_stream_id (struct twist_connection *conn);
 const char *twist_quic_server_name (struct twist_connection *conn);
+/* What is to be done with data on the stream ID of a QUIC connection that this
+   side is the client of, when KNOWN is whether a stream was opened for it
+   here.  0: it is a stream of the transfer, as ever.  1: ignore it: a
+   unidirectional stream of the server (its control stream, QPACK's).  2: the
+   connection is to be closed with H3_STREAM_CREATION_ERROR (RFC 9114, section
+   6.1): a bidirectional stream opened by the server, which HTTP/3 does not
+   have.  */
+int twist_quic_stream_action (uint64_t id, int known);
 int twist_quic_datagram_send (struct twist_connection *conn,
                               const uint8_t *data, size_t len);
 size_t twist_quic_datagram_max (struct twist_connection *conn);
@@ -1013,6 +1023,10 @@ struct twist_mime *twist_mime_new (int (*sink) (void *user, const uint8_t *data,
                                    void *user);
 void twist_mime_free (struct twist_mime *mime);
 int twist_mime_begin (struct twist_mime *mime, const char *subtype);
+/* The boundary of the message begun, for the Content-Type header of the
+   caller: multipart/mixed; boundary=...  It is new for each message, and
+   not guessable, so that no part can contain it.  NULL before begin.  */
+const char *twist_mime_boundary (const struct twist_mime *mime);
 int twist_mime_part (struct twist_mime *mime);
 int twist_mime_header (struct twist_mime *mime, const char *name,
                        const char *value);
@@ -1204,7 +1218,29 @@ struct twist_share
   struct twist_hsts *hsts;
   struct twist_altsvc *altsvc;
   struct twist_dns_cache *dns;
+  /* One mutex for the cookie jar, the HSTS list and the Alt-Svc list, taken
+     by the functions below when the share's locks ask for it.  */
+  void *data_mu;
 };
+
+/* The data of a share that handles of several threads may use, with the lock
+   that TWIST_LOCK_DATA_COOKIE, _HSTS or _ALT_SVC turns on: without the bit
+   they are plain calls, for a share that is used from one thread.  */
+int twist_share_cookie_store (struct twist_share *share, const char *set_cookie,
+                              const char *host, const char *path, int https);
+int twist_share_cookie_header (struct twist_share *share, const char *host,
+                               const char *path, int https, char **out);
+int twist_share_hsts_upgrade (struct twist_share *share, const char *host,
+                              uint64_t now);
+int twist_share_altsvc_note (struct twist_share *share, const char *origin,
+                             const char *alt);
+/* The Alt-Svc entry for ORIGIN, copied to OUT (CAP bytes); 1 if there is one.  */
+int twist_share_altsvc_lookup (struct twist_share *share, const char *origin,
+                               char *out, size_t cap);
+/* Hold, and let go of, the lock of one of the kinds of data above, as a call
+   of them does.  */
+void twist_share_data_lock (struct twist_share *share, unsigned bit);
+void twist_share_data_unlock (struct twist_share *share, unsigned bit);
 
 struct twist_dns_cache;
 
@@ -1246,6 +1282,17 @@ char *twist_strdup (const char *s);
    is none or it does not fit.  */
 int twist_home_dir (char *out, size_t cap);
 int twist_has_ctl (const char *s);
+/* The environment variable NAME, or NULL if it is not set, or if the process
+   is privileged (set-user-ID or set-group-ID, or a binary with capabilities):
+   there the environment is the invoking user's, who is not to choose the
+   trust store, the files that secrets are logged to, the proxy or the agent.
+   TWIST_PRIVILEGED overrides the test for the tests: 1 treats the process as
+   privileged, 0 as not, -1 asks the system.  */
+const char *twist_getenv_secure (const char *name);
+void twist_set_privileged (int how);
+/* The status code in the first three bytes of S: -1 unless they are three
+   digits, from 100 to 599.  */
+int twist_status_code (const char *s);
 /* Whether the header field NAME (N bytes, any case) with VALUE is one that
    HTTP/2 and HTTP/3 do not send: Connection, Keep-Alive, Proxy-Connection,
    Transfer-Encoding and Upgrade, and TE with anything but "trailers" (RFC

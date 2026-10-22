@@ -159,6 +159,59 @@ test_url_empty_host (void)
   twist_url_free_int (u);
 }
 
+/* What follows a host is a port of digits and then the end of the authority,
+   and a host is made of characters that can be in one.  "http://h:80junk/x"
+   was taken for port 80 and a path "junk/x", sent as "GET junk/x"; a port
+   that started with a space, a tab, a newline or a sign was read by strtol;
+   and "http://ho st/" was a host with a space in it.  curl takes none of
+   these.  An empty port is the default one, as in curl.  */
+static void
+test_url_strict (void)
+{
+  static const char *const bad[] = {
+    "http://h:80junk/x", "http://h:80 /x", "http://h: 80/", "http://h:\n80/",
+    "http://h:\t80/", "http://h:+80/", "http://h:-1/", "http://h:99999/",
+    "http://h:8x/", "http://h:0x50/", "http://[::1]junk/x", "http://[::1]:80junk/",
+    "http://ho st/", "http://host\t/x", "http://a\\b/c", "http://a|b/",
+    "http://h%41/", "http://h<b>/", "http://h\"x/", "http://h^x/",
+    "http://h`x/", "http://h{x}/", "sftp://ho st/f", "ftp://a b/f"
+  };
+  struct twist_url *u = NULL;
+  size_t i;
+
+  for (i = 0; i < sizeof bad / sizeof bad[0]; i++)
+    {
+      int rc = twist_url_parse_int (bad[i], &u);
+
+      if (rc == TWIST_OK)
+        fprintf (stderr, "  parsed: %s\n", bad[i]);
+      check (rc == TWIST_ERR_URL, "a URL with a bad port or host is refused");
+      twist_url_free_int (u);
+      u = NULL;
+    }
+  check (twist_url_parse_int ("http://h:/x", &u) == TWIST_OK && u->port == 80
+         && strcmp (u->host, "h") == 0 && strcmp (u->path, "/x") == 0,
+         "an empty port is the default");
+  twist_url_free_int (u);
+  check (twist_url_parse_int ("https://h:8443/x?a=b#f", &u) == TWIST_OK
+         && u->port == 8443, "a port");
+  twist_url_free_int (u);
+  check (twist_url_parse_int ("http://under_score-1.example.com./", &u)
+         == TWIST_OK, "a name with _ and - and a final dot");
+  twist_url_free_int (u);
+  check (twist_url_parse_int ("http://m\xc3\xbcnchen.example/", &u) == TWIST_OK,
+         "a name in UTF-8 is not refused");
+  twist_url_free_int (u);
+  check (twist_url_parse_int ("http://h:80?q=1", &u) == TWIST_OK && u->port == 80,
+         "a port, then a query");
+  twist_url_free_int (u);
+  check (twist_url_parse_int ("http://h:80#f", &u) == TWIST_OK, "then a fragment");
+  twist_url_free_int (u);
+  check (twist_url_parse_int ("http://[::1]:8080/p", &u) == TWIST_OK
+         && u->port == 8080, "an IPv6 address and a port");
+  twist_url_free_int (u);
+}
+
 static void
 test_url_userinfo (void)
 {
@@ -618,6 +671,68 @@ test_proxy_http (void)
                  "cHh1c2VyOnB4OnBhc3M=\r\n"), "Basic credentials");
   free (out);
   twist_proxy_free (p);
+}
+
+/* A long credential reaches the proxy whole, and the request that carries it
+   still ends with its blank line.  The Proxy-Authorization line went into a
+   buffer of 512 bytes, so a password over about 360 bytes was cut off, with
+   the end of the line and of the request, and the proxy went on reading the
+   TLS that followed as more headers.  And a status is three digits: "4  "
+   was taken for 224 and a success.  */
+static void
+test_proxy_long_credentials (void)
+{
+  struct twist_proxy *p;
+  uint8_t *out;
+  size_t len;
+  char pass[501];
+  char cred[512];
+  char *enc = NULL;
+  char want[1024];
+  size_t used;
+  int ready;
+  static const char *const bad[] = {
+    "HTTP/1.1 4  \r\n\r\n", "HTTP/1.1 2x0 OK\r\n\r\n",
+    "HTTP/1.1 2000 OK\r\n\r\n", "HTTP/1.1 20 OK\r\n\r\n",
+    "HTTP/1.1 +20 OK\r\n\r\n", "HTTP/1.1 600 OK\r\n\r\n",
+    "HTTP/1.1 000 OK\r\n\r\n"
+  };
+  size_t i;
+
+  memset (pass, 'p', sizeof pass - 1);
+  pass[sizeof pass - 1] = 0;
+  p = twist_proxy_new (TWIST_PROXY_HTTP, "127.0.0.1", 8080, NULL);
+  twist_proxy_set_target (p, "example.com", 443);
+  twist_proxy_set_credentials (p, "user", pass);
+  out = px_next (p, &len);
+  snprintf (cred, sizeof cred, "user:%s", pass);
+  check (twist_b64_encode ((const uint8_t *) cred, strlen (cred), &enc)
+         == TWIST_OK, "encode");
+  snprintf (want, sizeof want, "Proxy-Authorization: Basic %s\r\n", enc);
+  check (out != NULL && has (out, len, want),
+         "a long password is sent whole");
+  check (out != NULL && len >= 4 && memcmp (out + len - 4, "\r\n\r\n", 4) == 0,
+         "and the request ends with its blank line");
+  free (enc);
+  free (out);
+  twist_proxy_free (p);
+
+  for (i = 0; i < sizeof bad / sizeof bad[0]; i++)
+    {
+      p = twist_proxy_new (TWIST_PROXY_HTTP, "127.0.0.1", 8080, NULL);
+      twist_proxy_set_target (p, "h", 22);
+      free (px_next (p, &len));
+      check (px_feed (p, bad[i], strlen (bad[i]), &used, &ready) != TWIST_OK
+             || ready == 0, "a status that is not three digits is refused");
+      twist_proxy_free (p);
+    }
+  check (twist_status_code ("200") == 200 && twist_status_code ("404") == 404
+         && twist_status_code ("101") == 101 && twist_status_code ("599") == 599,
+         "status digits");
+  check (twist_status_code ("4  ") == -1 && twist_status_code ("2x0") == -1
+         && twist_status_code ("+20") == -1 && twist_status_code ("600") == -1
+         && twist_status_code ("099") == -1 && twist_status_code ("") == -1
+         && twist_status_code ("20") == -1, "and what is not");
 }
 
 static void
@@ -1080,6 +1195,85 @@ test_cleanup_handle_in_multi (void)
   twist_multi_cleanup (multi);
 }
 
+/* A share used from more than one thread: the cookie jar, the HSTS list and
+   the Alt-Svc list were not locked, whatever the share was told, and two
+   threads storing a cookie at once changed one list together.  With the
+   lock's bit set they take one lock; without it they are plain calls.  The
+   test holds the lock in one thread and has another store a cookie: the store
+   must wait for it.  */
+struct lock_rig
+{
+  struct twist_share *share;
+  volatile int released;
+  volatile int after;
+};
+
+static void *
+lock_store (void *arg)
+{
+  struct lock_rig *r = arg;
+
+  twist_share_cookie_store (r->share, "k=v", "example.com", "/", 1);
+  r->after = r->released;
+  return NULL;
+}
+
+static int
+store_waits (unsigned bits)
+{
+  struct lock_rig r;
+  struct timespec nap = { 0, 150000000 };
+  pthread_t t;
+
+  r.share = twist_share_init ();
+  r.released = 0;
+  r.after = -1;
+  if (r.share == NULL)
+    return -1;
+  if (bits != 0)
+    twist_share_setopt (r.share, bits);
+  twist_share_data_lock (r.share, TWIST_LOCK_DATA_COOKIE);
+  if (pthread_create (&t, NULL, lock_store, &r) != 0)
+    return -1;
+  nanosleep (&nap, NULL);
+  r.released = 1;
+  twist_share_data_unlock (r.share, TWIST_LOCK_DATA_COOKIE);
+  pthread_join (t, NULL);
+  twist_share_cleanup (r.share);
+  return r.after;
+}
+
+static void
+test_share_data_locks (void)
+{
+  char out[32];
+  twist_share *share = twist_share_init ();
+  char *hdr = NULL;
+
+  check (store_waits (TWIST_LOCK_DATA_COOKIE) == 1,
+         "with the cookie lock on, a store waits for it");
+  check (store_waits (0) == 0,
+         "and without it does not, which costs a single thread nothing");
+  check (store_waits (TWIST_LOCK_DATA_DNS) == 0,
+         "another lock's bit is not this one");
+  /* The calls do what they did.  */
+  twist_share_setopt (share, TWIST_LOCK_DATA_COOKIE | TWIST_LOCK_DATA_HSTS
+                             | TWIST_LOCK_DATA_ALT_SVC);
+  check (twist_share_cookie_store (share, "a=b", "h.example", "/", 1) == TWIST_OK
+         && twist_share_cookie_header (share, "h.example", "/", 1, &hdr)
+         == TWIST_OK && hdr != NULL && strstr (hdr, "a=b") != NULL,
+         "a cookie is kept and sent");
+  free (hdr);
+  check (twist_share_altsvc_note (share, "h.example", "h3:443") == TWIST_OK
+         && twist_share_altsvc_lookup (share, "h.example", out, sizeof out) == 1
+         && strcmp (out, "h3:443") == 0
+         && twist_share_altsvc_lookup (share, "other.example", out, sizeof out)
+         == 0, "an Alt-Svc entry is kept and copied out");
+  check (twist_share_hsts_upgrade (share, "h.example", 0) == 0,
+         "HSTS has none to apply");
+  twist_share_cleanup (share);
+}
+
 static void
 test_release_transfer (void)
 {
@@ -1509,16 +1703,19 @@ main (void)
   test_url_ipv6 ();
   test_url_resolve ();
   test_url_empty_host ();
+  test_url_strict ();
   test_connect_timeout_default ();
   test_http_ipv6_host ();
   test_scheme ();
   test_proxy_http ();
+  test_proxy_long_credentials ();
   test_proxy_socks ();
   test_proxy_parse ();
   test_conn_pool ();
   test_multi_perform ();
   test_release_transfer ();
   test_multi_from_callback ();
+  test_share_data_locks ();
   test_cleanup_handle_in_multi ();
   test_home_dir ();
   test_pool_completion_at_cleanup ();

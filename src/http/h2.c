@@ -75,6 +75,11 @@ struct twist_h2
   uint32_t cont_stream;
   uint32_t next_id;
   uint32_t peer_max;
+  /* Streams the client has opened and ended its side of, and that the server
+     has not yet ended: a response is to come on each.  The only streams, with
+     the live ones, that frames may arrive on.  */
+  uint32_t waiting[H2_MAX_STREAMS];
+  size_t n_waiting;
   int failed;
   struct twist_h2_stream *active;
   struct twist_h2_stream *free_list;
@@ -108,6 +113,37 @@ frame_hdr (uint8_t *p, uint32_t len, uint8_t type, uint8_t flags,
   p[6] = (uint8_t) (stream >> 16);
   p[7] = (uint8_t) (stream >> 8);
   p[8] = (uint8_t) stream;
+}
+
+static int
+waiting_has (const struct twist_h2 *h, uint32_t id)
+{
+  size_t i;
+
+  for (i = 0; i < h->n_waiting; i++)
+    if (h->waiting[i] == id)
+      return 1;
+  return 0;
+}
+
+static void
+waiting_add (struct twist_h2 *h, uint32_t id)
+{
+  if (h->n_waiting < H2_MAX_STREAMS && !waiting_has (h, id))
+    h->waiting[h->n_waiting++] = id;
+}
+
+static void
+waiting_drop (struct twist_h2 *h, uint32_t id)
+{
+  size_t i;
+
+  for (i = 0; i < h->n_waiting; i++)
+    if (h->waiting[i] == id)
+      {
+        h->waiting[i] = h->waiting[--h->n_waiting];
+        return;
+      }
 }
 
 static void
@@ -200,7 +236,12 @@ take_stream (struct twist_h2 *h, uint32_t id)
   for (s = h->active; s != NULL; s = s->next)
     if (s->live)
       live++;
+  /* The streams that are waiting for a response are streams in use, to the
+     server's limit and to ours.  */
+  live += h->n_waiting;
   if (h->peer_max != 0 && live >= h->peer_max)
+    return NULL;
+  if (live >= H2_MAX_STREAMS)
     return NULL;
   if (h->free_list != NULL)
     {
@@ -322,7 +363,10 @@ twist_h2_can_open (const struct twist_h2 *h)
   for (s = h->active; s != NULL; s = s->next)
     if (s->live)
       live++;
+  live += h->n_waiting;
   if (h->peer_max != 0 && live >= h->peer_max)
+    return 0;
+  if (live >= H2_MAX_STREAMS)
     return 0;
   if (h->free_list == NULL && h->n_alloc >= H2_MAX_STREAMS)
     return 0;
@@ -596,6 +640,32 @@ on_settings (struct twist_h2 *h, const uint8_t *p, size_t len)
   emit_settings_ack (h);
 }
 
+/* The stream a HEADERS or DATA frame is for.  Only a stream the client opened
+   and the server has not ended: one that is live, or that was opened and ended
+   on our side and is waiting for its response, which is then given a record.
+   A stream is not made for any number the peer names: a proxy that sent
+   frames on a stream of its own would have them taken for part of the
+   tunnel, and data after a stream has ended would be delivered again.
+   Anything else is a connection error (RFC 9113, section 5.1), and NULL.  */
+static struct twist_h2_stream *
+incoming_stream (struct twist_h2 *h, uint32_t id)
+{
+  struct twist_h2_stream *s = find_stream (h, id);
+
+  if (s != NULL)
+    return s;
+  if ((id & 1) == 0 || id >= h->next_id || !waiting_has (h, id))
+    {
+      h2_fail (h, TWIST_ERR_PROTOCOL);
+      return NULL;
+    }
+  waiting_drop (h, id);
+  s = take_stream (h, id);
+  if (s == NULL)
+    h2_fail (h, TWIST_ERR_NOMEM);
+  return s;
+}
+
 static void
 on_headers (struct twist_h2 *h, uint32_t stream, uint8_t flags,
             const uint8_t *p, size_t len)
@@ -610,12 +680,9 @@ on_headers (struct twist_h2 *h, uint32_t stream, uint8_t flags,
       h2_fail (h, TWIST_ERR_PROTOCOL);
       return;
     }
-  s = take_stream (h, stream);
+  s = incoming_stream (h, stream);
   if (s == NULL)
-    {
-      h2_fail (h, TWIST_ERR_NOMEM);
-      return;
-    }
+    return;
   body = frame_body (H2_HEADERS, flags, p, len, &n);
   if (body == NULL)
     {
@@ -725,15 +792,12 @@ dispatch_frame (struct twist_h2 *h, uint8_t type, uint8_t flags,
     }
   if (type == H2_DATA)
     {
-      struct twist_h2_stream *s = take_stream (h, stream);
+      struct twist_h2_stream *s = incoming_stream (h, stream);
       size_t n = 0;
       const uint8_t *body;
 
       if (s == NULL)
-        {
-          h2_fail (h, TWIST_ERR_NOMEM);
-          return;
-        }
+        return;
       body = frame_body (H2_DATA, flags, p, len, &n);
       if (body == NULL)
         {
@@ -765,7 +829,10 @@ dispatch_frame (struct twist_h2 *h, uint8_t type, uint8_t flags,
   if (type == H2_GOAWAY || type == H2_RST)
     {
       if (type == H2_RST)
-        release_stream (h, find_stream (h, stream));
+        {
+          release_stream (h, find_stream (h, stream));
+          waiting_drop (h, stream);
+        }
       h2_fail (h, TWIST_ERR_PROTOCOL);
       return;
     }
@@ -943,7 +1010,10 @@ twist_h2_request (struct twist_h2 *h, const char *method, const char *scheme,
       return rc;
     }
   if (headers_end)
-    release_stream (h, s);
+    {
+      release_stream (h, s);
+      waiting_add (h, id);
+    }
   while (body != NULL && sent < body_len && h->conn_send > 0 && s->send_left > 0
          && s->live)
     {
@@ -969,7 +1039,10 @@ twist_h2_request (struct twist_h2 *h, const char *method, const char *scheme,
       s->send_left -= (int32_t) chunk;
       sent += chunk;
       if (end)
-        release_stream (h, s);
+        {
+          release_stream (h, s);
+          waiting_add (h, id);
+        }
     }
   if (body != NULL && sent < body_len)
     {

@@ -52,6 +52,11 @@ struct twist_cmdq
   struct twist_cmd *stub;
   struct twist_cmd *head;
   struct twist_cmd *tail;
+  /* Set while the queue is being drained, by the consumer's thread.  A
+     command that drains it again is a nested call, which would free the node
+     the first holds and run what is behind it inside the command.  What is
+     queued runs when the command returns.  */
+  int draining;
 };
 
 struct twist_cmdq *
@@ -114,8 +119,9 @@ twist_cmdq_drain (struct twist_cmdq *q)
   struct twist_cmd *next;
   struct twist_cmd *tail;
 
-  if (q == NULL)
+  if (q == NULL || q->draining)
     return;
+  q->draining = 1;
   head = q->head;
   tail = __atomic_load_n (&q->tail, __ATOMIC_ACQUIRE);
   next = __atomic_load_n (&head->next, __ATOMIC_ACQUIRE);
@@ -133,4 +139,5 @@ twist_cmdq_drain (struct twist_cmdq *q)
         break;
       next = __atomic_load_n (&head->next, __ATOMIC_ACQUIRE);
     }
+  q->draining = 0;
 }

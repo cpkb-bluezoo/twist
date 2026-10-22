@@ -143,6 +143,23 @@ userinfo_escape (const char *s, char *out, size_t cap)
   return (int) o;
 }
 
+/* Whether a host name is made of what can be in one: letters, digits, "-",
+   ".", "_", "~", and any byte over 0x7f (a name in UTF-8, which is sent as it
+   is).  A space, a tab, a backslash, a bar and the rest are not: they were
+   taken, and went into the Host header and the lookup.  */
+static int
+host_chars_ok (const char *host)
+{
+  const unsigned char *p;
+
+  for (p = (const unsigned char *) host; *p != 0; p++)
+    if (!((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z')
+          || (*p >= '0' && *p <= '9') || *p == '-' || *p == '.' || *p == '_'
+          || *p == '~' || *p >= 0x80))
+      return 0;
+  return 1;
+}
+
 int
 twist_url_parse_int (const char *input, struct twist_url **out)
 {
@@ -264,6 +281,11 @@ twist_url_parse_int (const char *input, struct twist_url **out)
             }
           memcpy (u->host, host, (size_t) (endhost - host));
           u->host[endhost - host] = 0;
+          if (!host_chars_ok (u->host))
+            {
+              url_clear (u);
+              return TWIST_ERR_URL;
+            }
           p = endhost;
         }
       /* A scheme that names a host has one.  Without it the transfer would
@@ -276,16 +298,36 @@ twist_url_parse_int (const char *input, struct twist_url **out)
         }
       if (*p == ':')
         {
-          char *end = NULL;
-          long port = strtol (p + 1, &end, 10);
-          if (end == p + 1 || port < 0 || port > 65535)
+          /* Digits, and nothing else: strtol would take leading white space
+             and a sign, and stop at the first letter, leaving the rest to be
+             taken for a path.  No digits is the default port, as in curl.  */
+          const char *q = p + 1;
+          long port = 0;
+          int digits = 0;
+
+          while (*q >= '0' && *q <= '9')
             {
-              url_clear (u);
-              return TWIST_ERR_URL;
+              port = port * 10 + (*q - '0');
+              if (++digits > 5 || port > 65535)
+                {
+                  url_clear (u);
+                  return TWIST_ERR_URL;
+                }
+              q++;
             }
-          u->port = (int) port;
-          u->port_set = 1;
-          p = end;
+          if (digits > 0)
+            {
+              u->port = (int) port;
+              u->port_set = 1;
+            }
+          p = q;
+        }
+      /* The authority ends where the path, the query or the fragment starts,
+         or the URL ends: "http://h:80junk/x" is not port 80 and a path.  */
+      if (*p != 0 && *p != '/' && *p != '?' && *p != '#')
+        {
+          url_clear (u);
+          return TWIST_ERR_URL;
         }
     }
   if (*p == 0)

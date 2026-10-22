@@ -322,7 +322,7 @@ twist_ssh_agent_start (struct twist_ssh *s)
   if (e->loop == NULL || e->sslkey != NULL)
     return;
   path = e->ssh_agent_socket != NULL ? e->ssh_agent_socket
-                                     : getenv ("SSH_AUTH_SOCK");
+                                     : twist_getenv_secure ("SSH_AUTH_SOCK");
   if (path == NULL || path[0] == 0)
     return;
   if (strlen (path) >= sizeof sa.sun_path)

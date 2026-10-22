@@ -302,11 +302,12 @@ find_slot (struct twist_loop *loop, int fd)
   return &loop->slots[ix - 1];
 }
 
-void
+int
 twist_loop_watch_fd (struct twist_loop *loop, int fd, int interest,
                      struct twist_connection *conn)
 {
   struct twist_slot *slot;
+  int rc = TWIST_OK;
 
   slot = find_slot (loop, fd);
   if (slot == NULL)
@@ -317,7 +318,7 @@ twist_loop_watch_fd (struct twist_loop *loop, int fd, int interest,
           struct twist_slot *slots = realloc (loop->slots,
                                               cap * sizeof *slots);
           if (slots == NULL)
-            return;
+            return TWIST_ERR_NOMEM;
           loop->slots = slots;
           loop->slots_cap = cap;
         }
@@ -330,9 +331,10 @@ twist_loop_watch_fd (struct twist_loop *loop, int fd, int interest,
   slot->conn = conn;
   slot->interest = interest;
   if (loop->poll != NULL)
-    twist_poll_set (loop->poll, fd, interest, conn);
+    rc = twist_poll_set (loop->poll, fd, interest, conn);
   if (loop->watch_cb != NULL)
     loop->watch_cb (loop->watch_user, fd, interest);
+  return rc;
 }
 
 void

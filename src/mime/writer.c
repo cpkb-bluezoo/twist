@@ -26,6 +26,9 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <quickstep/crypto.h>
+#include <quickstep/status.h>
+
 /* Events become bytes in a fixed buffer and are handed to the sink as
    soon as the buffer fills.  A body chunk is not kept after the call
    returns.  Base64 keeps at most two leftover octets.  */
@@ -39,7 +42,8 @@ struct twist_mime
   void *user;
   uint8_t buf[MIME_CAP];
   size_t len;
-  char boundary[24];
+  /* "twist-" and 32 hex digits.  */
+  char boundary[40];
   int parts;
   int bol;
   int header;
@@ -123,9 +127,33 @@ twist_mime_begin (struct twist_mime *mime, const char *subtype)
 {
   if (mime == NULL || subtype == NULL || bad_header (subtype))
     return TWIST_ERR_INVAL;
-  memcpy (mime->boundary, "twist-mime-1", 13);
+  /* Chosen for each message, from 128 random bits.  A part of a message is
+     whatever its sender put in it, and if the boundary is known, or the same
+     every time, a part can hold it and end itself, and begin another with
+     headers of its own.  */
+  {
+    static const char hex[] = "0123456789abcdef";
+    uint8_t raw[16];
+    size_t i;
+
+    if (gq_random (raw, sizeof raw) != GQ_OK)
+      return TWIST_ERR_PROTOCOL;
+    memcpy (mime->boundary, "twist-", 6);
+    for (i = 0; i < sizeof raw; i++)
+      {
+        mime->boundary[6 + 2 * i] = hex[raw[i] >> 4];
+        mime->boundary[7 + 2 * i] = hex[raw[i] & 15];
+      }
+    mime->boundary[6 + 2 * sizeof raw] = 0;
+  }
   (void) subtype;
   return TWIST_OK;
+}
+
+const char *
+twist_mime_boundary (const struct twist_mime *mime)
+{
+  return mime != NULL && mime->boundary[0] != 0 ? mime->boundary : NULL;
 }
 
 static int

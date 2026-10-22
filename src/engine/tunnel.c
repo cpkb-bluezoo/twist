@@ -300,8 +300,7 @@ h2_header (void *user, const char *name, size_t nn, const char *value,
   struct twist_tunnel *t = user;
 
   if (nn == 7 && memcmp (name, ":status", 7) == 0 && vn == 3)
-    t->status = (value[0] - '0') * 100 + (value[1] - '0') * 10
-                + (value[2] - '0');
+    t->status = twist_status_code (value);
 }
 
 static int

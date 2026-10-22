@@ -42,6 +42,8 @@ test_errors (void)
                  twist_strerror (TWIST_ERR_RESUME)) != 0, "range distinct");
   check (strcmp (twist_strerror (TWIST_ERR_RESUME),
                  twist_strerror (TWIST_ERR_ABORTED)) != 0, "resume distinct");
+  check (strcmp (twist_strerror (TWIST_ERR_PARTIAL),
+                 twist_strerror (TWIST_ERR_CLOSED)) != 0, "partial distinct");
   check (strcmp (twist_strerror (TWIST_ERR_RECURSIVE),
                  twist_strerror (TWIST_ERR_INVAL)) != 0, "recursive distinct");
   easy = twist_easy_init ();

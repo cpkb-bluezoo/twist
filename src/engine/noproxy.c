@@ -207,25 +207,25 @@ env_proxy (const char *scheme)
     }
   memcpy (lower + n, "_proxy", sizeof "_proxy");
   memcpy (upper + n, "_PROXY", sizeof "_PROXY");
-  v = getenv (lower);
+  v = twist_getenv_secure (lower);
   if (v == NULL && strcmp (lower, "http_proxy") != 0)
-    v = getenv (upper);
+    v = twist_getenv_secure (upper);
   if (v != NULL)
     return v;
   /* A WebSocket goes through the proxy of the HTTP it is made from.  */
   if (strcmp (lower, "ws_proxy") == 0)
-    v = getenv ("http_proxy");
+    v = twist_getenv_secure ("http_proxy");
   else if (strcmp (lower, "wss_proxy") == 0)
     {
-      v = getenv ("https_proxy");
+      v = twist_getenv_secure ("https_proxy");
       if (v == NULL)
-        v = getenv ("HTTPS_PROXY");
+        v = twist_getenv_secure ("HTTPS_PROXY");
     }
   if (v != NULL)
     return v;
-  v = getenv ("all_proxy");
+  v = twist_getenv_secure ("all_proxy");
   if (v == NULL)
-    v = getenv ("ALL_PROXY");
+    v = twist_getenv_secure ("ALL_PROXY");
   return v;
 }
 
@@ -238,9 +238,9 @@ twist_easy_noproxy (const struct twist_easy *easy)
 
   if (!easy->noproxy_set)
     {
-      noproxy = getenv ("no_proxy");
+      noproxy = twist_getenv_secure ("no_proxy");
       if (noproxy == NULL)
-        noproxy = getenv ("NO_PROXY");
+        noproxy = twist_getenv_secure ("NO_PROXY");
     }
   return easy->url != NULL && twist_noproxy_match (easy->url->host, noproxy);
 }
@@ -272,9 +272,9 @@ twist_easy_proxy (const struct twist_easy *easy)
   noproxy = easy->noproxy_set ? easy->noproxy : NULL;
   if (!easy->noproxy_set)
     {
-      noproxy = getenv ("no_proxy");
+      noproxy = twist_getenv_secure ("no_proxy");
       if (noproxy == NULL)
-        noproxy = getenv ("NO_PROXY");
+        noproxy = twist_getenv_secure ("NO_PROXY");
     }
   if (easy->url != NULL && twist_noproxy_match (easy->url->host, noproxy))
     return NULL;

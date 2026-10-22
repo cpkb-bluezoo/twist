@@ -23,13 +23,17 @@
 #include "gettext.h"
 #include "twist-int.h"
 
+#include <ctype.h>
+#include <fcntl.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
 #include <sys/stat.h>
+#include <sys/types.h>
 #include <time.h>
+#include <unistd.h>
 
 /* Four chunks may be in flight.  The worker waits only when that
    pipeline is full, and it stops when the easy aborts.  The worker
@@ -70,6 +74,13 @@ struct twist_file
   int size_known;
   int size_noted;
   int err;
+  /* The path, percent-decoded, and the range asked for: both made on the
+     loop's thread, for the worker.  RANGE_MODE is 0 for none, 1 for A-B or A-
+     (RANGE_END -1: to the end), 2 for the last RANGE_END bytes.  */
+  char *path;
+  int range_mode;
+  long long range_start;
+  long long range_end;
   struct file_chunk slot[FILE_PIPELINE];
 };
 
@@ -109,6 +120,7 @@ file_free (void *p)
   pthread_mutex_unlock (&f->mu);
   pthread_cond_destroy (&f->cv);
   pthread_mutex_destroy (&f->mu);
+  free (f->path);
   free (f);
 }
 
@@ -303,38 +315,169 @@ file_retire (struct twist_file *f)
   pthread_mutex_unlock (&f->mu);
 }
 
+/* The percent-decoded path, in memory of its own; NULL if it holds a NUL,
+   which is no part of a name, or there is no memory.  An escape that is not
+   two hex digits is left as it is.  */
+static char *
+decode_path (const char *in, int *nul)
+{
+  size_t n = strlen (in);
+  char *out = twist_xmalloc (n + 1);
+  size_t i;
+  size_t o = 0;
+
+  *nul = 0;
+  if (out == NULL)
+    return NULL;
+  for (i = 0; i < n; i++)
+    {
+      unsigned char c = (unsigned char) in[i];
+
+      if (c == '%' && i + 2 < n && isxdigit ((unsigned char) in[i + 1])
+          && isxdigit ((unsigned char) in[i + 2]))
+        {
+          int hi = (unsigned char) in[i + 1];
+          int lo = (unsigned char) in[i + 2];
+
+          hi = isdigit (hi) ? hi - '0' : tolower (hi) - 'a' + 10;
+          lo = isdigit (lo) ? lo - '0' : tolower (lo) - 'a' + 10;
+          c = (unsigned char) ((hi << 4) | lo);
+          i += 2;
+        }
+      if (c == 0)
+        {
+          *nul = 1;
+          free (out);
+          return NULL;
+        }
+      out[o++] = (char) c;
+    }
+  out[o] = 0;
+  return out;
+}
+
+/* A number of only digits, not past what a file can be.  */
+static int
+range_number (const char *s, size_t n, long long *out)
+{
+  long long v = 0;
+  size_t i;
+
+  if (n == 0 || n > 18)
+    return -1;
+  for (i = 0; i < n; i++)
+    {
+      if (s[i] < '0' || s[i] > '9')
+        return -1;
+      v = v * 10 + (s[i] - '0');
+    }
+  *out = v;
+  return 0;
+}
+
+/* "A-B", "A-" or "-N", one range, as -r gives it.  */
+static int
+parse_range (const char *r, struct twist_file *f)
+{
+  const char *dash = strchr (r, '-');
+  size_t len = strlen (r);
+
+  if (dash == NULL || strchr (r, ',') != NULL)
+    return TWIST_ERR_RANGE;
+  if (dash == r)
+    {
+      if (range_number (r + 1, len - 1, &f->range_end) != 0
+          || f->range_end == 0)
+        return TWIST_ERR_RANGE;
+      f->range_mode = 2;
+      return TWIST_OK;
+    }
+  if (range_number (r, (size_t) (dash - r), &f->range_start) != 0)
+    return TWIST_ERR_RANGE;
+  f->range_end = -1;
+  if (dash[1] != 0
+      && (range_number (dash + 1, len - (size_t) (dash - r) - 1,
+                        &f->range_end) != 0 || f->range_end < f->range_start))
+    return TWIST_ERR_RANGE;
+  f->range_mode = 1;
+  return TWIST_OK;
+}
+
 static void
 file_work (void *arg)
 {
   struct twist_file *f = arg;
-  const char *path = f->easy->url->path;
-  FILE *fp;
+  const char *path = f->path;
+  FILE *fp = NULL;
+  int fd;
   struct stat st;
   int err = TWIST_OK;
   char *msg = NULL;
+  long long start = 0;
+  long long left;
 
-  fp = fopen (path, "rb");
-  if (fp == NULL)
+  /* Not blocking, so that a FIFO with nobody at the other end, or the like,
+     is looked at and refused and not waited on: the loop waits for this
+     thread when the transfer is let go of, and --max-time could not end it.
+     A regular file does not mind.  */
+  fd = open (path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+  if (fd < 0)
     {
       err = TWIST_ERR_FILE;
       msg = file_errmsg (path, 0);
       goto done;
     }
-  if (fstat (fileno (fp), &st) != 0 || !S_ISREG (st.st_mode))
+  if (fstat (fd, &st) != 0 || !S_ISREG (st.st_mode))
     {
+      close (fd);
       err = TWIST_ERR_FILE;
       msg = file_errmsg (path, 0);
+      goto done;
+    }
+  fp = fdopen (fd, "rb");
+  if (fp == NULL)
+    {
+      close (fd);
+      err = TWIST_ERR_FILE;
+      msg = file_errmsg (path, 0);
+      goto done;
+    }
+  left = (long long) st.st_size;
+  if (f->range_mode == 1)
+    {
+      start = f->range_start;
+      if (start >= left)
+        {
+          err = TWIST_ERR_RANGE;
+          goto done;
+        }
+      if (f->range_end >= 0 && f->range_end < left - 1)
+        left = f->range_end + 1;
+      left -= start;
+    }
+  else if (f->range_mode == 2)
+    {
+      start = f->range_end < left ? left - f->range_end : 0;
+      left -= start;
+    }
+  if (start > 0 && fseeko (fp, (off_t) start, SEEK_SET) != 0)
+    {
+      err = TWIST_ERR_FILE;
+      msg = file_errmsg (path, 1);
       goto done;
     }
   pthread_mutex_lock (&f->mu);
-  f->size = (long long) st.st_size;
+  f->size = left;
   f->size_known = 1;
   pthread_mutex_unlock (&f->mu);
-  for (;;)
+  while (left > 0)
     {
       char buf[FILE_CHUNK];
-      size_t n = fread (buf, 1, sizeof buf, fp);
+      size_t want = left < (long long) sizeof buf ? (size_t) left : sizeof buf;
+      size_t n = fread (buf, 1, want, fp);
       char *copy;
+
+      left -= (long long) n;
 
       pthread_mutex_lock (&f->mu);
       if (f->stop)
@@ -358,7 +501,7 @@ file_work (void *arg)
               break;
             }
         }
-      if (n < sizeof buf)
+      if (n < want)
         {
           if (ferror (fp))
             {
@@ -409,6 +552,30 @@ twist_file_attach (struct twist_easy *easy)
     }
   f->easy = easy;
   f->live = 1;
+  {
+    int nul = 0;
+
+    f->path = decode_path (path, &nul);
+    if (f->path == NULL)
+      {
+        pthread_cond_destroy (&f->cv);
+        pthread_mutex_destroy (&f->mu);
+        free (f);
+        return nul ? TWIST_ERR_URL : TWIST_ERR_NOMEM;
+      }
+  }
+  if (easy->range != NULL && easy->range[0] != 0)
+    {
+      rc = parse_range (easy->range, f);
+      if (rc != TWIST_OK)
+        {
+          pthread_cond_destroy (&f->cv);
+          pthread_mutex_destroy (&f->mu);
+          free (f->path);
+          free (f);
+          return rc;
+        }
+    }
   easy->xfer = f;
   easy->xfer_free = file_free;
   rc = twist_storage_submit (easy->multi->storage, file_work, f, NULL, NULL,

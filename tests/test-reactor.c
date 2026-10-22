@@ -683,6 +683,266 @@ test_inbound_ceiling_socket (void)
   free (blob);
 }
 
+/* ---- what handlers may do that the reactor had not allowed for ---- */
+
+/* A handler that calls resume_read from inside receive.  The resume delivered
+   the same unconsumed bytes again from inside the call that was still
+   handling them, so they were handled twice, and the count of what was
+   consumed was then the outer call's, of bytes the inner one had taken.  */
+static size_t reenter_accepted;
+static int reenter_calls;
+
+static size_t
+reenter_receive (struct twist_endpoint *ep, const uint8_t *data, size_t len)
+{
+  (void) data;
+  reenter_calls++;
+  if (reenter_calls == 1)
+    {
+      twist_endpoint_pause_read (ep);
+      twist_endpoint_resume_read (ep);
+      reenter_accepted += 2;
+      return 2;
+    }
+  reenter_accepted += len;
+  return len;
+}
+
+static const struct twist_protocol_handler reenter_handler = {
+  NULL, reenter_receive, NULL, NULL, NULL, NULL, NULL
+};
+
+/* One that closes the connection from inside receive, and returns having
+   used some of what it was given: the rest is not for it.  */
+static int closer_calls;
+
+static size_t
+closer_receive (struct twist_endpoint *ep, const uint8_t *data, size_t len)
+{
+  (void) data;
+  (void) len;
+  closer_calls++;
+  twist_endpoint_close (ep);
+  return 1;
+}
+
+static const struct twist_protocol_handler closer_handler = {
+  NULL, closer_receive, NULL, NULL, NULL, NULL, NULL
+};
+
+static void
+test_receive_reentrancy (void)
+{
+  struct twist_loop *loop = twist_loop_new (1);
+  struct twist_connection *c = twist_connection_new (loop);
+  static const uint8_t data[4] = { 'a', 'b', 'c', 'd' };
+
+  reenter_accepted = 0;
+  reenter_calls = 0;
+  twist_connection_set_handler (c, &reenter_handler);
+  twist_connection_ingest (c, data, sizeof data);
+  check (reenter_accepted == 4 && reenter_calls == 2,
+         "resume_read from receive does not give the bytes twice");
+  twist_connection_free (c);
+
+  c = twist_connection_new (loop);
+  closer_calls = 0;
+  twist_connection_set_handler (c, &closer_handler);
+  twist_connection_ingest (c, data, sizeof data);
+  check (closer_calls == 1,
+         "a handler that has closed is not given the rest of what came");
+  twist_connection_free (c);
+  twist_loop_free (loop);
+}
+
+/* A command that drains the queue itself.  The inner drain freed the node the
+   outer one held and ran what was behind it inside the first command; the
+   outer then read the freed node.  What is queued runs in order, one at a
+   time, with the nested call a no-op.  */
+static struct twist_cmdq *nest_q;
+static int nest_order[4];
+static int nest_n;
+static int nest_inside;
+static int nest_overlap;
+
+static void
+nest_second (void *user)
+{
+  (void) user;
+  if (nest_inside)
+    nest_overlap = 1;
+  nest_order[nest_n++] = 2;
+}
+
+static void
+nest_first (void *user)
+{
+  (void) user;
+  nest_inside = 1;
+  nest_order[nest_n++] = 1;
+  twist_cmdq_push (nest_q, nest_second, NULL);
+  twist_cmdq_drain (nest_q);
+  nest_inside = 0;
+}
+
+static void
+test_cmdq_nested_drain (void)
+{
+  nest_q = twist_cmdq_new ();
+  nest_n = 0;
+  nest_inside = 0;
+  nest_overlap = 0;
+  check (nest_q != NULL, "cmdq");
+  twist_cmdq_push (nest_q, nest_first, NULL);
+  twist_cmdq_drain (nest_q);
+  /* A drain runs what was queued when it began; what a command queues runs at
+     the next, and not inside the command.  */
+  check (nest_n == 1 && nest_order[0] == 1 && !nest_overlap,
+         "a command that drains does not run what it queued inside itself");
+  twist_cmdq_drain (nest_q);
+  check (nest_n == 2 && nest_order[1] == 2 && !nest_overlap,
+         "it runs at the next drain, after");
+  twist_cmdq_free (nest_q);
+}
+
+/* A timer that was given the owner's pointer to it clears that pointer when
+   it fires, before the callback: the handle is spent then, and a pointer to
+   it kept is one that cancels whichever timer takes its place.  */
+static struct twist_timer *slot_timer;
+static int slot_cleared;
+
+static void
+slot_cb (void *user)
+{
+  (void) user;
+  slot_cleared = slot_timer == NULL;
+}
+
+static void
+test_timer_slot (void)
+{
+  struct twist_loop *loop = twist_loop_new (1);
+  struct twist_timer *other = NULL;
+  int hits = 0;
+
+  twist_loop_set_now (loop, fake_now, NULL);
+  clock_ms = 100;
+  slot_cleared = -1;
+  check (twist_loop_schedule (loop, 200, slot_cb, NULL, &slot_timer)
+         == TWIST_OK && slot_timer != NULL, "scheduled");
+  twist_loop_schedule (loop, 300, timer_cb, &hits, &other);
+  clock_ms = 200;
+  twist_loop_on_timer (loop, clock_ms);
+  check (slot_cleared == 1 && slot_timer == NULL,
+         "the owner's pointer is clear when the timer fires");
+  /* Cancelling what is now nothing does nothing, and the other timer is
+     not touched.  */
+  twist_timer_cancel (slot_timer);
+  clock_ms = 300;
+  twist_loop_on_timer (loop, clock_ms);
+  check (hits == 1, "and cancels no other timer");
+  twist_loop_free (loop);
+}
+
+/* A close with output that the peer will not read waited for ever.  It has
+   an end now: the connection is let go when nothing has been written for
+   30 seconds, and a peer that reads, however slowly, is waited for.  */
+static int linger_disconnected;
+
+static void
+linger_cb (struct twist_endpoint *ep, int err)
+{
+  (void) ep;
+  (void) err;
+  linger_disconnected++;
+}
+
+static const struct twist_protocol_handler linger_handler = {
+  NULL, NULL, linger_cb, NULL, NULL, NULL, NULL
+};
+
+static void
+test_close_deadline (void)
+{
+  struct twist_loop *loop = twist_loop_new (0);
+  struct twist_connection *c = twist_connection_new (loop);
+  int sv[2];
+  int small = 4096;
+  size_t n = 1 << 20;
+  uint8_t *blob = calloc (1, n);
+  uint8_t sink[65536];
+
+  if (loop == NULL || c == NULL || blob == NULL
+      || socketpair (AF_UNIX, SOCK_STREAM, 0, sv) != 0)
+    abort ();
+  setsockopt (sv[0], SOL_SOCKET, SO_SNDBUF, &small, sizeof small);
+  fcntl (sv[0], F_SETFL, O_NONBLOCK);
+  fcntl (sv[1], F_SETFL, O_NONBLOCK);
+  twist_loop_set_now (loop, fake_now, NULL);
+  clock_ms = 1000;
+  linger_disconnected = 0;
+  twist_connection_set_handler (c, &linger_handler);
+  twist_connection_set_fd (c, sv[0]);
+  twist_connection_connected (c);
+  twist_connection_queue_out (c, blob, n);
+  twist_loop_run_once_ms (loop, 0);
+  twist_endpoint_close (twist_connection_endpoint (c));
+  check (linger_disconnected == 0, "closing with output pending waits");
+  clock_ms = 1000 + 29000;
+  twist_loop_run_once_ms (loop, 0);
+  check (linger_disconnected == 0, "for a while");
+  /* The peer reads some: that is progress, and the wait begins again.  */
+  clock_ms = 1000 + 29500;
+  if (read (sv[1], sink, sizeof sink) < 0)
+    abort ();
+  twist_loop_run_once_ms (loop, 0);
+  clock_ms = 1000 + 29500 + 29000;
+  twist_loop_run_once_ms (loop, 0);
+  check (linger_disconnected == 0, "and longer when the peer reads");
+  clock_ms = 1000 + 29500 + 31000;
+  twist_loop_run_once_ms (loop, 0);
+  check (linger_disconnected == 1,
+         "but not for ever when it does not: 30 seconds with no progress");
+  twist_connection_free (c);
+  twist_loop_free (loop);
+  close (sv[1]);
+  free (blob);
+}
+
+/* A connection whose descriptor cannot be watched (no room in the poll set,
+   or not a descriptor at all) was never given any event, and sat until its
+   timeout.  It fails at once.  */
+static int watch_err;
+
+static void
+watch_error_cb (struct twist_endpoint *ep, int err)
+{
+  (void) ep;
+  watch_err = err;
+}
+
+static const struct twist_protocol_handler watch_handler = {
+  NULL, NULL, NULL, NULL, watch_error_cb, NULL, NULL
+};
+
+static void
+test_watch_failure (void)
+{
+  struct twist_loop *loop = twist_loop_new (0);
+  struct twist_connection *c = twist_connection_new (loop);
+  int fd = open ("/dev/null", O_RDONLY);
+
+  if (fd < 0)
+    abort ();
+  close (fd);
+  watch_err = 0;
+  twist_connection_set_handler (c, &watch_handler);
+  twist_connection_set_fd (c, fd);
+  check (watch_err != 0, "a descriptor that cannot be watched fails the connection");
+  twist_connection_free (c);
+  twist_loop_free (loop);
+}
+
 /* A server that closes while twist is still sending must not kill twist.  A
    write to a stream socket whose peer has gone raises SIGPIPE, whose default
    is to end the process with no message and no exit status of its own
@@ -745,5 +1005,10 @@ main (void)
   test_stale_event ();
   test_write_to_gone_peer ();
   test_inbound_ceiling_socket ();
+  test_receive_reentrancy ();
+  test_cmdq_nested_drain ();
+  test_timer_slot ();
+  test_close_deadline ();
+  test_watch_failure ();
   return tests_finish ();
 }

@@ -112,9 +112,9 @@ twist_trust_load (gq_trust *trust, const char *cafile, const char *capath,
 
   if (!given)
     {
-      const char *bundle = getenv ("TWIST_CA_BUNDLE");
-      const char *dir = getenv ("SSL_CERT_DIR");
-      const char *file = getenv ("SSL_CERT_FILE");
+      const char *bundle = twist_getenv_secure ("TWIST_CA_BUNDLE");
+      const char *dir = twist_getenv_secure ("SSL_CERT_DIR");
+      const char *file = twist_getenv_secure ("SSL_CERT_FILE");
 
       if (bundle != NULL && bundle[0] != 0)
         cafile = bundle;
@@ -172,7 +172,7 @@ twist_verify_chain_names (const struct gq_trust *trust, const gq_slice *chain,
 int
 twist_keylog_wanted (void)
 {
-  const char *path = getenv ("SSLKEYLOGFILE");
+  const char *path = twist_getenv_secure ("SSLKEYLOGFILE");
 
   return path != NULL && path[0] != 0;
 }
@@ -180,7 +180,7 @@ twist_keylog_wanted (void)
 void
 twist_keylog_write (void *user, const char *line)
 {
-  const char *path = getenv ("SSLKEYLOGFILE");
+  const char *path = twist_getenv_secure ("SSLKEYLOGFILE");
   size_t n = strlen (line);
   char *buf;
   int fd;

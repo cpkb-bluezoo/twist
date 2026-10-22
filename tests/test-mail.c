@@ -92,16 +92,7 @@ test_mail (void)
   int done = 0;
   int err = 0;
   struct twist_mime *mime;
-  static const char expect_mime[] =
-    "--twist-mime-1\r\n"
-    "Content-Type: text/plain\r\n"
-    "\r\n"
-    "ab\r\n"
-    "--twist-mime-1\r\n"
-    "Content-Transfer-Encoding: base64\r\n"
-    "\r\n"
-    "aGk=\r\n"
-    "--twist-mime-1--\r\n";
+  char expect_mime[256];
 
   memset (&cap, 0, sizeof cap);
   twist_dotout_init (&out);
@@ -137,9 +128,46 @@ test_mail (void)
   check (twist_mime_body_b64 (mime, (const uint8_t *) "hi", 2) == TWIST_OK,
          "b64");
   check (twist_mime_finish (mime) == TWIST_OK, "mime end");
-  check (cap.n == sizeof expect_mime - 1
+  snprintf (expect_mime, sizeof expect_mime,
+            "--%s\r\nContent-Type: text/plain\r\n\r\nab\r\n"
+            "--%s\r\nContent-Transfer-Encoding: base64\r\n\r\naGk=\r\n"
+            "--%s--\r\n",
+            twist_mime_boundary (mime), twist_mime_boundary (mime),
+            twist_mime_boundary (mime));
+  check (cap.n == strlen (expect_mime)
          && memcmp (cap.b, expect_mime, cap.n) == 0, "mime bytes");
   twist_mime_free (mime);
+
+  /* The boundary is chosen for each message and cannot be guessed.  It was
+     "twist-mime-1" every time, so a part that held "--twist-mime-1" and a
+     line break ended its part and began another, with headers of its own.  */
+  {
+    struct twist_mime *a = twist_mime_new (mail_sink, &cap);
+    struct twist_mime *b = twist_mime_new (mail_sink, &cap);
+    const char *ba;
+    const char *bb;
+    size_t k;
+    int hex = 1;
+
+    check (twist_mime_boundary (a) == NULL, "no boundary before begin");
+    check (twist_mime_begin (a, "mixed") == TWIST_OK
+           && twist_mime_begin (b, "mixed") == TWIST_OK, "two messages");
+    ba = twist_mime_boundary (a);
+    bb = twist_mime_boundary (b);
+    check (ba != NULL && bb != NULL && strcmp (ba, bb) != 0,
+           "each message has its own boundary");
+    check (ba != NULL && strlen (ba) >= 24 && strlen (ba) <= 70,
+           "of a length that is hard to guess, and RFC 2046 allows");
+    check (ba != NULL && strncmp (ba, "twist-", 6) == 0, "named for twist");
+    for (k = 6; ba != NULL && ba[k] != 0; k++)
+      if (!((ba[k] >= '0' && ba[k] <= '9') || (ba[k] >= 'a' && ba[k] <= 'f')))
+        hex = 0;
+    check (hex, "and made of characters that need no quoting");
+    check (ba != NULL && strcmp (ba, "twist-mime-1") != 0,
+           "and not the one that used to be");
+    twist_mime_free (a);
+    twist_mime_free (b);
+  }
 
   {
     uint8_t raw[13] = { 0, 'a', 'l', 'i', 'c', 'e', 0,

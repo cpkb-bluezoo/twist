@@ -85,6 +85,13 @@ Reads a file, or uploads one with \fB\-\-data\fR or \fB\-T\fR.  It is a datagram
 .B ws, wss
 WebSocket, over HTTP/1, HTTP/2 or HTTP/3.  The payload bytes are written.
 .PP
+The schemes with a trailing s are TLS from the first byte.  The others are not
+upgraded: there is no STARTTLS, STLS or AUTH TLS, and no option to require
+them.  A user name and password given for smtp, pop3, imap, ldap, mqtt or ftp
+go on a connection that is not encrypted, by a method such as PLAIN, LOGIN or a
+simple bind that does not hide them; PLAIN is tried when the server advertises
+none.  Use the scheme with the s.
+.PP
 These schemes are recognised, but are not implemented, and exit 1:
 .B rtmp, rtmps,
 .B rtsp,

@@ -179,6 +179,15 @@ calculate (struct twist_progress *p, uint64_t now_ms)
   return show;
 }
 
+/* A + B, or the largest number if that is more.  Both are not negative.  */
+static long long
+sat_add (long long a, long long b)
+{
+  if (b > 0 && a > LLONG_MAX - b)
+    return LLONG_MAX;
+  return a + b;
+}
+
 static void
 meter (struct twist_easy *easy)
 {
@@ -231,9 +240,11 @@ meter (struct twist_easy *easy)
                            time_left);
   twist_progress_time2str (total_estimate, time_total);
   twist_progress_time2str (timespent, time_spent);
-  total_expected = (p->ul_known ? p->size_ul : p->uploaded)
-    + (p->dl_known ? p->size_dl : p->downloaded);
-  total_transfer = p->downloaded + p->uploaded;
+  /* Sizes are what a peer says, up to the largest number, so the sums do not
+     wrap.  */
+  total_expected = sat_add (p->ul_known ? p->size_ul : p->uploaded,
+                            p->dl_known ? p->size_dl : p->downloaded);
+  total_transfer = sat_add (p->downloaded, p->uploaded);
   if (total_expected > 10000)
     total_percen = total_transfer / (total_expected / 100);
   else if (total_expected > 0)

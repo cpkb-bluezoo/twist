@@ -73,6 +73,14 @@ struct dent
   const char *longname;
 };
 
+/* What a hostile server puts in a status message: a terminal escape that sets
+   the title, a line break and a carriage return to forge lines of output, a
+   C1 control in UTF-8, and a good deal of text.  */
+#define HOSTILE_TEXT "ok\033]0;pwned\007\nforged: line\rX\302\233[2J" \
+  "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" \
+  "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" \
+  "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+
 struct server
 {
   struct pipe out;
@@ -136,6 +144,7 @@ struct server
      hold those far past it until the file is closed: a server may answer in
      any order.  */
   int late_eof;
+  int hold_first;		/* Never answer the first read.  */
   uint32_t held[64];
   size_t nheld;
   int release_held;		/* Answer them now: the close was answered.  */
@@ -527,6 +536,10 @@ sv_sftp_request (void *user, const gf_sftp_request *req)
         return gf_sftp_server_status (sv->sftp, req->id,
                                       GF_FX_PERMISSION_DENIED,
                                       "not for you") != GF_OK;
+      if (strcmp (path, "/hostile") == 0)
+        return gf_sftp_server_status (sv->sftp, req->id,
+                                      GF_FX_PERMISSION_DENIED,
+                                      HOSTILE_TEXT) != GF_OK;
       return gf_sftp_server_status (sv->sftp, req->id, GF_FX_NO_SUCH_FILE,
                                     "") != GF_OK;
     case GF_FXP_READ:
@@ -534,7 +547,14 @@ sv_sftp_request (void *user, const gf_sftp_request *req)
         size_t n;
 
         if (sv->reads++ == 0)
-          sv->first_read = req->offset;
+          {
+            sv->first_read = req->offset;
+            if (sv->hold_first && !is_u && sv->nheld < 64)
+              {
+                sv->held[sv->nheld++] = req->id;
+                return 0;
+              }
+          }
         if (req->length > sv->max_read_len)
           sv->max_read_len = req->length;
         if (!is_u && sv->late_eof && sv->nheld < 64
@@ -615,6 +635,10 @@ sv_sftp_request (void *user, const gf_sftp_request *req)
       if (strcmp (path, "/denied") == 0)
         return gf_sftp_server_status (sv->sftp, req->id,
                                       GF_FX_PERMISSION_DENIED, "") != GF_OK;
+      if (strcmp (path, "/hostile") == 0)
+        return gf_sftp_server_status (sv->sftp, req->id,
+                                      GF_FX_PERMISSION_DENIED,
+                                      HOSTILE_TEXT) != GF_OK;
       return gf_sftp_server_status (sv->sftp, req->id, GF_FX_OK, "") != GF_OK;
     case GF_FXP_RENAME:
     case GF_FXP_SYMLINK:
@@ -5459,6 +5483,97 @@ test_abandoned_job (void)
     }
 }
 
+/* The text of an error that a server wrote is shown on the terminal and
+   written to the output of -w, so it is not given the terminal: control
+   characters, and the C1 ones in UTF-8, are made "?", as for a listing, and
+   it is of a length that fits.  It was copied as it came.  */
+static int
+has_control (const char *s)
+{
+  const unsigned char *p;
+
+  for (p = (const unsigned char *) s; *p != 0; p++)
+    if (*p < 0x20 || *p == 0x7f || (*p == 0xc2 && p[1] >= 0x80 && p[1] < 0xa0))
+      return 1;
+  return 0;
+}
+
+static void
+test_server_text_is_clean (void)
+{
+  struct server sv;
+  struct world w;
+  struct twist_easy *easy;
+  struct setup su = SETUP ("sftp://alice@127.0.0.1/hostile", 0, "secret");
+  struct twist_slist *pre;
+
+  check (server_new (&sv) == 0, "server");
+  easy = run (&w, &sv, &su);
+  check (easy->done && easy->result == TWIST_ERR_FILE
+         && twist_easy_error (easy) != NULL
+         && detail_has (easy, "permission denied"),
+         "a hostile status still fails the transfer");
+  check (twist_easy_error (easy) != NULL && !has_control (twist_easy_error (easy)),
+         "and its message has no control character in it");
+  check (twist_easy_error (easy) != NULL && strlen (twist_easy_error (easy)) < 300,
+         "and it is not longer than fits");
+  twist_easy_cleanup (easy);
+  server_free (&sv);
+
+  check (server_new (&sv) == 0, "server 2");
+  su.url = "sftp://alice@127.0.0.1/";
+  pre = commands ("rm /hostile", NULL, NULL);
+  easy = quote_run (&w, &sv, &su, pre, NULL);
+  check (easy->done && easy->result == TWIST_ERR_QUOTE
+         && twist_easy_error (easy) != NULL
+         && !has_control (twist_easy_error (easy)),
+         "the same for a command that fails");
+  twist_easy_cleanup (easy);
+  server_free (&sv);
+  twist_slist_free_all (pre);
+}
+
+/* A server may answer a read with less than was asked, and then the rest is
+   asked for.  One that holds the first read and answers every other with a
+   single byte makes a slot for each answer that cannot be delivered, and
+   another for the rest, with no end: memory grew with the server's patience,
+   and each answer scanned the list.  The number of reads in hand is limited,
+   and a server that goes past it is not answering reads.  */
+static void
+test_short_read_flood (void)
+{
+  struct server sv;
+  struct world w;
+  struct twist_easy *easy;
+  struct setup su = SETUP ("sftp://alice@127.0.0.1/data.bin", 0, "secret");
+  size_t n = 16 * 32768;
+  uint8_t *bigfile = malloc (n);
+
+  check (bigfile != NULL, "a bigfile file");
+  memset (bigfile, 'z', n);
+  check (server_new (&sv) == 0, "server");
+  sv.file = bigfile;
+  sv.filelen = n;
+  sv.max_read = 1;
+  sv.hold_first = 1;
+  easy = run (&w, &sv, &su);
+  check (easy->done && easy->result == TWIST_ERR_PROTOCOL,
+         "a server that answers reads a byte at a time and holds one is refused");
+  check (sv.reads < 3000, "after a bounded number of reads");
+  twist_easy_cleanup (easy);
+  server_free (&sv);
+  free (bigfile);
+
+  /* An ordinary server that answers in smaller pieces than asked, in order, is
+     not.  */
+  check (server_new (&sv) == 0, "server 2");
+  sv.max_read = 600;
+  easy = run (&w, &sv, &su);
+  check (easy->done && easy->result == TWIST_OK, "small pieces in order are fine");
+  twist_easy_cleanup (easy);
+  server_free (&sv);
+}
+
 int
 main (void)
 {
@@ -5512,6 +5627,8 @@ main (void)
   test_agent_session_bind ();
   test_agent_abandoned ();
   test_no_subsystem ();
+  test_server_text_is_clean ();
+  test_short_read_flood ();
   test_auth ();
   test_url_credentials ();
   test_kbdint ();

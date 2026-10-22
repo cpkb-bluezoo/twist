@@ -210,6 +210,7 @@ twist_origin_h3 (struct twist_easy *easy, const char *host, int *port)
 {
   struct twist_origin_hint *e = find_hint (easy, host, 0);
   const char *alt;
+  char altbuf[64];
 
   if (port != NULL)
     *port = 0;
@@ -221,9 +222,9 @@ twist_origin_h3 (struct twist_easy *easy, const char *host, int *port)
     }
   if (easy == NULL || easy->share == NULL || easy->share->altsvc == NULL)
     return 0;
-  alt = twist_altsvc_lookup (easy->share->altsvc, host);
-  if (alt == NULL)
+  if (!twist_share_altsvc_lookup (easy->share, host, altbuf, sizeof altbuf))
     return 0;
+  alt = altbuf;
   if (strcmp (alt, "none") == 0)
     return -1;
   if (strncmp (alt, "h3:", 3) == 0)
@@ -253,7 +254,7 @@ twist_origin_set_h3 (struct twist_easy *easy, const char *host, int yes,
     snprintf (buf, sizeof buf, "h3:%d", port > 0 ? port : 443);
   else
     snprintf (buf, sizeof buf, "none");
-  twist_altsvc_note (easy->share->altsvc, host, buf);
+  twist_share_altsvc_note (easy->share, host, buf);
 }
 
 int

@@ -27,6 +27,9 @@
 #include <string.h>
 #include <strings.h>
 #include <unistd.h>
+#ifdef __linux__
+# include <sys/auxv.h>
+#endif
 
 void *
 twist_xmalloc (size_t n)
@@ -42,7 +45,7 @@ twist_xmalloc (size_t n)
 int
 twist_home_dir (char *out, size_t cap)
 {
-  const char *home = getenv ("HOME");
+  const char *home = twist_getenv_secure ("HOME");
   struct passwd pw, *res = NULL;
   char buf[4096];
 
@@ -87,6 +90,46 @@ twist_has_ctl (const char *s)
     if (*p == '\r' || *p == '\n')
       return 1;
   return 0;
+}
+
+int
+twist_status_code (const char *s)
+{
+  if (s == NULL || s[0] < '1' || s[0] > '5' || s[1] < '0' || s[1] > '9'
+      || s[2] < '0' || s[2] > '9')
+    return -1;
+  return (s[0] - '0') * 100 + (s[1] - '0') * 10 + (s[2] - '0');
+}
+
+static int privileged_override = -1;
+
+void
+twist_set_privileged (int how)
+{
+  privileged_override = how;
+}
+
+/* Whether the environment is not the process's own: it was started set-user-ID
+   or set-group-ID (the real and effective IDs differ), or by the kernel with
+   more rights than its user's (AT_SECURE, which covers file capabilities).  */
+static int
+privileged (void)
+{
+  if (privileged_override >= 0)
+    return privileged_override;
+  if (getuid () != geteuid () || getgid () != getegid ())
+    return 1;
+#ifdef __linux__
+  return getauxval (AT_SECURE) != 0;
+#else
+  return 0;
+#endif
+}
+
+const char *
+twist_getenv_secure (const char *name)
+{
+  return privileged () ? NULL : getenv (name);
 }
 
 static int

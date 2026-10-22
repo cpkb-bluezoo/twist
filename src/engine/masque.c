@@ -349,8 +349,7 @@ h3_header (void *user, const char *name, size_t nn, const char *value,
   struct twist_masque *m = user;
 
   if (nn == 7 && memcmp (name, ":status", 7) == 0 && vn == 3)
-    m->status = (value[0] - '0') * 100 + (value[1] - '0') * 10
-                + (value[2] - '0');
+    m->status = twist_status_code (value);
 }
 
 static int

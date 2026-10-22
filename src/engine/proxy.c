@@ -539,10 +539,13 @@ twist_proxy_opening (struct twist_proxy *proxy, uint8_t **out, size_t *len)
   *len = 0;
   if (proxy->kind == TWIST_PROXY_HTTP && proxy->state == PX_START)
     {
-      char addr[256], auth[512] = "", line[1024];
+      char addr[256];
       char *enc = NULL;
+      char *line;
       const char *brk_l = "", *brk_r = "";
+      size_t cap;
       int n;
+      int m;
 
       target_address (proxy, addr, sizeof addr);
       if (strchr (addr, ':') != NULL)
@@ -550,33 +553,59 @@ twist_proxy_opening (struct twist_proxy *proxy, uint8_t **out, size_t *len)
           brk_l = "[";
           brk_r = "]";
         }
+      /* Built to the length of what is in it.  A credential is as long as the
+         user made it, and one cut off in a buffer took with it the end of the
+         line and of the request, and the proxy then read what followed as
+         more headers.  */
       if (proxy->user != NULL)
         {
-          char cred[600];
-          int cn = snprintf (cred, sizeof cred, "%s:%s", proxy->user,
-                             proxy->pass != NULL ? proxy->pass : "");
+          size_t ul = strlen (proxy->user);
+          size_t pl = proxy->pass != NULL ? strlen (proxy->pass) : 0;
+          char *cred = twist_xmalloc (ul + pl + 2);
+          int rc;
 
-          if (cn < 0 || (size_t) cn >= sizeof cred
-              || twist_b64_encode ((const uint8_t *) cred, (size_t) cn, &enc)
-                 != TWIST_OK)
+          if (cred == NULL)
             return TWIST_ERR_NOMEM;
-          snprintf (auth, sizeof auth, "Proxy-Authorization: Basic %s\r\n",
-                    enc);
-          memset (cred, 0, sizeof cred);
+          memcpy (cred, proxy->user, ul);
+          cred[ul] = ':';
+          if (pl > 0)
+            memcpy (cred + ul + 1, proxy->pass, pl);
+          rc = twist_b64_encode ((const uint8_t *) cred, ul + 1 + pl, &enc);
+          memset (cred, 0, ul + pl + 2);
+          free (cred);
+          if (rc != TWIST_OK)
+            return rc;
+        }
+      cap = 2 * (strlen (addr) + 2 + 8) + 128
+            + (enc != NULL ? strlen (enc) + 32 : 0);
+      line = twist_xmalloc (cap);
+      if (line == NULL)
+        {
+          free (enc);
+          return TWIST_ERR_NOMEM;
+        }
+      n = snprintf (line, cap,
+                    "CONNECT %s%s%s:%d HTTP/1.1\r\nHost: %s%s%s:%d\r\n",
+                    brk_l, addr, brk_r, proxy->target_port,
+                    brk_l, addr, brk_r, proxy->target_port);
+      m = n < 0 ? -1 : snprintf (line + n, cap - (size_t) n,
+                                 "%s%s%s\r\n",
+                                 enc != NULL ? "Proxy-Authorization: Basic " : "",
+                                 enc != NULL ? enc : "",
+                                 enc != NULL ? "\r\n" : "");
+      if (enc != NULL)
+        {
+          memset (enc, 0, strlen (enc));
           free (enc);
         }
-      n = snprintf (line, sizeof line,
-                    "CONNECT %s%s%s:%d HTTP/1.1\r\nHost: %s%s%s:%d\r\n%s\r\n",
-                    brk_l, addr, brk_r, proxy->target_port,
-                    brk_l, addr, brk_r, proxy->target_port, auth);
-      if (n < 0 || (size_t) n >= sizeof line)
-        return TWIST_ERR_CONNECT;
-      *out = (uint8_t *) twist_strdup (line);
-      if (*out == NULL)
-        return TWIST_ERR_NOMEM;
-      *len = (size_t) n;
+      if (n < 0 || m < 0 || (size_t) n + (size_t) m >= cap)
+        {
+          free (line);
+          return TWIST_ERR_CONNECT;
+        }
+      *out = (uint8_t *) line;
+      *len = (size_t) n + (size_t) m;
       proxy->state = PX_HTTP;
-      memset (auth, 0, sizeof auth);
       return TWIST_OK;
     }
   if (proxy->kind == TWIST_PROXY_SOCKS5 && proxy->state == PX_START)
@@ -681,9 +710,10 @@ http_status (const uint8_t *buf, size_t len)
   sp = memchr (p, ' ', len);
   if (sp == NULL || sp + 4 > p + len)
     return -1;
-  if (sp[1] < '0' || sp[1] > '9')
+  /* Three digits and then a space or the end of the line.  */
+  if (sp + 4 < p + len && sp[4] != ' ' && sp[4] != '\r' && sp[4] != '\n')
     return -1;
-  return (sp[1] - '0') * 100 + (sp[2] - '0') * 10 + (sp[3] - '0');
+  return twist_status_code (sp + 1);
 }
 
 static int

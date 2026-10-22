@@ -90,6 +90,142 @@ test_auth (void)
          == TWIST_ERR_UNSUPPORTED, "auth-int");
 }
 
+/* The response of RFC 7616 without qop, MD5, worked out here from whole
+   strings of any length: md5 (md5 (user:realm:pass) : nonce : md5 (method:uri))
+   in hex.  The code under test must come to the same.  */
+static void
+hex_md5 (const char *s, char *out)
+{
+  uint8_t d[16];
+  size_t i;
+
+  twist_md5 (s, strlen (s), d);
+  for (i = 0; i < 16; i++)
+    sprintf (out + 2 * i, "%02x", d[i]);
+}
+
+static void
+expected_response (const char *user, const char *realm, const char *pass,
+                   const char *method, const char *uri, const char *nonce,
+                   char *out)
+{
+  size_t n = strlen (user) + strlen (realm) + strlen (pass) + strlen (method)
+             + strlen (uri) + strlen (nonce) + 128;
+  char *t = malloc (n);
+  char ha1[33], ha2[33];
+
+  if (t == NULL)
+    abort ();
+  snprintf (t, n, "%s:%s:%s", user, realm, pass);
+  hex_md5 (t, ha1);
+  snprintf (t, n, "%s:%s", method, uri);
+  hex_md5 (t, ha2);
+  snprintf (t, n, "%s:%s:%s", ha1, nonce, ha2);
+  hex_md5 (t, out);
+  free (t);
+}
+
+/* A Digest header is built from what the challenge says and what the user
+   gave, none of which has a length of its own.  A long password or URI was
+   cut off in a fixed buffer, and the response then did not match the header
+   or the credentials, so that the login failed with nothing said; the
+   parameters were found by looking for their names anywhere in the
+   challenge, in "cnonce" for "nonce" and in the middle of a quoted realm;
+   and the server's opaque, which has to be sent back, was not.  */
+static void
+test_digest_lengths_and_params (void)
+{
+  char user[301];
+  char pass[701];
+  char uri[901];
+  char want[33];
+  char *hdr = NULL;
+  char needle[96];
+  size_t n;
+
+  memset (user, 'u', sizeof user - 1);
+  user[sizeof user - 1] = 0;
+  memset (pass, 'p', sizeof pass - 1);
+  pass[sizeof pass - 1] = 0;
+  uri[0] = '/';
+  memset (uri + 1, 'a', sizeof uri - 2);
+  uri[sizeof uri - 1] = 0;
+
+  /* Long credentials and a long URI: whole, and the response is of them.  */
+  check (twist_auth_digest ("Digest realm=\"r\", nonce=\"n1\"", "GET", uri, user,
+                            pass, 1, "c", &hdr) == TWIST_OK && hdr != NULL,
+         "digest with long fields");
+  expected_response (user, "r", pass, "GET", uri, "n1", want);
+  snprintf (needle, sizeof needle, "response=\"%s\"", want);
+  check (hdr != NULL && strstr (hdr, needle) != NULL,
+         "its response is that of the whole credentials");
+  check (hdr != NULL && strstr (hdr, user) != NULL && strstr (hdr, uri) != NULL,
+         "and the user name and the URI are in it whole");
+  n = hdr != NULL ? strlen (hdr) : 0;
+  check (n > 0 && hdr[n - 1] == '"', "and it ends where it should");
+  free (hdr);
+  hdr = NULL;
+
+  /* "nonce" is not "cnonce", and a name is not found in a quoted value.  */
+  check (twist_auth_digest ("Digest realm=\"r\", cnonce=\"WRONG\", nonce=\"RIGHT\"",
+                            "GET", "/", "u", "p", 1, "c", &hdr) == TWIST_OK,
+         "challenge with a cnonce");
+  check (hdr != NULL && strstr (hdr, "nonce=\"RIGHT\"") != NULL
+         && strstr (hdr, "WRONG") == NULL, "the nonce is nonce, not cnonce");
+  free (hdr);
+  hdr = NULL;
+  check (twist_auth_digest ("Digest realm=\"a qop=auth b\", nonce=\"n\"", "GET",
+                            "/", "u", "p", 1, "c", &hdr) == TWIST_OK,
+         "challenge with qop in the realm");
+  check (hdr != NULL && strstr (hdr, "qop=auth,") == NULL
+         && strstr (hdr, "realm=\"a qop=auth b\"") != NULL,
+         "a name inside a quoted value is not a parameter");
+  free (hdr);
+  hdr = NULL;
+  check (twist_auth_digest ("Digest REALM=\"r\", NONCE=\"n\", QOP=\"auth\"", "GET",
+                            "/", "u", "p", 1, "c", &hdr) == TWIST_OK
+         && hdr != NULL && strstr (hdr, "qop=auth") != NULL,
+         "names are not case sensitive");
+  free (hdr);
+  hdr = NULL;
+
+  /* The opaque is sent back as it came, and the algorithm named if it is
+     not the default.  */
+  check (twist_auth_digest ("Digest realm=\"r\", nonce=\"n\", opaque=\"5ccc069c\"",
+                            "GET", "/", "u", "p", 1, "c", &hdr) == TWIST_OK
+         && hdr != NULL && strstr (hdr, "opaque=\"5ccc069c\"") != NULL,
+         "the opaque is sent back");
+  free (hdr);
+  hdr = NULL;
+  check (twist_auth_digest ("Digest realm=\"r\", nonce=\"n\", algorithm=SHA-256",
+                            "GET", "/", "u", "p", 1, "c", &hdr) == TWIST_OK
+         && hdr != NULL && strstr (hdr, "algorithm=SHA-256") != NULL,
+         "SHA-256 is named in the response");
+  free (hdr);
+  hdr = NULL;
+  check (twist_auth_digest ("Digest realm=\"r\", nonce=\"n\"", "GET", "/", "u",
+                            "p", 1, "c", &hdr) == TWIST_OK
+         && hdr != NULL && strstr (hdr, "opaque") == NULL
+         && strstr (hdr, "algorithm") == NULL,
+         "neither when there is none, or for MD5");
+  free (hdr);
+  hdr = NULL;
+
+  /* A nonce longer than the old buffer.  */
+  {
+    char chal[600];
+    char nonce[301];
+
+    memset (nonce, 'n', sizeof nonce - 1);
+    nonce[sizeof nonce - 1] = 0;
+    snprintf (chal, sizeof chal, "Digest realm=\"r\", nonce=\"%s\"", nonce);
+    check (twist_auth_digest (chal, "GET", "/", "u", "p", 1, "c", &hdr)
+           == TWIST_OK && hdr != NULL && strstr (hdr, nonce) != NULL,
+           "a long nonce is taken");
+    free (hdr);
+  }
+}
+
 static void
 test_sasl (void)
 {
@@ -132,6 +268,7 @@ int
 main (void)
 {
   test_auth ();
+  test_digest_lengths_and_params ();
   test_sasl ();
   return tests_finish ();
 }

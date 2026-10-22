@@ -391,11 +391,83 @@ test_ftps_session (void)
   }
 }
 
+/* The server says how many bytes it will send, in the 150 reply, "(5
+   bytes)".  A transfer that ends with fewer is not the file: a data
+   connection that is closed early, with a 226 after it, was reported as a
+   success and left a truncated file with a good exit status.  curl's status
+   for it is 18.  A listing has no size, and a file that comes whole is as it
+   was.  */
+static void
+test_ftp_partial (void)
+{
+  static const char talk[] =
+    "220 ready\r\n230 in\r\n200 type\r\n"
+    "229 Entering Extended Passive Mode (|||40000|)\r\n"
+    "150 Opening BINARY mode data connection for f (5 bytes).\r\n";
+  size_t i;
+
+  for (i = 0; i < 4; i++)
+    {
+      twist_easy *easy = twist_easy_init ();
+      struct twist_ftp *f;
+
+      ftp_body_len = 0;
+      check (twist_url_parse_int ("ftp://127.0.0.1/f", &easy->url) == TWIST_OK,
+             "url");
+      easy->write_cb = ftp_write;
+      f = twist_ftp_new (easy, 0);
+      feed_session (f, talk, 1);
+      /* i bytes of 5 come, and then the end, and 226.  */
+      if (i > 0)
+        twist_ftp_data (f, (const uint8_t *) "hello", i);
+      feed_session (f, "226 done\r\n", 1);
+      twist_ftp_data_eof (f);
+      check (easy->done && easy->result == TWIST_ERR_PARTIAL,
+             "fewer bytes than announced is a partial file");
+      twist_easy_cleanup (easy);
+    }
+  {
+    twist_easy *easy = twist_easy_init ();
+    struct twist_ftp *f;
+
+    ftp_body_len = 0;
+    check (twist_url_parse_int ("ftp://127.0.0.1/f", &easy->url) == TWIST_OK,
+           "url");
+    easy->write_cb = ftp_write;
+    f = twist_ftp_new (easy, 0);
+    feed_session (f, talk, 1);
+    twist_ftp_data (f, (const uint8_t *) "hello", 5);
+    feed_session (f, "226 done\r\n", 1);
+    twist_ftp_data_eof (f);
+    check (easy->done && easy->result == TWIST_OK, "all of it is a success");
+    twist_easy_cleanup (easy);
+  }
+  /* No size given, nothing to hold it to.  */
+  {
+    twist_easy *easy = twist_easy_init ();
+    struct twist_ftp *f;
+
+    check (twist_url_parse_int ("ftp://127.0.0.1/f", &easy->url) == TWIST_OK,
+           "url");
+    easy->write_cb = ftp_write;
+    f = twist_ftp_new (easy, 0);
+    feed_session (f, "220 ready\r\n230 in\r\n200 type\r\n"
+                     "229 Entering Extended Passive Mode (|||40000|)\r\n"
+                     "150 Opening data connection.\r\n", 1);
+    twist_ftp_data (f, (const uint8_t *) "hi", 2);
+    feed_session (f, "226 done\r\n", 1);
+    twist_ftp_data_eof (f);
+    check (easy->done && easy->result == TWIST_OK, "no size, no complaint");
+    twist_easy_cleanup (easy);
+  }
+}
+
 int
 main (void)
 {
   test_ftp_parser ();
   test_ftp_session ();
   test_ftps_session ();
+  test_ftp_partial ();
   return tests_finish ();
 }

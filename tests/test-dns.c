@@ -740,6 +740,17 @@ test_dns_cache (void)
          && strcmp (hit.text, "192.0.2.1") == 0, "dns hit");
   check (twist_dns_cache_get (cache, "example.com", 1, &hit, 1000 + 60000)
          == 0, "dns expired");
+  /* A TTL is the server's say and may be anything: a forged answer with
+     0xfffffffe would pin an address for 136 years.  Kept for a minute at
+     most, as curl keeps a name.  */
+  check (dns_a_msg ("long.example", 0xfffffffeu, msg, sizeof msg, &len) == 0,
+         "dns msg long ttl");
+  check (twist_dns_cache_put_msg (cache, "long.example", 1, msg, len, 1000)
+         == TWIST_OK, "dns store long ttl");
+  check (twist_dns_cache_get (cache, "long.example", 1, &hit, 1000 + 59000)
+         == 1, "a long TTL is kept for a while");
+  check (twist_dns_cache_get (cache, "long.example", 1, &hit, 1000 + 60001)
+         == 0, "but not past a minute");
   check (dns_a_msg ("example.com", 30, msg, sizeof msg, &len) == 0, "dns msg 2");
   check (twist_dns_cache_put_msg (cache, "Example.COM", 1, msg, len, 5000)
          == TWIST_OK, "dns store fold");

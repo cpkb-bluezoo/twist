@@ -63,6 +63,20 @@ test_h1 (void)
   twist_h1_free (h);
 }
 
+/* Open stream 1 by sending a request: a response only follows one, and a
+   frame on a stream that was not opened is a connection error.  */
+static void
+h2_open_stream (struct twist_h2 *h)
+{
+  uint8_t *out = NULL;
+  size_t n = 0;
+
+  if (twist_h2_request (h, "GET", "https", "h", "/", NULL, NULL, 0, 0, &out,
+                        &n) != TWIST_OK)
+    abort ();
+  free (out);
+}
+
 static void
 test_h2 (void)
 {
@@ -81,6 +95,7 @@ test_h2 (void)
          "pri");
   free (preface);
   h = twist_h2_new (&ev);
+  h2_open_stream (h);
   reset_ev ();
   feed_remain (h2_recv, h, frames, sizeof frames, 1);
   check (strcmp (hdr_name, ":status") == 0 && strcmp (hdr_value, "200") == 0,
@@ -141,6 +156,7 @@ test_h2 (void)
             memset (p + 9, 'b', 16384);
           }
         h = twist_h2_new (&ev);
+        h2_open_stream (h);
         h2_emitted_n = 0;
         twist_h2_set_emit (h, h2_capture, NULL);
         reset_ev ();
@@ -1130,6 +1146,108 @@ test_connection_specific_headers (void)
   twist_hpack_free (dec);
 }
 
+/* A client has frames only on streams it opened: odd, and below the next it
+   will open.  A server (a proxy, for a tunnel) that sends DATA or HEADERS on
+   any other stream was having them taken for a stream of their own, and the
+   data went to the same place as the tunnel's.  It is a connection error
+   (RFC 9113, section 5.1), as is data on a stream that has already ended.  */
+static int h2f_failed;
+static size_t h2f_body;
+static int h2f_done;
+
+static void
+h2f_fail_cb (void *user, int err)
+{
+  (void) user;
+  h2f_failed = err;
+}
+
+static void
+h2f_body_cb (void *user, const uint8_t *data, size_t len)
+{
+  (void) user;
+  (void) data;
+  h2f_body += len;
+}
+
+static void
+h2f_done_cb (void *user)
+{
+  (void) user;
+  h2f_done++;
+}
+
+/* A session with stream 1 open, and the server's SETTINGS in.  */
+static struct twist_h2 *
+h2f_open (void)
+{
+  static const uint8_t settings[] = { 0, 0, 0, 4, 0, 0, 0, 0, 0 };
+  struct twist_h1_events ev;
+  struct twist_h2 *h;
+  uint8_t *out = NULL;
+  size_t n = 0;
+
+  memset (&ev, 0, sizeof ev);
+  ev.user = &h2f_failed;
+  ev.failure = h2f_fail_cb;
+  ev.body = h2f_body_cb;
+  ev.message_done = h2f_done_cb;
+  h2f_failed = 0;
+  h2f_body = 0;
+  h2f_done = 0;
+  h = twist_h2_new (&ev);
+  twist_h2_set_emit (h, tun_emit, NULL);
+  if (twist_h2_request (h, "GET", "https", "h", "/", NULL, NULL, 0, 0, &out,
+                        &n) != TWIST_OK)
+    abort ();
+  free (out);
+  twist_h2_receive (h, settings, sizeof settings);
+  return h;
+}
+
+static void
+test_h2_foreign_streams (void)
+{
+  /* DATA on stream 2, which is the server's to open, and never is.  */
+  static const uint8_t data_even[] = { 0, 0, 1, 0, 0, 0, 0, 0, 2, 'x' };
+  /* HEADERS, :status 200, on stream 3, which the client has not opened.  */
+  static const uint8_t head_idle[] = { 0, 0, 1, 1, 4, 0, 0, 0, 3, 0x88 };
+  /* DATA on stream 5, further on.  */
+  static const uint8_t data_idle[] = { 0, 0, 1, 0, 0, 0, 0, 0, 5, 'x' };
+  /* A response on stream 1: HEADERS 200, then DATA "hi" with END_STREAM.  */
+  static const uint8_t head_ok[] = { 0, 0, 1, 1, 4, 0, 0, 0, 1, 0x88 };
+  static const uint8_t data_end[] = { 0, 0, 2, 0, 1, 0, 0, 0, 1, 'h', 'i' };
+  static const uint8_t data_after[] = { 0, 0, 1, 0, 0, 0, 0, 0, 1, 'x' };
+  struct twist_h2 *h;
+
+  h = h2f_open ();
+  twist_h2_receive (h, data_even, sizeof data_even);
+  check (h2f_failed == TWIST_ERR_PROTOCOL && h2f_body == 0,
+         "DATA on a stream the server would open is a connection error");
+  twist_h2_free (h);
+
+  h = h2f_open ();
+  twist_h2_receive (h, head_idle, sizeof head_idle);
+  check (h2f_failed == TWIST_ERR_PROTOCOL, "HEADERS on an idle stream is one");
+  twist_h2_free (h);
+
+  h = h2f_open ();
+  twist_h2_receive (h, data_idle, sizeof data_idle);
+  check (h2f_failed == TWIST_ERR_PROTOCOL && h2f_body == 0,
+         "and DATA on one");
+  twist_h2_free (h);
+
+  h = h2f_open ();
+  twist_h2_receive (h, head_ok, sizeof head_ok);
+  twist_h2_receive (h, data_end, sizeof data_end);
+  check (h2f_failed == 0 && h2f_body == 2 && h2f_done == 1,
+         "a response on the stream that was opened is as it was");
+  twist_h2_receive (h, data_after, sizeof data_after);
+  check (h2f_failed == TWIST_ERR_PROTOCOL && h2f_body == 2,
+         "data after the stream has ended is refused, and not delivered");
+  twist_h2_free (h);
+}
+
 static void
 test_h2_share (void)
 {
@@ -1274,6 +1392,7 @@ main (void)
   test_hpack_long ();
   test_hpack_lowercase_names ();
   test_connection_specific_headers ();
+  test_h2_foreign_streams ();
   test_h2_share ();
   test_http_status ();
   test_h1_write_request ();

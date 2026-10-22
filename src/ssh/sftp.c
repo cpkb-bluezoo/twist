@@ -64,6 +64,15 @@
 
 #define SFTP_CHUNK 32768u
 #define SFTP_WINDOW 16u
+/* The most reads in hand at once, those asked and those answered but not yet
+   written (they are written in order).  A server answers with less than was
+   asked and the rest is asked for, which is a slot more each time; with no
+   limit one that holds back one answer and gives every other a byte makes
+   them without end.  Each chunk in flight needs at most SFTP_CHUNK divided by
+   the size of an answer of them, and the answers of a sane server are not
+   under 256 bytes, so this is room for any server that answers in order, and
+   no more than some tens of kilobytes for one that does not.  */
+#define SFTP_SLOT_MAX (SFTP_WINDOW * (SFTP_CHUNK / 256u))
 
 /* Tags of requests that are not reads.  A read's tag is its slot.  A write's
    is TAG_WRITE plus its length.  A transfer is a download or an upload, never
@@ -487,9 +496,33 @@ fail (struct twist_sftp_xfer *g, int err, const char *detail)
 /* An SFTP status that is not what was wanted.  Missing and forbidden files
    carry their own exit statuses, and so does an upload that
    fails for any other reason.  */
+/* What a server wrote, as text to show: no more than CAP - 1 bytes, with the
+   control characters, and the C1 ones in UTF-8, made "?".  It is the server's,
+   and it is shown on a terminal and written to the output of -w: an escape
+   sequence in it could set the title or move the cursor, and a line break
+   could forge a line.  The listing and the keyboard-interactive prompt take
+   the same care.  */
+static void
+clean_text (char *out, size_t cap, const uint8_t *data, size_t len)
+{
+  uint8_t tmp[256];
+  size_t n = data != NULL ? len : 0;
+
+  if (n > sizeof tmp)
+    n = sizeof tmp;
+  if (n > cap - 1)
+    n = cap - 1;
+  n = twist_ssh_sanitize (tmp, data, n);
+  if (n > cap - 1)
+    n = cap - 1;
+  memcpy (out, tmp, n);
+  out[n] = 0;
+}
+
 static void
 fail_status (struct twist_sftp_xfer *g, const gf_sftp_response *r)
 {
+  char said[160];
   char msg[512];
   const char *what;
   int status = g->put ? 25 : 79;
@@ -509,11 +542,9 @@ fail_status (struct twist_sftp_xfer *g, const gf_sftp_response *r)
       what = _("the server could not do it");
       break;
     }
-  snprintf (msg, sizeof msg, "%s: %s%s%.*s", g->path, what,
-            r->message.len > 0 ? " (" : "", (int) r->message.len,
-            r->message.data != NULL ? (const char *) r->message.data : "");
-  if (r->message.len > 0 && strlen (msg) + 2 < sizeof msg)
-    strcat (msg, ")");
+  clean_text (said, sizeof said, r->message.data, r->message.len);
+  snprintf (msg, sizeof msg, "%s: %s%s%s%s", g->path, what,
+            said[0] != 0 ? " (" : "", said, said[0] != 0 ? ")" : "");
   g->ssh->easy->proto_status = status;
   fail (g, TWIST_ERR_FILE, msg);
 }
@@ -754,8 +785,15 @@ read_response (struct twist_sftp_xfer *g, struct slot *sl,
       if (sl->got < sl->want)
         {
           /* Less than asked: ask again for the rest, from where this stops.  */
-          struct slot *rest = add_slot (g, sl->offset + sl->got,
-                                        sl->want - sl->got);
+          struct slot *rest;
+
+          if (g->used >= SFTP_SLOT_MAX)
+            {
+              fail (g, TWIST_ERR_PROTOCOL,
+                    _("the server answers reads in pieces too small"));
+              return;
+            }
+          rest = add_slot (g, sl->offset + sl->got, sl->want - sl->got);
 
           if (rest == NULL)
             {
@@ -1319,6 +1357,7 @@ quote_issue (struct twist_sftp_xfer *g)
 static void
 quote_status_failure (struct twist_sftp_xfer *g, const gf_sftp_response *r)
 {
+  char said[160];
   char msg[512];
   const char *what;
   const char *cmd = quote_name (g->q.cmd);
@@ -1335,10 +1374,9 @@ quote_status_failure (struct twist_sftp_xfer *g, const gf_sftp_response *r)
       what = _("the server could not do it");
       break;
     }
-  snprintf (msg, sizeof msg, _("%s command failed: %s%s%.*s%s"), cmd, what,
-            r->message.len > 0 ? " (" : "", (int) r->message.len,
-            r->message.data != NULL ? (const char *) r->message.data : "",
-            r->message.len > 0 ? ")" : "");
+  clean_text (said, sizeof said, r->message.data, r->message.len);
+  snprintf (msg, sizeof msg, _("%s command failed: %s%s%s%s"), cmd, what,
+            said[0] != 0 ? " (" : "", said, said[0] != 0 ? ")" : "");
   quote_fail (g, msg);
 }
 
@@ -1722,8 +1760,11 @@ twist_sftp_channel_failed (void *user, uint32_t id, uint32_t reason,
   (void) reason;
   if (s->sftp == NULL || id != s->sftp->chan)
     return 0;
-  snprintf (msg, sizeof msg, _("the server would not open a channel: %.*s"),
-            (int) text.len, text.data != NULL ? (const char *) text.data : "");
+  char said[160];
+
+  clean_text (said, sizeof said, text.data, text.len);
+  snprintf (msg, sizeof msg, _("the server would not open a channel: %s"),
+            said);
   fail (s->sftp, TWIST_ERR_PROTOCOL, msg);
   return 0;
 }

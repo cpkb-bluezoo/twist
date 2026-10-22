@@ -79,6 +79,18 @@ Twist TODO List
       Max-Age=0 does not delete.  SameSite and HttpOnly are not looked at.
   [ ] Redirects.  A redirect is followed only to http, https, ws and wss; there
       is no --proto-redir to change that.
+  [ ] STARTTLS (smtp, pop3, imap, ldap), AUTH TLS (ftp) and --ssl-reqd are not
+      done.  Credentials for a scheme without the s go in the clear (the manual
+      says so), and PLAIN and LOGIN are tried when the server advertises no
+      mechanism.
+  [ ] The output buffer of a connection has no limit.  A handler that queues
+      without end against a peer that does not read grows it, so each handler
+      limits itself (SFTP does, by its window); none does for a body given in
+      one piece, which the application chose the size of.
+  [ ] HTTP/3 closes the connection when the server opens a bidirectional stream
+      (twist_quic_stream_action, tested), but the callback that does it
+      (ev_stream_data in quic.c) is not run by any test: it needs a QUIC peer
+      that opens one, and there is none in the tree.
   [ ] Discovered resolvers (RFC 9462).  A DoT or DoQ resolver found with a
       _dns.resolver.arpa query must have a certificate valid for the address
       that was asked as well as for its own name (twist_verify_chain_names,

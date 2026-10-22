@@ -580,6 +580,16 @@ WebSocket, over HTTP/1, HTTP/2 or HTTP/3.  The payload bytes are
 written.
 @end table
 
+The schemes with a trailing @code{s} (@code{imaps}, @code{ldaps},
+@code{mqtts}, @code{pop3s}, @code{smtps}, @code{https}, @code{ftps},
+@code{wss}) are TLS from the first byte.  The ones without are not upgraded:
+twist has no @code{STARTTLS}, @code{STLS} or @code{AUTH TLS}, and no option
+to require them.  A user name and password given for @code{smtp},
+@code{pop3}, @code{imap}, @code{ldap}, @code{mqtt} or @code{ftp} are sent on
+a connection that is not encrypted, and by a method such as @code{PLAIN},
+@code{LOGIN} or a simple bind that does not hide them; @code{PLAIN} is tried
+when the server advertises none.  Use the scheme with the @code{s}.
+
 These schemes are recognised, but are not implemented, and exit 1:
 @code{rtmp}, @code{rtmps}, @code{rtsp}, @code{smb}, @code{smbs} and
 @code{telnet}.

@@ -45,6 +45,8 @@ struct twist_connection
   int failed;
   int hold_read;
   int force_write;
+  /* Inside deliver: a nested call is not to present the same bytes again.  */
+  int delivering;
   int in_pool;
   struct twist_protocol_handler handler;
   ssize_t (*read_fn) (void *, uint8_t *, size_t);
@@ -73,6 +75,8 @@ struct twist_connection
      twist_connection_start_tls passes on (see twist_connection_require_name).  */
   char *also_name;
   struct twist_timer *connect_timer;
+  /* While closing with output that has not gone: the end of the wait for it.  */
+  struct twist_timer *close_timer;
 };
 
 int (*twist_tls_start_fn) (struct twist_connection *,
@@ -131,8 +135,14 @@ refresh_interest (struct twist_connection *c)
     want |= TWIST_INTEREST_WRITE;
   if (want != c->interest)
     {
+      int rc;
+
       c->interest = want;
-      twist_loop_watch_fd (c->loop, c->fd, want, c);
+      rc = twist_loop_watch_fd (c->loop, c->fd, want, c);
+      /* A descriptor that cannot be watched is never given an event, and
+         the connection would sit until its timeout, if it had one.  */
+      if (rc != TWIST_OK && want != 0 && !c->failed)
+        twist_connection_fail (c, TWIST_ERR_CONNECT);
     }
 }
 
@@ -200,7 +210,16 @@ static void
 deliver (struct twist_connection *c, uint8_t **buf, size_t *off, size_t *len,
          size_t *cap)
 {
-  while (*len > 0 && c->handler.receive != NULL && !c->paused)
+  /* A handler may call resume_read from inside receive, which delivers the
+     same bytes again from inside the call that has not yet said how many it
+     used.  The nested call does nothing; this loop goes on with what is left
+     when receive returns.  And a handler that has closed, or a connection
+     that has failed, is given nothing more.  */
+  if (c->delivering)
+    return;
+  c->delivering = 1;
+  while (*len > 0 && c->handler.receive != NULL && !c->paused && !c->failed
+         && !c->closing)
     {
       size_t n = c->handler.receive (&c->ep, *buf + *off, *len);
 
@@ -211,6 +230,7 @@ deliver (struct twist_connection *c, uint8_t **buf, size_t *off, size_t *len,
       *off += n;
       *len -= n;
     }
+  c->delivering = 0;
   if (*len == 0)
     *off = 0;
   else if (*off > 0 && *cap > 0 && *off >= *cap / 2)
@@ -286,6 +306,32 @@ twist_connection_send_plain (struct twist_connection *c, const uint8_t *data,
   return twist_tls_send_plain_fn (c, data, len);
 }
 
+/* How long a close that has output waiting waits for it to go, when nothing
+   at all is written in that time.  A peer that reads, however slowly, is
+   waited for; one that does not is let go, and the close completes.  */
+#define TWIST_CLOSE_IDLE_MS 30000u
+
+static void
+close_timeout (void *user)
+{
+  struct twist_connection *c = user;
+
+  c->close_timer = NULL;
+  twist_connection_fail (c, TWIST_OK);
+}
+
+static void
+arm_close_timer (struct twist_connection *c)
+{
+  if (c->close_timer != NULL)
+    {
+      twist_timer_cancel (c->close_timer);
+      c->close_timer = NULL;
+    }
+  twist_loop_schedule (c->loop, twist_loop_now (c->loop) + TWIST_CLOSE_IDLE_MS,
+                       close_timeout, c, &c->close_timer);
+}
+
 static void
 tcp_close (struct twist_endpoint *ep)
 {
@@ -294,6 +340,8 @@ tcp_close (struct twist_endpoint *ep)
   refresh_interest (c);
   if (c->out_len == 0)
     twist_connection_fail (c, TWIST_OK);
+  else
+    arm_close_timer (c);
 }
 
 static void
@@ -350,6 +398,8 @@ twist_connection_free (struct twist_connection *c)
     }
   if (c->connect_timer != NULL)
     twist_timer_cancel (c->connect_timer);
+  if (c->close_timer != NULL)
+    twist_timer_cancel (c->close_timer);
   if (c->owner_free != NULL)
     c->owner_free (c->owner);
   if (c->free_tls != NULL && c->tls != NULL)
@@ -604,6 +654,8 @@ twist_connection_connect (struct twist_connection *c, const void *addr,
     }
   c->connecting = 1;
   refresh_interest (c);
+  if (c->failed)
+    return TWIST_OK;
   if (timeout_ms > 0)
     twist_loop_schedule (c->loop, twist_loop_now (c->loop) + timeout_ms,
                          connect_timeout, c, &c->connect_timer);
@@ -705,6 +757,9 @@ twist_connection_on_writable (struct twist_connection *c)
       ssize_t n = c->write_fn (c->io_user, c->outbuf + c->out_off, c->out_len);
       if (n > 0)
         {
+          /* Progress: the wait for a close to finish begins again.  */
+          if (c->closing && c->close_timer != NULL)
+            arm_close_timer (c);
           c->out_off += (size_t) n;
           c->out_len -= (size_t) n;
           if (c->out_len == 0)

@@ -95,6 +95,10 @@ struct twist_ftp
   int retr_sent;
   int ctrl_done;
   int data_eof;
+  /* The size the server said it would send, in its 150 reply, or -1; and what
+     has come.  */
+  long long expect;
+  long long received;
   int data_port;
   char data_host[64];
   char arg[1024];
@@ -102,6 +106,7 @@ struct twist_ftp
 };
 
 static void ftp_complete (struct twist_ftp *f, int err);
+static void ftp_finish_ok (struct twist_ftp *f);
 static void ftp_begin (struct twist_ftp *f);
 static int ftp_send (struct twist_ftp *f, const char *fmt, ...);
 static int ftp_send_transfer (struct twist_ftp *f);
@@ -792,6 +797,7 @@ ftp_on_reply (void *user, int code, int final, const char *text, size_t len)
           long long size = f->list ? -1 : reply_size (text, len);
 
           f->state = FTP_WAIT;
+          f->expect = size;
           if (size >= 0)
             twist_progress_dl_size (f->easy, size);
           return;
@@ -801,7 +807,7 @@ ftp_on_reply (void *user, int code, int final, const char *text, size_t len)
           f->ctrl_done = 1;
           f->state = FTP_WAIT;
           if (f->data_eof)
-            ftp_complete (f, TWIST_OK);
+            ftp_finish_ok (f);
           return;
         }
       if (code >= 400)
@@ -810,6 +816,19 @@ ftp_on_reply (void *user, int code, int final, const char *text, size_t len)
     default:
       return;
     }
+}
+
+/* The transfer ended well as far as the protocol goes.  If the server said how
+   much it would send, and less came, it is not the file: a data connection
+   closed early with a 226 after it was a success, and left a short file with
+   a good status.  A listing has no size.  */
+static void
+ftp_finish_ok (struct twist_ftp *f)
+{
+  if (!f->list && f->expect >= 0 && f->received < f->expect)
+    ftp_complete (f, TWIST_ERR_PARTIAL);
+  else
+    ftp_complete (f, TWIST_OK);
 }
 
 static void
@@ -861,7 +880,7 @@ ftp_disconnected (struct twist_endpoint *ep, int error)
   if (f->finished)
     return;
   if (f->ctrl_done && f->data_eof)
-    ftp_complete (f, TWIST_OK);
+    ftp_finish_ok (f);
   else
     ftp_complete (f, error != TWIST_OK ? error : TWIST_ERR_CLOSED);
 }
@@ -945,7 +964,11 @@ ftp_data_disconnected (struct twist_endpoint *ep, int error)
                        ? error : TWIST_ERR_TLS);
       return;
     }
-  if (error != TWIST_OK && error != TWIST_ERR_CLOSED && !f->retr_sent)
+  /* A close, or a close_notify, is the end of the data.  A reset or a TLS
+     failure is not: what came is not the file.  Unless all that was promised
+     had come, in which case how it ended does not matter.  */
+  if (error != TWIST_OK && error != TWIST_ERR_CLOSED
+      && !(!f->list && f->expect >= 0 && f->received >= f->expect))
     ftp_complete (f, error);
   else
     twist_ftp_data_eof (f);
@@ -1000,6 +1023,7 @@ twist_ftp_data (struct twist_ftp *f, const uint8_t *data, size_t len)
     return len;
   if (len == 0)
     return 0;
+  f->received += (long long) len;
   if (f->easy->write_cb != NULL)
     {
       accepted = twist_write_bytes (f->easy->write_cb, f->easy->write_data,
@@ -1022,7 +1046,7 @@ twist_ftp_data_eof (struct twist_ftp *f)
     return;
   f->data_eof = 1;
   if (f->ctrl_done)
-    ftp_complete (f, TWIST_OK);
+    ftp_finish_ok (f);
 }
 
 const char *
@@ -1190,6 +1214,7 @@ twist_ftp_new (struct twist_easy *easy, int live)
     return NULL;
   f->easy = easy;
   f->live = live;
+  f->expect = -1;
   f->implicit_tls = easy->url->scheme != NULL
                     && strcmp (easy->url->scheme, "ftps") == 0;
   prepare_arg (f);

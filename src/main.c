@@ -171,6 +171,8 @@ cli_status (int err, const char *url)
       return 97;
     case TWIST_ERR_RECURSIVE:
       return 93;
+    case TWIST_ERR_PARTIAL:
+      return 18;
     case TWIST_ERR_HOSTKEY:
       return 60;
     case TWIST_ERR_ENCODING:
@@ -219,8 +221,8 @@ usage (void)
          stdout);
   fputs (_("      --content-encoding C  gzip or deflate the request body\n"),
          stdout);
-  fputs (_("  -k, --insecure          accepted; certificates are still checked;\n"
-           "                          sftp and scp skip the known_hosts check\n"),
+  fputs (_("  -k, --insecure          do not check the server's certificate; sftp and\n"
+           "                          scp do not check the known_hosts file\n"),
          stdout);
   fputs (_("  -E, --cert FILE         client certificate (PEM)\n"), stdout);
   fputs (_("      --key FILE          private key for --cert (PEM), or for sftp and scp\n"),
@@ -739,6 +741,13 @@ remote_file (const char *url)
       free (name);
       return NULL;
     }
+  /* A last part of "-" names a file, as curl's -O does; "-" alone is the
+     name that means standard output, for -o.  */
+  if (o == 1 && name[0] == '-')
+    {
+      free (name);
+      return twist_strdup ("./-");
+    }
   return name;
 }
 
@@ -764,6 +773,16 @@ output_path (const struct cli_op *op, const char *name)
   return path;
 }
 
+/* A secret given on the command line is in the list of arguments that ps
+   shows for as long as the process lives, so once it has been taken the
+   argument is blanked, as curl does.  */
+static void
+scrub_arg (char *arg)
+{
+  if (arg != NULL)
+    memset (arg, ' ', strlen (arg));
+}
+
 static int
 ensure_dirs (const struct cli_op *op, const char *path)
 {
@@ -785,7 +804,9 @@ ensure_dirs (const struct cli_op *op, const char *path)
       if (copy[i] != '/')
         continue;
       copy[i] = 0;
-      if (mkdir (copy, 0777) < 0 && errno != EEXIST)
+      /* 0750, as curl makes them: what a download makes is not for everyone,
+         whatever the mask is.  */
+      if (mkdir (copy, 0750) < 0 && errno != EEXIST)
         {
           char msg[256];
 
@@ -1110,6 +1131,7 @@ run_one (twist_easy *easy, struct cli_op *op, const char *url,
   int rc;
   int code;
   const char *detail;
+  int write_failed;
 
   memset (&up, 0, sizeof up);
   memset (&hdrs, 0, sizeof hdrs);
@@ -1398,11 +1420,14 @@ run_one (twist_easy *easy, struct cli_op *op, const char *url,
       free (named_url);
       return 26;
     }
-  if ((body_short || hdrs.short_write) && (code == 0 || code == 42))
+  write_failed = (body_short || hdrs.short_write) && (code == 0 || code == 42);
+  if (write_failed)
     code = 23;
   if (code != 0)
     {
       detail = twist_easy_error (easy);
+      if (write_failed && detail == NULL)
+        detail = _("failure writing output to destination");
       diag_code (code, detail != NULL ? detail : twist_strerror (rc));
     }
   emit_writeout (op->writeout, easy, code);
@@ -1947,6 +1972,7 @@ main (int argc, char **argv)
           break;
         case 32:
           twist_easy_setopt (op->easy, TWISTOPT_KEYPASSWD, optarg);
+          scrub_arg (optarg);
           break;
         case 33:
           twist_easy_setopt (op->easy, TWISTOPT_SSH_HOST_PUBLIC_KEY_SHA256,
@@ -1990,6 +2016,7 @@ main (int argc, char **argv)
           break;
         case 'U':
           twist_easy_setopt (op->easy, TWISTOPT_PROXYUSERPWD, optarg);
+          scrub_arg (optarg);
           break;
         case 'A':
           twist_easy_setopt (op->easy, TWISTOPT_USERAGENT, optarg);
@@ -2012,8 +2039,16 @@ main (int argc, char **argv)
             twist_easy_setopt (op->easy, TWISTOPT_USERNAME, copy);
             twist_easy_setopt (op->easy, TWISTOPT_PASSWORD,
                                colon != NULL ? colon : (pass != NULL ? pass : ""));
-            free (pass);
+            if (pass != NULL)
+              {
+                memset (pass, 0, strlen (pass));
+                free (pass);
+              }
+            memset (copy, 0, strlen (copy));
+            if (colon != NULL)
+              memset (colon, 0, strlen (colon));
             free (copy);
+            scrub_arg (optarg);
           }
           break;
         case 'e':
@@ -2058,6 +2093,7 @@ main (int argc, char **argv)
           break;
         case 29:
           twist_easy_setopt (op->easy, TWISTOPT_XOAUTH2_BEARER, optarg);
+          scrub_arg (optarg);
           break;
         case 'm':
           {

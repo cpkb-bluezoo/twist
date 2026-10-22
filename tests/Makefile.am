@@ -25,10 +25,10 @@ PROGRAM_TESTS = test-reactor test-engine test-http test-auth test-dns \
 	test-tftp test-file test-tls test-errors test-coding test-ssh \
 	test-quote test-rate test-glob test-vars test-progress test-bar test-proxyenv test-env test-template test-masque
 ## The tool itself, on local files.
-SCRIPT_TESTS = cli-glob.sh cli-vars.sh cli-progress.sh
+SCRIPT_TESTS = cli-glob.sh cli-vars.sh cli-progress.sh cli-misc.sh
 TESTS = $(PROGRAM_TESTS) $(SCRIPT_TESTS)
 check_PROGRAMS = $(PROGRAM_TESTS)
-EXTRA_DIST = cli-glob.sh cli-vars.sh cli-progress.sh
+EXTRA_DIST = cli-glob.sh cli-vars.sh cli-progress.sh cli-misc.sh
 
 test_reactor_SOURCES = test-reactor.c check.c
 test_engine_SOURCES = test-engine.c check.c

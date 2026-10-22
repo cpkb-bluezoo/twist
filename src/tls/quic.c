@@ -205,22 +205,51 @@ ev_stream_opened (void *user, uint64_t id)
   (void) id;
 }
 
+/* The two low bits of a stream id say who opened it and which way it goes:
+   0 a client bidirectional, 1 a server bidirectional, 2 a client
+   unidirectional, 3 a server unidirectional.  */
+int
+twist_quic_stream_action (uint64_t id, int known)
+{
+  if (known)
+    return 0;
+  /* A unidirectional stream the server opened (its HTTP/3 control stream, and
+     QPACK's) is not the response; nothing here uses them.  */
+  if ((id & 3) == 3)
+    return 1;
+  /* A bidirectional one it opened is not allowed at all, and was taken for
+     part of the response: its data and its end went into it.  */
+  if ((id & 3) == 1)
+    return 2;
+  return 0;
+}
+
+/* RFC 9114, section 8.1.  */
+#define H3_STREAM_CREATION_ERROR 0x103
+
 static int
 ev_stream_data (void *user, uint64_t id, const uint8_t *data, size_t len,
                 int fin)
 {
   struct twist_quic *q = user;
   struct quic_stream *s = qs_find (q, id);
+  int action;
 
   if (s != NULL && s->on_data != NULL)
     {
       s->on_data (s->on_user, data, len, fin);
       return 0;
     }
-  /* A stream the server opened (a unidirectional one: its HTTP/3 control
-     stream, and QPACK's) is not the response; nothing here uses them.  */
-  if (s == NULL && (id & 3) == 3)
+  action = twist_quic_stream_action (id, s != NULL);
+  if (action == 1)
     return 0;
+  if (action == 2)
+    {
+      gq_conn_close (q->conn, twist_loop_now (q->loop) * 1000u, 1,
+                     H3_STREAM_CREATION_ERROR, NULL);
+      twist_connection_fail (q->twist, TWIST_ERR_PROTOCOL);
+      return 0;
+    }
   if (len > 0)
     twist_connection_deliver_app (q->twist, data, len);
   if (fin)
@@ -861,7 +890,7 @@ quic_qlog (void *user, const struct gq_conn *conn, uint64_t time_us,
   (void) len;
   if (q->qlog == NULL && !q->qlog_tried && conn != NULL)
     {
-      const char *dir = getenv ("QLOGDIR");
+      const char *dir = twist_getenv_secure ("QLOGDIR");
       size_t n = 0;
       const uint8_t *id = gq_conn_original_dcid (conn, &n);
 
@@ -1159,7 +1188,7 @@ twist_quic_dial (struct twist_loop *loop, const char *server_name,
   if (q->carrier != NULL)
     ecfg.conn.max_udp_payload = 1200;
   {
-    const char *qdir = getenv ("QLOGDIR");
+    const char *qdir = twist_getenv_secure ("QLOGDIR");
 
     if (qdir != NULL && qdir[0] != 0)
       {

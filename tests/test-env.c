@@ -397,6 +397,85 @@ test_quic_server_name (void)
   twist_loop_free (loop);
 }
 
+/* The environment of a privileged process is not its own.  A process that is
+   set-user-ID, or set-group-ID, or has capabilities, and links libtwist, took
+   its trust store from SSL_CERT_FILE, its secrets' log from SSLKEYLOGFILE, its
+   proxy from the *_proxy variables, its agent from SSH_AUTH_SOCK: all of them
+   chosen by whoever ran it.  They are not read there.  */
+static void
+test_privileged_environment (void)
+{
+  char dir[] = "/tmp/twist-priv-XXXXXX";
+  char path[128];
+  int rc = 0;
+
+  setenv ("TWIST_TEST_SECURE", "value", 1);
+  twist_set_privileged (0);
+  check (twist_getenv_secure ("TWIST_TEST_SECURE") != NULL
+         && strcmp (twist_getenv_secure ("TWIST_TEST_SECURE"), "value") == 0,
+         "an ordinary process reads its environment");
+  twist_set_privileged (1);
+  check (twist_getenv_secure ("TWIST_TEST_SECURE") == NULL,
+         "a privileged one does not");
+  twist_set_privileged (0);
+  unsetenv ("TWIST_TEST_SECURE");
+  check (twist_getenv_secure ("TWIST_TEST_SECURE") == NULL, "unset is NULL");
+  twist_set_privileged (-1);
+  check (twist_getenv_secure ("PATH") != NULL, "and by default, it asks the system");
+
+  /* The trust store of the environment, which fails when it is not there, is
+     not looked at.  */
+  clear_ca_env ();
+  setenv ("SSL_CERT_FILE", "/nonexistent/twist/ca.pem", 1);
+  twist_set_privileged (0);
+  trusts (NULL, NULL, 1, &rc);
+  check (rc == TWIST_ERR_TLS, "an ordinary process takes SSL_CERT_FILE");
+  twist_set_privileged (1);
+  trusts (NULL, NULL, 1, &rc);
+  check (rc == TWIST_OK, "a privileged one does not");
+  clear_ca_env ();
+
+  /* The key log is not written.  */
+  check (mkdtemp (dir) != NULL, "temp dir");
+  snprintf (path, sizeof path, "%s/keys", dir);
+  setenv ("SSLKEYLOGFILE", path, 1);
+  twist_set_privileged (0);
+  check (twist_keylog_wanted (), "an ordinary process logs keys");
+  twist_set_privileged (1);
+  check (!twist_keylog_wanted (), "a privileged one does not");
+  twist_set_privileged (-1);
+  unsetenv ("SSLKEYLOGFILE");
+  rmdir (dir);
+}
+
+/* Which streams of a QUIC connection are the transfer's.  The client opens
+   the bidirectional ones (ids 0, 4, 8...); the server may open unidirectional
+   ones (3, 7, 11...), which are ignored, and may not open a bidirectional one
+   (1, 5, 9...), which ends the connection.  */
+static void
+test_quic_stream_action (void)
+{
+  uint64_t i;
+  int ok = 1;
+
+  check (twist_quic_stream_action (0, 1) == 0 && twist_quic_stream_action (4, 1) == 0,
+         "a stream of ours is the transfer's");
+  check (twist_quic_stream_action (0, 0) == 0 && twist_quic_stream_action (8, 0) == 0,
+         "so is data on a client stream that is not tracked, as it was");
+  check (twist_quic_stream_action (3, 0) == 1 && twist_quic_stream_action (7, 0) == 1
+         && twist_quic_stream_action (11, 0) == 1,
+         "a unidirectional stream of the server is ignored");
+  check (twist_quic_stream_action (1, 0) == 2 && twist_quic_stream_action (5, 0) == 2
+         && twist_quic_stream_action (9, 0) == 2,
+         "a bidirectional stream of the server is an error");
+  for (i = 0; i < 4096; i++)
+    if ((i & 3) == 1 && twist_quic_stream_action (i, 0) != 2)
+      ok = 0;
+  check (ok, "all of them");
+  check (twist_quic_stream_action (1, 1) == 0,
+         "unless it was one we opened, which no server stream is");
+}
+
 int
 main (void)
 {
@@ -404,5 +483,7 @@ main (void)
   test_trust ();
   test_qlog ();
   test_quic_server_name ();
+  test_quic_stream_action ();
+  test_privileged_environment ();
   return tests_finish ();
 }

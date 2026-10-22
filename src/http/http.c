@@ -664,8 +664,8 @@ on_header (void *user, const char *name, size_t name_len, const char *value,
       char *cookie = ncopy (value, value_len);
       if (cookie != NULL)
         {
-          twist_jar_store (h->easy->share->jar, cookie, h->easy->url->host,
-                           h->easy->url->path, h->https);
+          twist_share_cookie_store (h->easy->share, cookie, h->easy->url->host,
+                                    h->easy->url->path, h->https);
           free (cookie);
         }
     }
@@ -756,14 +756,24 @@ accepts_coding (const char *accept, const char *name)
   return 0;
 }
 
+/* Give body data to the application.  One that takes less than it was given
+   is saying it cannot go on (a full disk), as curl's write callback does, and
+   the transfer ends there, with what was taken counted: the rest of the body
+   is not read to be thrown away.  Ending it only queues its completion, so it
+   is safe from inside the parser.  */
 static void
 deliver_body (struct twist_http *h, const uint8_t *data, size_t len)
 {
-  h->easy->size_download += len;
-  if (h->easy->failonerror && h->status >= 400)
+  size_t got = len;
+
+  if (h->finished)
     return;
-  if (h->easy->write_cb != NULL && len > 0)
-    twist_write_bytes (h->easy->write_cb, h->easy->write_data, data, len);
+  if (!(h->easy->failonerror && h->status >= 400)
+      && h->easy->write_cb != NULL && len > 0)
+    got = twist_write_bytes (h->easy->write_cb, h->easy->write_data, data, len);
+  h->easy->size_download += got;
+  if (got < len)
+    http_complete (h, TWIST_ERR_ABORTED);
 }
 
 /* Decoded data, in pieces, from the coding; see twist_coding_sink.  */
@@ -907,8 +917,9 @@ request_headers (struct twist_http *h)
   else if (easy->share != NULL && easy->share->jar != NULL)
     {
       char *cookie = NULL;
-      if (twist_jar_header (easy->share->jar, easy->url->host, easy->url->path,
-                            h->https, &cookie) == TWIST_OK
+      if (twist_share_cookie_header (easy->share, easy->url->host,
+                                     easy->url->path, h->https, &cookie)
+          == TWIST_OK
           && cookie != NULL)
         {
           list = twist_slist_append (list, cookie);
@@ -969,13 +980,11 @@ request_headers (struct twist_http *h)
 }
 
 static int
-send_request (struct twist_http *h)
+send_request_target (struct twist_http *h, const char *target)
 {
   struct twist_easy *easy = h->easy;
   struct twist_url *url = easy->url;
   const char *method;
-  const char *path;
-  char target[2048];
   char authority[512];
   struct twist_slist *extra;
   const uint8_t *body = NULL;
@@ -997,16 +1006,6 @@ send_request (struct twist_http *h)
     method = easy->method;
   else if (easy->postfields != NULL && !h->suppress_body)
     method = "POST";
-  path = url->path != NULL && url->path[0] != 0 ? url->path : "/";
-  if (h->proxy != NULL && !h->tunnel)
-    {
-      if (twist_url_proxy_target (url, target, sizeof target) != TWIST_OK)
-        return TWIST_ERR_URL;
-    }
-  else if (url->query != NULL)
-    snprintf (target, sizeof target, "%s?%s", path, url->query);
-  else
-    snprintf (target, sizeof target, "%s", path);
   {
     char hosttext[400];
 
@@ -1117,6 +1116,84 @@ send_request (struct twist_http *h)
             }
         }
     }
+  return rc;
+}
+
+/* The request target as it goes on the wire: bytes that cannot be in one, a
+   space, a control, anything over 0x7f, are percent encoded, as curl does it.
+   "GET /a b HTTP/1.1" is not a request, and a server may take it for one
+   with a target of "/a".  An escape that is there already is left, and so is
+   every other byte.  */
+static char *
+encode_target (const char *s)
+{
+  static const char hex[] = "0123456789ABCDEF";
+  size_t n = 0;
+  const unsigned char *p;
+  char *out;
+  char *o;
+
+  for (p = (const unsigned char *) s; *p != 0; p++)
+    n += (*p <= 0x20 || *p >= 0x7f) ? 3 : 1;
+  out = twist_xmalloc (n + 1);
+  if (out == NULL)
+    return NULL;
+  o = out;
+  for (p = (const unsigned char *) s; *p != 0; p++)
+    if (*p <= 0x20 || *p >= 0x7f)
+      {
+        *o++ = '%';
+        *o++ = hex[*p >> 4];
+        *o++ = hex[*p & 15];
+      }
+    else
+      *o++ = (char) *p;
+  *o = 0;
+  return out;
+}
+
+static int
+send_request (struct twist_http *h)
+{
+  struct twist_url *url = h->easy->url;
+  const char *path;
+  char *raw;
+  char *target;
+  int rc;
+
+  if (h->sent || h->conn == NULL)
+    return TWIST_OK;
+  path = url->path != NULL && url->path[0] != 0 ? url->path : "/";
+  if (h->proxy != NULL && !h->tunnel)
+    {
+      char whole[8192];
+
+      if (twist_url_proxy_target (url, whole, sizeof whole) != TWIST_OK)
+        return TWIST_ERR_URL;
+      raw = twist_strdup (whole);
+    }
+  else
+    {
+      size_t n = strlen (path) + (url->query != NULL ? strlen (url->query) + 1 : 0)
+                 + 1;
+
+      raw = twist_xmalloc (n);
+      if (raw != NULL)
+        {
+          if (url->query != NULL)
+            snprintf (raw, n, "%s?%s", path, url->query);
+          else
+            snprintf (raw, n, "%s", path);
+        }
+    }
+  if (raw == NULL)
+    return TWIST_ERR_NOMEM;
+  target = encode_target (raw);
+  free (raw);
+  if (target == NULL)
+    return TWIST_ERR_NOMEM;
+  rc = send_request_target (h, target);
+  free (target);
   return rc;
 }
 
@@ -2063,8 +2140,8 @@ http_begin (struct twist_http *h)
                  || strcmp (url->scheme, "wss") == 0);
   h->peer_minor = -1;
   if (!h->ws && easy->share != NULL && easy->share->hsts != NULL && !h->https
-      && twist_hsts_upgrade (easy->share->hsts, url->host,
-                             twist_loop_now (easy->loop)))
+      && twist_share_hsts_upgrade (easy->share, url->host,
+                                   twist_loop_now (easy->loop)))
     {
       free (url->scheme);
       url->scheme = twist_strdup ("https");

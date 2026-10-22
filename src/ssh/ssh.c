@@ -164,7 +164,7 @@ ssh_pool_key (struct twist_easy *e, char *key, size_t cap)
   if (e->url == NULL || e->url->host == NULL || e->loop == NULL)
     return TWIST_ERR_INVAL;
   if (agent == NULL)
-    agent = getenv ("SSH_AUTH_SOCK");
+    agent = twist_getenv_secure ("SSH_AUTH_SOCK");
   terms_add (&buf, &len, &bcap, ssh_password (e));
   terms_add (&buf, &len, &bcap, e->sslkey);
   terms_add (&buf, &len, &bcap, e->keypasswd);

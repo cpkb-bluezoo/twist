@@ -42,6 +42,15 @@ replace (char **slot, const char *s)
   *slot = opt_strdup (s);
 }
 
+/* As replace, for a secret: the old one is wiped, not just freed.  */
+static void
+replace_secret (char **slot, const char *s)
+{
+  if (*slot != NULL)
+    memset (*slot, 0, strlen (*slot));
+  replace (slot, s);
+}
+
 twist_easy *
 twist_easy_init (void)
 {
@@ -99,8 +108,16 @@ easy_clear (struct twist_easy *easy)
   free (easy->method);
   free (easy->useragent);
   free (easy->username);
-  free (easy->password);
-  free (easy->bearer);
+  if (easy->password != NULL)
+    {
+      memset (easy->password, 0, strlen (easy->password));
+      free (easy->password);
+    }
+  if (easy->bearer != NULL)
+    {
+      memset (easy->bearer, 0, strlen (easy->bearer));
+      free (easy->bearer);
+    }
   free (easy->proxy);
   free (easy->noproxy);
   free (easy->capath);
@@ -232,7 +249,7 @@ twist_easy_setopt (twist_easy *easy, int opt, ...)
       replace (&easy->username, va_arg (ap, const char *));
       break;
     case TWISTOPT_PASSWORD:
-      replace (&easy->password, va_arg (ap, const char *));
+      replace_secret (&easy->password, va_arg (ap, const char *));
       break;
     case TWISTOPT_HTTPAUTH:
       easy->auth = (unsigned) va_arg (ap, long);
@@ -323,7 +340,7 @@ twist_easy_setopt (twist_easy *easy, int opt, ...)
       }
       break;
     case TWISTOPT_XOAUTH2_BEARER:
-      replace (&easy->bearer, va_arg (ap, const char *));
+      replace_secret (&easy->bearer, va_arg (ap, const char *));
       break;
     case TWISTOPT_RANGE:
       replace (&easy->range, va_arg (ap, const char *));

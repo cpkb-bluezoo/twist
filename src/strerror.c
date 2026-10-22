@@ -72,6 +72,8 @@ twist_strerror (int err)
       return _("the transfer cannot be resumed");
     case TWIST_ERR_QUOTE:
       return _("a quote command failed");
+    case TWIST_ERR_PARTIAL:
+      return _("transferred a partial file");
     case TWIST_ERR_RECURSIVE:
       return _("an API function was called from inside a callback");
     case TWIST_ERR_PROXY:

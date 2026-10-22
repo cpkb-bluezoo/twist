@@ -218,6 +218,11 @@ on_msg_ttl (void *user, uint32_t ttl)
     }
 }
 
+/* How long an answer is kept, whatever its TTL says: a forged one could
+   otherwise pin an address for the life of the process.  A minute, as curl
+   keeps a name.  */
+#define DNS_TTL_MAX 60u
+
 static void
 store_addrs (struct twist_dns_cache *c, const char *name, int type,
              const struct twist_dns_addr *addr, int naddr, uint32_t ttl_sec,
@@ -229,6 +234,8 @@ store_addrs (struct twist_dns_cache *c, const char *name, int type,
 
   if (name == NULL || addr == NULL || naddr <= 0 || ttl_sec == 0)
     return;
+  if (ttl_sec > DNS_TTL_MAX)
+    ttl_sec = DNS_TTL_MAX;
   n = naddr > DNS_ADDRS ? DNS_ADDRS : naddr;
   e = find_ent (c, name, type);
   if (e == NULL)

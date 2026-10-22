@@ -16,8 +16,11 @@
 # You should have received a copy of the GNU General Public
 # License along with this program.  If not, see
 
-# ftp:// through an HTTP proxy and a SOCKS5 proxy (proxy-peer.py), against an
-# FTP server of python's.  The data connection is a second connection and has
+# ftp:// against an FTP server of python's, direct and through an HTTP proxy
+# and a SOCKS5 proxy (proxy-peer.py).  First, a transfer that ends before all
+# that the server said it would send has come is not the file: the data
+# connection closed early, or reset, with a 226 after it.  Then, through a
+# proxy: the data connection is a second connection and has
 # to go through the proxy as well: made directly, it connects from the client's
 # own address, past the proxy, which with a proxy that is there to hide the
 # client (Tor) gives it away, and with one that is the only way out does not
@@ -28,14 +31,14 @@
 TWIST=${TWIST:-../src/twist}
 skip ()
 {
-  echo "ftp-proxy: $1; skipping" >&2
+  echo "ftp: $1; skipping" >&2
   exit 77
 }
 command -v python3 >/dev/null 2>&1 || skip "no python3"
 [ -x "$TWIST" ] || skip "twist is not built ($TWIST)"
 here=$(cd "$(dirname "$0")" && pwd)
 
-work=$(mktemp -d "${TMPDIR:-/tmp}/twist-ftp-proxy.XXXXXX") || skip "no temp dir"
+work=$(mktemp -d "${TMPDIR:-/tmp}/twist-ftp.XXXXXX") || skip "no temp dir"
 pids=
 cleanup ()
 {
@@ -57,10 +60,11 @@ check ()
 is () { [ "$1" = "$2" ] && echo ok; }
 
 cat > "$work/ftpd.py" <<'PY'
-import socket, sys, threading
+import socket, struct, sys, threading
 
 log = sys.argv[1]
 BODY = b"hello over ftp\n"
+LONG = b"0123456789abcdefghij"          # 20 bytes
 
 def note(text):
     with open(log, "a") as f:
@@ -107,8 +111,19 @@ def session(conn):
             except OSError:
                 say("425 no data connection")
                 continue
-            say("150 Opening data connection (%d bytes)." % len(BODY))
-            d.sendall(BODY)
+            # "trunc": 20 bytes promised, 5 sent, closed with a FIN.  "reset":
+            # the same with a reset.  "resetend": all 20, and then a reset.
+            body = BODY
+            if arg in ("trunc", "reset", "resetend"):
+                body = LONG
+            say("150 Opening data connection (%d bytes)." % len(body))
+            if arg in ("trunc", "reset"):
+                d.sendall(body[:5])
+            else:
+                d.sendall(body)
+            if arg in ("reset", "resetend"):
+                d.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER,
+                             struct.pack("ii", 1, 0))
             d.close()
             say("226 done")
         elif verb == "QUIT":
@@ -159,6 +174,21 @@ asked () { sed 's/.*:\([0-9]*\)$/\1/' "$work/$1.log"; }
 data_port () { tail -1 "$work/ftpd.log" | sed 's/^data port //'; }
 
 check "$(is "$(get "$url")" "hello over ftp")" "ftp, direct"
+
+# A short file, a reset in the middle, a reset at the end.  The first is curl's
+# status 18; the second is an error, not an end of file; and the third, when
+# all that was announced had come, is a success.
+direct="ftp://u:p@127.0.0.1:$ftp_port"
+timeout 20 "$TWIST" -s -o "$work/t.out" "$direct/trunc" 2>/dev/null
+st=$?
+check "$(is "$st" 18)" "a file closed early is status 18 ($st)"
+timeout 20 "$TWIST" -s -o "$work/t.out" "$direct/reset" 2>/dev/null
+st=$?
+check "$([ "$st" != 0 ] && echo ok)" "a reset in the middle is an error ($st)"
+timeout 20 "$TWIST" -s -o "$work/t.out" "$direct/resetend" 2>/dev/null
+st=$?
+check "$(is "$st" 0)" "a reset after all of it is a success ($st)"
+check "$(is "$(wc -c < "$work/t.out" | tr -d ' ')" 20)" "with all 20 bytes"
 
 for kind in http socks; do
   case $kind in

@@ -627,12 +627,32 @@ is_binary (const uint8_t *p, size_t n)
 
   if (n == 0)
     return 0;
-  if (p[0] == ' ' || p[0] == ':' || p[0] == '<')
+  if (p[0] == ' ' || p[0] == ':' || p[0] == '<' || p[n - 1] == ' ')
     return 1;
   for (i = 0; i < n; i++)
     if (p[i] < 0x20 || p[i] > 0x7e)
       return 1;
   return 0;
+}
+
+/* An attribute description (RFC 4512): a keyword or an OID, with options
+   after semicolons.  So letters, digits, dots, hyphens and semicolons, and
+   nothing that would end the line or begin the value.  The name is the
+   server's and goes into the output as it comes.  */
+static int
+valid_attr_name (const uint8_t *p, size_t n)
+{
+  size_t i;
+
+  for (i = 0; i < n; i++)
+    {
+      uint8_t c = p[i];
+
+      if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+            || (c >= '0' && c <= '9') || c == '.' || c == '-' || c == ';'))
+        return 0;
+    }
+  return n > 0;
 }
 
 static int
@@ -776,7 +796,7 @@ on_prim (struct twist_ldap *l, uint8_t tag, const uint8_t *p, size_t n)
     }
   if (parent == 0x30)
     {
-      if (n == 0 || n >= sizeof l->attr)
+      if (n == 0 || n >= sizeof l->attr || !valid_attr_name (p, n))
         return TWIST_ERR_PROTOCOL;
       memcpy (l->attr, p, n);
       l->attr[n] = 0;

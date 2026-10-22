@@ -22,6 +22,7 @@
 
 #include "twist-int.h"
 
+#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
@@ -198,8 +199,16 @@ twist_share_init (void)
   s->hsts = twist_hsts_new ();
   s->altsvc = twist_altsvc_new ();
   s->dns = twist_dns_cache_new ();
+  {
+    pthread_mutex_t *mu = malloc (sizeof *mu);
+
+    if (mu != NULL && pthread_mutex_init (mu, NULL) == 0)
+      s->data_mu = mu;
+    else
+      free (mu);
+  }
   if (s->jar == NULL || s->pool == NULL || s->hsts == NULL || s->altsvc == NULL
-      || s->dns == NULL)
+      || s->dns == NULL || s->data_mu == NULL)
     {
       twist_share_cleanup (s);
       return NULL;
@@ -217,7 +226,104 @@ twist_share_cleanup (twist_share *share)
   twist_hsts_free (share->hsts);
   twist_altsvc_free (share->altsvc);
   twist_dns_cache_free (share->dns);
+  if (share->data_mu != NULL)
+    {
+      pthread_mutex_destroy (share->data_mu);
+      free (share->data_mu);
+    }
   free (share);
+}
+
+/* The lock for the cookie jar, the HSTS list and the Alt-Svc list, taken when
+   the share's locks ask for BIT, so that a share used by handles of several
+   threads does not change one list from two.  Without the bit it is nothing,
+   and a share used from one thread pays for no lock.  */
+static int
+data_locked (const struct twist_share *share, unsigned bit)
+{
+  return share != NULL && share->data_mu != NULL && (share->locks & bit) != 0;
+}
+
+void
+twist_share_data_lock (struct twist_share *share, unsigned bit)
+{
+  if (data_locked (share, bit))
+    pthread_mutex_lock (share->data_mu);
+}
+
+void
+twist_share_data_unlock (struct twist_share *share, unsigned bit)
+{
+  if (data_locked (share, bit))
+    pthread_mutex_unlock (share->data_mu);
+}
+
+int
+twist_share_cookie_store (struct twist_share *share, const char *set_cookie,
+                          const char *host, const char *path, int https)
+{
+  int rc;
+
+  twist_share_data_lock (share, TWIST_LOCK_DATA_COOKIE);
+  rc = twist_jar_store (share->jar, set_cookie, host, path, https);
+  twist_share_data_unlock (share, TWIST_LOCK_DATA_COOKIE);
+  return rc;
+}
+
+int
+twist_share_cookie_header (struct twist_share *share, const char *host,
+                           const char *path, int https, char **out)
+{
+  int rc;
+
+  twist_share_data_lock (share, TWIST_LOCK_DATA_COOKIE);
+  rc = twist_jar_header (share->jar, host, path, https, out);
+  twist_share_data_unlock (share, TWIST_LOCK_DATA_COOKIE);
+  return rc;
+}
+
+int
+twist_share_hsts_upgrade (struct twist_share *share, const char *host,
+                          uint64_t now)
+{
+  int rc;
+
+  twist_share_data_lock (share, TWIST_LOCK_DATA_HSTS);
+  rc = twist_hsts_upgrade (share->hsts, host, now);
+  twist_share_data_unlock (share, TWIST_LOCK_DATA_HSTS);
+  return rc;
+}
+
+int
+twist_share_altsvc_note (struct twist_share *share, const char *origin,
+                         const char *alt)
+{
+  int rc;
+
+  twist_share_data_lock (share, TWIST_LOCK_DATA_ALT_SVC);
+  rc = twist_altsvc_note (share->altsvc, origin, alt);
+  twist_share_data_unlock (share, TWIST_LOCK_DATA_ALT_SVC);
+  return rc;
+}
+
+/* The entry is in the list, which another thread may change as soon as the
+   lock is let go, so it is copied out under it.  */
+int
+twist_share_altsvc_lookup (struct twist_share *share, const char *origin,
+                           char *out, size_t cap)
+{
+  const char *alt;
+  int found = 0;
+
+  twist_share_data_lock (share, TWIST_LOCK_DATA_ALT_SVC);
+  alt = twist_altsvc_lookup (share->altsvc, origin);
+  if (alt != NULL && cap > 0)
+    {
+      snprintf (out, cap, "%s", alt);
+      found = 1;
+    }
+  twist_share_data_unlock (share, TWIST_LOCK_DATA_ALT_SVC);
+  return found;
 }
 
 int
