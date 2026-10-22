@@ -901,9 +901,12 @@ write_file (const char *path, const char *text, size_t len, int mode)
 
   if (fp != NULL)
     {
-      fwrite (text, 1, len, fp);
+      /* On the open file, and before anything is written: the mode is of the
+         file that was opened, not of whatever the path names a moment later,
+         and a key is never in the file with the default mode.  */
+      if (fchmod (fileno (fp), (mode_t) mode) == 0)
+        fwrite (text, 1, len, fp);
       fclose (fp);
-      chmod (path, (mode_t) mode);
     }
 }
 

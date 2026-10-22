@@ -241,13 +241,26 @@ load_dir (const char *dir)
       FILE *fp;
       uint8_t *buf;
       size_t n;
+      int fd;
 
       snprintf (path, sizeof path, "%s/%s", dir, e->d_name);
-      if (stat (path, &st) != 0 || !S_ISREG (st.st_mode))
+      /* Open, and then look at what was opened: a check of the path and then
+         an open of it can be of two files.  Without blocking, so that a FIFO
+         in the directory is passed over and not waited on.  */
+      fd = open (path, O_RDONLY | O_NONBLOCK);
+      if (fd < 0)
         continue;
-      fp = fopen (path, "rb");
+      if (fstat (fd, &st) != 0 || !S_ISREG (st.st_mode))
+        {
+          close (fd);
+          continue;
+        }
+      fp = fdopen (fd, "rb");
       if (fp == NULL)
-        continue;
+        {
+          close (fd);
+          continue;
+        }
       buf = malloc ((size_t) st.st_size + 1);
       if (buf != NULL)
         {

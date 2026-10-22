@@ -59,8 +59,20 @@ all (const char *pattern)
     {
       const char *u = strstr (pattern, "://") ? url : url + strlen (BASE);
 
-      used += (size_t) snprintf (out + used, sizeof out - used, "%s%s",
-                                 used ? " " : "", u);
+      /* snprintf says how long the text would have been, which is more than
+         the room when it did not fit; adding that made the room, taken from
+         the size of the buffer, a huge number.  What does not fit is dropped,
+         and the buffer ends in its terminator.  */
+      if (used < sizeof out - 1)
+        {
+          int w = snprintf (out + used, sizeof out - used, "%s%s",
+                            used ? " " : "", u);
+
+          if (w > 0)
+            used += (size_t) w;
+          if (used > sizeof out - 1)
+            used = sizeof out - 1;
+        }
       free (url);
     }
   twist_glob_free (g);
