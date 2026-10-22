@@ -20,10 +20,14 @@
 #define TWIST_CMDQ_H
 
 struct twist_cmdq;
+struct twist_cmd;
 
 struct twist_cmdq *twist_cmdq_new (void);
 void twist_cmdq_free (struct twist_cmdq *q);
 int twist_cmdq_push (struct twist_cmdq *q, void (*fn) (void *), void *user);
+struct twist_cmd *twist_cmdq_node_new (void (*fn) (void *), void *user);
+void twist_cmdq_node_free (struct twist_cmd *node);
+void twist_cmdq_push_node (struct twist_cmdq *q, struct twist_cmd *node);
 void twist_cmdq_drain (struct twist_cmdq *q);
 
 #endif

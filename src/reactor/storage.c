@@ -33,7 +33,6 @@ struct twist_storage
   struct twist_job *tail;
   size_t len;
   size_t bound;
-  int inline_mode;
   int stop;
   pthread_t *threads;
   size_t nthreads;
@@ -56,6 +55,13 @@ struct twist_job
   struct twist_loop *loop;
   struct twist_job *next;
   struct twist_done cell;
+  /* What posts the completion to LOOP, made when the job was submitted.  The
+     worker has to tell the loop that the job is done, and it cannot do that
+     as it can do nothing else: if there were no memory to make the command
+     then, the completion would have to run on the worker, where it is not
+     meant to.  Made here, in the thread that submits, a failure is the
+     submit's.  */
+  struct twist_cmd *cmd;
 };
 
 static void
@@ -82,11 +88,7 @@ finish_job (struct twist_job *job, int err)
   job->cell.user = job->user;
   job->cell.err = err;
   job->cell.job = job;
-  if (twist_loop_post (job->loop, done_on_loop, &job->cell) != TWIST_OK)
-    {
-      job->done (job->user, TWIST_ERR_NOMEM);
-      return 1;
-    }
+  twist_loop_cmd_post (job->loop, job->cmd);
   return 0;
 }
 
@@ -171,6 +173,8 @@ twist_storage_free (struct twist_storage *st)
     {
       struct twist_job *job = st->head;
       st->head = job->next;
+      if (job->cmd != NULL)
+        twist_loop_cmd_free (job->cmd);
       free (job);
     }
   free (st->threads);
@@ -179,10 +183,12 @@ twist_storage_free (struct twist_storage *st)
   free (st);
 }
 
-void
-twist_storage_set_inline (struct twist_storage *st, int inline_mode)
+/* How many threads the pool has.  With none, a job runs on the caller's thread
+   when it is submitted, which is no place for one that waits on the loop.  */
+size_t
+twist_storage_threads (const struct twist_storage *st)
 {
-  st->inline_mode = inline_mode;
+  return st->nthreads;
 }
 
 int
@@ -192,7 +198,7 @@ twist_storage_submit (struct twist_storage *st, void (*work) (void *),
 {
   struct twist_job *job;
 
-  if (st->inline_mode || st->nthreads == 0)
+  if (st->nthreads == 0)
     {
       work (arg);
       if (done != NULL)
@@ -207,10 +213,21 @@ twist_storage_submit (struct twist_storage *st, void (*work) (void *),
   job->done = done;
   job->user = user;
   job->loop = loop;
+  if (done != NULL && loop != NULL)
+    {
+      job->cmd = twist_loop_cmd_new (done_on_loop, &job->cell);
+      if (job->cmd == NULL)
+        {
+          free (job);
+          return TWIST_ERR_NOMEM;
+        }
+    }
   pthread_mutex_lock (&st->mu);
   if (st->len >= st->bound)
     {
       pthread_mutex_unlock (&st->mu);
+      if (job->cmd != NULL)
+        twist_loop_cmd_free (job->cmd);
       free (job);
       return TWIST_ERR_AGAIN;
     }

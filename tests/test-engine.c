@@ -1015,13 +1015,15 @@ test_conn_pool (void)
   {
     struct twist_connection *c = twist_connection_new (loop);
 
+    /* The idle timer is the loop's, as in real use; the loop is told the
+       time, and the connection goes when its age is reached.  */
     check (twist_pool_put_idle (pool, "old", c, 0) == TWIST_OK, "pool age put");
-    twist_pool_expire (pool, 117999);
+    twist_loop_on_timer (loop, 117999);
     check (twist_pool_take (pool, "old", &got) == TWIST_OK, "pool not expired");
     twist_connection_free (got);
     c = twist_connection_new (loop);
     check (twist_pool_put_idle (pool, "old", c, 0) == TWIST_OK, "pool age put 2");
-    twist_pool_expire (pool, 118000);
+    twist_loop_on_timer (loop, 118000);
     check (twist_pool_take (pool, "old", &got) == TWIST_ERR_AGAIN, "pool expired");
   }
   twist_pool_free (pool);

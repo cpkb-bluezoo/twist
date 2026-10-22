@@ -35,16 +35,24 @@
 #include <time.h>
 #include <unistd.h>
 
-/* Four chunks may be in flight.  The worker waits only when that
-   pipeline is full, and it stops when the easy aborts.  The worker
-   owns the file until the last ack, so the loop cannot free it early.
+/* Four chunks may be in flight.  The worker waits only when that pipeline is
+   full, and it stops when the transfer is let go of or fails.
 
-   The loop's thread acknowledges the chunks the worker posts.  When the
-   transfer is let go of before it is done, that same thread is the one that
-   waits for the worker to retire, so it has to acknowledge the chunks itself
-   while it waits: the worker can be waiting for room to post another.  A
-   transfer that has been let go of delivers nothing to the application and
-   tells the multi handle nothing.  */
+   The worker is a thread of the storage pool and the transfer belongs to the
+   loop's thread, and they share this record.  Letting go of a transfer
+   (file_free) is not to wait for the worker, whose read may be slow or stuck,
+   or which may not have started because the pool is busy: it marks the
+   record released and returns, and the record is freed by whichever of the
+   loop (the last chunk it has to acknowledge) and the worker (when it ends)
+   is the last to be done with it.  A released transfer delivers nothing to
+   the application and tells the multi handle nothing; the worker, which sees
+   that, stops.
+
+   The worker tells the loop what it has by posting commands, and it must not
+   change the transfer itself.  The last of them, that it is done, is made
+   when the transfer attaches, so that posting it cannot fail for want of
+   memory.  A chunk that cannot be posted ends the worker with that error,
+   which the last command carries.  */
 
 #define FILE_CHUNK 16384
 #define FILE_PIPELINE 4
@@ -63,12 +71,20 @@ struct file_chunk
 struct twist_file
 {
   struct twist_easy *easy;
+  /* The loop's, for the worker: it must not reach it through the easy handle,
+     which a released transfer may have left behind.  */
+  struct twist_loop *loop;
   pthread_mutex_t mu;
   pthread_cond_t cv;
   int live;
   int stop;
-  int abandoned;
+  int released;
   int inflight;
+  /* The note that the worker is done: its command, made at attach, and the
+     chunk it carries.  Counted in INFLIGHT once posted.  */
+  struct file_chunk final;
+  struct twist_cmd *final_cmd;
+  int final_posted;
   size_t total;
   long long size;		/* From the worker, under MU.  */
   int size_known;
@@ -85,43 +101,45 @@ struct twist_file
 };
 
 static void
-file_free (void *p)
+file_destroy (struct twist_file *f)
 {
-  struct twist_file *f = p;
-  struct twist_loop *loop;
-
-  if (f == NULL)
-    return;
-  loop = f->easy != NULL ? f->easy->loop : NULL;
-  pthread_mutex_lock (&f->mu);
-  f->abandoned = 1;
-  f->stop = 1;
-  pthread_cond_broadcast (&f->cv);
-  while (f->live)
-    {
-      struct timespec until;
-
-      /* Acknowledge what the worker has posted: it may be waiting for room.  */
-      pthread_mutex_unlock (&f->mu);
-      if (loop != NULL)
-        twist_loop_drain (loop);
-      pthread_mutex_lock (&f->mu);
-      if (!f->live)
-        break;
-      clock_gettime (CLOCK_REALTIME, &until);
-      until.tv_nsec += 1000000;
-      if (until.tv_nsec >= 1000000000)
-        {
-          until.tv_sec++;
-          until.tv_nsec -= 1000000000;
-        }
-      pthread_cond_timedwait (&f->cv, &f->mu, &until);
-    }
-  pthread_mutex_unlock (&f->mu);
+  if (!f->final_posted && f->final_cmd != NULL)
+    twist_loop_cmd_free (f->final_cmd);
   pthread_cond_destroy (&f->cv);
   pthread_mutex_destroy (&f->mu);
   free (f->path);
   free (f);
+}
+
+/* Let go of MU, which the caller holds, and free the record if nobody is left
+   to use it: the transfer is released, the worker has ended and every chunk
+   it posted has been acknowledged.  Whoever makes that so is the one that sees
+   it so, and the others do not touch the record again after they have let go
+   of the lock.  */
+static void
+file_unlock (struct twist_file *f)
+{
+  int last = f->released && !f->live && f->inflight == 0;
+
+  pthread_mutex_unlock (&f->mu);
+  if (last)
+    file_destroy (f);
+}
+
+/* The transfer is let go of: by the application, which no longer wants it,
+   or the multi handle going away.  It returns at once.  */
+static void
+file_free (void *p)
+{
+  struct twist_file *f = p;
+
+  if (f == NULL)
+    return;
+  pthread_mutex_lock (&f->mu);
+  f->released = 1;
+  f->stop = 1;
+  pthread_cond_broadcast (&f->cv);
+  file_unlock (f);
 }
 
 int
@@ -153,29 +171,41 @@ file_errmsg (const char *path, int reading)
   return msg;
 }
 
+/* A chunk, or the note that the worker is done, has been acknowledged: its
+   slot is free.  The record may be freed here.  C is not used after.  */
+static void
+chunk_done (struct twist_file *f, struct file_chunk *c, int stop)
+{
+  pthread_mutex_lock (&f->mu);
+  c->busy = 0;
+  if (f->inflight > 0)
+    f->inflight--;
+  if (stop)
+    f->stop = 1;
+  pthread_cond_broadcast (&f->cv);
+  file_unlock (f);
+}
+
 static void
 file_on_loop (void *user)
 {
   struct file_chunk *c = user;
   struct twist_file *f = c->file;
-  struct twist_easy *easy = f->easy;
+  struct twist_easy *easy;
   int err = c->err;
 
-  if (f->abandoned)
+  if (f->released)
     {
-      /* Let go of: nothing is for the application or the multi handle now.  */
+      /* Let go of: nothing is for the application or the multi handle now.
+         Only the loop's thread sets RELEASED, and this is it.  */
       free (c->data);
       free (c->errmsg);
       c->data = NULL;
       c->errmsg = NULL;
-      pthread_mutex_lock (&f->mu);
-      c->busy = 0;
-      if (f->inflight > 0)
-        f->inflight--;
-      pthread_cond_broadcast (&f->cv);
-      pthread_mutex_unlock (&f->mu);
+      chunk_done (f, c, 0);
       return;
     }
+  easy = f->easy;
   if (!f->size_noted)
     {
       long long size = -1;
@@ -206,7 +236,12 @@ file_on_loop (void *user)
   free (c->data);
   c->data = NULL;
   if (err != TWIST_OK && f->err == TWIST_OK)
-    f->err = err;
+    {
+      /* The worker reads it, under the lock.  */
+      pthread_mutex_lock (&f->mu);
+      f->err = err;
+      pthread_mutex_unlock (&f->mu);
+    }
   if (c->errmsg != NULL)
     {
       if (f->err != TWIST_OK)
@@ -221,19 +256,14 @@ file_on_loop (void *user)
         easy->size_download = f->total;
       twist_easy_finish (easy, f->err);
     }
-  pthread_mutex_lock (&f->mu);
-  c->busy = 0;
-  if (f->inflight > 0)
-    f->inflight--;
-  if (f->err != TWIST_OK)
-    f->stop = 1;
-  pthread_cond_broadcast (&f->cv);
-  pthread_mutex_unlock (&f->mu);
+  chunk_done (f, c, f->err != TWIST_OK);
 }
 
+/* Give the loop a chunk of data (DATA, LEN, owned from here) to deliver.  It
+   waits for room, and gives up with the reason if the transfer has been
+   stopped.  A failure to post is the error NOMEM, and nothing is delivered.  */
 static int
-hand_off (struct twist_file *f, char *data, size_t len, int err, char *msg,
-          int final_note)
+hand_off (struct twist_file *f, char *data, size_t len)
 {
   struct file_chunk *c = NULL;
   int i;
@@ -244,13 +274,12 @@ hand_off (struct twist_file *f, char *data, size_t len, int err, char *msg,
     {
       /* A stop is looked for before waiting for room, not only after: the
          one that wants it may be waiting for this thread.  */
-      if (f->stop && !final_note)
+      if (f->stop)
         {
           int why = f->err != TWIST_OK ? f->err : TWIST_ERR_ABORTED;
 
           pthread_mutex_unlock (&f->mu);
           free (data);
-          free (msg);
           return why;
         }
       if (f->inflight < FILE_PIPELINE)
@@ -268,7 +297,6 @@ hand_off (struct twist_file *f, char *data, size_t len, int err, char *msg,
     {
       pthread_mutex_unlock (&f->mu);
       free (data);
-      free (msg);
       return TWIST_ERR_NOMEM;
     }
   f->inflight++;
@@ -276,16 +304,14 @@ hand_off (struct twist_file *f, char *data, size_t len, int err, char *msg,
   c->file = f;
   c->data = data;
   c->len = len;
-  c->err = err;
-  c->errmsg = msg;
-  c->final_note = final_note;
-  rc = twist_loop_post (f->easy->loop, file_on_loop, c);
+  c->err = TWIST_OK;
+  c->errmsg = NULL;
+  c->final_note = 0;
+  rc = twist_loop_post (f->loop, file_on_loop, c);
   if (rc != TWIST_OK)
     {
       free (data);
-      free (msg);
       c->data = NULL;
-      c->errmsg = NULL;
       pthread_mutex_lock (&f->mu);
       c->busy = 0;
       if (f->inflight > 0)
@@ -297,22 +323,36 @@ hand_off (struct twist_file *f, char *data, size_t len, int err, char *msg,
   return TWIST_OK;
 }
 
+/* Tell the loop that the worker is done, with ERR and MSG (owned from here)
+   if it failed.  Its command was made when the transfer attached, and it is
+   not a slot of the pipeline, so there is no waiting for room and nothing to
+   fail: it comes after the chunks posted before it.  */
 static void
-file_drain (struct twist_file *f)
+hand_off_final (struct twist_file *f, int err, char *msg)
 {
+  struct file_chunk *c = &f->final;
+
   pthread_mutex_lock (&f->mu);
-  while (f->inflight > 0)
-    pthread_cond_wait (&f->cv, &f->mu);
+  f->inflight++;
+  f->final_posted = 1;
   pthread_mutex_unlock (&f->mu);
+  c->file = f;
+  c->data = NULL;
+  c->len = 0;
+  c->err = err;
+  c->errmsg = msg;
+  c->final_note = 1;
+  twist_loop_cmd_post (f->loop, f->final_cmd);
 }
 
+/* The worker has ended.  */
 static void
 file_retire (struct twist_file *f)
 {
   pthread_mutex_lock (&f->mu);
   f->live = 0;
   pthread_cond_broadcast (&f->cv);
-  pthread_mutex_unlock (&f->mu);
+  file_unlock (f);
 }
 
 /* The percent-decoded path, in memory of its own; NULL if it holds a NUL,
@@ -415,6 +455,17 @@ file_work (void *arg)
   char *msg = NULL;
   long long start = 0;
   long long left;
+  int released;
+
+  /* Let go of before it was started: the pool was busy.  Nothing to do.  */
+  pthread_mutex_lock (&f->mu);
+  released = f->released;
+  pthread_mutex_unlock (&f->mu);
+  if (released)
+    {
+      file_retire (f);
+      return;
+    }
 
   /* Not blocking, so that a FIFO with nobody at the other end, or the like,
      is looked at and refused and not waited on: the loop waits for this
@@ -476,6 +527,7 @@ file_work (void *arg)
       size_t want = left < (long long) sizeof buf ? (size_t) left : sizeof buf;
       size_t n = fread (buf, 1, want, fp);
       char *copy;
+      int rc;
 
       left -= (long long) n;
 
@@ -495,9 +547,10 @@ file_work (void *arg)
               break;
             }
           memcpy (copy, buf, n);
-          if (hand_off (f, copy, n, TWIST_OK, NULL, 0) != TWIST_OK)
+          rc = hand_off (f, copy, n);
+          if (rc != TWIST_OK)
             {
-              err = f->err != TWIST_OK ? f->err : TWIST_ERR_ABORTED;
+              err = rc;
               break;
             }
         }
@@ -514,9 +567,15 @@ file_work (void *arg)
 done:
   if (fp != NULL)
     fclose (fp);
-  if (hand_off (f, NULL, 0, err, msg, 1) != TWIST_OK && f->err == TWIST_OK)
-    twist_easy_finish (f->easy, err != TWIST_OK ? err : TWIST_ERR_NOMEM);
-  file_drain (f);
+  /* A transfer let go of has nobody to tell.  If it is let go of just after
+     this looks, the note is acknowledged and dropped on the loop.  */
+  pthread_mutex_lock (&f->mu);
+  released = f->released;
+  pthread_mutex_unlock (&f->mu);
+  if (released)
+    free (msg);
+  else
+    hand_off_final (f, err, msg);
   file_retire (f);
 }
 
@@ -531,6 +590,10 @@ twist_file_attach (struct twist_easy *easy)
   if (easy == NULL || easy->url == NULL || easy->loop == NULL
       || easy->multi == NULL || easy->multi->storage == NULL)
     return TWIST_ERR_INVAL;
+  /* The worker waits on the loop for room to hand over what it reads, so it
+     cannot be the loop's own thread.  */
+  if (twist_storage_threads (easy->multi->storage) == 0)
+    return TWIST_ERR_UNSUPPORTED;
   host = easy->url->host;
   path = easy->url->path;
   rc = twist_file_check_url (host, path, easy->url->path_set);
@@ -551,16 +614,22 @@ twist_file_attach (struct twist_easy *easy)
       return TWIST_ERR_NOMEM;
     }
   f->easy = easy;
+  f->loop = easy->loop;
   f->live = 1;
+  f->final.file = f;
+  f->final_cmd = twist_loop_cmd_new (file_on_loop, &f->final);
+  if (f->final_cmd == NULL)
+    {
+      file_destroy (f);
+      return TWIST_ERR_NOMEM;
+    }
   {
     int nul = 0;
 
     f->path = decode_path (path, &nul);
     if (f->path == NULL)
       {
-        pthread_cond_destroy (&f->cv);
-        pthread_mutex_destroy (&f->mu);
-        free (f);
+        file_destroy (f);
         return nul ? TWIST_ERR_URL : TWIST_ERR_NOMEM;
       }
   }
@@ -569,10 +638,7 @@ twist_file_attach (struct twist_easy *easy)
       rc = parse_range (easy->range, f);
       if (rc != TWIST_OK)
         {
-          pthread_cond_destroy (&f->cv);
-          pthread_mutex_destroy (&f->mu);
-          free (f->path);
-          free (f);
+          file_destroy (f);
           return rc;
         }
     }

@@ -292,6 +292,10 @@ int twist_loop_schedule (struct twist_loop *loop, uint64_t deadline_ms,
                          struct twist_timer **out);
 void twist_timer_cancel (struct twist_timer *timer);
 int twist_loop_post (struct twist_loop *loop, void (*fn) (void *), void *user);
+struct twist_cmd;
+struct twist_cmd *twist_loop_cmd_new (void (*fn) (void *), void *user);
+void twist_loop_cmd_post (struct twist_loop *loop, struct twist_cmd *cmd);
+void twist_loop_cmd_free (struct twist_cmd *cmd);
 void twist_loop_drain (struct twist_loop *loop);
 /* Watch FD for INTEREST for CONN.  0, or an error if it cannot be watched: the
    poll set has no room, or FD is not a descriptor.  */
@@ -514,7 +518,7 @@ void twist_storage_free (struct twist_storage *st);
 int twist_storage_submit (struct twist_storage *st, void (*work) (void *),
                           void *arg, void (*done) (void *user, int err),
                           void *user, struct twist_loop *loop);
-void twist_storage_set_inline (struct twist_storage *st, int inline_mode);
+size_t twist_storage_threads (const struct twist_storage *st);
 
 /* ---- url, scheme, dns, cache, proxy ---- */
 
@@ -797,7 +801,6 @@ int twist_pool_put_payload (struct twist_pool *pool, const char *key,
 /* The pool a transfer parks its connection in and looks for one in: its
    share's, else its multi handle's.  NULL for a handle on neither.  */
 struct twist_pool *twist_easy_pool (struct twist_easy *easy);
-void twist_pool_expire (struct twist_pool *pool, uint64_t now_ms);
 void twist_pool_set_lock (struct twist_pool *pool, int enabled);
 size_t twist_pool_count (struct twist_pool *pool);
 void twist_pool_drop_loop (struct twist_pool *pool, struct twist_loop *loop);

@@ -96,19 +96,46 @@ twist_cmdq_free (struct twist_cmdq *q)
   free (q);
 }
 
+/* A command made ahead of the push, so that what has to be told to the loop
+   can be, later, from a thread that must not fail to tell it: the memory is
+   had where the failure can be reported, and pushing the command cannot
+   fail.  */
+struct twist_cmd *
+twist_cmdq_node_new (void (*fn) (void *), void *user)
+{
+  struct twist_cmd *node = calloc (1, sizeof *node);
+
+  if (node == NULL)
+    return NULL;
+  node->fn = fn;
+  node->user = user;
+  return node;
+}
+
+/* One that was made and is not to be pushed after all.  */
+void
+twist_cmdq_node_free (struct twist_cmd *node)
+{
+  free (node);
+}
+
+void
+twist_cmdq_push_node (struct twist_cmdq *q, struct twist_cmd *node)
+{
+  struct twist_cmd *prev;
+
+  prev = __atomic_exchange_n (&q->tail, node, __ATOMIC_ACQ_REL);
+  __atomic_store_n (&prev->next, node, __ATOMIC_RELEASE);
+}
+
 int
 twist_cmdq_push (struct twist_cmdq *q, void (*fn) (void *), void *user)
 {
-  struct twist_cmd *node;
-  struct twist_cmd *prev;
+  struct twist_cmd *node = twist_cmdq_node_new (fn, user);
 
-  node = calloc (1, sizeof *node);
   if (node == NULL)
     return TWIST_ERR_NOMEM;
-  node->fn = fn;
-  node->user = user;
-  prev = __atomic_exchange_n (&q->tail, node, __ATOMIC_ACQ_REL);
-  __atomic_store_n (&prev->next, node, __ATOMIC_RELEASE);
+  twist_cmdq_push_node (q, node);
   return TWIST_OK;
 }
 

@@ -434,24 +434,3 @@ twist_pool_put_payload (struct twist_pool *pool, const char *key,
   return twist_pool_put_idle_payload (pool, key, conn, now, payload,
                                       payload_free);
 }
-
-void
-twist_pool_expire (struct twist_pool *pool, uint64_t now_ms)
-{
-  struct twist_pool_slot *s;
-  struct twist_pool_slot *next;
-
-  if (pool == NULL)
-    return;
-  pool_lock (pool);
-  s = pool->head;
-  pool_unlock (pool);
-  while (s != NULL)
-    {
-      next = s->next;
-      if (!s->discarded && !s->queued
-          && now_ms >= s->idle_at + TWIST_POOL_AGE_MS)
-        slot_discard (pool, s);
-      s = next;
-    }
-}

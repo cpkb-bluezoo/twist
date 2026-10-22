@@ -382,6 +382,28 @@ twist_loop_post (struct twist_loop *loop, void (*fn) (void *), void *user)
   return rc;
 }
 
+/* A command made now to be posted later with twist_loop_cmd_post, which cannot
+   fail.  NULL if there is no memory.  Free one that is not posted with
+   twist_loop_cmd_free.  */
+struct twist_cmd *
+twist_loop_cmd_new (void (*fn) (void *), void *user)
+{
+  return twist_cmdq_node_new (fn, user);
+}
+
+void
+twist_loop_cmd_post (struct twist_loop *loop, struct twist_cmd *cmd)
+{
+  twist_cmdq_push_node (loop->cmds, cmd);
+  waker_ping (loop->waker_w);
+}
+
+void
+twist_loop_cmd_free (struct twist_cmd *cmd)
+{
+  twist_cmdq_node_free (cmd);
+}
+
 long
 twist_loop_next_timeout (struct twist_loop *loop, uint64_t now_ms)
 {

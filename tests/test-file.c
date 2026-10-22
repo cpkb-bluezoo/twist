@@ -266,6 +266,36 @@ test_file_abandoned (void)
     }
 }
 
+/* The file handler reads on a worker thread and waits for the loop to take
+   what it reads.  A pool with no threads ran the worker on the loop's own
+   thread, which then waited for itself, for any file of more than three
+   chunks: it never came back from the call that added the handle.  Such a
+   pool is refused.  (A signal ends the test if it does not come back.)  */
+static void
+test_file_without_threads (void)
+{
+  struct twist_multi *multi = twist_multi_init ();
+  struct twist_easy *easy = twist_easy_init ();
+  char url[128];
+  int rc;
+
+  check (multi != NULL && easy != NULL, "a multi and a handle");
+  twist_storage_free (multi->storage);
+  multi->storage = twist_storage_new (0, 32);
+  check (multi->storage != NULL, "a pool with no threads");
+  snprintf (url, sizeof url, "file://%s", big_path);
+  twist_easy_setopt (easy, TWISTOPT_URL, url);
+  easy->write_cb = file_body;
+  alarm (20);
+  rc = twist_multi_add_handle (multi, easy);
+  alarm (0);
+  check (rc == TWIST_ERR_UNSUPPORTED,
+         "a file transfer is refused where there is no thread to read it");
+  twist_multi_remove_handle (multi, easy);
+  twist_multi_cleanup (multi);
+  twist_easy_cleanup (easy);
+}
+
 int
 main (void)
 {
@@ -278,6 +308,7 @@ main (void)
       test_file_large ();
       test_file_refused ();
       test_file_abandoned ();
+      test_file_without_threads ();
       unlink (big_path);
     }
   return tests_finish ();
