@@ -248,7 +248,15 @@ enum twist_opt
   TWISTOPT_NOPROXY = 61,
   /* A directory of PEM files of certificate authorities, in addition to
      TWISTOPT_CAINFO.  */
-  TWISTOPT_CAPATH = 62
+  TWISTOPT_CAPATH = 62,
+  /* A PEM bundle of the authorities that vouch for an https proxy.  Without
+     it the proxy is checked against the same authorities as the target
+     (TWISTOPT_CAINFO, TWISTOPT_CAPATH, the environment's, the system's).  */
+  TWISTOPT_PROXY_CAINFO = 63,
+  /* A long.  0 does not check the certificate of an https proxy; the default,
+     1, does.  This is not TWISTOPT_SSL_VERIFYPEER: the target is checked or
+     not as that says, and the proxy as this says.  */
+  TWISTOPT_PROXY_SSL_VERIFYPEER = 64
 };
 
 enum twist_dns_transport

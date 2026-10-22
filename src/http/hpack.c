@@ -435,15 +435,20 @@ twist_hpack_encode_request (struct twist_hpack *hp, const char *method,
           return TWIST_ERR_NOMEM;
         }
     }
-  buf[n++] = strcmp (scheme, "https") == 0 ? 0x87 : 0x86;
-  buf[n++] = strcmp (path, "/") == 0 ? 0x84 : 0;
-  if (strcmp (path, "/") != 0)
+  /* CONNECT (RFC 9113, 8.5) has neither a scheme nor a path.  */
+  if (scheme != NULL)
+    buf[n++] = strcmp (scheme, "https") == 0 ? 0x87 : 0x86;
+  if (path != NULL)
     {
-      buf[n - 1] = 0x40 | 4;
-      if (emit_str (&buf, &n, &cap, path) != TWIST_OK)
+      buf[n++] = strcmp (path, "/") == 0 ? 0x84 : 0;
+      if (strcmp (path, "/") != 0)
         {
-          free (buf);
-          return TWIST_ERR_NOMEM;
+          buf[n - 1] = 0x40 | 4;
+          if (emit_str (&buf, &n, &cap, path) != TWIST_OK)
+            {
+              free (buf);
+              return TWIST_ERR_NOMEM;
+            }
         }
     }
   buf[n++] = 0x41;

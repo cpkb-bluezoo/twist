@@ -987,5 +987,51 @@ e=$("$TWIST" -S -k --key "$work/userkey" -r 0-9999 -o /dev/null \
 check "$(case "$(printf '%s' "$e" | lastline)" in '100 10000  100 10000    0     0 '*) echo ok;; esac)" \
   "the meter knows the size of a range: $(printf '%s' "$e" | lastline)"
 
+# 13. An https proxy: TLS to it and CONNECT inside, over HTTP/2 and HTTP/1.1, in
+# front of the real sshd.  SSH inside the TLS of the proxy; a download, an upload
+# and two URLs that share a tunnel and a login.  Needs node and openssl.
+if command -v node >/dev/null 2>&1 && command -v openssl >/dev/null 2>&1; then
+  printf '[127.0.0.1]:%s %s\n' "$port" "$hostpub" > "$work/home/.ssh/known_hosts"
+  openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
+    -keyout "$work/hp-key.pem" -out "$work/hp-cert.pem" -days 2 \
+    -subj "/CN=127.0.0.1" -addext "subjectAltName=IP:127.0.0.1" >/dev/null 2>&1
+  s1="sftp://$user@127.0.0.1:$port$work/srv/small.txt"
+  for mode in h2 h1; do
+    rm -f "$work/hp-port"
+    node "$here/https-proxy.js" $mode "$work/hp-cert.pem" "$work/hp-key.pem" \
+      > "$work/hp-port" 2>/dev/null &
+    hp_pid=$!
+    i=0
+    while [ ! -s "$work/hp-port" ] && [ $i -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
+    hp=$(cat "$work/hp-port")
+    hx="https://127.0.0.1:$hp"
+    rm -f "$work/out"
+    t --key "$work/userkey" -x "$hx" --proxy-cacert "$work/hp-cert.pem" -o "$work/out" "$s1"
+    rc=$?
+    [ $rc -eq 0 ] && [ "$(cat "$work/out")" = small ]
+    check "$([ $? -eq 0 ] && echo ok)" "$mode https proxy: an sftp download (exit $rc)"
+    rm -f "$work/srv/up.bin"
+    t --key "$work/userkey" -x "$hx" --proxy-cacert "$work/hp-cert.pem" \
+      -T "$work/local.bin" "sftp://$user@127.0.0.1:$port$work/srv/up.bin"
+    rc=$?
+    [ $rc -eq 0 ] && cmp -s "$work/local.bin" "$work/srv/up.bin"
+    check "$([ $? -eq 0 ] && echo ok)" "$mode https proxy: a 900 KiB upload (exit $rc)"
+    before=$(logins)
+    t --key "$work/userkey" -x "$hx" --proxy-cacert "$work/hp-cert.pem" \
+      -o "$work/o1" "$s1" -o "$work/o2" "sftp://$user@127.0.0.1:$port$work/srv/data.bin"
+    rc=$?
+    sleep 0.3
+    n=$(( $(logins) - before ))
+    ok=
+    [ $rc -eq 0 ] && cmp -s "$work/o2" "$work/srv/data.bin" && [ $n -eq 1 ] && ok=ok
+    check "$ok" "$mode https proxy: two URLs, one tunnel, one login (logins $n, exit $rc)"
+    t --key "$work/userkey" -x "$hx" -o /dev/null "$s1" 2>/dev/null
+    check "$([ $? -ne 0 ] && echo ok)" "$mode https proxy: not trusted, not used"
+    kill $hp_pid 2>/dev/null
+  done
+else
+  echo "ssh-openssh: no node or openssl; skipping the https proxy checks" >&2
+fi
+
 [ $fail -eq 0 ] || exit 1
 exit 0

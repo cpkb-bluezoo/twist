@@ -53,6 +53,9 @@ struct twist_http
   struct twist_protocol_handler handler;
   int https;
   int tunnel;
+  int tls_tunnel;		/* Through an https proxy: tunnel.c.  */
+  char *tun_user;
+  char *tun_pass;
   int tls_on;
   int sent;
   int finished;
@@ -232,6 +235,15 @@ http_pool_key (struct twist_http *h, char *buf, size_t cap)
   return TWIST_OK;
 }
 
+/* Whether the connection is a tunnel through a proxy, to a target that is not
+   the proxy's: such a connection is not kept for others, nor are sessions on
+   it shared.  */
+static int
+via_tunnel (const struct twist_http *h)
+{
+  return (h->proxy != NULL && h->tunnel) || h->tls_tunnel;
+}
+
 static void
 http_park (struct twist_http *h)
 {
@@ -243,7 +255,7 @@ http_park (struct twist_http *h)
     return;
   if (!twist_h1_keep (h->h1))
     return;
-  if (h->proxy != NULL && h->tunnel)
+  if (via_tunnel (h))
     return;
   pool = http_pool (h);
   if (pool == NULL || http_pool_key (h, key, sizeof key) != TWIST_OK)
@@ -1466,23 +1478,54 @@ prepare_dial (struct twist_http *h)
   if (h->https_port > 0 && !url->port_set)
     port = h->https_port;
   h->tunnel = 0;
+  h->tls_tunnel = 0;
+  free (h->tun_user);
+  h->tun_user = NULL;
+  if (h->tun_pass != NULL)
+    {
+      memset (h->tun_pass, 0, strlen (h->tun_pass));
+      free (h->tun_pass);
+      h->tun_pass = NULL;
+    }
   twist_proxy_free (h->proxy);
   h->proxy = NULL;
   if (h->mode != HTTP_H3 && twist_easy_proxy (easy) != NULL)
     {
-      if (twist_proxy_parse (twist_easy_proxy (easy), &kind, &phost, &pport, &puser,
-                             &ppass) != TWIST_OK)
+      int prc = twist_proxy_parse (twist_easy_proxy (easy), &kind, &phost,
+                                   &pport, &puser, &ppass);
+
+      if (prc != TWIST_OK)
         {
           free (phost);
-          return TWIST_ERR_URL;
+          if (prc == TWIST_ERR_UNSUPPORTED)
+            twist_easy_set_error (easy, twist_strdup (_("this kind of proxy "
+                                                        "is not supported; "
+                                                        "use http://, "
+                                                        "https:// or "
+                                                        "socks5://")));
+          return prc == TWIST_ERR_UNSUPPORTED ? prc : TWIST_ERR_URL;
+        }
+      if (kind == TWIST_PROXY_HTTPS)
+        {
+          /* TLS to the proxy and CONNECT in it, for every target.  */
+          h->tls_tunnel = 1;
+          dial = phost;
+          port = pport;
+          h->tun_user = puser;
+          h->tun_pass = ppass;
+          puser = ppass = NULL;
         }
       h->tunnel = h->https || kind == TWIST_PROXY_SOCKS5;
+      if (kind == TWIST_PROXY_HTTPS)
+        h->tunnel = 0;
       if (h->tunnel || kind == TWIST_PROXY_HTTP)
         {
           dial = phost;
           port = pport;
         }
-      if (h->tunnel)
+      if (kind == TWIST_PROXY_HTTPS)
+        ;
+      else if (h->tunnel)
         {
           h->proxy = twist_proxy_new (kind, phost, pport, &h->handler);
           if (h->proxy != NULL)
@@ -1527,7 +1570,7 @@ http_borrow (struct twist_http *h)
 
   if ((h->mode != HTTP_H2 && h->mode != HTTP_H3) || h->ws)
     return 0;
-  if (h->proxy != NULL && h->tunnel)
+  if (via_tunnel (h))
     return 0;
   multi = h->easy != NULL ? h->easy->multi : NULL;
   if (multi == NULL || http_pool_key (h, key, sizeof key) != TWIST_OK)
@@ -1583,7 +1626,7 @@ http_reuse (struct twist_http *h)
   struct twist_endpoint *ep;
   char key[1024];
 
-  if (h->mode != HTTP_H1 || (h->proxy != NULL && h->tunnel))
+  if (h->mode != HTTP_H1 || via_tunnel (h))
     return 0;
   pool = http_pool (h);
   if (pool == NULL || http_pool_key (h, key, sizeof key) != TWIST_OK)
@@ -1612,6 +1655,24 @@ dial (struct twist_http *h, const struct twist_dns_addr *addr)
 
   if (http_borrow (h) || http_reuse (h))
     return;
+  if (h->tls_tunnel)
+    {
+      struct twist_tunnel_spec spec;
+
+      memset (&spec, 0, sizeof spec);
+      spec.proxy_host = h->dial_host;
+      spec.proxy_port = h->dial_port;
+      spec.user = h->tun_user;
+      spec.pass = h->tun_pass;
+      spec.host = h->easy->url->host;
+      spec.port = h->easy->url->port > 0
+        ? h->easy->url->port : twist_url_default_port (h->easy->url->scheme);
+      rc = twist_tunnel_connect (h->easy, &spec, addr, &h->handler, h,
+                                 &h->conn);
+      if (rc != TWIST_OK)
+        http_fail (h, rc);
+      return;
+    }
   h->conn = twist_connection_new (h->easy->loop);
   if (h->conn == NULL)
     {
@@ -1908,6 +1969,12 @@ http_free (void *p)
   free (h->auth_line);
   free (h->origin_host);
   free (h->dial_host);
+  free (h->tun_user);
+  if (h->tun_pass != NULL)
+    {
+      memset (h->tun_pass, 0, strlen (h->tun_pass));
+      free (h->tun_pass);
+    }
   free (h->hdr_line);
   free (h);
 }

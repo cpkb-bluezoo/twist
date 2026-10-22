@@ -85,6 +85,8 @@ struct twist_h2
   int pending_end;
   struct twist_h1_events next_ev;
   int have_next;
+  void (*writable) (void *);
+  void *writable_user;
 };
 
 static void
@@ -578,6 +580,8 @@ on_settings (struct twist_h2 *h, const uint8_t *p, size_t len)
                 s->send_left = (int32_t) now;
               }
           h->peer_init = (int32_t) val;
+          if (h->writable != NULL && delta > 0)
+            h->writable (h->writable_user);
         }
       else if (id == 5)
         {
@@ -715,6 +719,8 @@ dispatch_frame (struct twist_h2 *h, uint8_t type, uint8_t flags,
             }
         }
       flush_pending (h);
+      if (h->writable != NULL && !h->failed)
+        h->writable (h->writable_user);
       return;
     }
   if (type == H2_DATA)
@@ -805,6 +811,63 @@ queue_data (uint8_t **buf, size_t *n, size_t *cap, const uint8_t *p, size_t len)
     memcpy (*buf + *n, p, len);
   *n += len;
   return TWIST_OK;
+}
+
+void
+twist_h2_set_writable (struct twist_h2 *h, void (*cb) (void *), void *user)
+{
+  h->writable = cb;
+  h->writable_user = user;
+}
+
+uint32_t
+twist_h2_last_stream (const struct twist_h2 *h)
+{
+  return h != NULL && h->next_id > 1 ? h->next_id - 2 : 0;
+}
+
+size_t
+twist_h2_send_data (struct twist_h2 *h, uint32_t id, const uint8_t *data,
+                    size_t len, int end)
+{
+  struct twist_h2_stream *s;
+  size_t sent = 0;
+  uint8_t hdr[9];
+
+  if (h == NULL || h->failed)
+    return 0;
+  s = find_stream (h, id);
+  if (s == NULL)
+    return 0;
+  while (sent < len && h->conn_send > 0 && s->send_left > 0)
+    {
+      size_t n = len - sent;
+
+      if (n > h->max_frame)
+        n = h->max_frame;
+      if (n > (size_t) h->conn_send)
+        n = (size_t) h->conn_send;
+      if (n > (size_t) s->send_left)
+        n = (size_t) s->send_left;
+      frame_hdr (hdr, (uint32_t) n, H2_DATA, 0, id);
+      if (emit_bytes (h, hdr, sizeof hdr) != TWIST_OK
+          || emit_bytes (h, data + sent, n) != TWIST_OK)
+        {
+          h2_fail (h, TWIST_ERR_CONNECT);
+          return sent;
+        }
+      h->conn_send -= (int32_t) n;
+      s->send_left -= (int32_t) n;
+      sent += n;
+    }
+  /* The end of the stream takes no window.  */
+  if (end && sent == len)
+    {
+      frame_hdr (hdr, 0, H2_DATA, H2_END_STREAM, id);
+      if (emit_bytes (h, hdr, sizeof hdr) != TWIST_OK)
+        h2_fail (h, TWIST_ERR_CONNECT);
+    }
+  return sent;
 }
 
 int

@@ -102,6 +102,25 @@ dial_tcp (struct twist_mail_link *link, const struct twist_dns_addr *addr)
   void *user = link->user;
   const struct twist_protocol_handler *handler = link->handler;
 
+  if (link->tls_tunnel)
+    {
+      struct twist_tunnel_spec spec;
+      int rc;
+
+      memset (&spec, 0, sizeof spec);
+      spec.proxy_host = link->dial_host;
+      spec.proxy_port = link->dial_port;
+      spec.user = link->tun_user;
+      spec.pass = link->tun_pass;
+      spec.host = link->easy->url->host;
+      spec.port = link->easy->url->port > 0
+        ? link->easy->url->port
+        : twist_url_default_port (link->easy->url->scheme);
+      rc = twist_tunnel_connect (link->easy, &spec, addr, handler, user,
+                                 &c);
+      link->conn = c;
+      return rc;
+    }
   c = twist_connection_new (link->easy->loop);
   if (c == NULL)
     return TWIST_ERR_NOMEM;
@@ -185,23 +204,37 @@ twist_mail_link_open (struct twist_mail_link *link, struct twist_easy *easy,
         {
           twist_easy_set_error (easy, twist_strdup (_("this kind of proxy is "
                                                       "not supported; use "
-                                                      "http:// or socks5://")));
+                                                      "http://, https:// or "
+                                                      "socks5://")));
           return rc;
         }
       if (rc != TWIST_OK)
         return TWIST_ERR_URL;
-      link->proxy = twist_proxy_new (kind, phost, pport, handler);
-      if (link->proxy == NULL)
+      if (kind == TWIST_PROXY_HTTPS)
         {
-          free (phost);
-          free (puser);
-          free (ppass);
-          return TWIST_ERR_NOMEM;
+          /* TLS to the proxy and CONNECT in it (tunnel.c).  */
+          link->tls_tunnel = 1;
+          link->tun_user = puser;
+          link->tun_pass = ppass;
+          puser = ppass = NULL;
+          dial = phost;
+          link->dial_port = pport;
         }
-      twist_proxy_set_target (link->proxy, url->host, url->port);
-      twist_proxy_configure (link->proxy, easy, puser, ppass);
-      dial = phost;
-      link->dial_port = pport;
+      else
+        {
+          link->proxy = twist_proxy_new (kind, phost, pport, handler);
+          if (link->proxy == NULL)
+            {
+              free (phost);
+              free (puser);
+              free (ppass);
+              return TWIST_ERR_NOMEM;
+            }
+          twist_proxy_set_target (link->proxy, url->host, url->port);
+          twist_proxy_configure (link->proxy, easy, puser, ppass);
+          dial = phost;
+          link->dial_port = pport;
+        }
     }
   link->dial_host = twist_strdup (dial != NULL ? dial : "");
   free (phost);
@@ -260,5 +293,11 @@ twist_mail_link_close (struct twist_mail_link *link)
   twist_connection_free (link->conn);
   twist_proxy_free (link->proxy);
   free (link->dial_host);
+  free (link->tun_user);
+  if (link->tun_pass != NULL)
+    {
+      memset (link->tun_pass, 0, strlen (link->tun_pass));
+      free (link->tun_pass);
+    }
   memset (link, 0, sizeof *link);
 }

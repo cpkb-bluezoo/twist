@@ -700,8 +700,10 @@ test_proxy_parse (void)
          "an IPv6 proxy without one");
   check (PARSE ("http://u:p@[::1]:80") == TWIST_OK && strcmp (host, "::1") == 0
          && strcmp (user, "u") == 0, "both");
-  check (PARSE ("https://h") == TWIST_ERR_UNSUPPORTED,
-         "an https proxy is not spoken to in the clear");
+  check (PARSE ("https://h") == TWIST_OK && kind == TWIST_PROXY_HTTPS
+         && strcmp (host, "h") == 0 && port == 443, "https, 443");
+  check (PARSE ("HTTPS://u:p@h:8443/") == TWIST_OK && kind == TWIST_PROXY_HTTPS
+         && port == 8443 && strcmp (user, "u") == 0, "https, any case, with more");
   check (PARSE ("socks4://h") == TWIST_ERR_UNSUPPORTED, "socks4");
   check (PARSE ("ftp://h") == TWIST_ERR_UNSUPPORTED, "another scheme");
   check (PARSE ("http://") != TWIST_OK, "no host");

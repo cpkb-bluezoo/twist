@@ -297,6 +297,12 @@ twist_proxy_parse (const char *s, int *kind, char **host, int *port,
 
       if (sl == 4 && strncasecmp (s, "http", 4) == 0)
         ;
+      else if (sl == 5 && strncasecmp (s, "https", 5) == 0)
+        {
+          /* TLS to the proxy, then CONNECT inside it: a tunnel (tunnel.c).  */
+          k = TWIST_PROXY_HTTPS;
+          def = 443;
+        }
       else if ((sl == 6 && strncasecmp (s, "socks5", 6) == 0)
                || (sl == 7 && strncasecmp (s, "socks5h", 7) == 0))
         {
@@ -304,8 +310,8 @@ twist_proxy_parse (const char *s, int *kind, char **host, int *port,
           def = 1080;
         }
       else
-        /* https (a proxy spoken to over TLS), socks4, anything else: not
-           spoken here, and not to be taken for something that is.  */
+        /* socks4, anything else: not spoken here, and not to be taken for
+           something that is.  */
         return TWIST_ERR_UNSUPPORTED;
       p = sep + 3;
     }
@@ -412,8 +418,12 @@ struct twist_proxy *
 twist_proxy_new (int kind, const char *host, int port,
                  const struct twist_protocol_handler *inner)
 {
-  struct twist_proxy *p = calloc (1, sizeof *p);
+  struct twist_proxy *p;
 
+  /* An https proxy is a tunnel (tunnel.c), not this.  */
+  if (kind == TWIST_PROXY_HTTPS)
+    return NULL;
+  p = calloc (1, sizeof *p);
   if (p == NULL)
     return NULL;
   p->kind = kind;

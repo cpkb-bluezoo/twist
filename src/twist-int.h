@@ -162,6 +162,8 @@ struct twist_easy
   char *noproxy;
   int noproxy_set;
   char *capath;
+  char *proxy_cainfo;		/* For an https proxy; else cainfo.  */
+  int proxy_verifypeer;
   char *mail_from;
   struct twist_slist *mail_rcpt;
   char *doh_url;
@@ -297,6 +299,14 @@ struct twist_endpoint *twist_connection_endpoint (struct twist_connection *conn)
 void twist_connection_set_handler (struct twist_connection *conn,
                                    const struct twist_protocol_handler *h);
 void twist_connection_set_fd (struct twist_connection *conn, int fd);
+/* A connection carried by something else, such as a tunnel through a proxy,
+   has an owner: FREE_FN is called when the connection is freed (it must not
+   free the connection), and RESUME_FN when the application resumes reading
+   after pausing, so that what was held back can be given again.  */
+void twist_connection_set_owner (struct twist_connection *conn, void *owner,
+                                 void (*free_fn) (void *),
+                                 void (*resume_fn) (void *));
+int twist_connection_paused (const struct twist_connection *conn);
 void twist_connection_set_io (struct twist_connection *conn,
                               ssize_t (*read_fn) (void *, uint8_t *, size_t),
                               ssize_t (*write_fn) (void *, const uint8_t *,
@@ -704,7 +714,8 @@ enum twist_proxy_kind
 {
   TWIST_PROXY_NONE = 0,
   TWIST_PROXY_HTTP,
-  TWIST_PROXY_SOCKS5
+  TWIST_PROXY_SOCKS5,
+  TWIST_PROXY_HTTPS
 };
 
 /* Read a proxy URL: http://, socks5:// or socks5h:// (a name is given to the
@@ -797,6 +808,17 @@ void twist_h2_set_emit (struct twist_h2 *h2,
                         int (*emit) (void *, const uint8_t *, size_t),
                         void *user);
 int twist_h2_preface (uint8_t **out, size_t *out_len);
+/* A tunnel on a stream (CONNECT, RFC 9113 section 8.5).  The request for it
+   is twist_h2_request with no scheme and no path and the stream left open; the
+   stream is then twist_h2_last_stream.  send_data sends as much of DATA as the
+   windows and the frame size allow, and returns how much; the rest is the
+   caller's to send when the writable callback says the windows have grown.  END
+   closes the stream when all of DATA has gone.  */
+uint32_t twist_h2_last_stream (const struct twist_h2 *h2);
+size_t twist_h2_send_data (struct twist_h2 *h2, uint32_t id,
+                           const uint8_t *data, size_t len, int end);
+void twist_h2_set_writable (struct twist_h2 *h2, void (*cb) (void *),
+                            void *user);
 int twist_h2_request (struct twist_h2 *h2, const char *method,
                       const char *scheme, const char *authority,
                       const char *path, const struct twist_slist *extra,
@@ -961,6 +983,9 @@ struct twist_mail_link
   struct twist_timer *phase_timer;
   char *dial_host;
   int dial_port;
+  int tls_tunnel;		/* Through an https proxy: tunnel.c.  */
+  char *tun_user;
+  char *tun_pass;
   const struct twist_protocol_handler *handler;
   void *user;
   void (*fail) (void *user, int err);
@@ -1134,6 +1159,30 @@ int twist_easy_finish (struct twist_easy *easy, int result);
 int twist_easy_perform_in (struct twist_multi *multi, struct twist_easy *easy);
 void twist_easy_release_transfer (struct twist_easy *easy);
 int twist_transfer_start (struct twist_easy *easy);
+
+/* ---- tunnels through an https proxy (engine/tunnel.c) ---- */
+
+struct twist_tunnel_spec
+{
+  const char *proxy_host;	/* To name in TLS, and for the Host.  */
+  int proxy_port;
+  const char *user;		/* From the proxy's URL, or NULL: then -U.  */
+  const char *pass;
+  const char *host;		/* The target.  */
+  int port;
+};
+
+/* Make a tunnel to the target through the https proxy at PROXY_ADDR (already
+   looked up) and give back a connection, OUT, that is the tunnel: the
+   protocol uses it as it would a socket to the target.  HANDLER and USER are
+   its; HANDLER->connected is called when the proxy has said yes, and an error
+   when it has not.  The connection is the caller's to free, which ends the
+   tunnel.  If this fails OUT is still set, and is to be freed.  */
+int twist_tunnel_connect (struct twist_easy *easy,
+                          const struct twist_tunnel_spec *spec,
+                          const struct twist_dns_addr *proxy_addr,
+                          const struct twist_protocol_handler *handler,
+                          void *user, struct twist_connection **out);
 
 /* ---- the proxy to use ---- */
 

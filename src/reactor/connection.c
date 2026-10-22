@@ -64,6 +64,9 @@ struct twist_connection
   size_t app_cap;
   void *tls;
   void (*free_tls) (void *);
+  void *owner;
+  void (*owner_free) (void *);
+  void (*owner_resume) (void *);
   char alpn[32];
   size_t alpn_len;
   struct twist_timer *connect_timer;
@@ -294,6 +297,8 @@ tcp_resume (struct twist_endpoint *ep)
   if (ep->conn->app_len > 0)
     deliver (ep->conn, &ep->conn->app, &ep->conn->app_off, &ep->conn->app_len,
              &ep->conn->app_cap);
+  if (ep->conn->owner_resume != NULL)
+    ep->conn->owner_resume (ep->conn->owner);
 }
 
 struct twist_connection *
@@ -329,6 +334,8 @@ twist_connection_free (struct twist_connection *c)
     }
   if (c->connect_timer != NULL)
     twist_timer_cancel (c->connect_timer);
+  if (c->owner_free != NULL)
+    c->owner_free (c->owner);
   if (c->free_tls != NULL && c->tls != NULL)
     c->free_tls (c->tls);
   if (c->in_pool && c->inbuf != NULL && c->in_cap == 16384)
@@ -372,6 +379,22 @@ twist_connection_set_io (struct twist_connection *c,
   c->read_fn = read_fn != NULL ? read_fn : default_read;
   c->write_fn = write_fn != NULL ? write_fn : default_write;
   c->io_user = user != NULL ? user : c;
+}
+
+void
+twist_connection_set_owner (struct twist_connection *c, void *owner,
+                            void (*free_fn) (void *),
+                            void (*resume_fn) (void *))
+{
+  c->owner = owner;
+  c->owner_free = free_fn;
+  c->owner_resume = resume_fn;
+}
+
+int
+twist_connection_paused (const struct twist_connection *c)
+{
+  return c->paused;
 }
 
 void
@@ -451,7 +474,13 @@ twist_connection_queue_out (struct twist_connection *c, const uint8_t *data,
 {
   int rc = append_buf (&c->outbuf, &c->out_off, &c->out_len, &c->out_cap,
                        data, len);
-  if (rc == TWIST_OK)
+  if (rc != TWIST_OK)
+    return rc;
+  /* A connection with an owner and no descriptor (a tunnel) has nothing that
+     would tell the loop it can write: what TLS queues goes at once.  */
+  if (c->fd < 0 && c->owner_free != NULL)
+    twist_connection_on_writable (c);
+  else
     refresh_interest (c);
   return rc;
 }

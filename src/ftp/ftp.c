@@ -21,6 +21,7 @@
 #endif
 
 #include "twist-int.h"
+#include "gettext.h"
 
 #include <arpa/inet.h>
 #include <ctype.h>
@@ -951,6 +952,18 @@ ftp_begin (struct twist_ftp *f)
                              &ppass) != TWIST_OK)
         {
           ftp_complete (f, TWIST_ERR_URL);
+          return;
+        }
+      if (kind == TWIST_PROXY_HTTPS)
+        {
+          /* The data connection has to go through it as well; not yet.  */
+          free (phost);
+          free (puser);
+          free (ppass);
+          twist_easy_set_error (easy, twist_strdup (_("an https proxy is not "
+                                                      "supported for ftp; use "
+                                                      "http:// or socks5://")));
+          ftp_complete (f, TWIST_ERR_UNSUPPORTED);
           return;
         }
       f->proxy = twist_proxy_new (kind, phost, pport, &ftp_ctrl_handler);

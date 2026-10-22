@@ -183,13 +183,32 @@ the environment names and that cannot be read does not matter then.  For
 @option{--hostpubsha256} is still checked.
 @item -x @var{url}
 @itemx --proxy @var{url}
-Proxy.  Use @code{http://} or @code{socks5://} (@code{socks5h://} is the same),
-with a port (the default is 8080 for HTTP and 1080 for SOCKS) and, if the proxy wants them, @samp{user:password@@} before the host,
-percent-encoded.  An IPv6 proxy is in brackets.  @code{https://} and
-@code{socks4://} proxies are refused.  For @code{sftp} and @code{scp}
-(@pxref{SFTP and SCP}) the proxy opens a tunnel.  @option{-x ""} uses no
-proxy, whatever the environment says.  A proxy is also taken from the
+Proxy.  Use @code{http://}, @code{https://} or @code{socks5://}
+(@code{socks5h://} is the same), with a port (the default is 8080 for HTTP,
+443 for HTTPS and 1080 for SOCKS) and, if the proxy wants them,
+@samp{user:password@@} before the host, percent-encoded.  An IPv6 proxy is in
+brackets.  @code{socks4://} proxies are refused.  For @code{sftp} and
+@code{scp} (@pxref{SFTP and SCP}) the proxy opens a tunnel.  @option{-x ""}
+uses no proxy, whatever the environment says.  A proxy is also taken from the
 environment (@pxref{Environment}).
+
+An @code{https://} proxy is spoken to in TLS, and its certificate is checked.
+The proxy is asked, in that TLS, to @code{CONNECT} to the target: in a stream
+of HTTP/2 if it speaks that, and on the connection if it speaks only
+HTTP/1.1, as ALPN says.  What the target's protocol sends, including its own
+TLS, goes through that tunnel, so the proxy sees where the transfer goes and
+how much, but not what.  Credentials go to it as Basic, in the TLS.  This works
+for every scheme that can use a proxy except @code{ftp} and @code{ftps}, and an
+@code{http://} URL is tunnelled too.  HTTP/3 does not use a proxy yet.  A
+tunnel has a connection to the proxy of its own.
+@item --proxy-cacert @var{file}
+PEM bundle of the authorities that vouch for an https proxy.  Without it the
+proxy is checked against the same authorities as the target:
+@option{--cacert}, @option{--capath}, the environment's (@pxref{Environment}),
+and the system's.
+@item --proxy-insecure
+Do not check the certificate of an https proxy.  This is not @option{-k}: that
+says nothing about the proxy, and the proxy is checked unless this is given.
 @item --noproxy @var{list}
 Comma-separated hosts that do not go through a proxy, also when one is
 given with @option{-x}.  A name matches itself and the names under it:
@@ -593,7 +612,7 @@ request.
 
 A proxy from the environment has the same effect as @option{-x}, which
 overrides it.  Its value is a proxy URL as @option{-x} takes, with
-@code{http://} or @code{socks5://} before the host, and
+@code{http://}, @code{https://} or @code{socks5://} before the host, and
 @samp{user:password@@} if it wants them.  An empty value is no proxy.
 
 @table @env

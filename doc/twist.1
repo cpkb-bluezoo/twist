@@ -357,17 +357,44 @@ is still checked.
 .TP
 .BI \-x ", " \-\-proxy " url"
 Proxy.  Use
-.I http://
+.IR http:// ,
+.I https://
 or
 .IR socks5:// ,
 with
 .I user:password@
 before the host if the proxy wants them.
-https and socks4 proxies are refused.
+socks4 proxies are refused.
 .B \-x ""
 uses no proxy, whatever the environment says.
 A proxy is also taken from the environment (see
 .BR ENVIRONMENT ).
+.IP
+An
+.I https://
+proxy is spoken to in TLS, and its certificate is checked.  The proxy is asked,
+in that TLS, to CONNECT to the target: in a stream of HTTP/2 if it speaks that,
+and on the connection if it speaks only HTTP/1.1, as ALPN says.  What the
+target's protocol sends, including its own TLS, goes through that tunnel, so
+the proxy sees where the transfer goes and how much, but not what.  Credentials
+go to it as Basic, in the TLS.  This works for every scheme that can use a
+proxy except ftp and ftps, and an http:// URL is tunnelled too.  HTTP/3 does
+not use a proxy yet.  A tunnel has a connection to the proxy of its own.
+.TP
+.BI \-\-proxy\-cacert " file"
+PEM bundle of the authorities that vouch for an https proxy.  Without it the
+proxy is checked against the same authorities as the target:
+.BR \-\-cacert ,
+.BR \-\-capath ,
+the environment's (see
+.BR ENVIRONMENT ),
+and the system's.
+.TP
+.B \-\-proxy\-insecure
+Do not check the certificate of an https proxy.  This is not
+.BR \-k :
+that says nothing about the proxy, and the proxy is checked unless this is
+given.
 .TP
 .BI \-\-noproxy " list"
 Comma-separated hosts that do not go through a proxy, also when one is given
@@ -706,7 +733,8 @@ which overrides it.
 Its value is a proxy URL as
 .B \-x
 takes, with
-.I http://
+.IR http:// ,
+.I https://
 or
 .I socks5://
 before the host, and

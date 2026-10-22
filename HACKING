@@ -114,7 +114,9 @@ same numbers; what the tool shows and
 when in tests/cli-progress.sh, on file:// URLs; the sizes over HTTP in
 integration/http-progress.sh, against a server of python's.  The environment variables are tested in tests/test-proxyenv.c (which proxy,
 and the no-proxy list), tests/test-env.c (the trust store, the key log and
-qlog) and integration/env.sh (the proxies against a server of python's).  To
+qlog), integration/env.sh (the proxies against a server of python's) and
+integration/proxy-https.sh (https proxies, of node's, in front of an origin of
+python's; the sftp case is in integration/ssh-openssh.sh).  To
 compare with curl, run both on the same URL with COLUMNS set and 2>&1 >/dev/null,
 and look at the bytes (| od -c or | cat -v).  A hand test of the tool on a
 terminal shows nothing unless the body goes to a file.

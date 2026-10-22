@@ -28,7 +28,7 @@ Twist TODO List
           counts its own (sftp.c sent () and inflight).
         - proxies: socks5:// is treated as socks5h:// (the name goes to the
           proxy to look up; socks5:// should look it up itself).
-          https:// and socks4:// proxies are refused.  Credentials are
+          socks4:// proxies are refused.  Credentials are
           sent for tunnels only: a plain http:// URL through an HTTP
           proxy gets no Proxy-Authorization.
         - statvfs, and the other commands the sftp tool has, as -Q
@@ -100,6 +100,23 @@ Twist TODO List
       whether to read it is undecided.  SSL_CERT_DIR
       is read as a directory of PEM files by name (.pem, .crt, .cer or a
       c_rehash name), not through OpenSSL's rules.
+  [ ] https proxies (engine/tunnel.c) are done for TCP: TLS to the proxy, then
+      CONNECT in HTTP/2 or HTTP/1.1.  Left:
+        - CONNECT-UDP (RFC 9298) over HTTP/3, so that HTTP/3 and DNS over QUIC
+          can use a proxy, with --proxy-template-udp for a template other than
+          https://HOST:PORT/.well-known/masque/udp/{target_host}/{target_port}/.
+          Needs HTTP Datagrams (SETTINGS_H3_DATAGRAM) in the HTTP/3 layer, and a
+          QUIC client that sends over a datagram transport and not a UDP
+          socket.
+        - templated CONNECT-TCP (draft-ietf-httpbis-connect-tcp), and
+          --proxy-template-tcp for it, when it is an RFC.
+        - ftp and ftps through an https proxy (the data connection too).
+        - an http:// URL is tunnelled (CONNECT) and not sent in the proxy's
+          absolute form, which some proxies would rather have.
+        - a tunnel has an HTTP/2 connection of its own; one connection could
+          carry many.
+        - quickstep's gq_tls_free does not free the selected transcript
+          (t->tr), so each TLS connection leaks about 1.3 KB.
   [ ] URL globbing is done for URLs and for -o names (#N).  Not done: globbing
       the file given to -T ({a,b} there, with #N in the URL), and #N in
       --output-dir.  -T takes the name as written.

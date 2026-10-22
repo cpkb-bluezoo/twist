@@ -409,6 +409,46 @@ test_security_without_alpn (void)
   twist_loop_free (loop);
 }
 
+static int owner_freed;
+static int owner_resumed;
+
+static void
+owner_free (void *p)
+{
+  (void) p;
+  owner_freed++;
+}
+
+static void
+owner_resume (void *p)
+{
+  (void) p;
+  owner_resumed++;
+}
+
+/* A connection that is carried by another (a tunnel) has an owner that is told
+   when the application is ready for more, and when the connection is let go.  */
+static void
+test_connection_owner (void)
+{
+  struct twist_loop *loop = twist_loop_new (1);
+  struct twist_connection *c = twist_connection_new (loop);
+  int token;
+
+  twist_connection_set_owner (c, &token, owner_free, owner_resume);
+  check (!twist_connection_paused (c), "not paused");
+  twist_endpoint_pause_read (twist_connection_endpoint (c));
+  check (twist_connection_paused (c), "paused");
+  owner_resumed = 0;
+  twist_endpoint_resume_read (twist_connection_endpoint (c));
+  check (owner_resumed == 1 && !twist_connection_paused (c),
+         "the owner is told of the resume");
+  owner_freed = 0;
+  twist_connection_free (c);
+  check (owner_freed == 1, "and of the end");
+  twist_loop_free (loop);
+}
+
 static int cap_err;
 static size_t cap_got;
 
@@ -495,6 +535,7 @@ main (void)
   test_cmdq_producers ();
   test_connection ();
   test_security_without_alpn ();
+  test_connection_owner ();
   test_inbound_ceiling ();
   return tests_finish ();
 }

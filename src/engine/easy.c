@@ -57,6 +57,7 @@ twist_easy_init (void)
   easy->auth = TWISTAUTH_BASIC;
   easy->progress.hide = 1;
   easy->infilesize = -1;
+  easy->proxy_verifypeer = 1;
   easy->progress.lastshow = -1;
   return easy;
 }
@@ -103,6 +104,7 @@ easy_clear (struct twist_easy *easy)
   free (easy->proxy);
   free (easy->noproxy);
   free (easy->capath);
+  free (easy->proxy_cainfo);
   free (easy->range);
   free (easy->referer);
   free (easy->cookie);
@@ -400,6 +402,16 @@ twist_easy_setopt (twist_easy *easy, int opt, ...)
         replace (&easy->noproxy, s);
         easy->noproxy_set = s != NULL;
       }
+      break;
+    case TWISTOPT_PROXY_CAINFO:
+      {
+        const char *s = va_arg (ap, const char *);
+
+        replace (&easy->proxy_cainfo, s != NULL && s[0] != 0 ? s : NULL);
+      }
+      break;
+    case TWISTOPT_PROXY_SSL_VERIFYPEER:
+      easy->proxy_verifypeer = va_arg (ap, long) != 0;
       break;
     case TWISTOPT_CAPATH:
       {

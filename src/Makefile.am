@@ -74,6 +74,7 @@ libtwist_la_SOURCES = \
   engine/vars.c \
   engine/scheme.c \
   engine/share.c \
+  engine/tunnel.c \
   engine/url.c \
   dns/doh.c \
   dns/policy.c \

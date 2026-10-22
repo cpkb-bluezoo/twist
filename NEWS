@@ -12,6 +12,8 @@ Version 0.1 - unreleased
   * gzip and deflate request and response coding, via zlib
   * the progress meter and the bar (-#), and the library's
     TWISTOPT_XFERINFOFUNCTION
+  * https proxies (--proxy-cacert, --proxy-insecure): TLS to the proxy and
+    CONNECT in HTTP/2 or HTTP/1.1, for every scheme but ftp
   * environment variables: http_proxy, HTTPS_PROXY,
     [scheme]_PROXY, ALL_PROXY, NO_PROXY, COLUMNS, SSL_CERT_FILE, SSL_CERT_DIR,
     SSLKEYLOGFILE, QLOGDIR; with --noproxy and --capath; TWIST_CA_BUNDLE names

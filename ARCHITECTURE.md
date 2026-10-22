@@ -395,6 +395,20 @@ The first pass found a signed overflow in the HTTP/2 flow-control windows, a
 read past the QPACK static table, and in HPACK a table that counted entries
 and not bytes, no handling of size updates, and leaks on error paths.
 
+An https proxy is a tunnel (`src/engine/tunnel.c`), not the proxy state machine
+that wraps one connection: TLS is made twice, to the proxy and then to the
+target, and a connection holds one TLS layer. So the tunnel has two: an outer
+connection to the proxy (TCP, TLS with ALPN, then CONNECT, in a stream of
+HTTP/2 when the proxy speaks it, using `twist_h2_send_data` and its windows),
+and an inner one, without a descriptor, that the protocol is given as if it were
+a socket to the target. The inner connection's `write_fn` is the tunnel, what
+the tunnel receives is `twist_connection_ingest`ed, and the tunnel is its
+owner (`twist_connection_set_owner`): freed with it, told when the protocol
+resumes after pausing so that what was held can go on. A connection with an
+owner and no descriptor writes at once what TLS queues. The three places that
+dial (`http.c`, `mail/dial.c`, `ftp.c`) call `twist_tunnel_connect` in place of
+making a TCP connection when the proxy is https.
+
 The environment is read in three places, and only there. `twist_easy_proxy`
 (`src/engine/noproxy.c`) is the proxy a transfer uses: the one it was given,
 or else the environment's for the scheme (`http_proxy` in lower case only, the

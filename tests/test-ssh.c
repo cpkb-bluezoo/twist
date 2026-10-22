@@ -5077,15 +5077,17 @@ test_proxy_refusals (void)
   twist_easy_cleanup (easy);
   twist_multi_cleanup (multi);
 
-  /* Kinds that are not spoken.  */
+  /* A kind that is not spoken.  */
   multi = twist_multi_init ();
   easy = proxied_easy ("socks4://127.0.0.1:1080");
   check (tcp_get (multi, easy, &ts, "sftp", "/data.bin") == TWIST_ERR_UNSUPPORTED
          && detail_has (easy, "not supported"), "a SOCKS4 proxy is refused");
   twist_easy_cleanup (easy);
-  easy = proxied_easy ("https://127.0.0.1:3128");
-  check (tcp_get (multi, easy, &ts, "sftp", "/data.bin") == TWIST_ERR_UNSUPPORTED,
-         "an https proxy is refused, not spoken to in the clear");
+  /* An https proxy is spoken to, in TLS; with none there it is a refused
+     connection and not the clear text of the SSH banner.  */
+  easy = proxied_easy ("https://127.0.0.1:1");
+  check (tcp_get (multi, easy, &ts, "sftp", "/data.bin") == TWIST_ERR_CONNECT,
+         "no https proxy listening");
   twist_easy_cleanup (easy);
   twist_multi_cleanup (multi);
   ts_stop (&ts);

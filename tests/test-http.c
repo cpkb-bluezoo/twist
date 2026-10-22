@@ -273,6 +273,153 @@ test_h2_windows (void)
   twist_h2_free (h);
 }
 
+/* A CONNECT tunnel on a stream of HTTP/2 (RFC 9113, 8.5): the request has the
+   method and the authority and nothing else of the pseudo-headers, and the
+   data on the stream goes out in frames that keep to the windows and to the
+   frame size, waiting for the peer's updates when they are used up.  */
+static uint8_t tun_out[300000];
+static size_t tun_out_n;
+static int tun_writable;
+
+static int
+tun_emit (void *user, const uint8_t *data, size_t len)
+{
+  (void) user;
+  if (tun_out_n + len > sizeof tun_out)
+    return TWIST_ERR_NOMEM;
+  memcpy (tun_out + tun_out_n, data, len);
+  tun_out_n += len;
+  return 0;
+}
+
+static void
+tun_ready (void *user)
+{
+  (void) user;
+  tun_writable++;
+}
+
+static char tun_names[8][32];
+static char tun_values[8][64];
+static size_t tun_seen;
+
+static void
+tun_header (void *user, const char *name, size_t nn, const char *value,
+            size_t vn)
+{
+  (void) user;
+  if (tun_seen < 8)
+    {
+      snprintf (tun_names[tun_seen], sizeof tun_names[0], "%.*s", (int) nn,
+                name);
+      snprintf (tun_values[tun_seen], sizeof tun_values[0], "%.*s", (int) vn,
+                value);
+      tun_seen++;
+    }
+}
+
+/* The DATA frames in OUT from OFFSET: how many bytes they carry, and a check
+   that each is on stream ID and no longer than the frame size.  Returns the
+   total, or -1 if a frame is wrong.  *ENDS is the number with END_STREAM.  */
+static long
+tun_frames (size_t offset, uint32_t id, int *ends)
+{
+  long total = 0;
+
+  *ends = 0;
+  while (offset + 9 <= tun_out_n)
+    {
+      size_t len = ((size_t) tun_out[offset] << 16)
+                   | ((size_t) tun_out[offset + 1] << 8) | tun_out[offset + 2];
+      uint32_t sid = ((uint32_t) tun_out[offset + 5] << 24)
+                     | ((uint32_t) tun_out[offset + 6] << 16)
+                     | ((uint32_t) tun_out[offset + 7] << 8)
+                     | tun_out[offset + 8];
+
+      if (tun_out[offset + 3] != 0 || sid != id || len > 16384
+          || offset + 9 + len > tun_out_n)
+        return -1;
+      if (tun_out[offset + 4] & 1)
+        (*ends)++;
+      total += (long) len;
+      offset += 9 + len;
+    }
+  return total;
+}
+
+static void
+test_h2_tunnel (void)
+{
+  struct twist_h2 *h;
+  struct twist_hpack *hp;
+  struct twist_h1_events ev;
+  struct twist_slist *extra = twist_slist_append (NULL,
+                                                  "proxy-authorization: Basic eDp5");
+  uint8_t *out = NULL;
+  size_t n = 0;
+  static uint8_t data[100000];
+  size_t sent;
+  size_t mark;
+  int ends;
+
+  memset (data, 'x', sizeof data);
+  memset (&ev, 0, sizeof ev);
+  h = twist_h2_new (&ev);
+  twist_h2_set_emit (h, tun_emit, NULL);
+  twist_h2_set_writable (h, tun_ready, NULL);
+  check (twist_h2_request (h, "CONNECT", NULL, "example.org:443", NULL, extra,
+                           NULL, 0, 1, &out, &n) == TWIST_OK, "a CONNECT request");
+  /* The block after the 9 bytes of the frame header.  */
+  check (n > 9 && out[3] == 1 && (out[4] & 4) != 0 && (out[4] & 1) == 0,
+         "HEADERS with END_HEADERS, and the stream is left open");
+  memset (&ev, 0, sizeof ev);
+  ev.header = tun_header;
+  hp = twist_hpack_new ();
+  tun_seen = 0;
+  check (twist_hpack_decode (hp, out + 9, n - 9, &ev) == TWIST_OK
+         && tun_seen == 3
+         && strcmp (tun_names[0], ":method") == 0
+         && strcmp (tun_values[0], "CONNECT") == 0
+         && strcmp (tun_names[1], ":authority") == 0
+         && strcmp (tun_values[1], "example.org:443") == 0
+         && strcmp (tun_names[2], "proxy-authorization") == 0,
+         "CONNECT has :method and :authority, no :scheme and no :path");
+  twist_hpack_free (hp);
+  free (out);
+  check (twist_h2_last_stream (h) == 1, "the stream is 1");
+
+  /* The first window is 65535 for the connection and for the stream.  */
+  tun_out_n = 0;
+  sent = twist_h2_send_data (h, 1, data, sizeof data, 0);
+  check (sent == 65535, "a send stops at the window");
+  check (tun_frames (0, 1, &ends) == 65535 && ends == 0,
+         "frames of at most 16384, on the stream");
+  check (twist_h2_send_data (h, 1, data + sent, sizeof data - sent, 0) == 0,
+         "and nothing more until the window is opened");
+  check (twist_h2_send_data (h, 3, data, 10, 0) == 0, "no such stream: none");
+
+  /* An update on the connection alone is not enough, and the caller is told
+     when it might be: after each.  */
+  mark = tun_out_n;
+  tun_writable = 0;
+  h2_window_update (h, 0, 100000);
+  check (tun_writable == 1, "told of a window update");
+  check (twist_h2_send_data (h, 1, data + sent, sizeof data - sent, 0) == 0,
+         "the stream's window is shut as well");
+  h2_window_update (h, 1, 100000);
+  check (tun_writable == 2, "and of the next");
+  n = twist_h2_send_data (h, 1, data + sent, sizeof data - sent, 0);
+  check (n == sizeof data - sent && tun_frames (mark, 1, &ends) == (long) n,
+         "the rest goes");
+
+  /* The end of the stream, in a frame of no data, which needs no window.  */
+  mark = tun_out_n;
+  check (twist_h2_send_data (h, 1, NULL, 0, 1) == 0 && tun_frames (mark, 1, &ends) == 0
+         && ends == 1, "END_STREAM in an empty DATA frame");
+  twist_h2_free (h);
+  twist_slist_free_all (extra);
+}
+
 /* The HPACK dynamic table is a number of bytes (RFC 7541, 4.1): an entry is
    its name and value and 32, and the table is 4096 unless it is changed with
    a size update (6.3), which may not be more than we allow.  A server may
@@ -547,6 +694,7 @@ main (void)
   test_h2 ();
   test_h3 ();
   test_h2_windows ();
+  test_h2_tunnel ();
   test_hpack_table ();
   test_qpack_static_index ();
   test_cookie ();

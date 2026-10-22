@@ -231,7 +231,11 @@ usage (void)
          stdout);
   fputs (_("      --noproxy LIST      hosts that do not go through a proxy\n"),
          stdout);
-  fputs (_("  -x, --proxy URL         proxy (http:// or socks5://), may hold user:password@\n"), stdout);
+  fputs (_("  -x, --proxy URL         proxy (http://, https:// or socks5://), may hold\n"
+           "                          user:password@\n"), stdout);
+  fputs (_("      --proxy-cacert FILE CA bundle for an https proxy\n"), stdout);
+  fputs (_("      --proxy-insecure    do not check the certificate of an https proxy\n"),
+         stdout);
   fputs (_("  -U, --proxy-user U:P    user and password for the proxy\n"), stdout);
   fputs (_("      --url URL           a URL to fetch\n"), stdout);
   fputs (_("      --variable N=TEXT   set a variable (N@FILE, %N for the environment)\n"),
@@ -1643,6 +1647,8 @@ main (int argc, char **argv)
     { "hostpubsha256", required_argument, NULL, 33 },
     { "cacert", required_argument, NULL, 16 },
     { "capath", required_argument, NULL, 44 },
+    { "proxy-cacert", required_argument, NULL, 46 },
+    { "proxy-insecure", no_argument, NULL, 47 },
     { "noproxy", required_argument, NULL, 45 },
     { "proxy", required_argument, NULL, 'x' },
     { "proxy-user", required_argument, NULL, 'U' },
@@ -1908,6 +1914,12 @@ main (int argc, char **argv)
           break;
         case 45:
           twist_easy_setopt (op->easy, TWISTOPT_NOPROXY, optarg);
+          break;
+        case 46:
+          twist_easy_setopt (op->easy, TWISTOPT_PROXY_CAINFO, optarg);
+          break;
+        case 47:
+          twist_easy_setopt (op->easy, TWISTOPT_PROXY_SSL_VERIFYPEER, 0L);
           break;
         case 32:
           twist_easy_setopt (op->easy, TWISTOPT_KEYPASSWD, optarg);
