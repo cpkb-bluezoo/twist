@@ -361,6 +361,29 @@ with
 .I user:password@
 before the host if the proxy wants them.
 https and socks4 proxies are refused.
+.B \-x ""
+uses no proxy, whatever the environment says.
+A proxy is also taken from the environment (see
+.BR ENVIRONMENT ).
+.TP
+.BI \-\-noproxy " list"
+Comma-separated hosts that do not go through a proxy, also when one is given
+with
+.BR \-x .
+A name matches itself and the names under it:
+.I local.com
+matches local.com, www.local.com and not www.notlocal.com.
+An address matches itself, or a network as
+.IR 192.168.0.0/16 .
+.B *
+is every host, and the proxy is not used at all.
+This overrides the environment's
+.B no_proxy
+and
+.BR NO_PROXY ,
+and
+.B \-\-noproxy ""
+turns them off.
 .TP
 .BI \-U ", " \-\-proxy\-user " user:password"
 The user name and password for the proxy, if its URL has none.
@@ -560,6 +583,16 @@ says; one that does not is refused, even with
 .BI \-\-cacert " file"
 PEM trust bundle used to verify the peer.
 .TP
+.BI \-\-capath " directory"
+A directory of certificate authorities, as PEM files whose names end in .pem,
+.I .crt
+or .cer, or are the eight-digit hash and number that OpenSSL's c_rehash makes.
+It is used as well as
+.BR \-\-cacert .
+With neither, the environment's (see
+.BR ENVIRONMENT ),
+and then the system's authorities are trusted.
+.TP
 .B \-\-http1.0
 .TQ
 .B \-\-http1.1
@@ -660,6 +693,119 @@ with an optional port.  The default port is 853.  Discovery matches
 There is no config file,
 .BR \-\-fail\-with\-body ,
 verbose trace, cookie jar, or parallel transfer.
+.SH ENVIRONMENT
+The variables can be in lower case or upper case, and the lower case one has
+precedence.
+.B http_proxy
+is the exception: it is only read in lower case, since a web server that runs a
+program sets the upper case one from the request.
+.PP
+A proxy from the environment has the same effect as
+.BR \-x ,
+which overrides it.
+Its value is a proxy URL as
+.B \-x
+takes, with
+.I http://
+or
+.I socks5://
+before the host, and
+.I user:password@
+if it wants them.
+An empty value is no proxy.
+.TP
+.B http_proxy [protocol://]host[:port]
+The proxy for HTTP.
+.TP
+.B HTTPS_PROXY [protocol://]host[:port]
+The proxy for HTTPS.
+.TP
+.B [url-protocol]_PROXY [protocol://]host[:port]
+The proxy for the scheme of the URL, whatever it is: FTP_PROXY, FTPS_PROXY,
+SFTP_PROXY, IMAP_PROXY, SMTP_PROXY, LDAP_PROXY and so on, for the schemes that
+can go through a proxy.
+WS_PROXY and WSS_PROXY are those of WebSocket; if they are not set the proxy
+of HTTP and HTTPS is used.
+.TP
+.B ALL_PROXY [protocol://]host[:port]
+The proxy for a scheme that has none of its own.
+.TP
+.B NO_PROXY comma-separated list of hosts and domains
+Hosts that do not go through a proxy.  The list is as for
+.BR \-\-noproxy ,
+which overrides it: a name matches itself and the names under it, an address
+matches itself or a network written as 192.168.0.0/16, an IPv6 address is
+written without brackets, and a single
+.B *
+matches all hosts.
+This disables the proxy also when it was given with
+.BR \-x .
+.TP
+.B COLUMNS terminal width
+If it is a number from 21 to 9999, that many characters are the width of the
+bar of
+.BR \-# .
+Without it the width of the terminal is used, and 79 if there is none.
+.TP
+.B HOME directory
+Where
+.I .ssh/known_hosts
+is looked for, for sftp and scp.  If it is not set, the home directory in the
+password file.
+.TP
+.B QLOGDIR directory name
+Makes twist write a log of each QUIC connection (HTTP/3 and DNS over QUIC) in
+that directory, in a file named after the connection ID the client chose, in
+hexadecimal, and the ending
+.IR .qlog .
+Each line is an event of the connection, as draft-ietf-quic-qlog-quic-events
+defines them, with the time in microseconds, its name and its fields as
+KEY=VALUE.  The file can be read by the owner only.  A directory that is not
+there means no log.  These files can become large, and say who was talked to.
+.TP
+.B SSH_AUTH_SOCK file name
+The socket of the ssh-agent that holds the keys for sftp and scp, as for ssh.
+.TP
+.B SSL_CERT_DIR directory
+If set, it is used as the
+.B \-\-capath
+value.
+.TP
+.B SSL_CERT_FILE file name
+If set, it is used as the
+.B \-\-cacert
+value.
+.TP
+.B SSLKEYLOGFILE file name
+If you set this to a file name, twist writes the secrets of its TLS connections
+in that file, in the NSS key log format, so that Wireshark and similar tools can
+decrypt a capture of them.  This includes HTTP/3.  The file is made so that
+only its owner can read it, and what is in it undoes the encryption of the
+connections: it is for debugging.
+.TP
+.B TWIST_CA_BUNDLE file name
+If set, it is used as the
+.B \-\-cacert
+value, and
+.B SSL_CERT_DIR
+and
+.B SSL_CERT_FILE
+are not looked at.  It is twist's name for curl's CURL_CA_BUNDLE.
+.PP
+The names of the certificate variables are looked at only when neither
+.B \-\-cacert
+nor
+.B \-\-capath
+is given.  A file or directory that they name and that cannot be read is an
+error.
+.PP
+The variables that name the configuration file of curl (CURL_HOME,
+XDG_CONFIG_HOME, APPDATA, USERPROFILE), its choice of TLS library
+(CURL_SSL_BACKEND) and the shell (SHELL) are not used: twist reads no
+configuration file, and has one TLS library.
+Variables can also be imported by
+.B \-\-variable
+.IR %name .
 .SH "EXIT STATUS"
 .TP
 .B 0

@@ -176,9 +176,9 @@ twist_mail_link_open (struct twist_mail_link *link, struct twist_easy *easy,
   url = easy->url;
   link->dial_port = url->port;
   dial = url->host;
-  if (easy->proxy != NULL)
+  if (twist_easy_proxy (easy) != NULL)
     {
-      int rc = twist_proxy_parse (easy->proxy, &kind, &phost, &pport, &puser,
+      int rc = twist_proxy_parse (twist_easy_proxy (easy), &kind, &phost, &pport, &puser,
                                   &ppass);
 
       if (rc == TWIST_ERR_UNSUPPORTED)

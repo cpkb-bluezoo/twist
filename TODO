@@ -31,8 +31,7 @@ Twist TODO List
           proxy to look up; curl looks it up itself for socks5://).
           https:// and socks4:// proxies are refused.  Credentials are
           sent for tunnels only: a plain http:// URL through an HTTP
-          proxy gets no Proxy-Authorization.  No --noproxy and no proxy
-          environment variables.
+          proxy gets no Proxy-Authorization.
         - statvfs, and the other commands the sftp tool has, as -Q
           commands; --create-file-mode and the directory mode.
         - quote commands for scp URLs (curl has none either).
@@ -99,6 +98,22 @@ Twist TODO List
         - --stderr - keeps standard error; curl writes to standard output.
         - curl's warning that binary output is going to a terminal is not
           here.
+  [ ] The environment (see the manual).  Not done: a curl-style configuration
+      file, so no CURL_HOME or XDG_CONFIG_HOME; TWIST_CA_BUNDLE is twist's
+      name for CURL_CA_BUNDLE, and curl's name is not read.  SSL_CERT_DIR
+      is read as a directory of PEM files by name (.pem, .crt, .cer or a
+      c_rehash name), not through OpenSSL's rules.
+  [ ] -k does not turn certificate checking off for TLS: nothing sets
+      verify_peer in quickstep's hooks, and TWISTOPT_SSL_VERIFYPEER only
+      decides whether a trust bundle that cannot be loaded is an error.
+      HTTP/3 (twist_quic_dial) has no verify argument at all.  Found while
+      testing the certificate variables.
+  [ ] TLS to an OpenSSL or Python server does not finish: with a trusted
+      certificate the transfer hangs, and with an untrusted one it fails with
+      35, whether or not -k is given.  openssl s_server -msg shows the client
+      closing after the server's flight.  Found while testing the certificate
+      variables; the certificate checks of integration/env.sh are skipped when
+      a probe of this fails.
   [ ] URL globbing is done for URLs and for -o names (#N).  curl also globs
       the file given to -T ({a,b} there, with #N in the URL), and --output-dir
       does not take #N.  Neither is done here: -T takes the name as written.

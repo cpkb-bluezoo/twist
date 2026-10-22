@@ -702,8 +702,8 @@ twist_endpoint_loop (struct twist_endpoint *ep)
 int
 twist_connection_start_tls (struct twist_connection *c, const char *server_name,
                             int verify, const char *const *alpn, size_t n_alpn,
-                            const char *cafile, const char *certfile,
-                            const char *keyfile)
+                            const char *cafile, const char *capath,
+                            const char *certfile, const char *keyfile)
 {
   struct twist_tls_want want;
 
@@ -715,6 +715,7 @@ twist_connection_start_tls (struct twist_connection *c, const char *server_name,
   want.alpn = alpn;
   want.n_alpn = n_alpn;
   want.cafile = cafile;
+  want.capath = capath;
   want.certfile = certfile;
   want.keyfile = keyfile;
   return twist_tls_start_fn (c, &want);

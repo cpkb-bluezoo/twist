@@ -227,6 +227,10 @@ usage (void)
   fputs (_("      --hostpubsha256 H   SHA-256 of the sftp or scp host key (base64)\n"),
          stdout);
   fputs (_("      --cacert FILE       CA trust bundle (PEM)\n"), stdout);
+  fputs (_("      --capath DIR        directory of CA certificates (PEM)\n"),
+         stdout);
+  fputs (_("      --noproxy LIST      hosts that do not go through a proxy\n"),
+         stdout);
   fputs (_("  -x, --proxy URL         proxy (http:// or socks5://), may hold user:password@\n"), stdout);
   fputs (_("  -U, --proxy-user U:P    user and password for the proxy\n"), stdout);
   fputs (_("      --url URL           a URL to fetch\n"), stdout);
@@ -1639,6 +1643,8 @@ main (int argc, char **argv)
     { "pass", required_argument, NULL, 32 },
     { "hostpubsha256", required_argument, NULL, 33 },
     { "cacert", required_argument, NULL, 16 },
+    { "capath", required_argument, NULL, 44 },
+    { "noproxy", required_argument, NULL, 45 },
     { "proxy", required_argument, NULL, 'x' },
     { "proxy-user", required_argument, NULL, 'U' },
     { "user-agent", required_argument, NULL, 'A' },
@@ -1897,6 +1903,12 @@ main (int argc, char **argv)
           break;
         case 16:
           twist_easy_setopt (op->easy, TWISTOPT_CAINFO, optarg);
+          break;
+        case 44:
+          twist_easy_setopt (op->easy, TWISTOPT_CAPATH, optarg);
+          break;
+        case 45:
+          twist_easy_setopt (op->easy, TWISTOPT_NOPROXY, optarg);
           break;
         case 32:
           twist_easy_setopt (op->easy, TWISTOPT_KEYPASSWD, optarg);

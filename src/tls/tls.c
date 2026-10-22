@@ -139,18 +139,11 @@ tls_start (struct twist_connection *conn, const struct twist_tls_want *want)
       free (t);
       return TWIST_ERR_TLS;
     }
-  if (want->cafile != NULL)
-    {
-      if (gq_trust_add_pem_file (t->trust, want->cafile) != GQ_OK)
-        {
-          tls_free (t);
-          return TWIST_ERR_TLS;
-        }
-    }
-  else if (gq_trust_add_system (t->trust, NULL) != GQ_OK && want->verify)
+  rc = twist_trust_load (t->trust, want->cafile, want->capath, want->verify);
+  if (rc != TWIST_OK)
     {
       tls_free (t);
-      return TWIST_ERR_TLS;
+      return rc;
     }
   t->server_name = twist_strdup (want->server_name);
   for (i = 0; i < want->n_alpn && i < 2; i++)
@@ -174,6 +167,8 @@ tls_start (struct twist_connection *conn, const struct twist_tls_want *want)
   cfg.alpn = t->n_alpn > 0 ? t->alpn : NULL;
   cfg.n_alpn = t->n_alpn;
   cfg.trust = t->trust;
+  if (twist_keylog_wanted ())
+    cfg.keylog = twist_keylog_write;
   twist_client_auth_apply (t->auth, &cfg);
   memset (&ev, 0, sizeof ev);
   ev.user = conn;

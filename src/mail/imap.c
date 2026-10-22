@@ -490,7 +490,7 @@ imap_connected (struct twist_endpoint *ep)
     return;
   rc = twist_connection_start_tls (ep->conn, m->easy->url->host,
                                    m->easy->verifypeer, NULL, 0,
-                                   m->easy->cainfo, m->easy->sslcert,
+                                   m->easy->cainfo, m->easy->capath, m->easy->sslcert,
                                    m->easy->sslkey);
   if (rc != TWIST_OK)
     imap_complete (m, rc);

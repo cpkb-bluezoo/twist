@@ -12,3 +12,7 @@ Version 0.1 - unreleased
   * gzip and deflate request and response coding, via zlib
   * the progress meter and the bar (-#), as curl's, and the library's
     TWISTOPT_XFERINFOFUNCTION
+  * environment variables as curl has them: http_proxy, HTTPS_PROXY,
+    [scheme]_PROXY, ALL_PROXY, NO_PROXY, COLUMNS, SSL_CERT_FILE, SSL_CERT_DIR,
+    SSLKEYLOGFILE, QLOGDIR; with --noproxy and --capath; TWIST_CA_BUNDLE is
+    twist's CURL_CA_BUNDLE

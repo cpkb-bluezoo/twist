@@ -733,7 +733,7 @@ ftp_connected (struct twist_endpoint *ep)
     return;
   rc = twist_connection_start_tls (ep->conn, f->easy->url->host,
                                    f->easy->verifypeer, NULL, 0,
-                                   f->easy->cainfo, f->easy->sslcert,
+                                   f->easy->cainfo, f->easy->capath, f->easy->sslcert,
                                    f->easy->sslkey);
   if (rc != TWIST_OK)
     ftp_complete (f, rc);
@@ -945,9 +945,9 @@ ftp_begin (struct twist_ftp *f)
 
   f->dial_port = url->port;
   dial = url->host;
-  if (easy->proxy != NULL)
+  if (twist_easy_proxy (easy) != NULL)
     {
-      if (twist_proxy_parse (easy->proxy, &kind, &phost, &pport, &puser,
+      if (twist_proxy_parse (twist_easy_proxy (easy), &kind, &phost, &pport, &puser,
                              &ppass) != TWIST_OK)
         {
           ftp_complete (f, TWIST_ERR_URL);

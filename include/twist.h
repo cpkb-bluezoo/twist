@@ -142,8 +142,15 @@ enum twist_opt
   TWISTOPT_PASSWORD = 16,
   TWISTOPT_HTTPAUTH = 17,
   TWISTOPT_SSL_VERIFYPEER = 18,
+  /* A PEM bundle of certificate authorities.  Without this nor
+     TWISTOPT_CAPATH the environment's are used (TWIST_CA_BUNDLE, or
+     SSL_CERT_DIR and SSL_CERT_FILE), and then the system's.  */
   TWISTOPT_CAINFO = 19,
   TWISTOPT_TIMEOUT_MS = 20,
+  /* A proxy URL.  "" is no proxy, even when the environment names one; NULL
+     is the default, which is the environment's: http_proxy, HTTPS_PROXY and
+     the like by scheme, then ALL_PROXY, unless TWISTOPT_NOPROXY or NO_PROXY
+     names the host.  */
   TWISTOPT_PROXY = 21,
   TWISTOPT_HTTP_VERSION = 22,
   TWISTOPT_XOAUTH2_BEARER = 23,
@@ -233,7 +240,15 @@ enum twist_opt
   /* A long long: how many bytes TWISTOPT_READFUNCTION will give, if the
      application knows.  It is for the progress only; no request carries it.
      -1, the default, is not known.  */
-  TWISTOPT_INFILESIZE = 60
+  TWISTOPT_INFILESIZE = 60,
+  /* Comma-separated hosts that do not go through a proxy: a host name matches
+     itself and the names under it, an address matches itself or a network as
+     192.168.0.0/16, and * is all hosts.  "" is none.  Without this the
+     environment's no_proxy or NO_PROXY is used.  As CURLOPT_NOPROXY.  */
+  TWISTOPT_NOPROXY = 61,
+  /* A directory of PEM files of certificate authorities, in addition to
+     TWISTOPT_CAINFO.  As CURLOPT_CAPATH.  */
+  TWISTOPT_CAPATH = 62
 };
 
 enum twist_dns_transport

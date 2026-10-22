@@ -394,6 +394,20 @@ The first pass found a signed overflow in the HTTP/2 flow-control windows, a
 read past the QPACK static table, and in HPACK a table that counted entries
 and not bytes, no handling of size updates, and leaks on error paths.
 
+The environment is read in three places, and only there. `twist_easy_proxy`
+(`src/engine/noproxy.c`) is the proxy a transfer uses: the one it was given,
+or else the environment's for the scheme (`http_proxy` in lower case only, the
+others in either, then `all_proxy`), unless the host is on the no-proxy list,
+the transfer's or `no_proxy`; every handler that dials asks it when it dials,
+so a redirect is looked at again. `twist_trust_load` (`src/tls/trust.c`) fills
+the trust store for TLS and QUIC alike from the file and the directory it was
+given, or the environment's, or the system's. The key log and the qlog are
+callbacks that quickstep offers and does not use by itself: `SSLKEYLOGFILE` is
+appended to a line at a time, and `QLOGDIR` gets a file for each QUIC
+connection, named for the connection ID. The command line reads `COLUMNS`
+for the bar; `HOME` and `SSH_AUTH_SOCK` are read by the SSH code. The manual's
+Environment chapter is the list.
+
 The progress meter (`src/engine/progress.c`) is libcurl's (`lib/progress.c`):
 counters of what has been downloaded and uploaded, the sizes that are known,
 and an update that runs whenever any of those change. The update takes the

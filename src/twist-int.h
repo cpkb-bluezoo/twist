@@ -159,6 +159,9 @@ struct twist_easy
   char *referer;
   char *cookie;
   char *proxy_userpwd;
+  char *noproxy;
+  int noproxy_set;
+  char *capath;
   char *mail_from;
   struct twist_slist *mail_rcpt;
   char *doh_url;
@@ -331,8 +334,8 @@ struct twist_loop *twist_endpoint_loop (struct twist_endpoint *ep);
 int twist_connection_start_tls (struct twist_connection *conn,
                                 const char *server_name, int verify,
                                 const char *const *alpn, size_t n_alpn,
-                                const char *cafile, const char *certfile,
-                                const char *keyfile);
+                                const char *cafile, const char *capath,
+                                const char *certfile, const char *keyfile);
 const char *twist_connection_alpn (struct twist_connection *conn,
                                    size_t *len);
 void twist_connection_read_finished (struct twist_connection *conn);
@@ -345,12 +348,23 @@ struct twist_tls_want
   const char *const *alpn;
   size_t n_alpn;
   const char *cafile;
+  const char *capath;
   const char *certfile;
   const char *keyfile;
 };
 
 struct gq_tls_config;
 struct gq_tls_info;
+struct gq_trust;
+
+/* The certificate authorities for a connection: CAFILE and CAPATH, or the
+   environment's, or the system's (tls/trust.c).  */
+int twist_trust_load (struct gq_trust *trust, const char *cafile,
+                      const char *capath, int verify);
+/* SSLKEYLOGFILE: whether it is set, and the callback that writes a line to it
+   (gq_tls_config.keylog).  */
+int twist_keylog_wanted (void);
+void twist_keylog_write (void *user, const char *line);
 struct twist_client_auth;
 
 int twist_pem_certificates (const char *text, size_t len, gq_slice *chain,
@@ -372,8 +386,9 @@ extern int (*twist_quic_connect_fn) (struct twist_easy *easy,
                                      struct twist_connection **out);
 int twist_quic_dial (struct twist_loop *loop, const char *server_name,
                      const char *alpn, const struct twist_dns_addr *addr,
-                     int port, const char *cafile, const char *certfile,
-                     const char *keyfile, struct twist_connection **out);
+                     int port, const char *cafile, const char *capath,
+                     const char *certfile, const char *keyfile,
+                     struct twist_connection **out);
 int twist_quic_open_stream (struct twist_connection *conn);
 int twist_quic_can_open (struct twist_connection *conn);
 void twist_quic_bind (struct twist_connection *conn,
@@ -1115,6 +1130,19 @@ int twist_easy_finish (struct twist_easy *easy, int result);
 int twist_easy_perform_in (struct twist_multi *multi, struct twist_easy *easy);
 void twist_easy_release_transfer (struct twist_easy *easy);
 int twist_transfer_start (struct twist_easy *easy);
+
+/* ---- the proxy to use ---- */
+
+/* The proxy URL this transfer goes through, or NULL for none: the one given
+   with TWISTOPT_PROXY ("" is none), or else the environment's for the URL's
+   scheme (http_proxy, https_proxy, ftp_proxy... in lower case or upper, then
+   all_proxy), unless the host is on the TWISTOPT_NOPROXY list or the
+   environment's no_proxy.  It is worked out each time it is asked, so a
+   redirect to another host is looked at again.  The string is the easy
+   handle's or the environment's: it is not to be freed.  */
+const char *twist_easy_proxy (const struct twist_easy *easy);
+/* Whether HOST is on a no_proxy LIST.  */
+int twist_noproxy_match (const char *host, const char *list);
 
 /* ---- progress ---- */
 

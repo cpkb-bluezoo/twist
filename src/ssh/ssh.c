@@ -175,7 +175,7 @@ ssh_pool_key (struct twist_easy *e, char *key, size_t cap)
   /* A tunnel through one proxy is not one through another, or through the
      same with other credentials: the proxy is part of who the server sees
      and what let us in.  */
-  terms_add (&buf, &len, &bcap, e->proxy);
+  terms_add (&buf, &len, &bcap, twist_easy_proxy (e));
   terms_add (&buf, &len, &bcap, e->proxy_userpwd);
   if (len == (size_t) -1 || twist_sha256 (buf, len, d) != TWIST_OK)
     {

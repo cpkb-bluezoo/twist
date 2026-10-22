@@ -989,7 +989,7 @@ ldap_connected (struct twist_endpoint *ep)
     {
       rc = twist_connection_start_tls (ep->conn, l->easy->url->host,
                                        l->easy->verifypeer, NULL, 0,
-                                       l->easy->cainfo, l->easy->sslcert,
+                                       l->easy->cainfo, l->easy->capath, l->easy->sslcert,
                                        l->easy->sslkey);
       if (rc != TWIST_OK)
         ldap_complete (l, rc);

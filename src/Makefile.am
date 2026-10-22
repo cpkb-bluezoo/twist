@@ -67,6 +67,7 @@ libtwist_la_SOURCES = \
   engine/multi.c \
   engine/glob.c \
   engine/pool.c \
+  engine/noproxy.c \
   engine/progress.c \
   engine/rate.c \
   engine/proxy.c \
@@ -113,7 +114,8 @@ libtwist_la_SOURCES = \
   ssh/ssh.c \
   tls/identity.c \
   tls/quic.c \
-  tls/tls.c
+  tls/tls.c \
+  tls/trust.c
 
 twist_SOURCES = bar.c bar.h main.c
 twist_LDADD = libtwist.la $(READLINE_LIBS)

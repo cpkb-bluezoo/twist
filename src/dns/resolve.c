@@ -76,6 +76,7 @@ struct dns_query
   long timeout_ms;
   char *doh_text;
   const char *cainfo;
+  const char *capath;
   const char *certfile;
   const char *keyfile;
   struct twist_url *doh_parsed;
@@ -786,7 +787,7 @@ doh_connected (struct twist_endpoint *ep)
   if (q->done)
     return;
   rc = twist_connection_start_tls (q->conn, q->doh_parsed->host,
-                                   q->doh_verifypeer, alpn, 1, q->cainfo,
+                                   q->doh_verifypeer, alpn, 1, q->cainfo, q->capath,
                                    q->certfile, q->keyfile);
   if (rc != TWIST_OK)
     dns_finish (q, rc);
@@ -1004,7 +1005,7 @@ dot_connected (struct twist_endpoint *ep)
 
   if (q->done)
     return;
-  rc = twist_connection_start_tls (q->conn, q->peer_name, 1, alpn, 1, q->cainfo,
+  rc = twist_connection_start_tls (q->conn, q->peer_name, 1, alpn, 1, q->cainfo, q->capath,
                                    q->certfile, q->keyfile);
   if (rc != TWIST_OK)
     twist_connection_fail (q->conn, rc);
@@ -1061,7 +1062,7 @@ connect_doq (struct dns_query *q, const struct twist_dns_addr *addr, int port,
   rc = remember_peer (q, name, addr, port);
   if (rc != TWIST_OK)
     return rc;
-  rc = twist_quic_dial (q->loop, q->peer_name, "doq", addr, port, q->cainfo,
+  rc = twist_quic_dial (q->loop, q->peer_name, "doq", addr, port, q->cainfo, q->capath,
                         q->certfile, q->keyfile, &conn);
   if (rc != TWIST_OK)
     return rc;
@@ -1367,8 +1368,8 @@ static int
 resolve (struct twist_loop *loop, const char *host, const int *order,
          size_t norder, int want_https, const char *doh_url,
          const char *doq_url, const char *dot_url, int doh_verifypeer,
-         const char *cainfo, const char *certfile, const char *keyfile,
-         long timeout_ms, struct twist_dns_cache *cache,
+         const char *cainfo, const char *capath, const char *certfile,
+         const char *keyfile, long timeout_ms, struct twist_dns_cache *cache,
          void (*cb) (void *, int, const struct twist_dns_addr *),
          void (*svc_cb) (void *, int, const struct twist_dns_service *),
          void *user)
@@ -1442,6 +1443,7 @@ resolve (struct twist_loop *loop, const char *host, const int *order,
   q->want_https = want_https;
   q->doh_verifypeer = doh_verifypeer;
   q->cainfo = cainfo;
+  q->capath = capath;
   q->certfile = certfile;
   q->keyfile = keyfile;
   q->timeout_ms = timeout_ms;
@@ -1510,7 +1512,7 @@ twist_dns_resolve (struct twist_loop *loop, const char *host,
                    void *user)
 {
   return resolve (loop, host, order, norder, 0, NULL, NULL, NULL, 1, NULL,
-                  NULL, NULL, 0, loop_cache (loop), cb, NULL, user);
+                  NULL, NULL, NULL, 0, loop_cache (loop), cb, NULL, user);
 }
 
 int
@@ -1521,7 +1523,7 @@ twist_dns_resolve_service (struct twist_loop *loop, const char *host,
                            void *user)
 {
   return resolve (loop, host, order, norder, 1, NULL, NULL, NULL, 1, NULL,
-                  NULL, NULL, 0, NULL, NULL, cb, user);
+                  NULL, NULL, NULL, 0, NULL, NULL, cb, user);
 }
 
 /* A name is looked up within the time to connect, and no longer than the
@@ -1549,7 +1551,7 @@ twist_dns_resolve_easy (struct twist_easy *easy, const char *host,
   norder = easy->dns_order_n > 0 ? (size_t) easy->dns_order_n : 0;
   return resolve (easy->loop, host, order, norder, 0, easy->doh_url,
                   easy->doq_url, easy->dot_url, easy->doh_verifypeer,
-                  easy->cainfo, easy->sslcert, easy->sslkey,
+                  easy->cainfo, easy->capath, easy->sslcert, easy->sslkey,
                   easy_timeout (easy), easy_cache (easy), cb, NULL, user);
 }
 
@@ -1568,6 +1570,6 @@ twist_dns_resolve_service_easy (struct twist_easy *easy, const char *host,
   norder = easy->dns_order_n > 0 ? (size_t) easy->dns_order_n : 0;
   return resolve (easy->loop, host, order, norder, 1, easy->doh_url,
                   easy->doq_url, easy->dot_url, easy->doh_verifypeer,
-                  easy->cainfo, easy->sslcert, easy->sslkey,
+                  easy->cainfo, easy->capath, easy->sslcert, easy->sslkey,
                   easy_timeout (easy), NULL, NULL, cb, user);
 }

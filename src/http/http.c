@@ -221,7 +221,9 @@ http_pool_key (struct twist_http *h, char *buf, size_t cap)
     return TWIST_ERR_INVAL;
   url = h->easy->url;
   port = url->port > 0 ? url->port : twist_url_default_port (url->scheme);
-  proxy = h->easy->proxy != NULL ? h->easy->proxy : "-";
+  proxy = twist_easy_proxy (h->easy);
+  if (proxy == NULL)
+    proxy = "-";
   n = snprintf (buf, cap, "%p|%s|%s|%d|%s", (void *) h->easy->loop,
                 url->scheme != NULL ? url->scheme : "",
                 url->host != NULL ? url->host : "", port, proxy);
@@ -1400,7 +1402,7 @@ http_connected (struct twist_endpoint *ep)
       rc = twist_connection_start_tls (h->conn, h->easy->url->host,
                                        h->easy->verifypeer,
                                        n > 0 ? alpn : NULL, n,
-                                       h->easy->cainfo, h->easy->sslcert,
+                                       h->easy->cainfo, h->easy->capath, h->easy->sslcert,
                                        h->easy->sslkey);
       if (rc != TWIST_OK)
         {
@@ -1466,9 +1468,9 @@ prepare_dial (struct twist_http *h)
   h->tunnel = 0;
   twist_proxy_free (h->proxy);
   h->proxy = NULL;
-  if (h->mode != HTTP_H3 && easy->proxy != NULL)
+  if (h->mode != HTTP_H3 && twist_easy_proxy (easy) != NULL)
     {
-      if (twist_proxy_parse (easy->proxy, &kind, &phost, &pport, &puser,
+      if (twist_proxy_parse (twist_easy_proxy (easy), &kind, &phost, &pport, &puser,
                              &ppass) != TWIST_OK)
         {
           free (phost);

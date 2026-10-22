@@ -101,6 +101,8 @@ easy_clear (struct twist_easy *easy)
   free (easy->password);
   free (easy->bearer);
   free (easy->proxy);
+  free (easy->noproxy);
+  free (easy->capath);
   free (easy->range);
   free (easy->referer);
   free (easy->cookie);
@@ -390,6 +392,21 @@ twist_easy_setopt (twist_easy *easy, int opt, ...)
       break;
     case TWISTOPT_DOH_SSL_VERIFYPEER:
       easy->doh_verifypeer = va_arg (ap, long) != 0;
+      break;
+    case TWISTOPT_NOPROXY:
+      {
+        const char *s = va_arg (ap, const char *);
+
+        replace (&easy->noproxy, s);
+        easy->noproxy_set = s != NULL;
+      }
+      break;
+    case TWISTOPT_CAPATH:
+      {
+        const char *s = va_arg (ap, const char *);
+
+        replace (&easy->capath, s != NULL && s[0] != 0 ? s : NULL);
+      }
       break;
     case TWISTOPT_INFILESIZE:
       easy->infilesize = va_arg (ap, long long);

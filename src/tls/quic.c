@@ -45,6 +45,8 @@ struct twist_quic
   gq_trust *trust;
   struct twist_client_auth *auth;
   gq_tls_config tls;
+  FILE *qlog;
+  int qlog_tried;
   gq_slice alpn;
   uint8_t alpn_mem[16];
   char *server_name;
@@ -676,6 +678,8 @@ quic_free (void *p)
   if (q == NULL)
     return;
   gq_endpoint_free (q->ep);
+  if (q->qlog != NULL)
+    fclose (q->qlog);
   gq_trust_free (q->trust);
   twist_client_auth_free (q->auth);
   free (q->server_name);
@@ -687,6 +691,53 @@ quic_free (void *p)
       free (q->st[i].pend);
   }
   free (q);
+}
+
+/* QLOGDIR: a file for the connection in that directory, named after the
+   connection ID the client chose, with a line for each event: the time in
+   microseconds, the name of the event and its fields, as quickstep writes
+   them (qlog.h).  A directory that is not there, or cannot be written to, is
+   no log; the transfer does not mind.  */
+static void
+quic_qlog (void *user, const struct gq_conn *conn, uint64_t time_us,
+           const char *name, const char *fields, size_t len)
+{
+  struct twist_quic *q = user;
+
+  (void) len;
+  if (q->qlog == NULL && !q->qlog_tried && conn != NULL)
+    {
+      const char *dir = getenv ("QLOGDIR");
+      size_t n = 0;
+      const uint8_t *id = gq_conn_original_dcid (conn, &n);
+
+      q->qlog_tried = 1;
+      if (dir != NULL && dir[0] != 0 && id != NULL && n > 0 && n <= 20)
+        {
+          char path[1024];
+          size_t i;
+          int off = snprintf (path, sizeof path, "%s/", dir);
+          int fd;
+
+          for (i = 0; i < n && off > 0 && (size_t) off + 3 < sizeof path; i++)
+            off += snprintf (path + off, sizeof path - (size_t) off, "%02x",
+                             id[i]);
+          if (off > 0 && (size_t) off + sizeof ".qlog" < sizeof path)
+            {
+              memcpy (path + off, ".qlog", sizeof ".qlog");
+              fd = open (path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+              if (fd >= 0)
+                {
+                  q->qlog = fdopen (fd, "w");
+                  if (q->qlog == NULL)
+                    close (fd);
+                }
+            }
+        }
+    }
+  if (q->qlog != NULL)
+    fprintf (q->qlog, "%llu %s %s\n", (unsigned long long) time_us, name,
+             fields);
 }
 
 static void
@@ -776,8 +827,9 @@ twist_quic_can_open (struct twist_connection *conn)
 int
 twist_quic_dial (struct twist_loop *loop, const char *server_name,
                  const char *alpn, const struct twist_dns_addr *addr,
-                 int port, const char *cafile, const char *certfile,
-                 const char *keyfile, struct twist_connection **out)
+                 int port, const char *cafile, const char *capath,
+                 const char *certfile, const char *keyfile,
+                 struct twist_connection **out)
 {
   struct twist_quic *q;
   gq_endpoint_config ecfg;
@@ -814,15 +866,19 @@ twist_quic_dial (struct twist_loop *loop, const char *server_name,
       quic_free (q);
       return TWIST_ERR_TLS;
     }
-  if (cafile != NULL)
-    gq_trust_add_pem_file (q->trust, cafile);
-  else
-    gq_trust_add_system (q->trust, NULL);
+  rc = twist_trust_load (q->trust, cafile, capath, 1);
+  if (rc != TWIST_OK)
+    {
+      quic_free (q);
+      return rc;
+    }
   memset (&q->tls, 0, sizeof q->tls);
   q->tls.server_name = q->server_name;
   q->tls.alpn = &q->alpn;
   q->tls.n_alpn = 1;
   q->tls.trust = q->trust;
+  if (twist_keylog_wanted ())
+    q->tls.keylog = twist_keylog_write;
   q->tls.quic = 1;
   rc = twist_client_auth_load (&q->auth, certfile, keyfile);
   if (rc != TWIST_OK)
@@ -885,6 +941,15 @@ twist_quic_dial (struct twist_loop *loop, const char *server_name,
   twist_connection_endpoint (q->twist)->on_write_ready = quic_socket_ready;
   memset (&ecfg, 0, sizeof ecfg);
   memset (&eev, 0, sizeof eev);
+  {
+    const char *qdir = getenv ("QLOGDIR");
+
+    if (qdir != NULL && qdir[0] != 0)
+      {
+        ecfg.conn.qlog = quic_qlog;
+        ecfg.conn.qlog_user = q;
+      }
+  }
   eev.user = q;
   eev.accept = ep_accept;
   eev.connection = ep_connection;
@@ -924,7 +989,7 @@ quic_connect (struct twist_easy *easy, struct twist_connection **out)
   else
     return TWIST_ERR_RESOLVE;
   return twist_quic_dial (easy->loop, easy->url->host, "h3", &addr,
-                          easy->url->port, easy->cainfo, easy->sslcert,
+                          easy->url->port, easy->cainfo, easy->capath, easy->sslcert,
                           easy->sslkey, out);
 }
 
