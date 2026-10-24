@@ -123,7 +123,20 @@ twist_poll_set (struct twist_poll *p, int fd, int interest, void *ptr)
   EV_SET (&ev[n], fd, EVFILT_WRITE, wflags, 0, 0, ptr);
   n++;
   if (kevent (p->fd, ev, n, NULL, 0, NULL) < 0)
-    return TWIST_ERR_CONNECT;
+    {
+      int i;
+
+      /* Taking away a filter that was never there is ENOENT, and it fails the
+         whole call, including the filter that was to be added: a descriptor
+         new to the queue that is wanted for reading only is that.  Do the
+         changes one at a time, and let a delete of nothing be.  */
+      if (errno != ENOENT)
+        return TWIST_ERR_CONNECT;
+      for (i = 0; i < n; i++)
+        if (kevent (p->fd, &ev[i], 1, NULL, 0, NULL) < 0
+            && !(ev[i].flags == EV_DELETE && errno == ENOENT))
+          return TWIST_ERR_CONNECT;
+    }
   return TWIST_OK;
 #else
   (void) p;
