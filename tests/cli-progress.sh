@@ -47,8 +47,11 @@ check ()
 }
 is () { [ "$1" = "$2" ] && echo ok; }
 
-# The standard error of a command, with the body thrown away.
-err () { "$@" 2>&1 >/dev/null; }
+# The standard error of a command, with the body thrown away.  Its input is
+# nothing: the bar takes its width from the terminal on standard input, when
+# COLUMNS does not say, and the width here must not be that of the window the
+# tests are run from.
+err () { "$@" 2>&1 >/dev/null </dev/null; }
 
 # The meter: two lines of heading, a line of progress rewritten, a newline.
 e=$(err "$TWIST" -o /dev/null "$u"; echo x)
