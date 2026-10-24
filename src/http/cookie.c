@@ -172,37 +172,6 @@ host_is_address (const char *host)
   return host[0] != 0;
 }
 
-/* Whether DOMAIN, with no leading dot, is a public suffix as far as can be
-   told without a list of them: a top-level domain, or a country code with a
-   generic second level, such as co.uk and com.au.  A cookie set for one is
-   sent to every host under it.  The Public Suffix List is the proper way,
-   and misses nothing the way this does (github.io, blogspot.com); it is a
-   dependency to decide (see TODO).  */
-static int
-looks_like_public_suffix (const char *domain)
-{
-  static const char *const generic[] = {
-    "ac", "co", "com", "ed", "edu", "go", "gob", "gov", "gv", "mil", "ne",
-    "net", "nom", "or", "org", "sch"
-  };
-  const char *dot = strchr (domain, '.');
-  size_t i;
-  size_t first;
-
-  if (dot == NULL)
-    return 1;
-  if (strchr (dot + 1, '.') != NULL)
-    return 0;
-  if (strlen (dot + 1) != 2)
-    return 0;
-  first = (size_t) (dot - domain);
-  for (i = 0; i < sizeof generic / sizeof generic[0]; i++)
-    if (strlen (generic[i]) == first
-        && strncasecmp (domain, generic[i], first) == 0)
-      return 1;
-  return 0;
-}
-
 /* Take out and free the oldest cookie of DOMAIN, or of any domain if DOMAIN
    is NULL.  The jar is newest first.  */
 static void
@@ -313,31 +282,25 @@ jar_store (struct twist_jar *jar, const char *set_cookie,
       cookie_free (c);
       return TWIST_ERR_PROTOCOL;
     }
+  /* The cookie is for the host that set it, however wide it asked to be.
+     Telling a registry suffix from a domain needs the Public Suffix List,
+     which is never current; the host alone needs nothing.  An address is
+     no one's suffix either, so its own is the only Domain it can name.  */
   if (!c->host_only)
     {
-      int exact = strcasecmp (host, c->domain) == 0;
-
-      if (host_is_address (host))
+      if (host_is_address (host) && strcasecmp (host, c->domain) != 0)
         {
-          /* An address is no one's suffix.  */
-          if (!exact)
-            {
-              cookie_free (c);
-              return TWIST_ERR_PROTOCOL;
-            }
-          c->host_only = 1;
+          cookie_free (c);
+          return TWIST_ERR_PROTOCOL;
         }
-      else if (looks_like_public_suffix (c->domain))
+      free (c->domain);
+      c->domain = twist_strdup (host);
+      if (c->domain == NULL)
         {
-          /* Not for everyone under it; a host that is itself such a name
-             (localhost) may keep one for itself.  */
-          if (!exact)
-            {
-              cookie_free (c);
-              return TWIST_ERR_PROTOCOL;
-            }
-          c->host_only = 1;
+          cookie_free (c);
+          return TWIST_ERR_NOMEM;
         }
+      c->host_only = 1;
     }
 
   /* The same cookie (name, domain and path) replaces the old one, which an

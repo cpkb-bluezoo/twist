@@ -800,16 +800,18 @@ be made.  A transfer that is waiting and is cancelled stops waiting.
 @heading The cookie jar
 
 A transfer that uses the jar keeps the cookies that responses set and sends them
-back.  A cookie is sent to the host that set it, or, if it had a @code{Domain},
-to that domain and the hosts under it; to the paths under its @code{Path}; and
-over @code{https} only if it was marked @code{Secure}.  A @code{Secure} cookie
+back.  A cookie is sent to the host that set it and to no other, whatever
+@code{Domain} it asked for; to the paths under its @code{Path}; and over
+@code{https} only if it was marked @code{Secure}.  A @code{Secure} cookie
 is not believed when it comes over @code{http}, and cannot replace one that
 came over @code{https}.  A @code{Domain} that the host is not under is refused,
-and so is one that is an IP address other than the host's own.  A
-@code{Domain} that is a top-level domain, or a country code with a generic
-second level such as @samp{co.uk} or @samp{com.au}, is refused unless it is
-the host's own name, and then the cookie is for that host alone.  There is no
-Public Suffix List, so a name such as @samp{github.io} is believed.
+and so is one that is an IP address other than the host's own.  Any other
+@code{Domain}, wide or not, is kept but is read as the host's own name, so a
+@code{Domain=com} or @code{Domain=github.io} reaches no host that the server
+did not answer as.  That is the only protection against a cookie for a
+registry suffix that needs no list of them, since the Public Suffix List is
+never current.  The price is that a cookie shared between @samp{www.example.com}
+and @samp{api.example.com} is not: each host sets its own.
 
 A cookie with a control character in it, or more than 4096 bytes of name and
 value, is refused.  The jar holds at most 50 cookies for a domain and 3000 in

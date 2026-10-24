@@ -15,6 +15,8 @@ Version 0.1 - unreleased
     as the server sent it, exit status 85 for a CSeq that does not match;
     -I now writes the headers, and -i the blank line before the body, not
     after it
+  * the cookie jar (library only) keeps every cookie for the host that set it;
+    a Domain attribute widens nothing, so no Public Suffix List is needed
   * gzip and deflate request and response coding, via zlib
   * the progress meter and the bar (-#), and the library's
     TWISTOPT_XFERINFOFUNCTION

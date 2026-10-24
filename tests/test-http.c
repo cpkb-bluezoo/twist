@@ -792,9 +792,13 @@ test_h3_long_frames (void)
 }
 
 /* What the jar takes, and from whom.  A cookie is a claim by a server to be
-   sent to others, so the jar decides which claims it believes.  A server at
-   attacker.com that sets Domain=com has the cookie sent to every .com host
-   (and a fixation of a session on every site under a registry suffix); a
+   sent to others, so the jar decides which claims it believes.  It believes
+   none that reach past the host that set it: a Domain attribute is read only
+   to refuse a cookie that names a domain the host is not under, and every
+   other cookie is for that host alone, however wide it asked to be.  A
+   server at attacker.com that sets Domain=com therefore gets a cookie for
+   attacker.com, and not the fixation of a session on every site under a
+   registry suffix, which a list of suffixes would always be behind on.  A
    response over plain http that sets a Secure cookie is no more to be
    believed than whoever rewrote it on the way; a repeated cookie replaces
    the old one and does not pile up beside it; and a server cannot make the
@@ -818,34 +822,51 @@ test_cookie_domains (void)
 {
   struct twist_jar *jar = twist_jar_new ();
 
-  /* A registry suffix is not a domain for a cookie.  */
+  /* A wide Domain is kept for the host that set it, and for no one else.  */
   check (twist_jar_store (jar, "evil=1; Domain=com", "attacker.com", "/", 1)
-         == TWIST_ERR_PROTOCOL, "Domain=com is refused");
+         == TWIST_OK, "Domain=com is kept for its host");
+  check (cookie_sent_to (jar, "attacker.com", "/", 1, "evil=1"),
+         "and sent there");
   check (!cookie_sent_to (jar, "victim.com", "/", 1, "evil=1"),
-         "and is not sent to another .com host");
-  check (twist_jar_store (jar, "evil=1; Domain=.com", "attacker.com", "/", 1)
-         == TWIST_ERR_PROTOCOL, "nor with a leading dot");
-  check (twist_jar_store (jar, "s=1; Domain=co.uk", "a.co.uk", "/", 1)
-         == TWIST_ERR_PROTOCOL, "Domain=co.uk is refused");
-  check (twist_jar_store (jar, "s=1; Domain=com.au", "a.com.au", "/", 1)
-         == TWIST_ERR_PROTOCOL, "and com.au");
-  check (!cookie_sent_to (jar, "b.co.uk", "/", 1, "s=1"), "not sent on");
-  check (twist_jar_store (jar, "s=1; Domain=example.co.uk", "www.example.co.uk",
-                          "/", 1) == TWIST_OK, "a domain under co.uk is fine");
-  check (cookie_sent_to (jar, "shop.example.co.uk", "/", 1, "s=1"),
-         "and sent to its hosts");
-  check (!cookie_sent_to (jar, "other.co.uk", "/", 1, "s=1"),
+         "and not to another .com host");
+  check (!cookie_sent_to (jar, "www.attacker.com", "/", 1, "evil=1"),
+         "nor to a host under it");
+  check (twist_jar_store (jar, "s=1; Domain=.co.uk", "a.co.uk", "/", 1)
+         == TWIST_OK, "a leading dot changes nothing");
+  check (!cookie_sent_to (jar, "b.co.uk", "/", 1, "s=1"),
+         "Domain=co.uk is not sent on");
+  check (twist_jar_store (jar, "g=1; Domain=github.io", "me.github.io", "/",
+                          1) == TWIST_OK, "a suffix no list is needed for");
+  check (cookie_sent_to (jar, "me.github.io", "/", 1, "g=1"),
+         "is sent to its host");
+  check (!cookie_sent_to (jar, "you.github.io", "/", 1, "g=1"),
          "and not to its neighbours");
+  check (twist_jar_store (jar, "s=1; Domain=example.co.uk", "www.example.co.uk",
+                          "/", 1) == TWIST_OK, "a domain under co.uk is kept");
+  check (cookie_sent_to (jar, "www.example.co.uk", "/", 1, "s=1"),
+         "for its host");
+  check (!cookie_sent_to (jar, "shop.example.co.uk", "/", 1, "s=1"),
+         "and not for the hosts under the domain");
+  check (!cookie_sent_to (jar, "example.co.uk", "/", 1, "s=1"),
+         "nor for the domain itself");
   check (twist_jar_store (jar, "t=1; Domain=example.com", "www.example.com",
-                          "/", 1) == TWIST_OK, "an ordinary domain is fine");
-  /* A host that is itself the suffix may keep a cookie for itself.  */
+                          "/", 1) == TWIST_OK, "an ordinary domain is kept");
+  check (!cookie_sent_to (jar, "api.example.com", "/", 1, "t=1"),
+         "for its host only");
   check (twist_jar_store (jar, "h=1; Domain=localhost", "localhost", "/", 1)
          == TWIST_OK, "localhost for localhost");
   check (cookie_sent_to (jar, "localhost", "/", 1, "h=1"), "is sent there");
   check (!cookie_sent_to (jar, "x.localhost", "/", 1, "h=1"),
          "and only there");
   check (twist_jar_store (jar, "i=1; Domain=intranet", "app.intranet", "/", 1)
-         == TWIST_ERR_PROTOCOL, "a single label from another host is refused");
+         == TWIST_OK, "a single label above the host is kept");
+  check (!cookie_sent_to (jar, "other.intranet", "/", 1, "i=1"),
+         "for the host only");
+  check (twist_jar_store (jar, "x=1; Domain=bank.example", "evil.example", "/",
+                          1) == TWIST_ERR_PROTOCOL,
+         "a domain the host is not under is refused");
+  check (twist_jar_store (jar, "x=1; Domain=ample.com", "example.com", "/", 1)
+         == TWIST_ERR_PROTOCOL, "and a suffix that is not a whole label");
 
   /* An address matches only itself, never as a suffix.  */
   check (twist_jar_store (jar, "ip=1; Domain=0.0.1", "127.0.0.1", "/", 1)
@@ -980,6 +1001,11 @@ test_cookie (void)
                           "/", 1) == TWIST_OK, "parent domain");
   check (twist_jar_header (jar, "www.example.com", "/", 1, &hdr) == TWIST_OK
          && hdr != NULL && strstr (hdr, "id=1") != NULL, "parent send");
+  free (hdr);
+  hdr = NULL;
+  check (twist_jar_header (jar, "api.example.com", "/", 1, &hdr) == TWIST_OK
+         && (hdr == NULL || strstr (hdr, "id=1") == NULL),
+         "a Domain is not for the hosts under it");
   free (hdr);
   hdr = NULL;
   check (twist_jar_header (jar, "other.test", "/", 1, &hdr) == TWIST_OK

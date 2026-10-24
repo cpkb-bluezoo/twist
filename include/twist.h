@@ -322,9 +322,9 @@ enum twist_opt
   TWISTOPT_TELNETOPTIONS = 68,
   /* A long.  Non-zero has the transfer keep the cookies that responses set in
      the runtime's cookie jar and send them back.  A cookie is sent to the
-     host that set it, or, if it had a Domain, to that domain and the hosts
-     under it; to the paths under its Path; and over https only if it was marked
-     Secure.  The jar lives as long as the runtime does and is shared by
+     host that set it and to no other, whatever Domain it asked for (one for a
+     domain that the host is not under is refused); to the paths under its
+     Path; and over https only if it was marked Secure.  The jar lives as long as the runtime does and is shared by
      every transfer in it that asks for it.  A cookie given with
      TWISTOPT_COOKIE is sent in its place.  Only HTTP uses it.  */
   TWISTOPT_USE_COOKIES = 69,
