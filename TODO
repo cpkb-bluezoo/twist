@@ -23,8 +23,6 @@ SCP/SFTP (src/ssh, over foxtrot)
   - statvfs, and the other commands the sftp tool has, as -Q commands;
     --create-file-mode and the directory mode.
   - Quote commands for scp URLs.
-  - An HTTP/3 URL does not take a zone: quic_connect reads the host with
-    inet_pton itself.  Only the TCP dialers pass the scope.
   - --limit-rate for the other protocols: the pacer is in src/engine/rate.c,
     and only the SFTP pumps use it.  Until then the command line refuses the
     option for other URLs.
