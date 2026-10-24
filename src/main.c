@@ -1050,9 +1050,12 @@ emit_writeout (const char *fmt, twist_transfer *transfer, int code)
     }
 }
 
+struct cli_job;
+static FILE *job_body (struct cli_job *job);
+
 struct cli_headers
 {
-  FILE *body;
+  struct cli_job *job;          /* Whose body -i puts the headers in.  */
   FILE *dump;
   int include;
   int saw;
@@ -1066,9 +1069,13 @@ write_header (char *ptr, size_t size, size_t nmemb, void *userdata)
   size_t n = size * nmemb;
 
   h->saw = 1;
-  if (h->include && h->body != NULL
-      && fwrite (ptr, 1, n, h->body) < n)
-    h->short_write = 1;
+  if (h->include && h->job != NULL)
+    {
+      FILE *body = job_body (h->job);
+
+      if (body == NULL || fwrite (ptr, 1, n, body) < n)
+        h->short_write = 1;
+    }
   if (h->dump != NULL && fwrite (ptr, 1, n, h->dump) < n)
     h->short_write = 1;
   return h->short_write ? 0 : n;
@@ -1079,9 +1086,13 @@ finish_headers (struct cli_headers *h)
 {
   if (!h->saw)
     return;
-  if (h->include && h->body != NULL
-      && fwrite ("\r\n", 1, 2, h->body) < 2)
-    h->short_write = 1;
+  if (h->include && h->job != NULL)
+    {
+      FILE *body = job_body (h->job);
+
+      if (body == NULL || fwrite ("\r\n", 1, 2, body) < 2)
+        h->short_write = 1;
+    }
   if (h->dump != NULL && fwrite ("\r\n", 1, 2, h->dump) < 2)
     h->short_write = 1;
   h->saw = 0;
@@ -1141,7 +1152,10 @@ struct cli_job
   char *url;                    /* As written, or as a glob made it.  */
   const char *use_url;          /* What the transfer is given.  */
   const char *upload;           /* The name given to -T, or NULL.  */
-  FILE *body;
+  FILE *body;                   /* NULL until the file is made.  */
+  char *out_path;               /* The file, while it is not.  */
+  const char *out_mode;
+  int out_failed;               /* It could not be made.  */
   FILE *dump;
   struct cli_headers hdrs;
   struct cli_bytes up;
@@ -1166,6 +1180,7 @@ write_body (char *ptr, size_t size, size_t nmemb, void *userdata)
   struct cli_job *job = userdata;
   size_t n = size * nmemb;
   size_t got;
+  FILE *body;
 
   finish_headers (&job->hdrs);
   /* What is written to a terminal because nothing said where else, and has a
@@ -1186,7 +1201,13 @@ write_body (char *ptr, size_t size, size_t nmemb, void *userdata)
       job->body_short = 1;
       return 0;
     }
-  got = fwrite (ptr, 1, n, job->body);
+  body = job_body (job);
+  if (body == NULL)
+    {
+      job->body_short = 1;
+      return 0;
+    }
+  got = fwrite (ptr, 1, n, body);
   if (got < n)
     job->body_short = 1;
   return got;
@@ -1475,11 +1496,27 @@ run_next_url (struct cli_run *run, struct cli_next *next)
     }
 }
 
+/* The file the body goes in is made when something is first to go in it,
+   as the curl tool does: a transfer that fails before there is any body leaves
+   no file, and does not empty one that was there.  NULL if it cannot be made.  */
+static FILE *
+job_body (struct cli_job *job)
+{
+  if (job->body == NULL && job->out_path != NULL && !job->out_failed)
+    {
+      job->body = fopen (job->out_path, job->out_mode);
+      if (job->body == NULL)
+        job->out_failed = 1;
+    }
+  return job->body;
+}
+
 static void
 job_free (struct cli_job *job)
 {
   if (job == NULL)
     return;
+  free (job->out_path);
   if (job->body != NULL && job->body != stdout)
     fclose (job->body);
   if (job->dump != NULL && job->dump != stdout)
@@ -1625,16 +1662,11 @@ job_prepare (struct cli_run *run, struct cli_next *next, struct cli_job **out)
     }
   if (out_path != NULL)
     {
-      job->body = fopen (out_path, body_mode);
-      if (job->body == NULL)
-        {
-          char msg[256];
-
-          snprintf (msg, sizeof msg, _("could not write %s"), out_path);
-          diag_code (23, msg);
-          rc = 23;
-          goto fail;
-        }
+      /* Made when there is something to put in it (job_body).  */
+      job->body = NULL;
+      job->out_path = out_path;
+      job->out_mode = body_mode;
+      out_path = NULL;
     }
   job->refuse_binary = job->body == stdout && output == NULL
                        && isatty (fileno (stdout));
@@ -1724,7 +1756,7 @@ job_prepare (struct cli_run *run, struct cli_next *next, struct cli_job **out)
         close (job->ustream.fd);
       job->streaming = 0;
     }
-  job->hdrs.body = job->body;
+  job->hdrs.job = job;
   job->hdrs.dump = job->dump;
   job->hdrs.include = op->include;
   /* An upload to a directory goes to the file with the name it has here.  */
@@ -1863,11 +1895,17 @@ job_finish (struct cli_job *job, int rc)
   twist_transfer *transfer = job->transfer;
   int code;
   const char *detail;
-  char refused[80];
+  char refused[320];
   int write_failed;
 
   finish_headers (&job->hdrs);
-  if (job->body != stdout)
+  /* A transfer that worked and had no body still makes the file.  */
+  if (job->body == NULL && job->out_path != NULL && rc == TWIST_OK
+      && job_body (job) == NULL)
+    job->body_short = 1;
+  if (job->body == NULL)
+    ;
+  else if (job->body != stdout)
     {
       if (fclose (job->body) != 0 && rc == TWIST_OK)
         rc = TWIST_ERR_ABORTED;
@@ -1911,6 +1949,13 @@ job_finish (struct cli_job *job, int rc)
           snprintf (refused, sizeof refused,
                     _("client returned ERROR on write of %zu bytes"),
                     job->refused_len);
+          detail = refused;
+        }
+      if (write_failed && detail == NULL && job->out_failed
+          && job->out_path != NULL)
+        {
+          snprintf (refused, sizeof refused, _("could not write %s"),
+                    job->out_path);
           detail = refused;
         }
       if (write_failed && detail == NULL)

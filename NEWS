@@ -51,6 +51,8 @@ Version 0.1 - unreleased
     after 250 ms or at once when an attempt fails, and the first to connect
     kept; for http, https, ftp, ftps and the mail and other line protocols
     (not HTTP/3 or a connection through a proxy, which use one address)
+  * the file given to -o is made when there is something to put in it, so a
+    transfer that fails first leaves none, and does not empty one that was there
   * gzip and deflate request and response coding, via zlib
   * the progress meter and the bar (-#), and the library's
     TWISTOPT_XFERINFOFUNCTION
