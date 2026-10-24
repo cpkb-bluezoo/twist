@@ -48,6 +48,7 @@ Documentation License''.
 * Variables::
 * URL globbing::
 * SFTP and SCP::
+* Telnet::
 * GNU Free Documentation License::
 @end menu
 
@@ -196,7 +197,8 @@ dropped, not written to standard output.
 A @code{void *}, passed to the write callback.
 @item TWISTOPT_READFUNCTION
 A @code{twist_read_callback}: supplies the data of an @code{sftp} or @code{scp}
-upload, the message of @code{smtp}, and the messages of a WebSocket.  An HTTP
+upload, the message of @code{smtp}, the messages of a WebSocket, and what a
+@code{telnet} session sends (without one that is standard input).  An HTTP
 request body is given with @code{TWISTOPT_POSTFIELDS}.
 @item TWISTOPT_READDATA
 A @code{void *}, passed to the read callback.
@@ -436,6 +438,19 @@ unless its line starts with @samp{*}.  @xref{SFTP and SCP}.
 @item TWISTOPT_CREATE_MISSING_DIRS
 A long: an upload to a path whose directories are not there makes them, with
 mode 0755, and goes on.
+@end table
+
+@subheading telnet
+
+@table @code
+@item TWISTOPT_TELNETOPTIONS
+A @code{twist_slist *} of options for a @code{telnet} session, each written
+@samp{NAME=VALUE}, which the caller keeps.  @xref{Telnet}, for the names.  A name
+that is not one ends the transfer with @code{TWIST_ERR_UNKNOWN_OPTION}, and an
+option with no value, or a bad one, with @code{TWIST_ERR_OPTION_SYNTAX}, in
+both cases before there is a connection.  @code{NULL} clears it.  The user name
+(@code{TWISTOPT_USERNAME}, or the URL's) is given to the server as the
+variable @code{USER}.  Other schemes ignore it.
 @end table
 
 @subheading Sharing
@@ -793,6 +808,8 @@ come from the protocol, and not from the code.
 @item @code{TWIST_ERR_RECURSIVE} @tab 23 @tab 93 @tab A multi function was called from inside a callback.
 @item @code{TWIST_ERR_PARTIAL} @tab 24 @tab 18 @tab The transfer ended before all that was announced had come.
 @item @code{TWIST_ERR_USE_SSL} @tab 25 @tab 64 @tab TLS was required and the server would not upgrade.
+@item @code{TWIST_ERR_UNKNOWN_OPTION} @tab 26 @tab 48 @tab A name in a list of options is not one that exists.
+@item @code{TWIST_ERR_OPTION_SYNTAX} @tab 27 @tab 49 @tab An option in a list of options is not written as it must be.
 @end multitable
 
 @node Invocation
@@ -869,7 +886,13 @@ body.
 Upload @var{file} with PUT.  @code{-} reads standard input.  For
 @code{sftp} and @code{scp} the file is sent as it is read, so a large file or
 a pipe is not held in memory.  For other schemes it is read before the
-transfer starts.
+transfer starts.  A @code{telnet} session is not a PUT: it sends the file as
+it is read, and @code{-} is what it reads without @option{-T}, standard input.
+@item -t @var{name}=@var{value}
+@itemx --telnet-option @var{name}=@var{value}
+An option of a @code{telnet} session: @code{TTYPE}, @code{XDISPLOC},
+@code{NEW_ENV}, @code{WS} or @code{BINARY}.  Give the option as many times as
+needed.  @xref{Telnet}.  Another scheme ignores it.
 @item -I
 @itemx --head
 Fetch headers only.
@@ -1258,6 +1281,11 @@ The transfer was aborted.
 A bad argument was passed to the library.
 @item 47
 Too many redirects.
+@item 48
+An option given with @option{-t} is not one of the telnet options.
+@item 49
+An option given with @option{-t} is not written as @var{name}=@var{value}, or
+its value is not right for it.
 @item 52
 The server closed before sending any data.
 @item 56
@@ -1364,6 +1392,9 @@ SCP}.
 @item smtp, smtps
 Sends a message to the server, from @option{--mail-from} to each
 @option{--mail-rcpt}.
+@item telnet
+A telnet session: the server's text is written to the output and standard
+input is sent.  @xref{Telnet}.
 @item tftp
 Reads a file, or uploads one with @option{--data} or @option{-T}.  It is
 a datagram protocol, so no proxy is used.
@@ -1416,8 +1447,7 @@ it is not taken as part of the encrypted session: the transfer ends with exit
 status 8.
 
 These schemes are recognised, but are not implemented, and exit 1:
-@code{rtmp}, @code{rtmps}, @code{rtsp}, @code{smb}, @code{smbs} and
-@code{telnet}.
+@code{rtmp}, @code{rtmps}, @code{rtsp}, @code{smb} and @code{smbs}.
 
 @heading URLs
 
@@ -1943,6 +1973,85 @@ its own for each call, so it keeps nothing for the next one.
 @subheading Requirements
 
 SSH comes from the foxtrot library, which needs libgcrypt 1.12.4 or later.
+
+@node Telnet
+@chapter Telnet
+
+@code{telnet://host[:port]/} (port 23) opens a connection and runs a telnet
+session on it (RFC 854): what the server sends is written to the output, and
+what is read from standard input is sent to the server.  The path of the URL is
+not used.  The session ends when the server closes the connection, with exit
+status 0, or at the limit of @option{-m}.
+
+@subheading What is sent and what is written
+
+What is sent is standard input, which is read as it comes, so that a terminal,
+a pipe or a file may be used and what is typed goes to the server at once; or
+the file of @option{-T}, and @option{-T -} is standard input.  Each byte of 255
+is sent twice, as the protocol needs.  Nothing else is added or changed: a line
+ends as it does in the input.  The data of @option{-d} is not sent.  The end of
+the input does not end the session, which is the server's to end; a server that
+does not close is waited for until @option{-m}.
+
+What is written is the server's text without its commands.  A carriage return
+followed by a NUL is a carriage return, and 255 twice is a byte of 255.  A
+command that twist does not know is dropped.  A transfer that is much behind the
+connection waits for it, and does not hold the input in memory.
+
+@subheading Negotiation
+
+twist negotiates with a server that negotiates, and only then.  It speaks
+plain text to a server that does not, so that @code{telnet://} may be used to
+talk to a mail or an echo service.  The first time the server sends a command
+(WILL, WON'T, DO or DON'T), twist answers it and asks for the options it wants:
+binary transmission and suppress go-ahead, both ways.  It accepts the server's
+echo, but does not ask for it.  Every other option the server offers or asks for
+is refused, with these exceptions, which are given what they ask for:
+
+@table @asis
+@item terminal type
+@itemx X display location
+@itemx environment variables
+A server that asks, with a sub-negotiation, is told the values of the
+@code{TTYPE}, @code{XDISPLOC} and @code{NEW_ENV} options, or nothing for
+those that were not given.  Giving one of the options also offers it, with
+the other options twist wants, when the negotiation starts.
+@item window size
+A server that asks is told the size of @code{WS}, or 0 by 0 if it was not
+given, which is allowed and means that the server may guess.
+@end table
+
+@subheading The options
+
+@option{-t} (@code{TWISTOPT_TELNETOPTIONS}) takes @var{name}=@var{value}, with
+the name in either case:
+
+@table @code
+@item TTYPE=@var{type}
+The terminal type, such as @code{vt100}, up to 31 bytes.
+@item XDISPLOC=@var{display}
+The X display, such as @code{host:0}, up to 127 bytes.
+@item NEW_ENV=@var{name},@var{value}
+An environment variable.  Give the option once for each.  @code{NEW_ENV=name}
+is a variable with no value.
+@item WS=@var{width}x@var{height}
+The size of the window in characters, each from 1 to 65535.
+@item BINARY=@var{n}
+1, the default, asks for binary transmission; any other number does not.
+@end table
+
+The user name of @option{-u} or of the URL is sent as the variable @code{USER},
+and so offers the environment to the server.  A value with a byte above 127 is
+skipped without an error; a user name with one is refused (exit status 43).  A
+name that is not one of these is exit status 48, and an option with no
+@samp{=} or with a bad value is exit status 49.  Both are found before twist
+connects.
+
+@subheading Not done
+
+There is no TLS variant, @option{--limit-rate} is refused, and the size of a
+terminal is not found out and sent: use @code{WS}.  A proxy can be used, and the
+session goes through its tunnel.
 
 @node GNU Free Documentation License
 @appendix GNU Free Documentation License

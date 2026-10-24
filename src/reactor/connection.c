@@ -791,6 +791,12 @@ twist_endpoint_send (struct twist_endpoint *ep, const uint8_t *data,
   return ep->send (ep, data, len);
 }
 
+size_t
+twist_endpoint_pending (const struct twist_endpoint *ep)
+{
+  return ep != NULL && ep->conn != NULL ? ep->conn->out_len : 0;
+}
+
 void
 twist_endpoint_close (struct twist_endpoint *ep)
 {

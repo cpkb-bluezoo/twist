@@ -348,6 +348,17 @@ loop. QUIC is one UDP registration on the loop; each stream is then an
 endpoint. DoH is the HTTP scheme used as a resolver, not a special case
 in the poll backend.
 
+`telnet` is the one handler that reads a second descriptor, its input. Standard
+input that can be polled (a terminal, a pipe) is watched as a connection of its
+own, on a duplicate of descriptor 0 so that freeing it does not close the
+caller's; it is read only when `poll` says it is ready, because the descriptor
+is not the transfer's to make non-blocking. One that cannot be polled (a
+regular file, the null device) and the read callback are read a chunk at a
+time from a timer on the loop. Either stops when the connection is behind
+(`twist_endpoint_pending`) and goes on from the endpoint's `on_write_ready`, so
+a large input is not held in memory. The end of the input does not end the
+transfer; the server closing does.
+
 ## Scheme table
 
 Every URL scheme twist knows has a row. HTTP is the first row with a real

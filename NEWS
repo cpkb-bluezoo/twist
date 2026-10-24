@@ -7,7 +7,10 @@ Please send Twist bug reports to <dog@gnu.org>
 Version 0.1 - unreleased
 
   * HTTP/1, HTTP/2, and HTTP/3, plus FTP, mail, MQTT, LDAP,
-    WebSocket, Gopher, DICT, TFTP, and FILE
+    WebSocket, Gopher, DICT, Telnet, TFTP, and FILE
+  * telnet sessions: the server's text is written out, its option
+    negotiation is answered, and standard input (or -T) is sent; -t sets the
+    terminal type, display, environment and window size
   * quickstep is an installed library found by pkg-config
   * gzip and deflate request and response coding, via zlib
   * the progress meter and the bar (-#), and the library's

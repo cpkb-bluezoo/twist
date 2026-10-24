@@ -20,6 +20,8 @@
 # other part, on file:// URLs so that no network is needed: what --help says
 # about -k, the mode of directories --create-dirs makes, -O with a name of "-",
 # a range and percent-encoding on a file URL, and a file that is not a file.
+# The telnet options are checked here too: a bad one ends the transfer before
+# it connects, so nothing needs to be listening.
 
 TWIST=${TWIST:-../src/twist}
 [ -x "$TWIST" ] || { echo "cli-misc: twist is not built ($TWIST); skipping" >&2; exit 77; }
@@ -101,5 +103,34 @@ mkfifo "$work/fifo" 2>/dev/null && {
   check "$([ "$st" != 124 ] && [ "$st" != 0 ] && echo ok)" \
     "a FIFO is refused, not waited on (status $st)"
 }
+
+# A telnet option that is not written as it must be is status 49, and one that
+# is not an option is 48, both before there is a connection (nothing listens
+# on port 1).  Which one is said, and a value that is not ASCII is skipped.
+telnet_status ()
+{
+  "$TWIST" -s -S "$@" telnet://127.0.0.1:1/ </dev/null 2>"$work/err"
+  st=$?
+}
+telnet_status -t foo
+check "$(is "$st" 49)" "-t foo is status 49 ($st)"
+check "$(grep -q 'foo' "$work/err" && echo ok)" "-t foo says which option"
+telnet_status -t WS=bad
+check "$(is "$st" 49)" "-t WS=bad is status 49 ($st)"
+telnet_status -t WS=0x5
+check "$(is "$st" 49)" "-t WS=0x5 is status 49 ($st)"
+telnet_status -t FOO=bar
+check "$(is "$st" 48)" "-t FOO=bar is status 48 ($st)"
+check "$(grep -q 'FOO=bar' "$work/err" && echo ok)" "-t FOO=bar says which option"
+telnet_status -t TTYPE=vt100 -t WS=80x24 -t NEW_ENV=A,B -t XDISPLOC=h:0 -t BINARY=0
+check "$(is "$st" 7)" "good options go on to connect, and fail there ($st)"
+telnet_status --telnet-option ws=80X24
+check "$(is "$st" 7)" "--telnet-option, in either case ($st)"
+telnet_status -t "TTYPE=caf$(printf '\303\251')"
+check "$(is "$st" 7)" "a value with a byte above 127 is skipped ($st)"
+
+# -d is not sent to a telnet server, and does not turn it into anything else.
+telnet_status -d hello
+check "$(is "$st" 7)" "-d with a telnet URL ($st)"
 
 [ $fail = 0 ]

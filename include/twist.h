@@ -73,7 +73,12 @@ enum twist_error
   /* TLS was asked for with TWISTOPT_USE_SSL and could not be had: the
      server does not offer to upgrade the connection, or refused to
      (curl's CURLE_USE_SSL_FAILED).  */
-  TWIST_ERR_USE_SSL = 25
+  TWIST_ERR_USE_SSL = 25,
+  /* A name in a list of options, such as TWISTOPT_TELNETOPTIONS, that the
+     transfer does not have.  */
+  TWIST_ERR_UNKNOWN_OPTION = 26,
+  /* An option in such a list that is not written as it must be.  */
+  TWIST_ERR_OPTION_SYNTAX = 27
 };
 
 const char *twist_strerror (int err);
@@ -296,7 +301,23 @@ enum twist_opt
      whoever is on the path can make a server seem not to offer TLS, so TRY
      protects against nobody who is.  The user name and password are sent only
      after the upgrade.  Other schemes ignore it.  */
-  TWISTOPT_USE_SSL = 67
+  TWISTOPT_USE_SSL = 67,
+  /* For telnet: a twist_slist the caller keeps, of options for the session,
+     each written NAME=VALUE with the name in either case.  TTYPE=TYPE is the
+     terminal type to give, XDISPLOC=DISPLAY the X display, NEW_ENV=NAME,VALUE
+     an environment variable (it may be given any number of times, and
+     NEW_ENV=NAME has none), WS=WIDTHxHEIGHT the size of the window in
+     characters, and BINARY=1, the default, or 0 whether bytes are sent and
+     taken as they are.  A name that is not one of these ends the transfer
+     with TWIST_ERR_UNKNOWN_OPTION, and one without a value, or with a bad
+     one, with TWIST_ERR_OPTION_SYNTAX.  A value with a byte above 0x7f is
+     skipped.  A user name (TWISTOPT_USERNAME, or the URL's) is given as the
+     USER variable.  NULL clears it.  Other schemes ignore it.
+
+     What is sent to a telnet server is what TWISTOPT_READFUNCTION gives, and
+     without one it is standard input, which is watched for as long as the
+     server keeps the connection.  TWISTOPT_POSTFIELDS is not sent.  */
+  TWISTOPT_TELNETOPTIONS = 68
 };
 
 enum twist_use_ssl

@@ -303,6 +303,9 @@ twist_easy_setopt (twist_easy *easy, int opt, ...)
           easy->use_ssl = (int) how;
       }
       break;
+    case TWISTOPT_TELNETOPTIONS:
+      easy->telnet_options = va_arg (ap, struct twist_slist *);
+      break;
     case TWISTOPT_RESUME_FROM:
       easy->resume_from = va_arg (ap, long long);
       break;

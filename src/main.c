@@ -80,6 +80,7 @@ struct cli_op
   struct twist_slist *rcpts;
   struct twist_slist *quote;
   struct twist_slist *postquote;
+  struct twist_slist *telnet;	/* -t, for telnet URLs.  */
   int ftp_create_dirs;
   uint64_t limit_rate;		/* Bytes a second; 0: none.  */
   int globoff;			/* -g: {} and [] in a URL are plain.  */
@@ -175,6 +176,10 @@ cli_status (int err, const char *url)
       return 18;
     case TWIST_ERR_USE_SSL:
       return 64;
+    case TWIST_ERR_UNKNOWN_OPTION:
+      return 48;
+    case TWIST_ERR_OPTION_SYNTAX:
+      return 49;
     case TWIST_ERR_HOSTKEY:
       return 60;
     case TWIST_ERR_ENCODING:
@@ -208,7 +213,10 @@ usage (void)
   fputs (_("      --data-raw DATA     request body, @ is not a file\n"), stdout);
   fputs (_("      --data-urlencode D  form field, percent-encoded\n"), stdout);
   fputs (_("  -G, --get               put -d on the query string\n"), stdout);
-  fputs (_("  -T, --upload-file FILE  upload FILE (- is stdin) with PUT\n"),
+  fputs (_("  -T, --upload-file FILE  upload FILE (- is stdin) with PUT; send it to telnet\n"),
+         stdout);
+  fputs (_("  -t, --telnet-option O=V set a telnet option: TTYPE, XDISPLOC, NEW_ENV, WS\n"
+           "                          (80x24) or BINARY\n"),
          stdout);
   fputs (_("  -I, --head              fetch headers only\n"), stdout);
   fputs (_("  -i, --include           write response headers before the body\n"),
@@ -1022,6 +1030,15 @@ is_ssh_url (const char *url)
   return strncmp (url, "sftp://", 7) == 0 || strncmp (url, "scp://", 6) == 0;
 }
 
+/* A telnet session sends what is read from standard input, or from the file
+   of -T, and nothing is a request: the data of -d is not sent, and the
+   transfer is not a PUT.  */
+static int
+is_telnet_url (const char *url)
+{
+  return strncasecmp (url, "telnet://", 9) == 0;
+}
+
 /* The file being uploaded, for the schemes that take it as it is read.  */
 struct cli_upload
 {
@@ -1114,7 +1131,8 @@ output_expected (const char *url, const char *upload)
   if (upload == NULL)
     return 1;
   return strncasecmp (url, "http://", 7) == 0
-         || strncasecmp (url, "https://", 8) == 0;
+         || strncasecmp (url, "https://", 8) == 0
+         || is_telnet_url (url);
 }
 
 static int
@@ -1250,7 +1268,12 @@ run_one (twist_easy *easy, struct cli_op *op, const char *url,
     }
   else if (op->dump_header != NULL)
     dump = stdout;
-  if (upload != NULL && is_ssh_url (url))
+  if (upload != NULL && is_telnet_url (url) && strcmp (upload, "-") == 0)
+    {
+      /* Standard input is what a telnet session reads when it is given
+         nothing else, as it is watched and not read to its end first.  */
+    }
+  else if (upload != NULL && (is_ssh_url (url) || is_telnet_url (url)))
     {
       /* Sent as it is read, so that a large file, or a pipe, is not held in
          memory first.  */
@@ -1269,7 +1292,7 @@ run_one (twist_easy *easy, struct cli_op *op, const char *url,
           return 26;
         }
       streaming = 1;
-      if (method == NULL)
+      if (method == NULL && !is_telnet_url (url))
         method = "PUT";
     }
   else if (upload != NULL)
@@ -1292,7 +1315,7 @@ run_one (twist_easy *easy, struct cli_op *op, const char *url,
       if (method == NULL)
         method = "PUT";
     }
-  else if (op->has_data && !op->get)
+  else if (op->has_data && !op->get && !is_telnet_url (url))
     {
       payload = op->data != NULL ? op->data : empty_body;
       payload_n = op->data_len;
@@ -1377,6 +1400,7 @@ run_one (twist_easy *easy, struct cli_op *op, const char *url,
     twist_easy_setopt (easy, TWISTOPT_POSTFIELDSIZE, (long) payload_n);
   twist_easy_setopt (easy, TWISTOPT_HTTPHEADER,
                      op->headers != NULL ? op->headers : NULL);
+  twist_easy_setopt (easy, TWISTOPT_TELNETOPTIONS, op->telnet);
   twist_easy_setopt (easy, TWISTOPT_MAIL_FROM, op->mail_from);
   twist_easy_setopt (easy, TWISTOPT_MAIL_RCPT, op->rcpts);
   twist_easy_setopt (easy, TWISTOPT_MAX_RECV_SPEED_LARGE, op->limit_rate);
@@ -1584,6 +1608,7 @@ free_op (struct cli_op *op)
   twist_slist_free_all (op->rcpts);
   twist_slist_free_all (op->quote);
   twist_slist_free_all (op->postquote);
+  twist_slist_free_all (op->telnet);
   twist_easy_cleanup (op->easy);
   free (op);
 }
@@ -1673,6 +1698,7 @@ main (int argc, char **argv)
     { "data-urlencode", required_argument, NULL, 26 },
     { "get", no_argument, NULL, 'G' },
     { "upload-file", required_argument, NULL, 'T' },
+    { "telnet-option", required_argument, NULL, 't' },
     { "head", no_argument, NULL, 'I' },
     { "include", no_argument, NULL, 'i' },
     { "dump-header", required_argument, NULL, 'D' },
@@ -1808,7 +1834,7 @@ main (int argc, char **argv)
           continue;
         }
       c = getopt_long (argc, argv,
-                       "+:o:X:H:d:Lkx:A:u:Iw:fE:hm:e:r:b:sS#OT:GgiD:qC:lQ:U:",
+                       "+:o:X:H:d:Lkx:A:u:Iw:fE:hm:e:r:b:sS#OT:t:GgiD:qC:lQ:U:",
                        expandable, NULL);
       if (c == -1)
         break;
@@ -1897,6 +1923,11 @@ main (int argc, char **argv)
           break;
         case 'T':
           status = append_item (&op->uploads, &op->uploads_tail, optarg, 0);
+          break;
+        case 't':
+          op->telnet = twist_slist_append (op->telnet, optarg);
+          if (op->telnet == NULL)
+            status = 27;
           break;
         case 'I':
           op->head = 1;

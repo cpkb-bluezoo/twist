@@ -146,6 +146,7 @@ struct twist_easy
   int dirlistonly;
   struct twist_slist *quote;	/* Borrowed: the caller's.  */
   struct twist_slist *postquote;
+  struct twist_slist *telnet_options;	/* Borrowed too.  */
   int create_missing_dirs;
   char *ssh_agent_socket;
   long timeout_ms;
@@ -356,6 +357,10 @@ void twist_connection_set_tls (struct twist_connection *conn, void *tls,
 void *twist_connection_tls (struct twist_connection *conn);
 int twist_endpoint_send (struct twist_endpoint *ep, const uint8_t *data,
                          size_t len);
+/* How many bytes sent on EP the connection has not yet written.  A handler
+   that sends without limit, such as one that copies standard input, stops when
+   this is large and goes on from EP's on_write_ready.  */
+size_t twist_endpoint_pending (const struct twist_endpoint *ep);
 void twist_endpoint_close (struct twist_endpoint *ep);
 void twist_endpoint_pause_read (struct twist_endpoint *ep);
 void twist_endpoint_resume_read (struct twist_endpoint *ep);
@@ -1182,6 +1187,25 @@ size_t twist_gopher_receive (struct twist_gopher *gopher, const uint8_t *data,
                              size_t len);
 void twist_gopher_closed (struct twist_gopher *gopher, int err);
 int twist_gopher_attach (struct twist_easy *easy);
+
+/* Telnet (RFC 854).  twist_telnet_receive takes what the server sent and
+   writes the text in it to the transfer's write callback, answering the
+   server's negotiation.  twist_telnet_input takes what is to be sent, and
+   escapes it.  With LIVE zero there is no connection and what would be sent
+   is kept, for twist_telnet_sent; the input is then given by the caller, and
+   LIVE nonzero reads it (standard input, or the read callback).  */
+struct twist_telnet;
+struct twist_telnet *twist_telnet_new (struct twist_easy *easy, int live);
+void twist_telnet_free (void *telnet);
+size_t twist_telnet_receive (struct twist_telnet *telnet, const uint8_t *data,
+                             size_t len);
+void twist_telnet_input (struct twist_telnet *telnet, const uint8_t *data,
+                         size_t len);
+const uint8_t *twist_telnet_sent (const struct twist_telnet *telnet,
+                                  size_t *len);
+void twist_telnet_sent_clear (struct twist_telnet *telnet);
+void twist_telnet_closed (struct twist_telnet *telnet, int err);
+int twist_telnet_attach (struct twist_easy *easy);
 
 struct twist_dict;
 struct twist_dict *twist_dict_new (struct twist_easy *easy, int live);

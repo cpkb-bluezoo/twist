@@ -13,7 +13,7 @@ EXTRA_DIST = fuzz.sh fuzz.h engine.c \
 	harness-h1.c harness-h2.c harness-h3.c harness-hpack.c harness-imap.c \
 	harness-ldap.c harness-mailtext.c harness-mqtt.c harness-pop3.c \
 	harness-proxy.c harness-quote.c harness-sasl.c harness-smtp.c \
-	harness-tftp.c harness-url.c harness-vars.c harness-ws.c
+	harness-telnet.c harness-tftp.c harness-url.c harness-vars.c harness-ws.c
 
 dist-hook:
 	cp -R $(srcdir)/regress $(distdir)/regress

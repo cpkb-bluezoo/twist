@@ -76,6 +76,10 @@ twist_strerror (int err)
       return _("transferred a partial file");
     case TWIST_ERR_USE_SSL:
       return _("the server would not upgrade to TLS");
+    case TWIST_ERR_UNKNOWN_OPTION:
+      return _("an unknown option was given");
+    case TWIST_ERR_OPTION_SYNTAX:
+      return _("an option is not written as it must be");
     case TWIST_ERR_RECURSIVE:
       return _("an API function was called from inside a callback");
     case TWIST_ERR_PROXY:

@@ -35,7 +35,7 @@ libtwist_la_LIBADD = $(QUICKSTEP_LIBS) $(FOXTROT_LIBS) $(ZLIB_LIBS) \
 ##   dns/      DNS client: message parser, transport order, resolver
 ##   auth/     SASL clients, HTTP Basic and Digest, MD5, SHA-256
 ##   http/     HTTP/1, HTTP/2, HTTP/3 and cookies
-##   ftp/ file/ mail/ mqtt/ ldap/ ws/ gopher/ dict/ tftp/ ssh/  scheme handlers
+##   ftp/ file/ mail/ mqtt/ ldap/ ws/ gopher/ dict/ telnet/ tftp/ ssh/  scheme handlers
 ##   mime/     streaming MIME writer
 ##   tls/      quickstep TLS and QUIC under the connection
 
@@ -108,6 +108,7 @@ libtwist_la_SOURCES = \
   ws/ws.c \
   gopher/gopher.c \
   dict/dict.c \
+  telnet/telnet.c \
   tftp/tftp.c \
   ssh/agent.c \
   ssh/hostkey.c \

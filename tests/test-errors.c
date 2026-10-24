@@ -46,6 +46,13 @@ test_errors (void)
                  twist_strerror (TWIST_ERR_CLOSED)) != 0, "partial distinct");
   check (strcmp (twist_strerror (TWIST_ERR_RECURSIVE),
                  twist_strerror (TWIST_ERR_INVAL)) != 0, "recursive distinct");
+  check (strcmp (twist_strerror (TWIST_ERR_UNKNOWN_OPTION),
+                 twist_strerror (TWIST_ERR_OPTION_SYNTAX)) != 0,
+         "option errors distinct");
+  check (strcmp (twist_strerror (TWIST_ERR_UNKNOWN_OPTION),
+                 twist_strerror (-1)) != 0, "unknown option has a sentence");
+  check (strcmp (twist_strerror (TWIST_ERR_OPTION_SYNTAX),
+                 twist_strerror (-1)) != 0, "option syntax has a sentence");
   easy = twist_easy_init ();
   check (easy != NULL && twist_easy_error (easy) == NULL, "no detail");
   twist_easy_set_error (easy, twist_strdup ("could not open file /no/such"));
