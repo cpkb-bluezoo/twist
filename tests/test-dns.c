@@ -445,14 +445,17 @@ test_doh (void)
      address as far as the system is concerned: without it a link-local address
      goes nowhere.  */
   {
-    unsigned lo = if_nametoindex ("lo");
+    /* The loopback interface is lo on Linux and lo0 on the BSDs.  */
+    const char *loname = if_nametoindex ("lo") != 0 ? "lo" : "lo0";
+    unsigned lo = if_nametoindex (loname);
+    char zoned[32];
 
+    snprintf (zoned, sizeof zoned, "fe80::1%%%s", loname);
     memset (&saw, 0, sizeof saw);
     saw.scope = 12345;
-    check (twist_dns_resolve_transfer (transfer, "fe80::1%lo", on_literal,
-                                       &saw)
+    check (twist_dns_resolve_transfer (transfer, zoned, on_literal, &saw)
            == TWIST_OK && saw.calls == 1 && saw.err == TWIST_OK
-           && strcmp (saw.text, "fe80::1%lo") == 0
+           && strcmp (saw.text, zoned) == 0
            && saw.family == 6 && saw.scope == lo && lo != 0,
            "a zone by name gives the index of the interface");
     memset (&saw, 0, sizeof saw);

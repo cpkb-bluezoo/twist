@@ -45,6 +45,22 @@
 #include <time.h>
 #include <unistd.h>
 
+#ifndef __GLIBC__
+
+/* The functions are replaced by defining them in the program, and the
+   program's definitions win over the library's only where symbols are
+   resolved by name in one namespace, as with glibc.  Elsewhere (Mac OS) they
+   do not, and the test would pass for no reason.  */
+int
+main (void)
+{
+  fputs ("test-threads: needs glibc's symbol interposition; skipping\n",
+         stderr);
+  return 77;
+}
+
+#else
+
 extern void *__libc_calloc (size_t, size_t);
 
 /* A function the next definition has, from dlsym, which gives an object
@@ -336,3 +352,5 @@ main (void)
   unlink (big);
   return tests_finish ();
 }
+
+#endif /* __GLIBC__ */

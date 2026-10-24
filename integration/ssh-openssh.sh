@@ -972,19 +972,19 @@ lastline ()
 }
 e=$("$TWIST" -S -k --key "$work/userkey" -o /dev/null \
   "sftp://$user@$base$work/srv/data.bin" 2>&1 >/dev/null)
-check "$(case "$(printf '%s' "$e" | lastline)" in '100  700k  100  700k    0     0 '*) echo ok;; esac)" \
+check "$(case "$(printf '%s' "$e" | lastline)" in ('100  700k  100  700k    0     0 '*) echo ok;; esac)" \
   "the meter knows the size of an sftp download: $(printf '%s' "$e" | lastline)"
 e=$("$TWIST" -S -k --key "$work/userkey" -T "$work/local.bin" \
   "sftp://$user@$base$work/srv/up.bin" 2>&1 >/dev/null)
-check "$(case "$(printf '%s' "$e" | lastline)" in '100  900k    0     0  100  900k '*) echo ok;; esac)" \
+check "$(case "$(printf '%s' "$e" | lastline)" in ('100  900k    0     0  100  900k '*) echo ok;; esac)" \
   "the meter knows the size of an sftp upload: $(printf '%s' "$e" | lastline)"
 e=$(COLUMNS=50 "$TWIST" -S -# -k --key "$work/userkey" -o /dev/null \
   "sftp://$user@$base$work/srv/data.bin" 2>&1 >/dev/null | tr '\r' '\n' | grep -v '^$' | tail -n 1)
-check "$(case "$e" in *' 100.0%') echo ok;; esac)" "the bar reaches 100.0% for an sftp download: $e"
+check "$(case "$e" in (*' 100.0%') echo ok;; esac)" "the bar reaches 100.0% for an sftp download: $e"
 # A range is the size of the range.
 e=$("$TWIST" -S -k --key "$work/userkey" -r 0-9999 -o /dev/null \
   "sftp://$user@$base$work/srv/data.bin" 2>&1 >/dev/null)
-check "$(case "$(printf '%s' "$e" | lastline)" in '100 10000  100 10000    0     0 '*) echo ok;; esac)" \
+check "$(case "$(printf '%s' "$e" | lastline)" in ('100 10000  100 10000    0     0 '*) echo ok;; esac)" \
   "the meter knows the size of a range: $(printf '%s' "$e" | lastline)"
 
 # 13. An https proxy: TLS to it and CONNECT inside, over HTTP/2 and HTTP/1.1, in

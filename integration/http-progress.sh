@@ -113,34 +113,34 @@ heading='  % Total    % Received % Xferd  Average Speed   Time    Time     Time 
 
 # A download of a known size.
 e=$(meter -o /dev/null "$u/five")
-check "$(case "$(printf '%s\n' "$e" | head -n 1)" in "$heading") echo ok;; esac)" "the heading"
-check "$(case "$(printf '%s\n' "$e" | last)" in '100  5000  100  5000    0     0 '*) echo ok;; esac)" "a download of 5000: $(printf '%s\n' "$e" | last)"
-check "$(case "$(printf '%s\n' "$e" | sed -n 3p)" in '  0     0    0     0    0     0      0      0 '*) echo ok;; esac)" "it starts at 0"
+check "$(case "$(printf '%s\n' "$e" | head -n 1)" in ("$heading") echo ok;; esac)" "the heading"
+check "$(case "$(printf '%s\n' "$e" | last)" in ('100  5000  100  5000    0     0 '*) echo ok;; esac)" "a download of 5000: $(printf '%s\n' "$e" | last)"
+check "$(case "$(printf '%s\n' "$e" | sed -n 3p)" in ('  0     0    0     0    0     0      0      0 '*) echo ok;; esac)" "it starts at 0"
 
 # An empty body: 0, and no division by it.
 e=$(meter -o /dev/null "$u/empty")
-check "$(case "$(printf '%s\n' "$e" | last)" in '  0     0    0     0    0     0 '*) echo ok;; esac)" "an empty body: $(printf '%s\n' "$e" | last)"
+check "$(case "$(printf '%s\n' "$e" | last)" in ('  0     0    0     0    0     0 '*) echo ok;; esac)" "an empty body: $(printf '%s\n' "$e" | last)"
 
 # A body of a size that is not said: the total is what has come.
 e=$(meter -o /dev/null "$u/chunked")
-check "$(case "$(printf '%s\n' "$e" | last)" in '100  5000    0  5000    0     0 '*) echo ok;; esac)" "chunked: $(printf '%s\n' "$e" | last)"
+check "$(case "$(printf '%s\n' "$e" | last)" in ('100  5000    0  5000    0     0 '*) echo ok;; esac)" "chunked: $(printf '%s\n' "$e" | last)"
 
 # Uploads: -d, and -T with the file read whole.
 e=$(meter -o /dev/null -d 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' "$u/x")
-check "$(case "$(printf '%s\n' "$e" | last)" in '100    46  100     2  100    44 '*) echo ok;; esac)" "a POST of 44: $(printf '%s\n' "$e" | last)"
+check "$(case "$(printf '%s\n' "$e" | last)" in ('100    46  100     2  100    44 '*) echo ok;; esac)" "a POST of 44: $(printf '%s\n' "$e" | last)"
 e=$(meter -o /dev/null -T "$work/five" "$u/x")
-check "$(case "$(printf '%s\n' "$e" | last)" in '100  5002  100     2  100  5000 '*) echo ok;; esac)" "a PUT of 5000: $(printf '%s\n' "$e" | last)"
+check "$(case "$(printf '%s\n' "$e" | last)" in ('100  5002  100     2  100  5000 '*) echo ok;; esac)" "a PUT of 5000: $(printf '%s\n' "$e" | last)"
 
 # A redirect ends the first response's line and starts the next at 0, under
 # the same heading.
 all=$("$TWIST" -L -o /dev/null "$u/redirect" 2>&1 >/dev/null)
 check "$([ "$(printf '%s' "$all" | grep -c '% Total')" = 1 ] && echo ok)" "one heading with a redirect"
 e=$(printf '%s' "$all" | tr '\r' '\n' | grep -v '^$')
-check "$(case "$(printf '%s\n' "$e" | last)" in '100  5000  100  5000    0     0 '*) echo ok;; esac)" "the redirect's target: $(printf '%s\n' "$e" | last)"
+check "$(case "$(printf '%s\n' "$e" | last)" in ('100  5000  100  5000    0     0 '*) echo ok;; esac)" "the redirect's target: $(printf '%s\n' "$e" | last)"
 raw=$(printf '%s' "$all" | tr '\r\n' '@#')
-check "$(case "$raw" in *'#@100  5000  100  5000'*) echo ok;; esac)" "a newline ends the redirect's line"
+check "$(case "$raw" in (*'#@100  5000  100  5000'*) echo ok;; esac)" "a newline ends the redirect's line"
 e=$(meter -o /dev/null "$u/redirect")
-check "$(case "$(printf '%s\n' "$e" | last)" in '  0     0    0     0    0     0 '*) echo ok;; esac)" "a redirect that is not followed has no body: $(printf '%s\n' "$e" | last)"
+check "$(case "$(printf '%s\n' "$e" | last)" in ('  0     0    0     0    0     0 '*) echo ok;; esac)" "a redirect that is not followed has no body: $(printf '%s\n' "$e" | last)"
 
 # The bar: the width given and the percentage.
 e=$(COLUMNS=40 "$TWIST" -# -o /dev/null "$u/five" 2>&1 >/dev/null | tr '\r' '\n' | grep -v '^$' | tail -n 1)

@@ -3846,9 +3846,16 @@ link_local (struct in6_addr *addr, unsigned *scope, char *name)
 
       if (a->ifa_addr == NULL || a->ifa_addr->sa_family != AF_INET6
           || !(a->ifa_flags & IFF_UP) || (a->ifa_flags & IFF_LOOPBACK)
+          /* A tunnel (utun, a VPN) takes what is sent to its own address out
+             to the other end and not back, and the connection hangs.  */
+          || (a->ifa_flags & IFF_POINTOPOINT)
           || !IN6_IS_ADDR_LINKLOCAL (&s6->sin6_addr))
         continue;
       *addr = s6->sin6_addr;
+      /* The BSDs and Mac OS put the interface's index in the address, in the
+         bytes that are zero in a link-local one; it is the zone, which is
+         named separately, and is not part of the address.  */
+      addr->s6_addr[2] = addr->s6_addr[3] = 0;
       *scope = if_nametoindex (a->ifa_name);
       snprintf (name, IF_NAMESIZE, "%s", a->ifa_name);
       found = *scope != 0;
@@ -5626,8 +5633,38 @@ test_short_read_flood (void)
   server_free (&sv);
 }
 
+static int run_tests (void);
+
+/* The tests keep servers and pipes of 2 MiB and more in their frames, which
+   Linux's 8 MiB stack holds and Mac OS's, for a thread other than the first
+   (512 KiB), does not, nor the first for a function with two of them.  So
+   they run on a thread whose stack is made big enough.  */
+#define TEST_STACK (256UL * 1024 * 1024)
+
+static void *
+run_thread (void *arg)
+{
+  *(int *) arg = run_tests ();
+  return NULL;
+}
+
 int
 main (void)
+{
+  pthread_attr_t attr;
+  pthread_t thread;
+  int status = 1;
+
+  if (pthread_attr_init (&attr) != 0
+      || pthread_attr_setstacksize (&attr, TEST_STACK) != 0
+      || pthread_create (&thread, &attr, run_thread, &status) != 0)
+    return run_tests ();
+  pthread_join (thread, NULL);
+  return status;
+}
+
+static int
+run_tests (void)
 {
   size_t i;
 

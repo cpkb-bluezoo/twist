@@ -54,10 +54,10 @@ err () { "$@" 2>&1 >/dev/null; }
 e=$(err "$TWIST" -o /dev/null "$u"; echo x)
 heading='  % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
                                  Dload  Upload   Total   Spent    Left  Speed'
-check "$(case "$e" in "$heading"*) echo ok;; esac)" "the meter has the heading"
+check "$(case "$e" in ("$heading"*) echo ok;; esac)" "the meter has the heading"
 last=$(printf '%s' "$e" | tr '\r' '\n' | tail -n 2 | head -n 1)
-check "$(case "$last" in '100     8  100     8    0     0 '*) echo ok;; esac)" "the last line is 100%: $last"
-check "$(case "$e" in *"
+check "$(case "$last" in ('100     8  100     8    0     0 '*) echo ok;; esac)" "the last line is 100%: $last"
+check "$(case "$e" in (*"
 x") echo ok;; esac)" "and the line ends"
 check "$(is "$(printf '%s' "$e" | tr '\r' '\n' | grep -c '^  0     8    0     0\|^  0     0    0     0')" 1)" "the first line is 0%"
 
@@ -82,23 +82,23 @@ check "$(is "$(err "$TWIST" --no-progress-meter -o /dev/null "$u")" "")" "--no-p
 check "$(is "$(err "$TWIST" --no-progress-meter -# -o /dev/null "$u")" "")" "--no-progress-meter and -#"
 check "$(is "$(err "$TWIST" -# --no-progress-meter -o /dev/null "$u")" "")" "-# and --no-progress-meter"
 check "$(is "$(err "$TWIST" -s -# -o /dev/null "$u")" "")" "-s and -#"
-check "$(case "$(err "$TWIST" -s --no-silent -o /dev/null "$u")" in "$heading"*) echo ok;; esac)" "--no-silent"
-check "$(case "$(err "$TWIST" --no-progress-meter --progress-meter -o /dev/null "$u")" in "$heading"*) echo ok;; esac)" "--progress-meter"
-check "$(case "$(err "$TWIST" -# --no-progress-bar -o /dev/null "$u")" in "$heading"*) echo ok;; esac)" "--no-progress-bar"
+check "$(case "$(err "$TWIST" -s --no-silent -o /dev/null "$u")" in ("$heading"*) echo ok;; esac)" "--no-silent"
+check "$(case "$(err "$TWIST" --no-progress-meter --progress-meter -o /dev/null "$u")" in ("$heading"*) echo ok;; esac)" "--progress-meter"
+check "$(case "$(err "$TWIST" -# --no-progress-bar -o /dev/null "$u")" in ("$heading"*) echo ok;; esac)" "--no-progress-bar"
 check "$(is "$(COLUMNS=60 err "$TWIST" --no-progress-bar -# -o /dev/null "$u" | vis)" "$want")" "-# after --no-progress-bar"
 
 # Errors are told with the meter off, or not, as -S says.  A file that is not
 # there draws nothing.
 msg="twist: (37) could not open file"
 e=$(err "$TWIST" -o /dev/null "$gone")
-check "$(case "$e" in "$msg"*) echo ok;; esac)" "an error without -s: $e"
+check "$(case "$e" in ("$msg"*) echo ok;; esac)" "an error without -s: $e"
 check "$(is "$(err "$TWIST" -s -o /dev/null "$gone")" "")" "-s hides the error"
-check "$(case "$(err "$TWIST" -s -S -o /dev/null "$gone")" in "$msg"*) echo ok;; esac)" "-s -S"
-check "$(case "$(err "$TWIST" -S -s -o /dev/null "$gone")" in "$msg"*) echo ok;; esac)" "-S -s: independent"
+check "$(case "$(err "$TWIST" -s -S -o /dev/null "$gone")" in ("$msg"*) echo ok;; esac)" "-s -S"
+check "$(case "$(err "$TWIST" -S -s -o /dev/null "$gone")" in ("$msg"*) echo ok;; esac)" "-S -s: independent"
 check "$(is "$(err "$TWIST" -s -S --no-show-error -o /dev/null "$gone")" "")" "--no-show-error"
-check "$(case "$(err "$TWIST" -s --no-silent -o /dev/null "$gone")" in "$msg"*) echo ok;; esac)" "--no-silent shows the error"
-check "$(case "$(err "$TWIST" --no-progress-meter -o /dev/null "$gone")" in "$msg"*) echo ok;; esac)" "--no-progress-meter leaves the error"
-check "$(case "$(err "$TWIST" -# -o /dev/null "$gone")" in "$msg"*) echo ok;; esac)" "-# and an error"
+check "$(case "$(err "$TWIST" -s --no-silent -o /dev/null "$gone")" in ("$msg"*) echo ok;; esac)" "--no-silent shows the error"
+check "$(case "$(err "$TWIST" --no-progress-meter -o /dev/null "$gone")" in ("$msg"*) echo ok;; esac)" "--no-progress-meter leaves the error"
+check "$(case "$(err "$TWIST" -# -o /dev/null "$gone")" in ("$msg"*) echo ok;; esac)" "-# and an error"
 "$TWIST" -s -o /dev/null "$gone" 2>/dev/null
 check "$(is $? 37)" "the exit status is the same"
 
@@ -110,11 +110,11 @@ $want")" "-# after --next"
 # --stderr takes the meter too.
 "$TWIST" -o /dev/null --stderr "$work/err.txt" "$u" 2>"$work/real.txt"
 check "$(is "$(cat "$work/real.txt")" "")" "nothing on standard error with --stderr"
-check "$(case "$(cat "$work/err.txt")" in "$heading"*) echo ok;; esac)" "the meter is in the --stderr file"
+check "$(case "$(cat "$work/err.txt")" in ("$heading"*) echo ok;; esac)" "the meter is in the --stderr file"
 
 # A meter in a pipe, as the body is not on a terminal: the meter is shown.
 e=$("$TWIST" "$u" 2>&1 >/dev/null | head -n 1)
-check "$(case "$e" in "  % Total"*) echo ok;; esac)" "a body in a pipe has the meter"
+check "$(case "$e" in ("  % Total"*) echo ok;; esac)" "a body in a pipe has the meter"
 
 # The body going to a terminal hides the meter; with -o it
 # does not.  This needs a terminal, which python can make.

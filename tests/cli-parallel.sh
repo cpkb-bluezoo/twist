@@ -131,12 +131,22 @@ done
 
 # A body that goes to a terminal is not mixed with the line: when any URL has
 # no file of its own, nothing is drawn.  A terminal is needed to see it.
+# Run a command line on a terminal, in util-linux's script or in BSD's, which
+# take the command differently.
+on_tty ()
+{
+  if script -qec true /dev/null >/dev/null 2>&1; then
+    script -qec "$1" /dev/null >/dev/null 2>&1
+  else
+    script -q /dev/null sh -c "$1" >/dev/null 2>&1
+  fi
+}
 if command -v script >/dev/null 2>&1; then
   fresh
-  script -qec "'$TWIST' -Z -o out1 '$u/f1.txt' '$u/f2.txt' 2>'$work/err'" /dev/null >/dev/null 2>&1
+  on_tty "'$TWIST' -Z -o out1 '$u/f1.txt' '$u/f2.txt' 2>'$work/err'"
   check "$([ ! -s "$work/err" ] && echo ok)" "-Z with a body to the terminal draws nothing"
   fresh
-  script -qec "'$TWIST' -Z -o out1 '$u/f1.txt' -o out2 '$u/f2.txt' 2>'$work/err'" /dev/null >/dev/null 2>&1
+  on_tty "'$TWIST' -Z -o out1 '$u/f1.txt' -o out2 '$u/f2.txt' 2>'$work/err'"
   check "$(grep -q '^DL% UL%' "$work/err" && echo ok)" \
     "-Z with every body in a file draws the line even on a terminal"
 fi

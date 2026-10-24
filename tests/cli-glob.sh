@@ -26,7 +26,8 @@ TWIST=${TWIST:-../src/twist}
 # The tests change directory, so the path must not be relative.
 TWIST=$(cd "$(dirname "$TWIST")" && pwd)/$(basename "$TWIST")
 
-work=$(mktemp -d "${TMPDIR:-/tmp}/twist-glob.XXXXXX") || exit 77
+tmp=${TMPDIR:-/tmp}
+work=$(mktemp -d "${tmp%/}/twist-glob.XXXXXX") || exit 77
 trap 'rm -rf "$work"' EXIT INT TERM
 src="$work/src"
 mkdir -p "$src/x" "$src/y" "$work/out"
@@ -83,7 +84,10 @@ rc=$?
 check "$([ $rc -ne 0 ] && [ ! -s "$work/out/n.out" ] && echo ok)" "-g (exit $rc)"
 
 # The URLs, as written out.
-check "$([ "$(t -o /dev/null -w '%{url_effective}\n' "$u/{a,b}.txt" | sed "s|$src||" | tr '\n' ' ')" = 'file:///a.txt file:///b.txt ' ] && echo ok)" "url_effective of each"
+# (The pattern is in a variable: Mac OS's bash 3.2 brace-expands it inside the
+# substitution.)
+pair="$u/{a,b}.txt"
+check "$([ "$(t -o /dev/null -w '%{url_effective}\n' "$pair" | sed "s|$src||" | tr '\n' ' ')" = 'file:///a.txt file:///b.txt ' ] && echo ok)" "url_effective of each"
 
 # An IPv6 address is not a range, and each URL is tried.
 out=$(t -o /dev/null --connect-timeout 1 -w '%{url_effective}\n' 'http://[::1]:1/{x,y}' 2>/dev/null)

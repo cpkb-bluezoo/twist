@@ -23,6 +23,8 @@ Version 0.1 - unreleased
   * a connection is shared only between transfers with the same TLS settings
     (verification, CA, client certificate and key, an https proxy's, and
     proxy credentials)
+  * Mac OS and the BSDs: the event loop no longer fails to watch a descriptor
+    that is new to the kernel's queue and wanted for reading only
   * gzip and deflate request and response coding, via zlib
   * the progress meter and the bar (-#), and the library's
     TWISTOPT_XFERINFOFUNCTION

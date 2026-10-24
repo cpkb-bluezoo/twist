@@ -178,7 +178,7 @@ for mode in h2 h1; do
   check "$(is "$(get -x "https://alice:secret@127.0.0.1:$proxy_port" $c "$u")" direct)" "$mode: credentials in the URL"
   check "$([ "$(status -x "$px" $c -U alice:wrong "$u")" = 56 ] && echo ok)" "$mode: the wrong password is 56"
   e=$(timeout 30 "$TWIST" -S -o /dev/null -x "$px" $c "$u" 2>&1)
-  check "$(case "$e" in *"CONNECT tunnel failed, response 407"*) echo ok;; esac)" "$mode: the refusal is told: $e"
+  check "$(case "$e" in (*"CONNECT tunnel failed, response 407"*) echo ok;; esac)" "$mode: the refusal is told: $e"
   kill "$proxy_pid" 2>/dev/null
 done
 
@@ -190,7 +190,7 @@ for mode in h2 h1; do
   c="--proxy-cacert $work/proxy-cert.pem"
   check "$([ "$(status -x "$px" $c "$u")" = 56 ] && echo ok)" "$mode: a refused target is 56"
   e=$(timeout 30 "$TWIST" -S -o /dev/null -x "$px" $c "$u" 2>&1)
-  check "$(case "$e" in *"response 403"*) echo ok;; esac)" "$mode: and says 403: $e"
+  check "$(case "$e" in (*"response 403"*) echo ok;; esac)" "$mode: and says 403: $e"
   check "$(is "$(get -x "$px" $c --cacert "$work/origin-cert.pem" "$tu")" direct)" "$mode: another target is let through"
   kill "$proxy_pid" 2>/dev/null
 done

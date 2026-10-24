@@ -24,6 +24,7 @@
 #include "twist-int.h"
 
 #include <arpa/inet.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <netinet/in.h>
 #include <poll.h>
@@ -1418,9 +1419,8 @@ test_cancel (void)
   twist_transfer *transfer = timeout_transfer (port);
   struct check_job job = { 0, 0, 0 };
   struct timespec nap = { 0, 5000000 };
-  struct timeval tv = { 2, 0 };
   char buf[64];
-  ssize_t n;
+  ssize_t n = -1;
   int i;
 
   check (fd >= 0 && runtime != NULL, "cancel setup");
@@ -1446,9 +1446,20 @@ test_cancel (void)
          "a transfer that has ended cannot be cancelled");
   if (peer >= 0)
     {
-      setsockopt (peer, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
-      while ((n = recv (peer, buf, sizeof buf, 0)) > 0)
-        ;
+      /* The descriptor is closed on a turn of the loop, which is given to it
+         while the close is waited for: on a machine that is busy the turn
+         that does it can be some time coming.  */
+      fcntl (peer, F_SETFL, O_NONBLOCK);
+      for (i = 0; i < 600 && n != 0; i++)
+        {
+          twist_runtime_run_once (runtime, 0);
+          while ((n = recv (peer, buf, sizeof buf, 0)) > 0)
+            ;
+          if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK)
+            break;
+          if (n != 0)
+            nanosleep (&nap, NULL);
+        }
       check (n == 0, "the connection was closed");
       close (peer);
     }

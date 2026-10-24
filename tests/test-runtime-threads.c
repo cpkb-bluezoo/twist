@@ -24,6 +24,7 @@
 #include "twist-int.h"
 
 #include <arpa/inet.h>
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <poll.h>
 #include <pthread.h>
@@ -292,10 +293,11 @@ srv_start_stalled (struct srv *s, int h2)
   s->port = ntohs (sin.sin_port);
   for (i = 0; i < 6; i++)
     {
-      int fd = socket (AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
+      int fd = socket (AF_INET, SOCK_STREAM, 0);
 
       if (fd < 0)
         break;
+      fcntl (fd, F_SETFL, O_NONBLOCK);
       connect (fd, (struct sockaddr *) &sin, sizeof sin);
       s->dummy[s->ndummy++] = fd;
     }
