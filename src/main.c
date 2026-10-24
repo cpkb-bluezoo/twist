@@ -95,6 +95,8 @@ struct cli_op
   int form_next;
   char *method;
   int head;
+  int head_given;		/* -I or --head was given.  */
+  int no_head_given;		/* --no-head was.  */
   int get;
   int include;
   char *dump_header;
@@ -331,7 +333,11 @@ usage (void)
          stdout);
   fputs (_("      --no-silent, --no-show-error, --no-progress-bar,\n"
            "      --progress-meter    undo the option\n"), stdout);
-  fputs (_("      --stderr FILE       diagnostics go to FILE\n"), stdout);
+  fputs (_("      --no-OPTION         turn off a switch, such as --no-fail or\n"
+           "                          --no-location; the last one given counts\n"),
+         stdout);
+  fputs (_("      --stderr FILE       diagnostics go to FILE (- is standard output)\n"),
+         stdout);
   /* TRANSLATORS: The %{name} tokens are literal.  Keep the doubled
      percent signs.  */
   printf (_("  -w, --write-out FORMAT  print after the body (%%{http_code},\n"
@@ -1144,6 +1150,8 @@ struct cli_job
   struct twist_bar bar;
   int bar_used;
   int body_short;               /* A write to the body came up short.  */
+  int refuse_binary;            /* The body is on a terminal by default.  */
+  size_t refused_len;           /* The write it was refused in.  */
   int reads_stdin;              /* The transfer reads standard input.  */
   int aborted;                  /* Ended because another failed.  */
   struct twist_meter_xfer xfer; /* What the run's meter knows of it.  */
@@ -1158,6 +1166,24 @@ write_body (char *ptr, size_t size, size_t nmemb, void *userdata)
   size_t got;
 
   finish_headers (&job->hdrs);
+  /* What is written to a terminal because nothing said where else, and has a
+     NUL in it, is binary and would only mess the terminal up.  -o - says
+     that it is wanted there.  Say so, unless told not to, and write nothing:
+     the transfer fails as a write that did not go.  */
+  if (job->refuse_binary && memchr (ptr, 0, n) != NULL)
+    {
+      if (!silent)
+        {
+          fputs (_("Warning: Binary output can mess up your terminal. "
+                   "Use \"--output -\" to tell \n"), err_fp);
+          fprintf (err_fp, _("Warning: %s to output it to your terminal "
+                             "anyway, or consider \"--output \n"), PACKAGE);
+          fputs (_("Warning: <FILE>\" to save to a file.\n"), err_fp);
+        }
+      job->refused_len = n;
+      job->body_short = 1;
+      return 0;
+    }
   got = fwrite (ptr, 1, n, job->body);
   if (got < n)
     job->body_short = 1;
@@ -1608,6 +1634,8 @@ job_prepare (struct cli_run *run, struct cli_next *next, struct cli_job **out)
           goto fail;
         }
     }
+  job->refuse_binary = job->body == stdout && output == NULL
+                       && isatty (fileno (stdout));
   free (out_path);
   out_path = NULL;
   if (op->dump_header != NULL && strcmp (op->dump_header, "-") != 0)
@@ -1833,6 +1861,7 @@ job_finish (struct cli_job *job, int rc)
   twist_transfer *transfer = job->transfer;
   int code;
   const char *detail;
+  char refused[80];
   int write_failed;
 
   finish_headers (&job->hdrs);
@@ -1875,6 +1904,13 @@ job_finish (struct cli_job *job, int rc)
       if (job->aborted)
         detail = _("Transfer aborted due to critical error in another "
                    "transfer");
+      if (write_failed && detail == NULL && job->refused_len > 0)
+        {
+          snprintf (refused, sizeof refused,
+                    _("client returned ERROR on write of %zu bytes"),
+                    job->refused_len);
+          detail = refused;
+        }
       if (write_failed && detail == NULL)
         detail = _("failure writing output to destination");
       diag_code (code, detail != NULL ? detail : twist_strerror (rc));
@@ -2189,6 +2225,11 @@ op_set_str (struct cli_op *op, int opt, const char *str)
    has this bit set.  */
 #define EXPAND_BIT (1 << 16)
 
+/* --no-NAME is the option that is a switch, turned off.  The table of long
+   options has an entry for each, whose value has this bit set; the option
+   itself is handled with it taken off, and NEGATE says it was there.  */
+#define NEGATE_BIT (1 << 17)
+
 static struct option *
 expand_options (const struct option *longs)
 {
@@ -2243,8 +2284,10 @@ main (int argc, char **argv)
   static const struct option longs[] = {
     { "output", required_argument, NULL, 'o' },
     { "remote-name", no_argument, NULL, 'O' },
+    { "no-remote-name", no_argument, NULL, NEGATE_BIT | 'O' },
     { "output-dir", required_argument, NULL, 22 },
     { "create-dirs", no_argument, NULL, 23 },
+    { "no-create-dirs", no_argument, NULL, NEGATE_BIT | 23 },
     { "request", required_argument, NULL, 'X' },
     { "header", required_argument, NULL, 'H' },
     { "data", required_argument, NULL, 'd' },
@@ -2252,15 +2295,21 @@ main (int argc, char **argv)
     { "data-raw", required_argument, NULL, 25 },
     { "data-urlencode", required_argument, NULL, 26 },
     { "get", no_argument, NULL, 'G' },
+    { "no-get", no_argument, NULL, NEGATE_BIT | 'G' },
     { "upload-file", required_argument, NULL, 'T' },
     { "telnet-option", required_argument, NULL, 't' },
     { "head", no_argument, NULL, 'I' },
+    { "no-head", no_argument, NULL, NEGATE_BIT | 'I' },
     { "include", no_argument, NULL, 'i' },
+    { "no-include", no_argument, NULL, NEGATE_BIT | 'i' },
     { "dump-header", required_argument, NULL, 'D' },
     { "location", no_argument, NULL, 'L' },
+    { "no-location", no_argument, NULL, NEGATE_BIT | 'L' },
     { "max-redirs", required_argument, NULL, 1 },
     { "fail", no_argument, NULL, 'f' },
+    { "no-fail", no_argument, NULL, NEGATE_BIT | 'f' },
     { "fail-early", no_argument, NULL, 27 },
+    { "no-fail-early", no_argument, NULL, NEGATE_BIT | 27 },
     { "parallel", no_argument, NULL, 'Z' },
     { "no-parallel", no_argument, NULL, 53 },
     { "parallel-max", required_argument, NULL, 54 },
@@ -2269,8 +2318,10 @@ main (int argc, char **argv)
     { "parallel-max-host", required_argument, NULL, 57 },
     { "threads", required_argument, NULL, 59 },
     { "compressed", no_argument, NULL, 30 },
+    { "no-compressed", no_argument, NULL, NEGATE_BIT | 30 },
     { "content-encoding", required_argument, NULL, 31 },
     { "insecure", no_argument, NULL, 'k' },
+    { "no-insecure", no_argument, NULL, NEGATE_BIT | 'k' },
     { "cert", required_argument, NULL, 'E' },
     { "key", required_argument, NULL, 15 },
     { "pass", required_argument, NULL, 32 },
@@ -2279,11 +2330,14 @@ main (int argc, char **argv)
     { "capath", required_argument, NULL, 44 },
     { "proxy-cacert", required_argument, NULL, 46 },
     { "proxy-insecure", no_argument, NULL, 47 },
+    { "no-proxy-insecure", no_argument, NULL, NEGATE_BIT | 47 },
     { "proxy-template-udp", required_argument, NULL, 48 },
     { "noproxy", required_argument, NULL, 45 },
     { "ssl", no_argument, NULL, 51 },
+    { "no-ssl", no_argument, NULL, NEGATE_BIT | 51 },
     { "ftp-ssl", no_argument, NULL, 51 },
     { "ssl-reqd", no_argument, NULL, 52 },
+    { "no-ssl-reqd", no_argument, NULL, NEGATE_BIT | 52 },
     { "ftp-ssl-reqd", no_argument, NULL, 52 },
     { "unix-socket", required_argument, NULL, 49 },
     { "abstract-unix-socket", required_argument, NULL, 50 },
@@ -2295,8 +2349,10 @@ main (int argc, char **argv)
     { "range", required_argument, NULL, 'r' },
     { "continue-at", required_argument, NULL, 'C' },
     { "list-only", no_argument, NULL, 'l' },
+    { "no-list-only", no_argument, NULL, NEGATE_BIT | 'l' },
     { "quote", required_argument, NULL, 'Q' },
     { "ftp-create-dirs", no_argument, NULL, 34 },
+    { "no-ftp-create-dirs", no_argument, NULL, NEGATE_BIT | 34 },
     { "limit-rate", required_argument, NULL, 43 },
     { "cookie", required_argument, NULL, 'b' },
     { "oauth2-bearer", required_argument, NULL, 29 },
@@ -2313,7 +2369,9 @@ main (int argc, char **argv)
     { "stderr", required_argument, NULL, 21 },
     { "write-out", required_argument, NULL, 'w' },
     { "globoff", no_argument, NULL, 'g' },
+    { "no-globoff", no_argument, NULL, NEGATE_BIT | 'g' },
     { "disable", no_argument, NULL, 'q' },
+    { "no-disable", no_argument, NULL, NEGATE_BIT | 'q' },
     { "next", no_argument, NULL, 28 },
     { "http1.0", no_argument, NULL, 2 },
     { "http1.1", no_argument, NULL, 3 },
@@ -2324,6 +2382,7 @@ main (int argc, char **argv)
     { "dns-order", required_argument, NULL, 8 },
     { "doh-url", required_argument, NULL, 13 },
     { "doh-insecure", no_argument, NULL, 14 },
+    { "no-doh-insecure", no_argument, NULL, NEGATE_BIT | 14 },
     { "doq-url", required_argument, NULL, 17 },
     { "dot-url", required_argument, NULL, 18 },
     { "mail-from", required_argument, NULL, 11 },
@@ -2339,6 +2398,7 @@ main (int argc, char **argv)
   struct option *expandable = NULL;
   struct twist_vars *vars = NULL;
   char *expanded = NULL;
+  int negate = 0;
   int c;
   int status = 0;
 
@@ -2421,6 +2481,12 @@ main (int argc, char **argv)
             }
           optarg = expanded;
         }
+      negate = 0;
+      if (c > 0 && (c & NEGATE_BIT))
+        {
+          negate = 1;
+          c &= ~NEGATE_BIT;
+        }
       switch (c)
         {
         case 36:
@@ -2447,7 +2513,10 @@ main (int argc, char **argv)
           status = append_item (&op->outputs, &op->outputs_tail, optarg, 0);
           break;
         case 'O':
-          status = append_item (&op->outputs, &op->outputs_tail, NULL, 1);
+          /* -O names the file of the URL it comes before, which --no-remote-name
+             does not undo.  */
+          if (!negate)
+            status = append_item (&op->outputs, &op->outputs_tail, NULL, 1);
           break;
         case 22:
           free (op->output_dir);
@@ -2456,7 +2525,7 @@ main (int argc, char **argv)
             status = 27;
           break;
         case 23:
-          op->create_dirs = 1;
+          op->create_dirs = !negate;
           break;
         case 'X':
           free (op->method);
@@ -2482,7 +2551,7 @@ main (int argc, char **argv)
           status = add_urlencode (op, optarg);
           break;
         case 'G':
-          op->get = 1;
+          op->get = !negate;
           break;
         case 'T':
           status = append_item (&op->uploads, &op->uploads_tail, optarg, 0);
@@ -2493,11 +2562,30 @@ main (int argc, char **argv)
             status = 27;
           break;
         case 'I':
-          op->head = 1;
-          op->include = 1;
+          /* -I and --no-head do not go together, in either order.  */
+          if (negate ? op->head_given : op->no_head_given)
+            {
+              char msg[200];
+
+              snprintf (msg, sizeof msg, _("option %s: is badly used here"),
+                        argv[optind - 1][0] == '-' && argv[optind - 1][1] == '-'
+                        ? argv[optind - 1] : "-I");
+              diag (msg);
+              suggest ();
+              status = 2;
+              break;
+            }
+          if (negate)
+            op->no_head_given = 1;
+          else
+            {
+              op->head_given = 1;
+              op->head = 1;
+              op->include = 1;
+            }
           break;
         case 'i':
-          op->include = 1;
+          op->include = !negate;
           break;
         case 'D':
           free (op->dump_header);
@@ -2506,7 +2594,7 @@ main (int argc, char **argv)
             status = 27;
           break;
         case 'L':
-          op_set_long (op, TWISTOPT_FOLLOWLOCATION, 1L);
+          op_set_long (op, TWISTOPT_FOLLOWLOCATION, negate ? 0L : 1L);
           break;
         case 1:
           {
@@ -2524,10 +2612,10 @@ main (int argc, char **argv)
           }
           break;
         case 'f':
-          op_set_long (op, TWISTOPT_FAILONERROR, 1L);
+          op_set_long (op, TWISTOPT_FAILONERROR, negate ? 0L : 1L);
           break;
         case 27:
-          fail_early = 1;
+          fail_early = !negate;
           break;
         case 'Z':
           parallel = 1;
@@ -2574,7 +2662,7 @@ main (int argc, char **argv)
           parallel_immediate = 0;
           break;
         case 30:
-          op_set_str (op, TWISTOPT_ACCEPT_ENCODING, "");
+          op_set_str (op, TWISTOPT_ACCEPT_ENCODING, negate ? NULL : "");
           break;
         case 31:
           if (op_set_str (op, TWISTOPT_CONTENT_ENCODING, optarg)
@@ -2586,7 +2674,7 @@ main (int argc, char **argv)
             }
           break;
         case 'k':
-          op_set_long (op, TWISTOPT_SSL_VERIFYPEER, 0L);
+          op_set_long (op, TWISTOPT_SSL_VERIFYPEER, negate ? 1L : 0L);
           break;
         case 'E':
           op_set_str (op, TWISTOPT_SSLCERT, optarg);
@@ -2604,10 +2692,12 @@ main (int argc, char **argv)
           op_set_str (op, TWISTOPT_NOPROXY, optarg);
           break;
         case 51:
-          op_set_long (op, TWISTOPT_USE_SSL, (long) TWIST_USE_SSL_TRY);
+          op_set_long (op, TWISTOPT_USE_SSL, negate ? (long) TWIST_USE_SSL_NONE
+                       : (long) TWIST_USE_SSL_TRY);
           break;
         case 52:
-          op_set_long (op, TWISTOPT_USE_SSL, (long) TWIST_USE_SSL_ALL);
+          op_set_long (op, TWISTOPT_USE_SSL, negate ? (long) TWIST_USE_SSL_NONE
+                       : (long) TWIST_USE_SSL_ALL);
           break;
         case 49:
         case 50:
@@ -2624,7 +2714,7 @@ main (int argc, char **argv)
           op_set_str (op, TWISTOPT_PROXY_CAINFO, optarg);
           break;
         case 47:
-          op_set_long (op, TWISTOPT_PROXY_SSL_VERIFYPEER, 0L);
+          op_set_long (op, TWISTOPT_PROXY_SSL_VERIFYPEER, negate ? 1L : 0L);
           break;
         case 48:
           {
@@ -2653,7 +2743,7 @@ main (int argc, char **argv)
           op_set_str (op, TWISTOPT_SSH_HOST_PUBLIC_KEY_SHA256, optarg);
           break;
         case 34:
-          op->ftp_create_dirs = 1;
+          op->ftp_create_dirs = !negate;
           break;
         case 43:
           if (parse_rate (optarg, &op->limit_rate) != 0)
@@ -2732,7 +2822,7 @@ main (int argc, char **argv)
           op_set_str (op, TWISTOPT_RANGE, optarg);
           break;
         case 'l':
-          op_set_long (op, TWISTOPT_DIRLISTONLY, 1L);
+          op_set_long (op, TWISTOPT_DIRLISTONLY, negate ? 0L : 1L);
           break;
         case 'C':
           if (strcmp (optarg, "-") == 0)
@@ -2822,25 +2912,28 @@ main (int argc, char **argv)
           no_progress = 1;
           break;
         case 21:
-          if (strcmp (optarg, "-") != 0)
-            {
-              FILE *fp = fopen (optarg, "wb");
+          /* The file, or standard output for "-": what would have gone to
+             standard error, the errors and the meter, goes there.  */
+          {
+            FILE *fp = stdout;
 
-              if (fp == NULL)
-                {
-                  char msg[256];
+            if (strcmp (optarg, "-") != 0)
+              fp = fopen (optarg, "wb");
+            if (fp == NULL)
+              {
+                char msg[256];
 
-                  snprintf (msg, sizeof msg, _("could not write %s"), optarg);
-                  diag_code (23, msg);
-                  status = 23;
-                }
-              else
-                {
-                  if (err_fp != stderr)
-                    fclose (err_fp);
-                  err_fp = fp;
-                }
-            }
+                snprintf (msg, sizeof msg, _("could not write %s"), optarg);
+                diag_code (23, msg);
+                status = 23;
+              }
+            else
+              {
+                if (err_fp != stderr && err_fp != stdout)
+                  fclose (err_fp);
+                err_fp = fp;
+              }
+          }
           break;
         case 'w':
           free (op->writeout);
@@ -2849,7 +2942,7 @@ main (int argc, char **argv)
             status = 27;
           break;
         case 'g':
-          op->globoff = 1;
+          op->globoff = !negate;
           break;
         case 'q':
           break;
@@ -2918,7 +3011,7 @@ main (int argc, char **argv)
             }
           break;
         case 14:
-          op_set_long (op, TWISTOPT_DOH_SSL_VERIFYPEER, 0L);
+          op_set_long (op, TWISTOPT_DOH_SSL_VERIFYPEER, negate ? 1L : 0L);
           break;
         case 17:
           if (op_set_str (op, TWISTOPT_DOQ_URL, optarg) != TWIST_OK)
@@ -3008,7 +3101,7 @@ done:
       free_op (ops);
       ops = next;
     }
-  if (err_fp != NULL && err_fp != stderr)
+  if (err_fp != NULL && err_fp != stderr && err_fp != stdout)
     fclose (err_fp);
   twist_global_cleanup ();
   return status;

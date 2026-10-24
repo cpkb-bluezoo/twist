@@ -1091,6 +1091,9 @@ void twist_h1_free (struct twist_h1 *parser);
 size_t twist_h1_receive (struct twist_h1 *parser, const uint8_t *data,
                          size_t len);
 int twist_h1_keep (const struct twist_h1 *parser);
+/* Whether the next response is to a HEAD request, and so has no body whatever
+   its headers say (RFC 9112, 6.3).  Set before the response, for each.  */
+void twist_h1_set_head (struct twist_h1 *parser, int head);
 int twist_h1_write_request (const char *method, const char *target,
                             const char *host, int http10,
                             const struct twist_slist *extra,

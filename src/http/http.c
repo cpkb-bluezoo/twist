@@ -1291,8 +1291,13 @@ send_request_target (struct twist_http *h, const char *target)
     rc = twist_h3_request (h->h3, method, scheme, authority, target, extra,
                            body, body_len, &out, &out_len);
   else
-    rc = twist_h1_write_request (method, target, authority, http10, extra, body,
-                                 body_len, &out, &out_len);
+    {
+      /* What answers a HEAD has no body, and the parser must know it before
+         the headers come.  */
+      twist_h1_set_head (h->h1, strcmp (method, "HEAD") == 0);
+      rc = twist_h1_write_request (method, target, authority, http10, extra,
+                                   body, body_len, &out, &out_len);
+    }
   twist_slist_free_all (extra);
   if (rc != TWIST_OK)
     {

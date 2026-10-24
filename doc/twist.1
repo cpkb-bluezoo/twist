@@ -439,7 +439,13 @@ for libbrotli.
 .BI \-o ", " \-\-output " file"
 Write the body to \fIfile\fR.
 .B \-
-is standard output.
+is standard output.  When no
+.B \-o
+is given and standard output is a terminal, a body with a NUL byte in it is binary and is not written there: the tool warns (not with
+.BR \-s ),
+writes nothing and exits 23.
+.B \-o \-
+writes it to the terminal anyway.
 .TP
 .B \-O, \-\-remote\-name
 Write the body to the last segment of the URL path.  A last segment of
@@ -899,9 +905,46 @@ Hide the progress meter and the bar, and leave the diagnostics alone.
 undoes it.
 .TP
 .BI \-\-stderr " file"
-Write diagnostics to \fIfile\fR.
+Write diagnostics, and the progress meter, to \fIfile\fR.
 .B \-
-keeps standard error.  This applies to every URL.
+is standard output, where they come in order with the body.  This applies to every URL.
+.TP
+.BI \-\-no\- option
+Turn off an option that is a switch, as the last of the two on the command line.  Every switch has one:
+.BR \-\-no\-remote\-name ,
+.BR \-\-no\-create\-dirs ,
+.BR \-\-no\-get ,
+.BR \-\-no\-head ,
+.BR \-\-no\-include ,
+.BR \-\-no\-location ,
+.BR \-\-no\-fail ,
+.BR \-\-no\-fail\-early ,
+.BR \-\-no\-parallel ,
+.BR \-\-no\-parallel\-immediate ,
+.BR \-\-no\-compressed ,
+.BR \-\-no\-insecure ,
+.BR \-\-no\-proxy\-insecure ,
+.BR \-\-no\-ssl ,
+.BR \-\-no\-ssl\-reqd ,
+.BR \-\-no\-list\-only ,
+.BR \-\-no\-ftp\-create\-dirs ,
+.BR \-\-no\-silent ,
+.BR \-\-no\-show\-error ,
+.BR \-\-no\-progress\-bar ,
+.BR \-\-progress\-meter ,
+.BR \-\-no\-globoff ,
+.B \-\-no\-disable
+and
+.BR \-\-no\-doh\-insecure .
+One that is not a switch (\fB\-\-next\fR, the choice of HTTP version, \fB\-\-help\fR) cannot be turned off, and exits 2.
+.B \-I
+with
+.B \-\-no\-head
+in either order is an error.
+.B \-\-no\-remote\-name
+does nothing:
+.B \-O
+names the file of the URL it comes before.
 .TP
 .BI \-w ", " \-\-write\-out " format"
 Print \fIformat\fR on standard output after the body.

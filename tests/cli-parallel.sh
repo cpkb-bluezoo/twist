@@ -132,13 +132,15 @@ done
 # A body that goes to a terminal is not mixed with the line: when any URL has
 # no file of its own, nothing is drawn.  A terminal is needed to see it.
 # Run a command line on a terminal, in util-linux's script or in BSD's, which
-# take the command differently.
+# take the command differently.  Standard input is nothing: BSD's script asks
+# the descriptor it has about its terminal, and fails when it is a socket or a
+# pipe, as it is under some ways of running the tests.
 on_tty ()
 {
-  if script -qec true /dev/null >/dev/null 2>&1; then
-    script -qec "$1" /dev/null >/dev/null 2>&1
+  if script -qec true /dev/null </dev/null >/dev/null 2>&1; then
+    script -qec "$1" /dev/null </dev/null >/dev/null 2>&1
   else
-    script -q /dev/null sh -c "$1" >/dev/null 2>&1
+    script -q /dev/null sh -c "$1" </dev/null >/dev/null 2>&1
   fi
 }
 if command -v script >/dev/null 2>&1; then

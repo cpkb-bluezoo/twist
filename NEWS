@@ -25,6 +25,11 @@ Version 0.1 - unreleased
     proxy credentials)
   * Mac OS and the BSDs: the event loop no longer fails to watch a descriptor
     that is new to the kernel's queue and wanted for reading only
+  * --stderr - is standard output, as curl's is; a binary body (one with a
+    NUL) is not written to a terminal unless -o - says so (exit 23, and a
+    warning); --no-OPTION for every option that is a switch
+  * a response to HEAD, and a 204 or a 304, has no body whatever its headers
+    say: -I no longer waits for one (exit 52 on HTTP/1.0, a hang on keep-alive)
   * gzip and deflate request and response coding, via zlib
   * the progress meter and the bar (-#), and the library's
     TWISTOPT_XFERINFOFUNCTION

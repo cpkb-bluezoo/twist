@@ -48,6 +48,7 @@ struct twist_h1
   int code;
   int chunked;
   int keep;
+  int head;			/* The response is to a HEAD request.  */
   uint64_t need;
   char line[8192];
   size_t line_len;
@@ -63,6 +64,13 @@ twist_h1_new (const struct twist_h1_events *ev)
     p->ev = *ev;
   p->state = H1_STATUS;
   return p;
+}
+
+void
+twist_h1_set_head (struct twist_h1 *p, int head)
+{
+  if (p != NULL)
+    p->head = head != 0;
 }
 
 void
@@ -157,6 +165,14 @@ header_done (struct twist_h1 *p)
     {
       p->state = H1_STATUS;
       return;
+    }
+  /* A response to HEAD, a 204 and a 304 have no body, whatever the headers
+     say of its length or coding: they are the headers that a GET would have
+     had.  Waiting for one is waiting for the connection to close.  */
+  if (p->head || p->code == 204 || p->code == 304)
+    {
+      p->chunked = 0;
+      p->need = 0;
     }
   if (p->chunked)
     p->state = H1_CHUNK_SIZE;

@@ -978,7 +978,11 @@ successfully.  A @samp{Features:} line names the optional libraries that
 twist was built with, @samp{brotli} for libbrotli.
 @item -o @var{file}
 @itemx --output @var{file}
-Write the response body to @var{file}.  @code{-} is standard output.
+Write the response body to @var{file}.  @code{-} is standard output.  When no
+@option{-o} is given and standard output is a terminal, a body with a NUL byte
+in it is binary and is not written there: the tool warns (not with
+@option{-s}), writes nothing and exits 23.  @code{-o -} writes it to the terminal
+anyway.
 @item -O
 @itemx --remote-name
 Write the body to the last segment of the URL path.  A last segment of
@@ -1269,8 +1273,25 @@ meter}).  @option{--no-progress-bar} undoes it.
 Hide the progress meter and the bar, and leave the diagnostics alone.
 @option{--progress-meter} undoes it.
 @item --stderr @var{file}
-Write diagnostics to @var{file}.  @code{-} keeps standard error.  This
-applies to every URL.
+Write diagnostics, and the progress meter, to @var{file}.  @code{-} is
+standard output, where they come in order with the body.  This applies to every
+URL.
+@item --no-@var{option}
+Turn off an option that is a switch, as the last of the two on the command
+line.  Every switch has one: @option{--no-remote-name},
+@option{--no-create-dirs}, @option{--no-get}, @option{--no-head},
+@option{--no-include}, @option{--no-location}, @option{--no-fail},
+@option{--no-fail-early}, @option{--no-parallel},
+@option{--no-parallel-immediate}, @option{--no-compressed},
+@option{--no-insecure}, @option{--no-proxy-insecure}, @option{--no-ssl},
+@option{--no-ssl-reqd}, @option{--no-list-only}, @option{--no-ftp-create-dirs},
+@option{--no-silent}, @option{--no-show-error}, @option{--no-progress-bar},
+@option{--progress-meter}, @option{--no-globoff}, @option{--no-disable} and
+@option{--no-doh-insecure}.  One that is not a switch (@option{--next}, the
+choice of HTTP version, @option{--help}) cannot be turned off, and exits 2.
+@option{-I} with @option{--no-head}, in either order, is an error.
+@option{--no-remote-name} does nothing: @option{-O} names the file of the URL
+it comes before.
 @item -w @var{format}
 @itemx --write-out @var{format}
 Print @var{format} on standard output after the body.

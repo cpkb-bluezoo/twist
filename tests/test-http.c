@@ -63,6 +63,68 @@ test_h1 (void)
   twist_h1_free (h);
 }
 
+/* A response that has no body, though it may say it has one: to a HEAD
+   request, or a 204 or a 304 (RFC 9112, 6.3).  The parser must not wait for
+   what is never sent, or for the connection to close.  */
+static void
+test_h1_no_body (void)
+{
+  static const char head[] =
+    "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\n";
+  static const char chunked[] =
+    "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n";
+  static const char not_modified[] =
+    "HTTP/1.1 304 Not Modified\r\nContent-Length: 5\r\n\r\n";
+  static const char no_content[] =
+    "HTTP/1.1 204 No Content\r\nContent-Length: 5\r\n\r\n";
+  struct twist_h1_events ev = test_events ();
+  struct twist_h1 *h;
+  size_t split;
+
+  for (split = 1; split <= 4; split *= 4)
+    {
+      h = twist_h1_new (&ev);
+      reset_ev ();
+      twist_h1_set_head (h, 1);
+      feed_all (h1_recv, h, (const uint8_t *) head, sizeof head - 1, split);
+      check (saw_status == 200 && saw_done == 1 && body_len == 0,
+             "a response to HEAD is done at the headers");
+      twist_h1_free (h);
+
+      h = twist_h1_new (&ev);
+      reset_ev ();
+      twist_h1_set_head (h, 1);
+      feed_all (h1_recv, h, (const uint8_t *) chunked, sizeof chunked - 1,
+                split);
+      check (saw_done == 1 && body_len == 0,
+             "and one that says it is chunked");
+      twist_h1_free (h);
+
+      h = twist_h1_new (&ev);
+      reset_ev ();
+      feed_all (h1_recv, h, (const uint8_t *) head, sizeof head - 1, split);
+      check (saw_status == 200 && saw_done == 0,
+             "to anything else the same headers promise a body");
+      twist_h1_free (h);
+
+      h = twist_h1_new (&ev);
+      reset_ev ();
+      feed_all (h1_recv, h, (const uint8_t *) not_modified,
+                sizeof not_modified - 1, split);
+      check (saw_status == 304 && saw_done == 1 && body_len == 0,
+             "a 304 has no body");
+      twist_h1_free (h);
+
+      h = twist_h1_new (&ev);
+      reset_ev ();
+      feed_all (h1_recv, h, (const uint8_t *) no_content,
+                sizeof no_content - 1, split);
+      check (saw_status == 204 && saw_done == 1 && body_len == 0,
+             "nor a 204");
+      twist_h1_free (h);
+    }
+}
+
 /* Open stream 1 by sending a request: a response only follows one, and a
    frame on a stream that was not opened is a connection error.  */
 static void
@@ -1404,6 +1466,7 @@ int
 main (void)
 {
   test_h1 ();
+  test_h1_no_body ();
   test_h2 ();
   test_h3 ();
   test_h3_long_frames ();

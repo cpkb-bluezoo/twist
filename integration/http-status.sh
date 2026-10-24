@@ -113,6 +113,16 @@ check "$(is "$out" "HTTP/1.1 200 Fine  Thing<CR>${nl}Content-Length: 2<CR>${nl}<
 h1 'HTTP/1.0 301 Moved\r\nContent-Length: 0\r\n\r\n' -i
 check "$(is "$out" "HTTP/1.0 301 Moved<CR>${nl}Content-Length: 0<CR>${nl}<CR>")" \
   "and an HTTP/1.0 one: $out"
+# The headers of a response to HEAD promise a body that is not sent, and the
+# transfer is over at the headers: a server of HTTP/1.0 that closes, and one
+# that keeps the connection (which the transfer must not wait on).
+h1 'HTTP/1.0 200 OK\r\nContent-Length: 5\r\n\r\n' -I
+check "$(is "$status" 0)" "-I against HTTP/1.0 with a length: status $status"
+check "$(is "$out" "HTTP/1.0 200 OK<CR>${nl}Content-Length: 5<CR>${nl}<CR>")" \
+  "and the headers are written: $out"
+h1 'HTTP/1.1 304 Not Modified\r\nContent-Length: 5\r\n\r\n' -i
+check "$(is "$status" 0)" "a 304 with a length: status $status"
+
 h1 'HTTP/1.1 204\r\nX: y\r\n\r\n' -i
 check "$(is "$out" "HTTP/1.1 204<CR>${nl}X: y<CR>${nl}<CR>")" \
   "no reason phrase, no trailing space: $out"
