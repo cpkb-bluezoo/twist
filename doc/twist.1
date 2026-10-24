@@ -832,6 +832,9 @@ and
 .B \-\-fail\-early
 still apply.  A URL is required before
 .BR \-\-next .
+The transfers of the whole command line, whatever the
+.B \-\-next
+between them, share the connections that are kept and the names that were looked up.
 .TP
 .BI \-E ", " \-\-cert " file"
 Client certificate in PEM form, leaf first.  Further certificates in

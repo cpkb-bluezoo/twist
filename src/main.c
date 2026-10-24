@@ -58,6 +58,17 @@ struct cli_item
   struct cli_item *next;
 };
 
+/* An option for the transfers of an operation: a number or a string, as
+   twist_transfer_setopt takes them.  The string is the record's own.  */
+struct cli_opt
+{
+  int opt;
+  int is_str;
+  long num;
+  char *str;
+  struct cli_opt *next;
+};
+
 struct cli_op
 {
   struct cli_item *urls;
@@ -90,10 +101,10 @@ struct cli_op
   int resume_set;
   int resume_auto;
   long long resume_off;
-  twist_transfer *transfer;
-  /* The loop the URLs of the operation share, so that a connection one
-     leaves is there for the next.  */
-  struct twist_runtime *runtime;
+  /* The options of the operation that go to every transfer it makes, in the
+     order they were given.  */
+  struct cli_opt *opts;
+  struct cli_opt *opts_tail;
   struct cli_op *next;
 };
 
@@ -997,21 +1008,6 @@ write_header (char *ptr, size_t size, size_t nmemb, void *userdata)
   return h->short_write ? 0 : n;
 }
 
-static int body_short;
-
-static size_t
-write_body (char *ptr, size_t size, size_t nmemb, void *userdata)
-{
-  FILE *fp = userdata;
-  size_t n = size * nmemb;
-  size_t got;
-
-  got = fwrite (ptr, 1, n, fp);
-  if (got < n)
-    body_short = 1;
-  return got;
-}
-
 static void
 finish_headers (struct cli_headers *h)
 {
@@ -1065,6 +1061,45 @@ read_upload (char *ptr, size_t size, size_t nmemb, void *user)
       return TWIST_READFUNC_ABORT;
     }
   return (size_t) n;
+}
+
+/* One URL being fetched: the transfer made for it, and everything the tool
+   holds for as long as it runs.  A job is made by job_prepare, handed to the
+   runtime, and freed by job_finish once the transfer has ended.  */
+struct cli_job
+{
+  struct cli_run *run;
+  struct cli_op *op;
+  twist_transfer *transfer;
+  struct cli_job *next;         /* In the run's list of jobs under way.  */
+  char *url;                    /* As written, or as a glob made it.  */
+  const char *use_url;          /* What the transfer is given.  */
+  const char *upload;           /* The name given to -T, or NULL.  */
+  FILE *body;
+  FILE *dump;
+  struct cli_headers hdrs;
+  struct cli_bytes up;
+  struct cli_upload ustream;
+  int streaming;
+  char *query_url;
+  char *named_url;
+  struct twist_bar bar;
+  int bar_used;
+  int body_short;               /* A write to the body came up short.  */
+  int reads_stdin;              /* The transfer reads standard input.  */
+};
+
+static size_t
+write_body (char *ptr, size_t size, size_t nmemb, void *userdata)
+{
+  struct cli_job *job = userdata;
+  size_t n = size * nmemb;
+  size_t got;
+
+  got = fwrite (ptr, 1, n, job->body);
+  if (got < n)
+    job->body_short = 1;
+  return got;
 }
 
 /* URL with the name of FILE added, if URL names a directory (it ends in a
@@ -1136,99 +1171,261 @@ output_expected (const char *url, const char *upload)
          || is_telnet_url (url);
 }
 
-/* The one place the tool waits.  A transfer is started on the operation's
-   runtime and runs on its loop, and the latch is held while any is in
-   flight: the transfer's callback lowers the count, and the loop is run
-   until it is zero.  Nothing below this blocks.  The tool starts one
-   transfer at a time, so the count is 0 or 1; it is a count so that the
-   place that waits is already the place that would wait for several.  The
-   result is the transfer's own.  */
-struct latch
+/* The work of one invocation: the operations in order, and a cursor over the
+   URLs of all of them.  URLs are taken one at a time, in the order they were
+   given, and a pattern is expanded as its URLs are asked for.  A job is made
+   for each, and at most CAP are under way at once; they share the one
+   runtime, and so the connections, names and stores it keeps, for the whole
+   command line.  */
+struct cli_run
 {
+  struct twist_runtime *runtime;
+  struct cli_op *op;            /* The operation being taken from.  */
+  struct cli_op *next_op;       /* The one after it.  */
+  struct cli_item *url;         /* The next URL of OP.  */
+  struct cli_item *out;         /* The next -o of OP.  */
+  struct cli_item *up;          /* The next -T of OP.  */
+  struct twist_glob *glob;      /* The pattern being expanded, or NULL.  */
+  int glob_yielded;             /* How many URLs it has given.  */
+  const char *item_output;      /* The -o of the pattern, or NULL.  */
+  int item_remote;              /* ... is -O.  */
+  const char *item_upload;      /* The -T of the pattern.  */
+  struct cli_job *jobs;         /* Under way.  */
   int inflight;
-  int result;
+  int cap;                      /* Jobs under way at most.  */
+  int status;                   /* What the run exits with.  */
+  int stop;                     /* No more are to be started.  */
 };
 
-static void
-latch_done (twist_transfer *transfer, int result, void *user)
+/* What a URL of the cursor is: its text, the output name a pattern made for
+   it (to be freed), the output as given, whether that is -O, and the
+   upload.  */
+struct cli_next
 {
-  struct latch *latch = user;
+  char *url;
+  char *name;
+  const char *output;
+  int remote;
+  const char *upload;
+};
 
-  (void) transfer;
-  latch->result = result;
-  latch->inflight--;
+/* The exit status is that of the last transfer to end, or of the last thing
+   that failed before there was one.  --fail-early stops the run at the first
+   failure.  */
+static void
+run_note (struct cli_run *run, int code)
+{
+  run->status = code;
+  if (code != 0 && fail_early)
+    run->stop = 1;
 }
 
+/* The next URL, in order, across URLs and operations: 1, or 0 when there is
+   none or the run is to stop.  Trouble in producing one (a pattern that is
+   wrong, no URL, no memory) is told here and noted, and the cursor goes on.  */
 static int
-latch_run (struct twist_runtime *runtime, twist_transfer *transfer)
+run_next_url (struct cli_run *run, struct cli_next *next)
 {
-  struct latch latch;
   int rc;
 
-  latch.inflight = 1;
-  latch.result = TWIST_OK;
-  /* Let the loop see what happened to the connections kept since the last
-     transfer, so that one the server has closed is not taken.  */
-  twist_runtime_run_once (runtime, 0);
-  rc = twist_runtime_start (runtime, transfer, latch_done, &latch);
-  if (rc != TWIST_OK)
-    return rc;
-  while (latch.inflight > 0)
+  memset (next, 0, sizeof *next);
+  for (;;)
     {
-      rc = twist_runtime_run_once (runtime, -1);
-      if (rc != TWIST_OK)
+      if (run->stop)
+        return 0;
+      if (run->glob != NULL)
         {
-          /* The loop itself has failed.  End the transfer, and let the loop
-             report it if it can.  */
-          twist_runtime_cancel (runtime, transfer);
-          twist_runtime_run_once (runtime, 0);
-          if (latch.inflight > 0)
-            return rc;
+          char *url = NULL;
+
+          rc = twist_glob_next (run->glob, &url);
+          if (rc == 1)
+            {
+              char *name = NULL;
+
+              run->glob_yielded++;
+              if (run->item_output != NULL && !run->item_remote)
+                {
+                  name = twist_glob_name (run->glob, run->item_output);
+                  if (name == NULL)
+                    {
+                      free (url);
+                      twist_glob_free (run->glob);
+                      run->glob = NULL;
+                      diag_code (27, twist_strerror (TWIST_ERR_NOMEM));
+                      run_note (run, 27);
+                      continue;
+                    }
+                }
+              next->url = url;
+              next->name = name;
+              next->output = name != NULL ? name : run->item_output;
+              next->remote = run->item_remote;
+              next->upload = run->item_upload;
+              return 1;
+            }
+          if (rc < 0)
+            {
+              diag_code (27, twist_strerror (TWIST_ERR_NOMEM));
+              run_note (run, 27);
+            }
+          else if (run->glob_yielded == 0)
+            run_note (run, 0);
+          twist_glob_free (run->glob);
+          run->glob = NULL;
+          continue;
         }
+      if (run->url == NULL)
+        {
+          /* The operation is used up: on to the next.  */
+          run->op = run->next_op;
+          if (run->op == NULL)
+            return 0;
+          run->next_op = run->op->next;
+          if (run->op->urls == NULL)
+            {
+              diag (_("no URL specified"));
+              suggest ();
+              run_note (run, 2);
+              continue;
+            }
+          run->url = run->op->urls;
+          run->out = run->op->outputs;
+          run->up = run->op->uploads;
+          continue;
+        }
+      {
+        struct cli_item *item = run->url;
+        const char *output = NULL;
+        int remote = 0;
+        const char *upload = NULL;
+
+        run->url = item->next;
+        if (run->out != NULL)
+          {
+            output = run->out->remote ? NULL : run->out->text;
+            remote = run->out->remote;
+            run->out = run->out->next;
+          }
+        if (run->up != NULL)
+          {
+            upload = run->up->text;
+            run->up = run->up->next;
+          }
+        if (run->op->globoff)
+          {
+            char *url = twist_strdup (item->text);
+
+            if (url == NULL)
+              {
+                diag_code (27, twist_strerror (TWIST_ERR_NOMEM));
+                run_note (run, 27);
+                continue;
+              }
+            next->url = url;
+            next->output = output;
+            next->remote = remote;
+            next->upload = upload;
+            return 1;
+          }
+        else
+          {
+            char err[1200];
+            struct twist_glob *g = NULL;
+
+            rc = twist_glob_parse (item->text, &g, err, sizeof err);
+            if (rc == TWIST_ERR_URL)
+              {
+                diag_code (3, err);
+                run_note (run, 3);
+              }
+            else if (rc != TWIST_OK)
+              {
+                diag_code (27, twist_strerror (rc));
+                run_note (run, 27);
+              }
+            else
+              {
+                run->glob = g;
+                run->glob_yielded = 0;
+                run->item_output = output;
+                run->item_remote = remote;
+                run->item_upload = upload;
+              }
+          }
+      }
     }
-  return latch.result;
 }
 
-static int
-run_one (twist_transfer *transfer, struct cli_op *op, const char *url,
-         const char *output, int remote, const char *upload)
+static void
+job_free (struct cli_job *job)
 {
+  if (job == NULL)
+    return;
+  if (job->body != NULL && job->body != stdout)
+    fclose (job->body);
+  if (job->dump != NULL && job->dump != stdout)
+    fclose (job->dump);
+  if (job->streaming && job->ustream.fd != STDIN_FILENO)
+    close (job->ustream.fd);
+  twist_transfer_free (job->transfer);
+  free (job->up.p);
+  free (job->query_url);
+  free (job->named_url);
+  free (job->url);
+  free (job);
+}
+
+/* Make the job for the URL NEXT gives, and set up its transfer: the options
+   of the operation, then what is particular to this URL.  Returns 0 and the
+   job, or the exit status of what went wrong, which has been told.  The URL
+   is taken over.  */
+static int
+job_prepare (struct cli_run *run, struct cli_next *next, struct cli_job **out)
+{
+  struct cli_op *op = run->op;
+  struct cli_job *job;
+  struct cli_opt *opt;
+  twist_transfer *transfer;
+  const char *url;
+  const char *output = next->output;
+  const char *upload = next->upload;
   char *out_name = NULL;
   char *out_path = NULL;
-  FILE *body = stdout;
-  FILE *dump = NULL;
-  struct cli_bytes up;
-  struct cli_upload ustream = { -1, 0 };
-  int streaming = 0;
+  static char empty_body[] = "";
   char *payload = NULL;
   size_t payload_n = 0;
-  static char empty_body[] = "";
   const char *method = op->method;
-  char *query_url = NULL;
-  char *named_url = NULL;
-  const char *use_url = url;
   const char *body_mode = "wb";
   long long resume = 0;
-  struct cli_headers hdrs;
-  struct twist_bar bar;
-  int bar_used = 0;
   int hide_progress;
   int rc;
-  int code;
-  const char *detail;
-  int write_failed;
 
-  memset (&up, 0, sizeof up);
-  memset (&hdrs, 0, sizeof hdrs);
-  body_short = 0;
-  transfer->proto_status = 0;
-  if (remote)
+  *out = NULL;
+  job = calloc (1, sizeof *job);
+  if (job == NULL)
+    {
+      free (next->url);
+      next->url = NULL;
+      diag_code (27, twist_strerror (TWIST_ERR_NOMEM));
+      return 27;
+    }
+  job->run = run;
+  job->op = op;
+  job->url = next->url;
+  next->url = NULL;
+  job->upload = upload;
+  job->body = stdout;
+  job->ustream.fd = -1;
+  job->use_url = job->url;
+  url = job->url;
+  if (next->remote)
     {
       out_name = remote_file (url);
       if (out_name == NULL)
         {
           diag_code (23, _("remote file name has no length"));
-          return 23;
+          rc = 23;
+          goto fail;
         }
     }
   else if (output != NULL)
@@ -1238,20 +1435,18 @@ run_one (twist_transfer *transfer, struct cli_op *op, const char *url,
   if (output != NULL && strcmp (output, "-") != 0 && out_path == NULL)
     {
       diag_code (27, twist_strerror (TWIST_ERR_NOMEM));
-      return 27;
+      rc = 27;
+      goto fail;
     }
   if ((rc = ensure_dirs (op, out_path)) != 0)
-    {
-      free (out_path);
-      return rc;
-    }
+    goto fail;
   if (op->limit_rate != 0 && !is_ssh_url (url))
     {
       /* Nothing else keeps to a rate yet, and a limit that is not kept is
          worse than none.  */
       diag_code (2, _("--limit-rate works for sftp and scp only"));
-      free (out_path);
-      return 2;
+      rc = 2;
+      goto fail;
     }
   if (op->resume_set)
     {
@@ -1260,8 +1455,8 @@ run_one (twist_transfer *transfer, struct cli_op *op, const char *url,
       if (!is_ssh_url (url))
         {
           diag_code (2, _("--continue-at works for sftp and scp only"));
-          free (out_path);
-          return 2;
+          rc = 2;
+          goto fail;
         }
       if (sends)
         resume = op->resume_auto ? -1 : op->resume_off;
@@ -1274,7 +1469,8 @@ run_one (twist_transfer *transfer, struct cli_op *op, const char *url,
               if (out_path == NULL)
                 {
                   diag_code (2, _("--continue-at - needs an output file"));
-                  return 2;
+                  rc = 2;
+                  goto fail;
                 }
               resume = size_of_file (out_path);
               if (resume < 0)
@@ -1283,8 +1479,8 @@ run_one (twist_transfer *transfer, struct cli_op *op, const char *url,
 
                   snprintf (msg, sizeof msg, _("could not read %s"), out_path);
                   diag_code (23, msg);
-                  free (out_path);
-                  return 23;
+                  rc = 23;
+                  goto fail;
                 }
             }
           else
@@ -1294,34 +1490,34 @@ run_one (twist_transfer *transfer, struct cli_op *op, const char *url,
     }
   if (out_path != NULL)
     {
-      body = fopen (out_path, body_mode);
-      if (body == NULL)
+      job->body = fopen (out_path, body_mode);
+      if (job->body == NULL)
         {
           char msg[256];
 
           snprintf (msg, sizeof msg, _("could not write %s"), out_path);
           diag_code (23, msg);
-          free (out_path);
-          return 23;
+          rc = 23;
+          goto fail;
         }
     }
   free (out_path);
+  out_path = NULL;
   if (op->dump_header != NULL && strcmp (op->dump_header, "-") != 0)
     {
-      dump = fopen (op->dump_header, "wb");
-      if (dump == NULL)
+      job->dump = fopen (op->dump_header, "wb");
+      if (job->dump == NULL)
         {
           char msg[256];
 
           snprintf (msg, sizeof msg, _("could not write %s"), op->dump_header);
           diag_code (23, msg);
-          if (body != stdout)
-            fclose (body);
-          return 23;
+          rc = 23;
+          goto fail;
         }
     }
   else if (op->dump_header != NULL)
-    dump = stdout;
+    job->dump = stdout;
   if (upload != NULL && is_telnet_url (url) && strcmp (upload, "-") == 0)
     {
       /* Standard input is what a telnet session reads when it is given
@@ -1331,41 +1527,34 @@ run_one (twist_transfer *transfer, struct cli_op *op, const char *url,
     {
       /* Sent as it is read, so that a large file, or a pipe, is not held in
          memory first.  */
-      ustream.fd = strcmp (upload, "-") == 0 ? STDIN_FILENO
-                   : open (upload, O_RDONLY);
-      if (ustream.fd < 0)
+      job->ustream.fd = strcmp (upload, "-") == 0 ? STDIN_FILENO
+                        : open (upload, O_RDONLY);
+      if (job->ustream.fd < 0)
         {
           char msg[256];
 
           snprintf (msg, sizeof msg, _("could not read %s"), upload);
           diag_code (26, msg);
-          if (body != stdout)
-            fclose (body);
-          if (dump != NULL && dump != stdout)
-            fclose (dump);
-          return 26;
+          rc = 26;
+          goto fail;
         }
-      streaming = 1;
+      job->streaming = 1;
       if (method == NULL && !is_telnet_url (url))
         method = "PUT";
     }
   else if (upload != NULL)
     {
-      if (read_named (upload, &up, 0) != TWIST_OK)
+      if (read_named (upload, &job->up, 0) != TWIST_OK)
         {
           char msg[256];
 
           snprintf (msg, sizeof msg, _("could not read %s"), upload);
           diag_code (26, msg);
-          if (body != stdout)
-            fclose (body);
-          if (dump != NULL && dump != stdout)
-            fclose (dump);
-          free (up.p);
-          return 26;
+          rc = 26;
+          goto fail;
         }
-      payload = up.p != NULL ? up.p : empty_body;
-      payload_n = up.n;
+      payload = job->up.p != NULL ? job->up.p : empty_body;
+      payload_n = job->up.n;
       if (method == NULL)
         method = "PUT";
     }
@@ -1382,39 +1571,52 @@ run_one (twist_transfer *transfer, struct cli_op *op, const char *url,
 
       if (joined == NULL)
         {
-          free (up.p);
-          if (streaming && ustream.fd != STDIN_FILENO)
-            close (ustream.fd);
-          if (body != stdout)
-            fclose (body);
-          if (dump != NULL && dump != stdout)
-            fclose (dump);
           diag_code (27, twist_strerror (TWIST_ERR_NOMEM));
-          return 27;
+          rc = 27;
+          goto fail;
         }
       memcpy (joined, url, ulen);
       joined[ulen] = q != NULL ? '&' : '?';
       memcpy (joined + ulen + 1, op->data != NULL ? op->data : "", op->data_len);
       joined[ulen + 1 + op->data_len] = 0;
-      query_url = joined;
-      use_url = query_url;
+      job->query_url = joined;
+      job->use_url = job->query_url;
       payload = NULL;
       /* The data goes in the URL; nothing is uploaded.  */
-      if (streaming && ustream.fd != STDIN_FILENO)
-        close (ustream.fd);
-      streaming = 0;
+      if (job->streaming && job->ustream.fd != STDIN_FILENO)
+        close (job->ustream.fd);
+      job->streaming = 0;
     }
-  hdrs.body = body;
-  hdrs.dump = dump;
-  hdrs.include = op->include;
+  job->hdrs.body = job->body;
+  job->hdrs.dump = job->dump;
+  job->hdrs.include = op->include;
   /* An upload to a directory goes to the file with the name it has here.  */
-  if (upload != NULL && is_ssh_url (use_url))
+  if (upload != NULL && is_ssh_url (job->use_url))
     {
-      named_url = with_file_name (use_url, upload);
-      if (named_url != NULL)
-        use_url = named_url;
+      job->named_url = with_file_name (job->use_url, upload);
+      if (job->named_url != NULL)
+        job->use_url = job->named_url;
     }
-  twist_transfer_setopt (transfer, TWISTOPT_URL, use_url);
+  job->reads_stdin = (job->streaming && job->ustream.fd == STDIN_FILENO)
+                     || (is_telnet_url (job->use_url) && !job->streaming);
+  transfer = twist_transfer_new ();
+  if (transfer == NULL)
+    {
+      diag_code (27, twist_strerror (TWIST_ERR_NOMEM));
+      rc = 27;
+      goto fail;
+    }
+  job->transfer = transfer;
+  /* What the command line set for the operation, in the order it was given,
+     and then what is particular to this URL.  */
+  for (opt = op->opts; opt != NULL; opt = opt->next)
+    {
+      if (opt->is_str)
+        twist_transfer_setopt (transfer, opt->opt, opt->str);
+      else
+        twist_transfer_setopt (transfer, opt->opt, opt->num);
+    }
+  twist_transfer_setopt (transfer, TWISTOPT_URL, job->use_url);
   twist_transfer_setopt (transfer, TWISTOPT_RESUME_FROM, resume);
   twist_transfer_setopt (transfer, TWISTOPT_CUSTOMREQUEST, method);
   twist_transfer_setopt (transfer, TWISTOPT_NOBODY, op->head ? 1L : 0L);
@@ -1424,25 +1626,27 @@ run_one (twist_transfer *transfer, struct cli_op *op, const char *url,
     struct stat ust;
     long long usize = -1;
 
-    if (streaming && fstat (ustream.fd, &ust) == 0 && S_ISREG (ust.st_mode))
+    if (job->streaming && fstat (job->ustream.fd, &ust) == 0
+        && S_ISREG (ust.st_mode))
       usize = (long long) ust.st_size;
     twist_transfer_setopt (transfer, TWISTOPT_INFILESIZE, usize);
   }
   /* The meter is drawn unless -s or --no-progress-meter says not, or the
      body is going to the terminal.  -# draws a bar instead.  */
   hide_progress = silent || no_progress
-                  || (body == stdout && output_expected (use_url, upload)
+                  || (job->body == stdout
+                      && output_expected (job->use_url, upload)
                       && isatty (fileno (stdout)));
   twist_transfer_setopt (transfer, TWISTOPT_STDERR, err_fp);
   twist_transfer_setopt (transfer, TWISTOPT_NOPROGRESS,
                          hide_progress ? 1L : 0L);
   if (progress_bar && !hide_progress)
     {
-      twist_bar_init (&bar, err_fp, op->resume_set ? resume : 0);
-      bar_used = 1;
+      twist_bar_init (&job->bar, err_fp, op->resume_set ? resume : 0);
+      job->bar_used = 1;
       twist_transfer_setopt (transfer, TWISTOPT_XFERINFOFUNCTION,
                              twist_bar_callback);
-      twist_transfer_setopt (transfer, TWISTOPT_XFERINFODATA, &bar);
+      twist_transfer_setopt (transfer, TWISTOPT_XFERINFODATA, &job->bar);
     }
   else
     {
@@ -1450,9 +1654,9 @@ run_one (twist_transfer *transfer, struct cli_op *op, const char *url,
       twist_transfer_setopt (transfer, TWISTOPT_XFERINFODATA, NULL);
     }
   twist_transfer_setopt (transfer, TWISTOPT_READFUNCTION,
-                         streaming ? read_upload : NULL);
+                         job->streaming ? read_upload : NULL);
   twist_transfer_setopt (transfer, TWISTOPT_READDATA,
-                         streaming ? &ustream : NULL);
+                         job->streaming ? &job->ustream : NULL);
   if (payload != NULL)
     twist_transfer_setopt (transfer, TWISTOPT_POSTFIELDSIZE, (long) payload_n);
   twist_transfer_setopt (transfer, TWISTOPT_HTTPHEADER,
@@ -1461,7 +1665,7 @@ run_one (twist_transfer *transfer, struct cli_op *op, const char *url,
   /* A telnet session sends what is read from standard input, unless it is
      given a file to send.  The library takes no descriptor for granted.  */
   twist_transfer_setopt (transfer, TWISTOPT_TELNET_INPUT_FD,
-                         is_telnet_url (use_url) && !streaming
+                         is_telnet_url (job->use_url) && !job->streaming
                          ? (long) STDIN_FILENO : -1L);
   twist_transfer_setopt (transfer, TWISTOPT_MAIL_FROM, op->mail_from);
   twist_transfer_setopt (transfer, TWISTOPT_MAIL_RCPT, op->rcpts);
@@ -1471,57 +1675,80 @@ run_one (twist_transfer *transfer, struct cli_op *op, const char *url,
                          op->limit_rate);
   /* Only an sftp URL takes them; to any other they mean nothing, so a command line of several kinds of URL works.  */
   twist_transfer_setopt (transfer, TWISTOPT_QUOTE,
-                         strncmp (use_url, "sftp://",
+                         strncmp (job->use_url, "sftp://",
                                   7) == 0 ? op->quote : NULL);
   twist_transfer_setopt (transfer, TWISTOPT_POSTQUOTE,
-                         strncmp (use_url, "sftp://", 7) == 0 ? op->postquote
-                         : NULL);
+                         strncmp (job->use_url, "sftp://", 7) == 0
+                         ? op->postquote : NULL);
   twist_transfer_setopt (transfer, TWISTOPT_CREATE_MISSING_DIRS,
-                         op->ftp_create_dirs && strncmp (use_url, "sftp://", 7) == 0
+                         op->ftp_create_dirs
+                         && strncmp (job->use_url, "sftp://", 7) == 0
                          ? 1L : 0L);
   twist_transfer_setopt (transfer, TWISTOPT_WRITEFUNCTION, write_body);
-  twist_transfer_setopt (transfer, TWISTOPT_WRITEDATA, body);
-  if (op->include || dump != NULL)
+  twist_transfer_setopt (transfer, TWISTOPT_WRITEDATA, job);
+  if (op->include || job->dump != NULL)
     {
       twist_transfer_setopt (transfer, TWISTOPT_HEADERFUNCTION, write_header);
-      twist_transfer_setopt (transfer, TWISTOPT_HEADERDATA, &hdrs);
+      twist_transfer_setopt (transfer, TWISTOPT_HEADERDATA, &job->hdrs);
     }
   else
     {
       twist_transfer_setopt (transfer, TWISTOPT_HEADERFUNCTION, NULL);
       twist_transfer_setopt (transfer, TWISTOPT_HEADERDATA, NULL);
     }
-  rc = latch_run (op->runtime, transfer);
-  finish_headers (&hdrs);
-  if (body != stdout)
+  *out = job;
+  return 0;
+
+fail:
+  free (out_path);
+  job_free (job);
+  return rc;
+}
+
+/* The transfer of JOB has ended with RC: close what it used, say what went
+   wrong, write out what -w asks for, and free the job.  Returns the exit
+   status for it.  */
+static int
+job_finish (struct cli_job *job, int rc)
+{
+  struct cli_op *op = job->op;
+  twist_transfer *transfer = job->transfer;
+  int code;
+  const char *detail;
+  int write_failed;
+
+  finish_headers (&job->hdrs);
+  if (job->body != stdout)
     {
-      if (fclose (body) != 0 && rc == TWIST_OK)
+      if (fclose (job->body) != 0 && rc == TWIST_OK)
         rc = TWIST_ERR_ABORTED;
     }
   else
-    fflush (body);
-  if (dump != NULL && dump != stdout)
-    fclose (dump);
-  if (streaming && ustream.fd != STDIN_FILENO)
-    close (ustream.fd);
-  code = cli_status (rc, use_url);
+    fflush (job->body);
+  job->body = NULL;
+  if (job->dump != NULL && job->dump != stdout)
+    fclose (job->dump);
+  job->dump = NULL;
+  if (job->streaming && job->ustream.fd != STDIN_FILENO)
+    close (job->ustream.fd);
+  job->streaming = 0;
+  code = cli_status (rc, job->use_url);
   if (transfer->proto_status != 0)
     code = transfer->proto_status;
-  if (ustream.failed)
+  if (job->ustream.failed)
     {
       char msg[256];
 
-      snprintf (msg, sizeof msg, _("could not read %s"), upload);
+      snprintf (msg, sizeof msg, _("could not read %s"), job->upload);
       diag_code (26, msg);
       emit_writeout (op->writeout, transfer, 26);
-      if (bar_used)
-        twist_bar_finish (&bar);
-      free (up.p);
-      free (query_url);
-      free (named_url);
+      if (job->bar_used)
+        twist_bar_finish (&job->bar);
+      job_free (job);
       return 26;
     }
-  write_failed = (body_short || hdrs.short_write) && (code == 0 || code == 42);
+  write_failed = (job->body_short || job->hdrs.short_write)
+                 && (code == 0 || code == 42);
   if (write_failed)
     code = 23;
   if (code != 0)
@@ -1533,119 +1760,116 @@ run_one (twist_transfer *transfer, struct cli_op *op, const char *url,
     }
   emit_writeout (op->writeout, transfer, code);
   /* After the message: the bar's line ends last.  */
-  if (bar_used)
-    twist_bar_finish (&bar);
-  free (up.p);
-  free (query_url);
-  free (named_url);
+  if (job->bar_used)
+    twist_bar_finish (&job->bar);
+  job_free (job);
   return code;
 }
 
-/* One URL as written, which may be a pattern: the transfers it makes, in
-   order.  The output name is made for each, with #1 for what the first glob
-   is, and so on.  The status is the last transfer's, or the first failure
-   with --fail-early.  A pattern that is wrong is a malformed URL (3), for
-   this one only.  */
-static int
-run_glob (struct cli_op *op, const char *pattern, const char *output,
-          int remote, const char *upload)
+/* The transfer of JOB has ended, or the loop failed under it.  */
+static void
+run_job_ended (struct cli_job *job, int rc)
 {
-  struct twist_glob *g = NULL;
-  char err[1200], *url;
-  int status = 0, rc;
+  struct cli_run *run = job->run;
+  struct cli_job **link;
 
-  rc = twist_glob_parse (pattern, &g, err, sizeof err);
-  if (rc == TWIST_ERR_URL)
-    {
-      diag_code (3, err);
-      return 3;
-    }
-  if (rc != TWIST_OK)
-    {
-      diag_code (27, twist_strerror (rc));
-      return 27;
-    }
-  while ((rc = twist_glob_next (g, &url)) == 1)
-    {
-      char *name = NULL;
-
-      if (output != NULL && !remote)
-        {
-          name = twist_glob_name (g, output);
-          if (name == NULL)
-            {
-              free (url);
-              status = 27;
-              diag_code (27, twist_strerror (TWIST_ERR_NOMEM));
-              break;
-            }
-        }
-      status = run_one (op->transfer, op, url, name != NULL ? name : output,
-                        remote, upload);
-      free (name);
-      free (url);
-      if (status != 0 && fail_early)
+  for (link = &run->jobs; *link != NULL; link = &(*link)->next)
+    if (*link == job)
+      {
+        *link = job->next;
         break;
-    }
-  if (rc < 0)
-    {
-      status = 27;
-      diag_code (27, twist_strerror (TWIST_ERR_NOMEM));
-    }
-  twist_glob_free (g);
-  return status;
+      }
+  run->inflight--;
+  run_note (run, job_finish (job, rc));
 }
 
-static int
-run_op (struct cli_op *op)
+/* Called from the loop, when the transfer has ended.  */
+static void
+job_done (twist_transfer *transfer, int result, void *user)
 {
-  struct cli_item *url;
-  struct cli_item *out;
-  struct cli_item *up;
-  int status = 0;
+  (void) transfer;
+  run_job_ended (user, result);
+}
 
-  if (op->urls == NULL)
+static void
+run_start (struct cli_run *run, struct cli_job *job)
+{
+  int rc;
+
+  job->next = run->jobs;
+  run->jobs = job;
+  run->inflight++;
+  /* Let the loop see what happened to the connections kept since the last
+     transfer, so that one the server has closed is not taken.  */
+  twist_runtime_run_once (run->runtime, 0);
+  rc = twist_runtime_start (run->runtime, job->transfer, job_done, job);
+  if (rc != TWIST_OK)
+    run_job_ended (job, rc);
+}
+
+/* Start jobs while there is room for them and URLs for them.  A URL that
+   cannot be made into a job is told, noted, and passed over.  */
+static void
+run_fill (struct cli_run *run)
+{
+  struct cli_next next;
+
+  while (!run->stop && run->inflight < run->cap && run_next_url (run, &next))
     {
-      diag (_("no URL specified"));
-      suggest ();
-      return 2;
+      struct cli_job *job;
+      int code = job_prepare (run, &next, &job);
+
+      free (next.name);
+      if (code != 0)
+        run_note (run, code);
+      else
+        run_start (run, job);
     }
-  out = op->outputs;
-  up = op->uploads;
-  /* If there is none, each URL has a loop of its own.  */
-  op->runtime = twist_runtime_new ();
-  if (op->runtime == NULL)
+}
+
+/* The loop has failed with RC.  End every transfer, and let the loop report
+   it if it can; what it cannot is ended here.  */
+static void
+run_loop_failed (struct cli_run *run, int rc)
+{
+  struct cli_job *job;
+
+  for (job = run->jobs; job != NULL; job = job->next)
+    twist_runtime_cancel (run->runtime, job->transfer);
+  twist_runtime_run_once (run->runtime, 0);
+  while (run->jobs != NULL)
+    run_job_ended (run->jobs, rc);
+}
+
+/* Run everything on the command line, and return the exit status.  */
+static int
+run_all (struct cli_op *ops)
+{
+  struct cli_run run;
+
+  memset (&run, 0, sizeof run);
+  run.next_op = ops;
+  run.cap = 1;
+  run.runtime = twist_runtime_new ();
+  if (run.runtime == NULL)
     {
       diag_code (27, twist_strerror (TWIST_ERR_NOMEM));
       return 27;
     }
-  for (url = op->urls; url != NULL; url = url->next)
+  for (;;)
     {
-      const char *output = NULL;
-      int remote = 0;
-      const char *upload = NULL;
+      int rc;
 
-      if (out != NULL)
-        {
-          output = out->remote ? NULL : out->text;
-          remote = out->remote;
-          out = out->next;
-        }
-      if (up != NULL)
-        {
-          upload = up->text;
-          up = up->next;
-        }
-      if (op->globoff)
-        status = run_one (op->transfer, op, url->text, output, remote, upload);
-      else
-        status = run_glob (op, url->text, output, remote, upload);
-      if (status != 0 && fail_early)
+      run_fill (&run);
+      if (run.inflight == 0)
         break;
+      rc = twist_runtime_run_once (run.runtime, -1);
+      if (rc != TWIST_OK)
+        run_loop_failed (&run, rc);
     }
-  twist_runtime_free (op->runtime);
-  op->runtime = NULL;
-  return status;
+  twist_glob_free (run.glob);
+  twist_runtime_free (run.runtime);
+  return run.status;
 }
 
 static void
@@ -1678,7 +1902,17 @@ free_op (struct cli_op *op)
   twist_slist_free_all (op->quote);
   twist_slist_free_all (op->postquote);
   twist_slist_free_all (op->telnet);
-  twist_transfer_free (op->transfer);
+  while (op->opts != NULL)
+    {
+      struct cli_opt *next = op->opts->next;
+
+      /* It may be a password.  */
+      if (op->opts->str != NULL)
+        memset (op->opts->str, 0, strlen (op->opts->str));
+      free (op->opts->str);
+      free (op->opts);
+      op->opts = next;
+    }
   free (op);
 }
 
@@ -1689,13 +1923,64 @@ new_op (void)
 
   if (op == NULL)
     return NULL;
-  op->transfer = twist_transfer_new ();
-  if (op->transfer == NULL)
-    {
-      free (op);
-      return NULL;
-    }
   return op;
+}
+
+/* A transfer that is never started.  An option is tried on it when the
+   command line is read, so that one the library will not take is told then,
+   and not when the first transfer is made.  What the library accepts for an
+   option does not depend on any other, so one does for every operation.  */
+static twist_transfer *validator;
+
+/* Set the option for the transfers of OP.  Returns what the library says of
+   it: an option it refuses is not kept.  */
+static int
+op_set_record (struct cli_op *op, int opt, int is_str, long num,
+               const char *str)
+{
+  struct cli_opt *o;
+  int rc;
+
+  if (is_str)
+    rc = twist_transfer_setopt (validator, opt, str);
+  else
+    rc = twist_transfer_setopt (validator, opt, num);
+  if (rc != TWIST_OK)
+    return rc;
+  o = calloc (1, sizeof *o);
+  if (o == NULL)
+    return TWIST_ERR_NOMEM;
+  o->opt = opt;
+  o->is_str = is_str;
+  o->num = num;
+  if (is_str && str != NULL)
+    {
+      /* A copy now, as the caller scrubs the argument.  */
+      o->str = twist_strdup (str);
+      if (o->str == NULL)
+        {
+          free (o);
+          return TWIST_ERR_NOMEM;
+        }
+    }
+  if (op->opts_tail != NULL)
+    op->opts_tail->next = o;
+  else
+    op->opts = o;
+  op->opts_tail = o;
+  return TWIST_OK;
+}
+
+static int
+op_set_long (struct cli_op *op, int opt, long num)
+{
+  return op_set_record (op, opt, 0, num, NULL);
+}
+
+static int
+op_set_str (struct cli_op *op, int opt, const char *str)
+{
+  return op_set_record (op, opt, 1, 0, str);
 }
 
 /* --expand-NAME is any option that takes a parameter, with variables expanded
@@ -1864,9 +2149,10 @@ main (int argc, char **argv)
       status = 27;
       goto done;
     }
+  validator = twist_transfer_new ();
   vars = twist_vars_new ();
   expandable = expand_options (longs);
-  if (vars == NULL || expandable == NULL)
+  if (validator == NULL || vars == NULL || expandable == NULL)
     {
       diag_code (27, twist_strerror (TWIST_ERR_NOMEM));
       status = 27;
@@ -2011,7 +2297,7 @@ main (int argc, char **argv)
             status = 27;
           break;
         case 'L':
-          twist_transfer_setopt (op->transfer, TWISTOPT_FOLLOWLOCATION, 1L);
+          op_set_long (op, TWISTOPT_FOLLOWLOCATION, 1L);
           break;
         case 1:
           {
@@ -2025,21 +2311,20 @@ main (int argc, char **argv)
                 status = 2;
               }
             else
-              twist_transfer_setopt (op->transfer, TWISTOPT_MAXREDIRS, n);
+              op_set_long (op, TWISTOPT_MAXREDIRS, n);
           }
           break;
         case 'f':
-          twist_transfer_setopt (op->transfer, TWISTOPT_FAILONERROR, 1L);
+          op_set_long (op, TWISTOPT_FAILONERROR, 1L);
           break;
         case 27:
           fail_early = 1;
           break;
         case 30:
-          twist_transfer_setopt (op->transfer, TWISTOPT_ACCEPT_ENCODING, "");
+          op_set_str (op, TWISTOPT_ACCEPT_ENCODING, "");
           break;
         case 31:
-          if (twist_transfer_setopt (op->transfer, TWISTOPT_CONTENT_ENCODING,
-                                     optarg)
+          if (op_set_str (op, TWISTOPT_CONTENT_ENCODING, optarg)
               != TWIST_OK)
             {
               diag (_("unsupported content encoding"));
@@ -2048,36 +2333,33 @@ main (int argc, char **argv)
             }
           break;
         case 'k':
-          twist_transfer_setopt (op->transfer, TWISTOPT_SSL_VERIFYPEER, 0L);
+          op_set_long (op, TWISTOPT_SSL_VERIFYPEER, 0L);
           break;
         case 'E':
-          twist_transfer_setopt (op->transfer, TWISTOPT_SSLCERT, optarg);
+          op_set_str (op, TWISTOPT_SSLCERT, optarg);
           break;
         case 15:
-          twist_transfer_setopt (op->transfer, TWISTOPT_SSLKEY, optarg);
+          op_set_str (op, TWISTOPT_SSLKEY, optarg);
           break;
         case 16:
-          twist_transfer_setopt (op->transfer, TWISTOPT_CAINFO, optarg);
+          op_set_str (op, TWISTOPT_CAINFO, optarg);
           break;
         case 44:
-          twist_transfer_setopt (op->transfer, TWISTOPT_CAPATH, optarg);
+          op_set_str (op, TWISTOPT_CAPATH, optarg);
           break;
         case 45:
-          twist_transfer_setopt (op->transfer, TWISTOPT_NOPROXY, optarg);
+          op_set_str (op, TWISTOPT_NOPROXY, optarg);
           break;
         case 51:
-          twist_transfer_setopt (op->transfer, TWISTOPT_USE_SSL,
-                                 (long) TWIST_USE_SSL_TRY);
+          op_set_long (op, TWISTOPT_USE_SSL, (long) TWIST_USE_SSL_TRY);
           break;
         case 52:
-          twist_transfer_setopt (op->transfer, TWISTOPT_USE_SSL,
-                                 (long) TWIST_USE_SSL_ALL);
+          op_set_long (op, TWISTOPT_USE_SSL, (long) TWIST_USE_SSL_ALL);
           break;
         case 49:
         case 50:
-          if (twist_transfer_setopt (op->transfer, c == 49
-                                     ? TWISTOPT_UNIX_SOCKET
-                                     : TWISTOPT_ABSTRACT_UNIX_SOCKET, optarg)
+          if (op_set_str (op, c == 49 ? TWISTOPT_UNIX_SOCKET
+                          : TWISTOPT_ABSTRACT_UNIX_SOCKET, optarg)
               != TWIST_OK)
             {
               diag (_("the Unix socket name is too long"));
@@ -2086,11 +2368,10 @@ main (int argc, char **argv)
             }
           break;
         case 46:
-          twist_transfer_setopt (op->transfer, TWISTOPT_PROXY_CAINFO, optarg);
+          op_set_str (op, TWISTOPT_PROXY_CAINFO, optarg);
           break;
         case 47:
-          twist_transfer_setopt (op->transfer, TWISTOPT_PROXY_SSL_VERIFYPEER,
-                                 0L);
+          op_set_long (op, TWISTOPT_PROXY_SSL_VERIFYPEER, 0L);
           break;
         case 48:
           {
@@ -2108,17 +2389,15 @@ main (int argc, char **argv)
                 status = 2;
               }
             else
-              twist_transfer_setopt (op->transfer, TWISTOPT_PROXY_TEMPLATE_UDP, optarg);
+              op_set_str (op, TWISTOPT_PROXY_TEMPLATE_UDP, optarg);
           }
           break;
         case 32:
-          twist_transfer_setopt (op->transfer, TWISTOPT_KEYPASSWD, optarg);
+          op_set_str (op, TWISTOPT_KEYPASSWD, optarg);
           scrub_arg (optarg);
           break;
         case 33:
-          twist_transfer_setopt (op->transfer,
-                                 TWISTOPT_SSH_HOST_PUBLIC_KEY_SHA256,
-                                 optarg);
+          op_set_str (op, TWISTOPT_SSH_HOST_PUBLIC_KEY_SHA256, optarg);
           break;
         case 34:
           op->ftp_create_dirs = 1;
@@ -2154,14 +2433,14 @@ main (int argc, char **argv)
             }
           break;
         case 'x':
-          twist_transfer_setopt (op->transfer, TWISTOPT_PROXY, optarg);
+          op_set_str (op, TWISTOPT_PROXY, optarg);
           break;
         case 'U':
-          twist_transfer_setopt (op->transfer, TWISTOPT_PROXYUSERPWD, optarg);
+          op_set_str (op, TWISTOPT_PROXYUSERPWD, optarg);
           scrub_arg (optarg);
           break;
         case 'A':
-          twist_transfer_setopt (op->transfer, TWISTOPT_USERAGENT, optarg);
+          op_set_str (op, TWISTOPT_USERAGENT, optarg);
           break;
         case 'u':
           {
@@ -2178,9 +2457,9 @@ main (int argc, char **argv)
               *colon++ = 0;
             else
               pass = read_password (copy);
-            twist_transfer_setopt (op->transfer, TWISTOPT_USERNAME, copy);
-            twist_transfer_setopt (op->transfer, TWISTOPT_PASSWORD,
-                                   colon != NULL ? colon : (pass != NULL ? pass : ""));
+            op_set_str (op, TWISTOPT_USERNAME, copy);
+            op_set_str (op, TWISTOPT_PASSWORD,
+                        colon != NULL ? colon : (pass != NULL ? pass : ""));
             if (pass != NULL)
               {
                 memset (pass, 0, strlen (pass));
@@ -2194,13 +2473,13 @@ main (int argc, char **argv)
           }
           break;
         case 'e':
-          twist_transfer_setopt (op->transfer, TWISTOPT_REFERER, optarg);
+          op_set_str (op, TWISTOPT_REFERER, optarg);
           break;
         case 'r':
-          twist_transfer_setopt (op->transfer, TWISTOPT_RANGE, optarg);
+          op_set_str (op, TWISTOPT_RANGE, optarg);
           break;
         case 'l':
-          twist_transfer_setopt (op->transfer, TWISTOPT_DIRLISTONLY, 1L);
+          op_set_long (op, TWISTOPT_DIRLISTONLY, 1L);
           break;
         case 'C':
           if (strcmp (optarg, "-") == 0)
@@ -2231,11 +2510,10 @@ main (int argc, char **argv)
             }
           break;
         case 'b':
-          twist_transfer_setopt (op->transfer, TWISTOPT_COOKIE, optarg);
+          op_set_str (op, TWISTOPT_COOKIE, optarg);
           break;
         case 29:
-          twist_transfer_setopt (op->transfer, TWISTOPT_XOAUTH2_BEARER,
-                                 optarg);
+          op_set_str (op, TWISTOPT_XOAUTH2_BEARER, optarg);
           scrub_arg (optarg);
           break;
         case 'm':
@@ -2249,7 +2527,7 @@ main (int argc, char **argv)
                 status = 2;
               }
             else
-              twist_transfer_setopt (op->transfer, TWISTOPT_TIMEOUT_MS, ms);
+              op_set_long (op, TWISTOPT_TIMEOUT_MS, ms);
           }
           break;
         case 19:
@@ -2263,8 +2541,7 @@ main (int argc, char **argv)
                 status = 2;
               }
             else
-              twist_transfer_setopt (op->transfer, TWISTOPT_CONNECTTIMEOUT_MS,
-                                     ms);
+              op_set_long (op, TWISTOPT_CONNECTTIMEOUT_MS, ms);
           }
           break;
         case 's':
@@ -2345,28 +2622,28 @@ main (int argc, char **argv)
           }
           break;
         case 2:
-          twist_transfer_setopt (op->transfer, TWISTOPT_HTTP_VERSION,
-                                 (long) TWIST_HTTP_VERSION_1_0);
+          op_set_long (op, TWISTOPT_HTTP_VERSION,
+                       (long) TWIST_HTTP_VERSION_1_0);
           break;
         case 3:
-          twist_transfer_setopt (op->transfer, TWISTOPT_HTTP_VERSION,
-                                 (long) TWIST_HTTP_VERSION_1_1);
+          op_set_long (op, TWISTOPT_HTTP_VERSION,
+                       (long) TWIST_HTTP_VERSION_1_1);
           break;
         case 4:
-          twist_transfer_setopt (op->transfer, TWISTOPT_HTTP_VERSION,
-                                 (long) TWIST_HTTP_VERSION_2_0);
+          op_set_long (op, TWISTOPT_HTTP_VERSION,
+                       (long) TWIST_HTTP_VERSION_2_0);
           break;
         case 5:
-          twist_transfer_setopt (op->transfer, TWISTOPT_HTTP_VERSION,
-                                 (long) TWIST_HTTP_VERSION_3);
+          op_set_long (op, TWISTOPT_HTTP_VERSION,
+                       (long) TWIST_HTTP_VERSION_3);
           break;
         case 9:
-          twist_transfer_setopt (op->transfer, TWISTOPT_HTTP_VERSION,
-                                 (long) TWIST_HTTP_VERSION_2_PRIOR_KNOWLEDGE);
+          op_set_long (op, TWISTOPT_HTTP_VERSION,
+                       (long) TWIST_HTTP_VERSION_2_PRIOR_KNOWLEDGE);
           break;
         case 10:
-          twist_transfer_setopt (op->transfer, TWISTOPT_HTTP_VERSION,
-                                 (long) TWIST_HTTP_VERSION_3ONLY);
+          op_set_long (op, TWISTOPT_HTTP_VERSION,
+                       (long) TWIST_HTTP_VERSION_3ONLY);
           break;
         case 11:
           free (op->mail_from);
@@ -2380,7 +2657,7 @@ main (int argc, char **argv)
             status = 27;
           break;
         case 13:
-          if (twist_transfer_setopt (op->transfer, TWISTOPT_DOH_URL, optarg) != TWIST_OK)
+          if (op_set_str (op, TWISTOPT_DOH_URL, optarg) != TWIST_OK)
             {
               diag (_("could not set the DoH server"));
               suggest ();
@@ -2388,11 +2665,10 @@ main (int argc, char **argv)
             }
           break;
         case 14:
-          twist_transfer_setopt (op->transfer, TWISTOPT_DOH_SSL_VERIFYPEER,
-                                 0L);
+          op_set_long (op, TWISTOPT_DOH_SSL_VERIFYPEER, 0L);
           break;
         case 17:
-          if (twist_transfer_setopt (op->transfer, TWISTOPT_DOQ_URL, optarg) != TWIST_OK)
+          if (op_set_str (op, TWISTOPT_DOQ_URL, optarg) != TWIST_OK)
             {
               diag (_("could not set the DoQ server"));
               suggest ();
@@ -2400,7 +2676,7 @@ main (int argc, char **argv)
             }
           break;
         case 18:
-          if (twist_transfer_setopt (op->transfer, TWISTOPT_DOT_URL, optarg) != TWIST_OK)
+          if (op_set_str (op, TWISTOPT_DOT_URL, optarg) != TWIST_OK)
             {
               diag (_("could not set the DoT server"));
               suggest ();
@@ -2408,7 +2684,7 @@ main (int argc, char **argv)
             }
           break;
         case 8:
-          if (twist_transfer_setopt (op->transfer, TWISTOPT_DNS_ORDER, optarg) != TWIST_OK)
+          if (op_set_str (op, TWISTOPT_DNS_ORDER, optarg) != TWIST_OK)
             {
               diag (_("unrecognised DNS transport order"));
               suggest ();
@@ -2465,19 +2741,10 @@ main (int argc, char **argv)
       if (status != 0)
         goto done;
     }
-  {
-    struct cli_op *cur;
-    int last = 0;
-
-    for (cur = ops; cur != NULL; cur = cur->next)
-      {
-        last = run_op (cur);
-        if (last != 0 && fail_early)
-          break;
-      }
-    status = last;
-  }
+  status = run_all (ops);
 done:
+  twist_transfer_free (validator);
+  validator = NULL;
   free (expanded);
   free (expandable);
   twist_vars_free (vars);

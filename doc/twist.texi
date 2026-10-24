@@ -1183,7 +1183,9 @@ not inherit the previous URL's method, body, headers, output, proxy,
 user, or timeouts.  @option{-s}, @option{-S}, @option{-#},
 @option{--no-progress-meter}, @option{--stderr}, and
 @option{--fail-early} still apply.  A URL is required before
-@option{--next}.
+@option{--next}.  The transfers of the whole command line, whatever
+the @option{--next} between them, share the connections that are kept and the
+names that were looked up.
 @item -E @var{file}
 @itemx --cert @var{file}
 Client certificate in PEM form, leaf first.  Further certificates in

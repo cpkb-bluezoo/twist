@@ -133,4 +133,44 @@ check "$(is "$st" 7)" "a value with a byte above 127 is skipped ($st)"
 telnet_status -d hello
 check "$(is "$st" 7)" "-d with a telnet URL ($st)"
 
+# Several URLs on one command line, each with its own -o: every one is
+# fetched into its own file, in order.  The status is that of the last
+# transfer, so a failure between two good ones does not show in it, and a
+# failure at the end does.  With --fail-early the first failure ends the run,
+# also across --next, and its status is the one reported.
+printf 'bee' > "$src/b.txt"
+printf 'sea' > "$src/c.txt"
+mkdir "$work/multi"
+(cd "$work/multi" && t "file://$src/a.txt" -o o1 "file://$src/b.txt" -o o2 \
+   "file://$src/c.txt" -o o3; echo $? > st)
+check "$(is "$(cat "$work/multi/st")" 0)" "three URLs with -o each: status 0"
+check "$(is "$(cat "$work/multi/o1" "$work/multi/o2" "$work/multi/o3" 2>&1)" abeesea)" \
+  "three URLs with -o each: three files"
+rm -rf "$work/multi"; mkdir "$work/multi"
+(cd "$work/multi" && t "file://$src/a.txt" -o o1 "file://$src/none" -o o2 \
+   "file://$src/c.txt" -o o3; echo $? > st)
+check "$(is "$(cat "$work/multi/st")" 0)" \
+  "a failure between two good URLs: the status is the last transfer's"
+check "$(is "$(cat "$work/multi/o1" "$work/multi/o3" 2>&1)" asea)" \
+  "a failure between two good URLs: both good ones arrive"
+rm -rf "$work/multi"; mkdir "$work/multi"
+(cd "$work/multi" && t "file://$src/a.txt" -o o1 "file://$src/none" -o o2; echo $? > st)
+check "$(is "$(cat "$work/multi/st")" 37)" "a failure last is the status"
+rm -rf "$work/multi"; mkdir "$work/multi"
+(cd "$work/multi" && t --fail-early "file://$src/a.txt" -o o1 \
+   "file://$src/none" -o o2 "file://$src/c.txt" -o o3; echo $? > st)
+check "$(is "$(cat "$work/multi/st")" 37)" "--fail-early: the first failure is the status"
+check "$([ -f "$work/multi/o1" ] && [ ! -e "$work/multi/o3" ] && echo ok)" \
+  "--fail-early: nothing after the failure is fetched"
+rm -rf "$work/multi"; mkdir "$work/multi"
+(cd "$work/multi" && t --fail-early "file://$src/none" -o o1 --next \
+   "file://$src/c.txt" -o o3; echo $? > st)
+check "$(is "$(cat "$work/multi/st")" 37)" "--fail-early across --next: the status"
+check "$([ ! -e "$work/multi/o3" ] && echo ok)" "--fail-early across --next: stops"
+rm -rf "$work/multi"; mkdir "$work/multi"
+(cd "$work/multi" && t "file://$src/none" -o o1 --next \
+   "file://$src/c.txt" -o o3; echo $? > st)
+check "$(is "$(cat "$work/multi/st")" 0)" "without it the next group runs, and its status is the last"
+check "$(is "$(cat "$work/multi/o3" 2>&1)" sea)" "and its file arrives"
+
 [ $fail = 0 ]
