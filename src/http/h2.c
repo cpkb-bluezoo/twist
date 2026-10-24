@@ -78,7 +78,13 @@ struct twist_h2
   /* Streams the client has opened and ended its side of, and that the server
      has not yet ended: a response is to come on each.  The only streams, with
      the live ones, that frames may arrive on.  */
-  uint32_t waiting[H2_MAX_STREAMS];
+  struct
+  {
+    uint32_t id;
+    /* Who the response is for, when it is not the connection's one user.  */
+    int have_ev;
+    struct twist_h1_events ev;
+  } waiting[H2_MAX_STREAMS];
   size_t n_waiting;
   int failed;
   struct twist_h2_stream *active;
@@ -121,35 +127,61 @@ waiting_has (const struct twist_h2 *h, uint32_t id)
   size_t i;
 
   for (i = 0; i < h->n_waiting; i++)
-    if (h->waiting[i] == id)
+    if (h->waiting[i].id == id)
       return 1;
   return 0;
 }
 
+/* Wait for the response to ID, which is for the owner S had, if it had one:
+   the stream's record is let go when its request is sent, and made again
+   when the response comes, and must then be given the owner again.  */
 static void
-waiting_add (struct twist_h2 *h, uint32_t id)
+waiting_add (struct twist_h2 *h, uint32_t id, const struct twist_h2_stream *s)
 {
   if (h->n_waiting < H2_MAX_STREAMS && !waiting_has (h, id))
-    h->waiting[h->n_waiting++] = id;
+    {
+      h->waiting[h->n_waiting].id = id;
+      h->waiting[h->n_waiting].have_ev = s != NULL && s->have_ev;
+      if (h->waiting[h->n_waiting].have_ev)
+        h->waiting[h->n_waiting].ev = s->ev;
+      h->n_waiting++;
+    }
 }
 
+/* Stop waiting for ID.  If there was an owner for it, *HAVE is true and *EV
+   is it.  */
 static void
-waiting_drop (struct twist_h2 *h, uint32_t id)
+waiting_take (struct twist_h2 *h, uint32_t id, int *have,
+              struct twist_h1_events *ev)
 {
   size_t i;
 
+  if (have != NULL)
+    *have = 0;
   for (i = 0; i < h->n_waiting; i++)
-    if (h->waiting[i] == id)
+    if (h->waiting[i].id == id)
       {
+        if (have != NULL && h->waiting[i].have_ev)
+          {
+            *have = 1;
+            *ev = h->waiting[i].ev;
+          }
         h->waiting[i] = h->waiting[--h->n_waiting];
         return;
       }
 }
 
 static void
+waiting_drop (struct twist_h2 *h, uint32_t id)
+{
+  waiting_take (h, id, NULL, NULL);
+}
+
+static void
 h2_fail (struct twist_h2 *h, int err)
 {
   struct twist_h2_stream *s;
+  size_t i;
 
   h->failed = 1;
   if (h->ev.failure != NULL && h->ev.user != NULL)
@@ -158,6 +190,11 @@ h2_fail (struct twist_h2 *h, int err)
     if (s->have_ev && s->ev.failure != NULL && s->ev.user != NULL
         && s->ev.user != h->ev.user)
       s->ev.failure (s->ev.user, err);
+  for (i = 0; i < h->n_waiting; i++)
+    if (h->waiting[i].have_ev && h->waiting[i].ev.failure != NULL
+        && h->waiting[i].ev.user != NULL
+        && h->waiting[i].ev.user != h->ev.user)
+      h->waiting[i].ev.failure (h->waiting[i].ev.user, err);
 }
 
 static int
@@ -391,6 +428,7 @@ void
 twist_h2_drop_user (struct twist_h2 *h, void *user)
 {
   struct twist_h2_stream *s;
+  size_t i;
 
   if (h == NULL || user == NULL)
     return;
@@ -406,6 +444,9 @@ twist_h2_drop_user (struct twist_h2 *h, void *user)
   for (s = h->active; s != NULL; s = s->next)
     if (s->have_ev && s->ev.user == user)
       s->have_ev = 0;
+  for (i = 0; i < h->n_waiting; i++)
+    if (h->waiting[i].have_ev && h->waiting[i].ev.user == user)
+      h->waiting[i].have_ev = 0;
 }
 
 int
@@ -651,6 +692,8 @@ static struct twist_h2_stream *
 incoming_stream (struct twist_h2 *h, uint32_t id)
 {
   struct twist_h2_stream *s = find_stream (h, id);
+  struct twist_h1_events ev;
+  int have;
 
   if (s != NULL)
     return s;
@@ -659,10 +702,15 @@ incoming_stream (struct twist_h2 *h, uint32_t id)
       h2_fail (h, TWIST_ERR_PROTOCOL);
       return NULL;
     }
-  waiting_drop (h, id);
+  waiting_take (h, id, &have, &ev);
   s = take_stream (h, id);
   if (s == NULL)
     h2_fail (h, TWIST_ERR_NOMEM);
+  else if (have)
+    {
+      s->ev = ev;
+      s->have_ev = 1;
+    }
   return s;
 }
 
@@ -1011,8 +1059,8 @@ twist_h2_request (struct twist_h2 *h, const char *method, const char *scheme,
     }
   if (headers_end)
     {
+      waiting_add (h, id, s);
       release_stream (h, s);
-      waiting_add (h, id);
     }
   while (body != NULL && sent < body_len && h->conn_send > 0 && s->send_left > 0
          && s->live)
@@ -1040,8 +1088,8 @@ twist_h2_request (struct twist_h2 *h, const char *method, const char *scheme,
       sent += chunk;
       if (end)
         {
+          waiting_add (h, id, s);
           release_stream (h, s);
-          waiting_add (h, id);
         }
     }
   if (body != NULL && sent < body_len)

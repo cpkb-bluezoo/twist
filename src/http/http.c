@@ -45,6 +45,15 @@ enum
   HTTP_H3
 };
 
+/* A transfer on a session, in the session's list of them.  */
+struct twist_http;
+
+struct twist_session_user
+{
+  struct twist_session_user *next;
+  struct twist_http *h;
+};
+
 struct twist_http
 {
   struct twist_transfer *transfer;
@@ -109,6 +118,20 @@ struct twist_http
   struct twist_ws *wsess;
   int watch_alt;
   int alt_h3;
+  /* Where the transfer stands with its origin (origin.c): waiting for a
+     connection that is being made, or for room under the limit on
+     connections; the connection it holds against that limit; and the
+     connection it is making that others wait for.  Each is a key, or NULL.
+     resume_quic says which way to start again.  */
+  struct twist_origin_waiter waiter;
+  struct twist_session_user su;
+  int retried;
+  uint8_t *h3_tail;       /* Of a frame, from a shared connection.  */
+  size_t h3_tail_len;
+  char *slot_key;
+  char *lead_key;
+  int resume_quic;
+  int requeue;                      /* Woken for room that was not there.  */
   int peer_minor;
   int req_http10;
   struct twist_dns_addr peer;
@@ -146,6 +169,25 @@ ncopy (const char *s, size_t n)
   return p;
 }
 
+/* What the HTTP/2 parser of a session writes on its own account (the window
+   updates, the acknowledgements of settings and pings, the rest of a request
+   body): to the session's connection, whoever owns it at the moment.  The
+   transfer that made the session is not to be relied on, as it ends before
+   the session does.  */
+static int
+session_emit (void *user, const uint8_t *data, size_t len)
+{
+  struct twist_session *s = user;
+
+  /* A session that is not on a connection has no one to write to, as a
+     parser with no emitter has not.  */
+  if (s->conn == NULL)
+    return TWIST_OK;
+  if (s->closed)
+    return TWIST_ERR_CONNECT;
+  return twist_endpoint_send (twist_connection_endpoint (s->conn), data, len);
+}
+
 struct twist_session *
 twist_session_add (struct twist_runtime *runtime, const char *key,
                    struct twist_loop *loop, struct twist_connection *conn,
@@ -165,9 +207,11 @@ twist_session_add (struct twist_runtime *runtime, const char *key,
       return NULL;
     }
   s->loop = loop;
+  s->runtime = runtime;
   s->conn = conn;
   s->h2 = h2;
-  s->users = 1;
+  if (h2 != NULL)
+    twist_h2_set_emit (h2, session_emit, s);
   s->next = runtime->sessions;
   runtime->sessions = s;
   return s;
@@ -183,7 +227,7 @@ twist_session_find (struct twist_runtime *runtime, const char *key,
     return NULL;
   for (s = runtime->sessions; s != NULL; s = s->next)
     {
-      if (s->loop != loop || strcmp (s->key, key) != 0)
+      if (s->loop != loop || s->closed || strcmp (s->key, key) != 0)
         continue;
       if (s->h2 != NULL)
         {
@@ -199,8 +243,12 @@ twist_session_find (struct twist_runtime *runtime, const char *key,
 void
 twist_session_release (struct twist_session *session)
 {
-  if (session != NULL && session->users > 0)
-    session->users--;
+  if (session == NULL)
+    return;
+  /* A stream is free, which one that waits under the limit on connections
+     may use.  */
+  if (session->runtime != NULL && session->runtime->origintab != NULL)
+    twist_origintab_wake (session->runtime->origintab, session->key);
 }
 
 void
@@ -217,6 +265,7 @@ twist_session_free_all (struct twist_runtime *runtime)
 
       twist_connection_free (s->conn);
       twist_h2_free (s->h2);
+      free (s->slot_key);
       free (s->key);
       free (s);
       s = next;
@@ -233,34 +282,105 @@ http_pool (struct twist_http *h)
 static int
 http_pool_key (struct twist_http *h, char *buf, size_t cap)
 {
-  struct twist_url *url;
-  int port;
-  const char *proxy;
-  char sock[160];
-  int n;
-
-  if (h->transfer == NULL || h->transfer->url == NULL
-      || h->transfer->loop == NULL)
+  if (h->transfer == NULL)
     return TWIST_ERR_INVAL;
-  url = h->transfer->url;
-  port = url->port > 0 ? url->port : twist_url_default_port (url->scheme);
-  proxy = twist_transfer_proxy (h->transfer);
-  if (h->transfer->unix_path != NULL)
+  return twist_transfer_origin_key (h->transfer, buf, cap);
+}
+
+static struct twist_origintab *
+http_tab (const struct twist_http *h)
+{
+  if (h->transfer == NULL || h->transfer->runtime == NULL)
+    return NULL;
+  return h->transfer->runtime->origintab;
+}
+
+/* The connection that was being made for others to share has settled, one way
+   or the other, and those who waited for it go on.  It is done once for each
+   connection made, and by nobody else.  */
+static void
+http_settle (struct twist_http *h, int how)
+{
+  char *key = h->lead_key;
+  struct twist_origintab *tab = http_tab (h);
+
+  if (key == NULL)
+    return;
+  h->lead_key = NULL;
+  if (tab != NULL)
+    twist_origintab_settle (tab, key, how);
+  free (key);
+}
+
+/* Give back the connection held against the limit on connections.  */
+static void
+http_slot_release (struct twist_http *h)
+{
+  char *key = h->slot_key;
+  struct twist_origintab *tab = http_tab (h);
+
+  if (key == NULL)
+    return;
+  h->slot_key = NULL;
+  if (tab != NULL)
+    twist_origintab_release (tab, key);
+  free (key);
+}
+
+static struct twist_protocol_handler session_ops;
+static void session_lost (struct twist_session *s, struct twist_http *except,
+                          int err);
+
+/* The transfer is on the session S, among the others.  */
+static void
+session_link (struct twist_http *h, struct twist_session *s)
+{
+  h->sess = s;
+  h->su.h = h;
+  h->su.next = s->users_head;
+  s->users_head = &h->su;
+}
+
+static void
+session_unlink (struct twist_http *h)
+{
+  struct twist_session_user **pp;
+
+  if (h->sess == NULL)
+    return;
+  for (pp = &h->sess->users_head; *pp != NULL; pp = &(*pp)->next)
+    if (*pp == &h->su)
+      {
+        *pp = h->su.next;
+        break;
+      }
+  h->su.next = NULL;
+}
+
+/* Stop using the session, if the transfer is on one.  Its connection is the
+   session's, and is handed to it, if the transfer was what it answered to.  */
+static void
+http_leave_session (struct twist_http *h)
+{
+  if (h->sess == NULL)
+    return;
+  if (h->conn != NULL)
     {
-      /* The socket is where the connection goes, as a proxy would be.  */
-      snprintf (sock, sizeof sock, "unix:%c%s",
-                h->transfer->unix_abstract ? '@' : '/',
-                h->transfer->unix_path);
-      proxy = sock;
+      struct twist_endpoint *ep = twist_connection_endpoint (h->conn);
+
+      if (ep->user_data == h)
+        {
+          ep->user_data = h->sess;
+          twist_connection_set_handler (h->conn, &session_ops);
+        }
     }
-  if (proxy == NULL)
-    proxy = "-";
-  n = snprintf (buf, cap, "%p|%s|%s|%d|%s", (void *) h->transfer->loop,
-                url->scheme != NULL ? url->scheme : "",
-                url->host != NULL ? url->host : "", port, proxy);
-  if (n < 0 || (size_t) n >= cap)
-    return TWIST_ERR_NOMEM;
-  return TWIST_OK;
+  twist_h2_drop_user (h->sess->h2, h);
+  if (h->h2 == h->sess->h2)
+    h->h2 = NULL;
+  h->conn = NULL;
+  session_unlink (h);
+  twist_session_release (h->sess);
+  h->sess = NULL;
 }
 
 /* Whether the connection is a tunnel through a proxy, to a target that is not
@@ -292,6 +412,10 @@ http_park (struct twist_http *h)
   h->conn = NULL;
   if (twist_pool_put (pool, key, c) != TWIST_OK)
     h->conn = c;
+  else
+    /* An idle connection holds no place under the limit; whoever waits for
+       one may take this.  */
+    http_slot_release (h);
 }
 
 static void
@@ -300,6 +424,7 @@ http_complete (struct twist_http *h, int err)
   if (h->finished)
     return;
   h->finished = 1;
+  http_settle (h, TWIST_SETTLE_UNKNOWN);
   if (h->ws && h->mode == HTTP_H3 && h->conn != NULL)
     {
       int fr = twist_quic_finish_stream (h->conn);
@@ -1139,14 +1264,32 @@ send_request_target (struct twist_http *h, const char *target)
 
           if (http_pool_key (h, key, sizeof key) == TWIST_OK)
             {
-              h->sess = twist_session_add (h->transfer->runtime, key,
-                                           h->transfer->loop,
-                                           h->conn,
-                                           h->mode == HTTP_H2 ? h->h2 : NULL);
+              struct twist_session *added
+                = twist_session_add (h->transfer->runtime, key,
+                                     h->transfer->loop, h->conn,
+                                     h->mode == HTTP_H2 ? h->h2 : NULL);
+
+              if (added != NULL)
+                session_link (h, added);
               if (h->sess != NULL)
-                h->sess->preface = h->preface_sent;
+                {
+                  h->sess->preface = h->preface_sent;
+                  /* The connection is the session's now, and so is the
+                     place it holds under the limit on connections, until it
+                     closes.  A tunnel's is not shared, and stays ours.  */
+                  if (!via_tunnel (h))
+                    {
+                      h->sess->slot_key = h->slot_key;
+                      h->slot_key = NULL;
+                    }
+                }
             }
         }
+      /* Those who waited to learn whether the connection could be shared are
+         told: they find the session, or make their own.  */
+      if (h->mode == HTTP_H2 || h->mode == HTTP_H3)
+        http_settle (h, h->sess != NULL ? TWIST_SETTLE_SHARED
+                                        : TWIST_SETTLE_UNKNOWN);
     }
   return rc;
 }
@@ -1287,6 +1430,8 @@ http_restart (void *user)
   /* Completed meanwhile (a timeout): it stays so.  */
   if (h->finished)
     return;
+  /* A connection that is a session's goes on without us.  */
+  http_leave_session (h);
   c = h->conn;
   if (h->transfer->url != NULL && h->dial_host != NULL
       && h->transfer->url->host != NULL && h->restart_keep && !h->conn_lost
@@ -1334,6 +1479,7 @@ http_restart (void *user)
     }
   if (c != NULL)
     twist_connection_free (c);
+  http_slot_release (h);
   twist_proxy_free (h->proxy);
   h->proxy = NULL;
   free (h->dial_host);
@@ -1495,7 +1641,13 @@ http_receive (struct twist_endpoint *ep, const uint8_t *data, size_t len)
   struct twist_http *h = http_of (ep);
 
   if (h->finished)
-    return len;
+    {
+      /* A connection that is a session's goes on for the others' sake, until
+         this transfer is let go and the session answers for it.  */
+      if (h->sess != NULL && h->mode == HTTP_H2)
+        return twist_h2_receive (h->sess->h2, data, len);
+      return len;
+    }
   if (h->ws_open && h->mode == HTTP_H1)
     {
       size_t n = twist_ws_receive (h->wsess, data, len);
@@ -1524,9 +1676,10 @@ session_disc (struct twist_endpoint *ep, int error)
 {
   struct twist_session *s = ep->user_data;
 
-  (void) error;
   if (s != NULL && s->h2 != NULL)
     twist_h2_drop_user (s->h2, s->h2);
+  if (s != NULL)
+    session_lost (s, NULL, error != TWIST_OK ? error : TWIST_ERR_CLOSED);
 }
 
 static struct twist_protocol_handler session_ops = {
@@ -1559,6 +1712,7 @@ h3_fallback (void *user)
   h->preface_sent = 0;
   if (c != NULL)
     twist_connection_free (c);
+  http_slot_release (h);
   h->how = h->https ? TWIST_DISC_ALPN : TWIST_DISC_H2C;
   h->mode = HTTP_H1;
   h->offered_h2c = h->how == TWIST_DISC_H2C;
@@ -1570,6 +1724,7 @@ http_fail (struct twist_http *h, int err)
 {
   if (h->finished)
     return;
+  http_settle (h, TWIST_SETTLE_UNKNOWN);
   /* HTTP/3 was selected by discovery and could not be opened.  One
      fall back, onto ALPN or h2c.  A pinned HTTP/3-only request does
      not.  */
@@ -1598,7 +1753,12 @@ http_security (struct twist_endpoint *ep, const char *alpn, size_t alpn_len)
   else if (alpn_len == 2 && memcmp (alpn, "h3", 2) == 0)
     h->mode = HTTP_H3;
   else
-    h->mode = HTTP_H1;
+    {
+      h->mode = HTTP_H1;
+      /* The origin does not multiplex: the next transfer to it need not
+         wait to learn that.  */
+      http_settle (h, TWIST_SETTLE_H1);
+    }
   if (send_request (h) != TWIST_OK)
     http_fail (h, TWIST_ERR_PROTOCOL);
 }
@@ -1644,6 +1804,9 @@ http_disconnected (struct twist_endpoint *ep, int error)
 {
   struct twist_http *h = http_of (ep);
 
+  /* The session is lost whatever becomes of this transfer.  */
+  if (h->sess != NULL)
+    session_lost (h->sess, h, error != TWIST_OK ? error : TWIST_ERR_CLOSED);
   if (h->restarting)
     {
       h->conn_lost = 1;
@@ -1658,6 +1821,8 @@ http_error (struct twist_endpoint *ep, int error)
 {
   struct twist_http *h = http_of (ep);
 
+  if (h->sess != NULL)
+    session_lost (h->sess, h, error);
   if (h->restarting)
     {
       h->conn_lost = 1;
@@ -1902,15 +2067,95 @@ prepare_dial (struct twist_http *h)
   return h->dial_host != NULL ? TWIST_OK : TWIST_ERR_NOMEM;
 }
 
+/* What arrives on a stream of a shared HTTP/3 connection.  The connection
+   keeps what the parser leaves of a frame for the next read, but a stream of
+   its own is given what it gets only once, so the transfer keeps it; and the
+   end of the stream is the end of the response, as it is on the connection of
+   a transfer that has it to itself (http_read_finished).  */
 static size_t
 h3_stream_data (void *user, const uint8_t *data, size_t len, int fin)
 {
   struct twist_http *h = user;
+  const uint8_t *p = data;
+  size_t n = len;
+  size_t used;
 
-  (void) fin;
   if (h == NULL || h->h3 == NULL)
     return len;
-  return twist_h3_receive (h->h3, data, len);
+  if (h->h3_tail_len == 0)
+    {
+      free (h->h3_tail);
+      h->h3_tail = NULL;
+    }
+  if (h->h3_tail_len > 0)
+    {
+      uint8_t *joined = realloc (h->h3_tail, h->h3_tail_len + len);
+
+      if (joined == NULL)
+        {
+          http_fail (h, TWIST_ERR_NOMEM);
+          return len;
+        }
+      memcpy (joined + h->h3_tail_len, data, len);
+      h->h3_tail = joined;
+      h->h3_tail_len += len;
+      p = joined;
+      n = h->h3_tail_len;
+    }
+  used = twist_h3_receive (h->h3, p, n);
+  if (used < n)
+    {
+      /* The rest of a frame that is not all here.  */
+      if (p == h->h3_tail)
+        {
+          memmove (h->h3_tail, p + used, n - used);
+          h->h3_tail_len = n - used;
+        }
+      else
+        {
+          h->h3_tail = twist_xmalloc (n - used);
+          if (h->h3_tail == NULL)
+            {
+              h->h3_tail_len = 0;
+              http_fail (h, TWIST_ERR_NOMEM);
+              return len;
+            }
+          memcpy (h->h3_tail, p + used, n - used);
+          h->h3_tail_len = n - used;
+        }
+    }
+  else
+    h->h3_tail_len = 0;
+  if (fin && !h->finished && h->mode == HTTP_H3)
+    http_message_done (h);
+  return len;
+}
+
+/* Whether the transfer's origin can carry other transfers on a connection of
+   its own, and the transfer may take part: it is to be HTTP/2 or HTTP/3 from
+   the first byte, or it is https and the server is to say which in the
+   handshake.  A tunnel or a websocket is not shared.  */
+static int
+session_wanted (const struct twist_http *h)
+{
+  /* HTTP/2 prior knowledge over https is negotiated in the handshake like any
+     other (twist_http_discover gives it ALPN), so it is covered here and by
+     h2_pinned below; only a cleartext one has its mode set from the start.  */
+  if (h->ws || via_tunnel (h))
+    return 0;
+  if (h->mode == HTTP_H2 || h->mode == HTTP_H3)
+    return 1;
+  return h->https && h->how == TWIST_DISC_ALPN && !h->req_http10;
+}
+
+/* Whether HTTP/2 was asked for, and not HTTP/3 in its place.  */
+static int
+h2_pinned (const struct twist_http *h)
+{
+  int v = h->transfer->http_version;
+
+  return v == TWIST_HTTP_VERSION_2_0 || v == TWIST_HTTP_VERSION_2TLS
+         || v == TWIST_HTTP_VERSION_2_PRIOR_KNOWLEDGE;
 }
 
 static int
@@ -1920,9 +2165,7 @@ http_borrow (struct twist_http *h)
   struct twist_runtime *runtime;
   char key[1024];
 
-  if ((h->mode != HTTP_H2 && h->mode != HTTP_H3) || h->ws)
-    return 0;
-  if (via_tunnel (h))
+  if (!session_wanted (h))
     return 0;
   runtime = h->transfer != NULL ? h->transfer->runtime : NULL;
   if (runtime == NULL || http_pool_key (h, key, sizeof key) != TWIST_OK)
@@ -1930,36 +2173,43 @@ http_borrow (struct twist_http *h)
   s = twist_session_find (runtime, key, h->transfer->loop);
   if (s == NULL || s->conn == NULL)
     return 0;
+  /* A transfer that is to be one or the other takes only that; one that is
+     to learn from the handshake takes what is there, unless HTTP/2 was asked
+     for.  */
+  if (h->mode == HTTP_H2 || h->mode == HTTP_H3)
+    {
+      if ((h->mode == HTTP_H3) != (s->h2 == NULL))
+        return 0;
+    }
+  else if (s->h2 == NULL && h2_pinned (h))
+    return 0;
   if (arm_parsers (h) != TWIST_OK)
     return 0;
-  if (h->mode == HTTP_H2)
+  if (s->h2 != NULL)
     {
-      if (s->h2 == NULL)
-        {
-          http_free_parsers (h);
-          return 0;
-        }
       twist_h2_free (h->h2);
       h->h2 = s->h2;
+      h->mode = HTTP_H2;
     }
   else
     {
       if (twist_quic_open_stream (s->conn) != TWIST_OK)
         {
-          http_free_parsers (h);
+          arm_parsers (h);
           return 0;
         }
       twist_quic_bind (s->conn, h3_stream_data, h);
+      h->mode = HTTP_H3;
     }
   h->conn = s->conn;
-  h->sess = s;
-  s->users++;
+  session_link (h, s);
   h->preface_sent = 1;
   if (twist_connection_tls (s->conn) != NULL)
     h->tls_on = 1;
   if (send_request (h) != TWIST_OK)
     {
       twist_h2_drop_user (s->h2, h);
+      session_unlink (h);
       twist_session_release (s);
       h->sess = NULL;
       if (h->h2 == s->h2)
@@ -1968,6 +2218,200 @@ http_borrow (struct twist_http *h)
       http_complete (h, TWIST_ERR_CONNECT);
     }
   return 1;
+}
+
+static void dial (struct twist_http *h, const struct twist_dns_addr *addr);
+static void start_quic (struct twist_http *h,
+                        const struct twist_dns_addr *addr);
+
+/* The step after waiting, from the loop: start again from the top, with the
+   place under the limit that was granted, if one was.  The transfer may have
+   ended or been freed meanwhile.  */
+static void
+http_resume_posted (void *user)
+{
+  struct twist_http *h = user;
+
+  if (http_posted_done (h))
+    return;
+  if (h->finished)
+    return;
+  if (h->waiter.state == TWIST_WAIT_GRANTED)
+    {
+      free (h->slot_key);
+      h->slot_key = twist_origin_waiter_take (&h->waiter);
+    }
+  if (h->resume_quic)
+    start_quic (h, &h->peer);
+  else
+    dial (h, &h->peer);
+  /* The place at the head of the queue was for that attempt only.  */
+  h->requeue = 0;
+}
+
+/* From the loop: the transfer's session lost its connection before any of the
+   response came, and the transfer goes again, on a connection of its own.
+   This is not done where the loss is found, which may be inside a call that
+   the transfer itself is making.  */
+static void
+session_retry (void *user)
+{
+  struct twist_http *h = user;
+  struct twist_session *s = h->sess;
+
+  if (http_posted_done (h))
+    return;
+  if (h->finished || s == NULL)
+    return;
+  twist_h2_drop_user (s->h2, h);
+  if (h->h2 == s->h2)
+    h->h2 = NULL;
+  session_unlink (h);
+  twist_session_release (s);
+  h->sess = NULL;
+  h->conn = NULL;
+  /* Half a frame of the lost stream is of no use to the next.  */
+  free (h->h3_tail);
+  h->h3_tail = NULL;
+  h->h3_tail_len = 0;
+  h->sent = 0;
+  h->preface_sent = 0;
+  h->tls_on = 0;
+  if (arm_parsers (h) != TWIST_OK)
+    {
+      http_fail (h, TWIST_ERR_NOMEM);
+      return;
+    }
+  /* Over what the session was on, which the mode says.  */
+  h->resume_quic = h->mode == HTTP_H3;
+  if (h->resume_quic)
+    start_quic (h, &h->peer);
+  else
+    dial (h, &h->peer);
+}
+
+/* The transfer's session has lost its connection.  If nothing of the
+   response has come, the transfer goes again, once; else it has failed.  */
+static void
+session_user_lost (struct twist_http *h, int err)
+{
+  if (h->finished || h->sess == NULL)
+    return;
+  if (h->status != 0 || h->retried)
+    {
+      http_fail (h, err);
+      return;
+    }
+  h->retried = 1;
+  if (http_post (h, session_retry) != TWIST_OK)
+    http_fail (h, TWIST_ERR_NOMEM);
+}
+
+/* The connection of the session is gone: it is not to be used again, the place
+   it held under the limit on connections is free, and the transfers on it
+   except EXCEPT, which is told by its own handler, are told.  */
+static void
+session_lost (struct twist_session *s, struct twist_http *except, int err)
+{
+  struct twist_session_user *u;
+  struct twist_session_user *next;
+
+  if (s->closed)
+    return;
+  s->closed = 1;
+  if (s->slot_key != NULL)
+    {
+      char *key = s->slot_key;
+
+      s->slot_key = NULL;
+      if (s->runtime != NULL && s->runtime->origintab != NULL)
+        twist_origintab_release (s->runtime->origintab, key);
+      free (key);
+    }
+  for (u = s->users_head; u != NULL; u = next)
+    {
+      next = u->next;
+      if (u->h != except)
+        session_user_lost (u->h, err);
+    }
+}
+
+/* Called by the table, when what the transfer waited for has come.  Nothing
+   is done here but to post the next step: the table is in the middle of its
+   own work, and this may be on another transfer's stack.  */
+static void
+http_resume (void *user, int why)
+{
+  struct twist_http *h = user;
+
+  if (h->finished)
+    return;
+  h->requeue = why == TWIST_RESUME_WOKEN;
+  if (http_post (h, http_resume_posted) != TWIST_OK)
+    http_complete (h, TWIST_ERR_NOMEM);
+}
+
+/* Before a connection is made or taken: wait for a connection to the origin
+   that is being made, if it may be shared; then take a place under the limit
+   on connections, which are open ones and those being made.  1 if the
+   transfer is to wait, to be started again from the top when it is its turn,
+   0 if it goes on.  A connection that is idle in the pool holds no place, so a
+   transfer takes one before it takes that, and the places held plus the
+   connections being made stay within the limit.  A place is held until the
+   connection is parked, closed, or the session's.  */
+static int
+http_gate (struct twist_http *h, int quic)
+{
+  struct twist_origintab *tab = http_tab (h);
+  char key[1024];
+  int rc;
+
+  if (tab == NULL || h->slot_key != NULL
+      || http_pool_key (h, key, sizeof key) != TWIST_OK)
+    return 0;
+  h->waiter.resume = http_resume;
+  h->waiter.user = h;
+  h->resume_quic = quic;
+  if (h->transfer->pipewait && session_wanted (h)
+      && twist_origintab_park (tab, key, &h->waiter))
+    return 1;
+  /* One that was woken and found no room goes back to the head.  */
+  rc = twist_origintab_acquire (tab, key, h->transfer->loop, &h->waiter,
+                                h->requeue);
+  h->requeue = 0;
+  if (rc == 0)
+    return 1;
+  if (rc < 0)
+    {
+      http_fail (h, rc);
+      return 1;
+    }
+  h->slot_key = twist_strdup (key);
+  if (h->slot_key == NULL)
+    {
+      twist_origintab_release (tab, key);
+      http_fail (h, TWIST_ERR_NOMEM);
+      return 1;
+    }
+  return 0;
+}
+
+/* A connection is about to be made: if others might share it, say so.  */
+static void
+http_lead (struct twist_http *h)
+{
+  struct twist_origintab *tab = http_tab (h);
+  char key[1024];
+
+  if (tab == NULL || h->lead_key != NULL || !session_wanted (h)
+      || http_pool_key (h, key, sizeof key) != TWIST_OK
+      || !twist_origintab_may_lead (tab, key))
+    return;
+  if (twist_origintab_lead (tab, key, h->transfer->loop) != TWIST_OK)
+    return;
+  h->lead_key = twist_strdup (key);
+  if (h->lead_key == NULL)
+    twist_origintab_settle (tab, key, TWIST_SETTLE_UNKNOWN);
 }
 
 static int
@@ -2045,8 +2489,17 @@ dial (struct twist_http *h, const struct twist_dns_addr *addr)
   size_t salen;
   int rc;
 
-  if (http_borrow (h) || http_reuse (h))
+  if (http_borrow (h))
+    {
+      /* A stream of a session holds no place under the limit.  */
+      http_slot_release (h);
+      return;
+    }
+  if (http_gate (h, 0))
     return;
+  if (http_reuse (h))
+    return;
+  http_lead (h);
   if (h->tls_tunnel)
     {
       struct twist_tunnel_spec spec;
@@ -2139,12 +2592,21 @@ on_proxy_resolved (void *user, int err, const struct twist_dns_addr *addr)
 static void
 start_quic (struct twist_http *h, const struct twist_dns_addr *addr)
 {
-  if (http_borrow (h))
-    return;
   struct twist_transfer *transfer = h->transfer;
-  char *saved = transfer->url->host;
-  int saved_port = transfer->url->port;
+  char *saved;
+  int saved_port;
   int rc;
+
+  if (http_borrow (h))
+    {
+      http_slot_release (h);
+      return;
+    }
+  if (http_gate (h, 1))
+    return;
+  http_lead (h);
+  saved = transfer->url->host;
+  saved_port = transfer->url->port;
 
   if (twist_quic_connect_fn == NULL)
     {
@@ -2411,26 +2873,12 @@ http_free (void *p)
     return;
   if (h->timer != NULL)
     twist_timer_cancel (h->timer);
-  if (h->sess != NULL)
-    {
-      if (h->conn != NULL)
-        {
-          struct twist_endpoint *ep = twist_connection_endpoint (h->conn);
-
-          if (ep->user_data == h)
-            {
-              ep->user_data = h->sess;
-              twist_connection_set_handler (h->conn, &session_ops);
-            }
-        }
-      twist_h2_drop_user (h->sess->h2, h);
-      if (h->h2 == h->sess->h2)
-        h->h2 = NULL;
-      h->conn = NULL;
-      twist_session_release (h->sess);
-      h->sess = NULL;
-    }
+  /* Out of every queue first: what it was granted, it gives back.  */
+  twist_origintab_cancel (&h->waiter);
+  http_leave_session (h);
   twist_connection_free (h->conn);
+  http_slot_release (h);
+  http_settle (h, TWIST_SETTLE_UNKNOWN);
   twist_proxy_free (h->proxy);
   http_free_parsers (h);
   twist_ws_free (h->wsess);
@@ -2451,6 +2899,7 @@ http_free (void *p)
       free (h->tun_pass);
     }
   free (h->hdr_line);
+  free (h->h3_tail);
   if (h->posted > 0)
     {
       h->dead = 1;

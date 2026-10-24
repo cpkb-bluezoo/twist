@@ -68,6 +68,7 @@ libtwist_la_SOURCES = \
   engine/pool.c \
   engine/masque.c \
   engine/noproxy.c \
+  engine/origin.c \
   engine/progress.c \
   engine/rate.c \
   engine/proxy.c \
@@ -122,7 +123,7 @@ libtwist_la_SOURCES = \
   tls/trust.c
 
 twist_SOURCES = bar.c bar.h main.c meter.c meter.h
-twist_LDADD = libtwist.la $(READLINE_LIBS)
+twist_LDADD = libtwist.la $(READLINE_LIBS) $(LIBM)
 
 ## For fuzz/fuzz.sh, which compiles the library again with sanitizers and
 ## instrumentation: what to compile, and with what.

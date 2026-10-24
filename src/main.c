@@ -54,8 +54,9 @@ static int progress_bar;
 static int no_progress;
 static int fail_early;
 /* -Z: transfers run together, at most parallel_max of them.  All of these are
-   global.  --parallel-immediate and --parallel-max-host are read, and have no
-   say in how a transfer is made.  */
+   global.  With --parallel-immediate a transfer does not wait for a
+   connection that is being made; --parallel-max-host is the most connections
+   to one host.  */
 static int parallel;
 static long parallel_max = 50;
 static int parallel_immediate;
@@ -250,6 +251,8 @@ usage (void)
   fputs (_("      --fail-early        stop at the first failed URL\n"), stdout);
   fputs (_("  -Z, --parallel          run the transfers together\n"), stdout);
   fputs (_("      --parallel-max N    at most N transfers at once (default 50, most 300)\n"),
+         stdout);
+  fputs (_("      --parallel-max-host N  at most N connections to one host\n"),
          stdout);
   fputs (_("      --parallel-immediate  do not wait to share a connection\n"),
          stdout);
@@ -1701,6 +1704,8 @@ job_prepare (struct cli_run *run, struct cli_next *next, struct cli_job **out)
       else
         twist_transfer_setopt (transfer, opt->opt, opt->num);
     }
+  twist_transfer_setopt (transfer, TWISTOPT_PIPEWAIT,
+                         parallel_immediate ? 0L : 1L);
   twist_transfer_setopt (transfer, TWISTOPT_URL, job->use_url);
   twist_transfer_setopt (transfer, TWISTOPT_RESUME_FROM, resume);
   twist_transfer_setopt (transfer, TWISTOPT_CUSTOMREQUEST, method);
@@ -2018,6 +2023,9 @@ run_all (struct cli_op *ops)
       diag_code (27, twist_strerror (TWIST_ERR_NOMEM));
       return 27;
     }
+  if (parallel && parallel_max_host > 0)
+    twist_runtime_setopt (run.runtime, TWIST_RUNTIMEOPT_MAX_HOST_CONNECTIONS,
+                          parallel_max_host);
   for (;;)
     {
       int rc;

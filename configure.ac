@@ -129,6 +129,10 @@ LIBS=$tw_save_LIBS
 
 AC_CHECK_HEADER([zlib.h], [], [AC_MSG_ERROR([zlib.h is required])])
 tw_save_LIBS=$LIBS
+# The bar draws its spaceship from a sine.
+AC_CHECK_LIB([m], [sin], [LIBM=-lm], [LIBM=])
+AC_SUBST([LIBM])
+
 AC_CHECK_LIB([z], [inflate],
   [ZLIB_LIBS="-lz"],
   [AC_MSG_ERROR([zlib is required])])

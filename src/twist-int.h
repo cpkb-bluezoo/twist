@@ -114,9 +114,9 @@ struct twist_progress
   long long current_speed;	/* Over the last few seconds.  */
   long long timespent_us;
   long long lastshow;		/* The second of the last drawing; -1: none.  */
-  unsigned speeder_n;
-  long long speeder[TWIST_PROGRESS_HISTORY];
-  uint64_t speeder_ms[TWIST_PROGRESS_HISTORY];
+  unsigned draws;		/* Lines drawn since the counters began.  */
+  long long hist_bytes[TWIST_PROGRESS_HISTORY];	/* Moved, at each draw.  */
+  uint64_t hist_ms[TWIST_PROGRESS_HISTORY];
   struct twist_timer *tick;
   uint64_t tick_due;		/* A second after the last update.  */
 };
@@ -197,6 +197,7 @@ struct twist_transfer
   int use_cookies;
   int use_hsts;
   int use_altsvc;
+  int pipewait;  /* TWISTOPT_PIPEWAIT.  */
   struct twist_runtime *runtime;
   struct twist_loop *loop;
   /* Told the result when the transfer ends (twist_runtime_start); and the
@@ -257,7 +258,12 @@ struct twist_runtime
   struct twist_jar *jar;
   struct twist_hsts *hsts;
   struct twist_altsvc *altsvc;
+  /* What is known of each origin, and the limit on connections to one.  */
+  struct twist_origintab *origintab;
+  int started_any;		/* A transfer has been started in it.  */
 };
+
+struct twist_session_user;
 
 struct twist_session
 {
@@ -265,8 +271,11 @@ struct twist_session
   struct twist_loop *loop;
   struct twist_connection *conn;
   struct twist_h2 *h2;
-  int users;
   int preface;
+  struct twist_runtime *runtime;
+  char *slot_key;		/* The connection it holds, against the limit.  */
+  int closed;			/* The connection is gone.  */
+  struct twist_session_user *users_head;	/* Those on it (http.c).  */
   struct twist_session *next;
 };
 
@@ -280,6 +289,86 @@ struct twist_session *twist_session_find (struct twist_runtime *runtime,
                                           struct twist_loop *loop);
 void twist_session_release (struct twist_session *session);
 void twist_session_free_all (struct twist_runtime *runtime);
+
+/* ---- origins ---- */
+
+/* A transfer, or a session, that waits for an origin: either for a
+   connection that is being made to it to say whether several transfers can
+   share it (TWIST_WAIT_SESSION), or for room under the limit on connections
+   to it (TWIST_WAIT_SLOT).  When what it waits for has come, RESUME is called
+   with USER and the reason: the connection settled, or it was given a
+   connection to make (which it then holds until it gives it back with
+   twist_origintab_release), or a stream of a session is free and it may
+   use that instead.  */
+enum
+{
+  TWIST_WAIT_NONE = 0,
+  TWIST_WAIT_SESSION,
+  TWIST_WAIT_SLOT,
+  TWIST_WAIT_GRANTED
+};
+
+enum
+{
+  TWIST_RESUME_SETTLED,
+  TWIST_RESUME_GRANTED,
+  TWIST_RESUME_WOKEN
+};
+
+struct twist_origin_waiter
+{
+  struct twist_origin_waiter *next;
+  struct twist_origintab *tab;
+  char *key;
+  void (*resume) (void *user, int why);
+  void *user;
+  int state;
+};
+
+/* How a connection that was being made to an origin turned out.  */
+enum
+{
+  TWIST_SETTLE_SHARED,		/* It carries several transfers.  */
+  TWIST_SETTLE_H1,		/* It carries one at a time.  */
+  TWIST_SETTLE_UNKNOWN		/* It failed, or was given up.  */
+};
+
+struct twist_origintab;
+
+/* The key of the origin TRANSFER is going to: its loop, scheme, host, port, and
+   the proxy or Unix socket it goes through.  */
+int twist_transfer_origin_key (struct twist_transfer *transfer, char *buf,
+                               size_t cap);
+struct twist_origintab *twist_origintab_new (void);
+void twist_origintab_free (struct twist_origintab *tab);
+void twist_origintab_set_cap (struct twist_origintab *tab, long cap);
+/* A connection that may carry several transfers is being made to KEY.  */
+int twist_origintab_lead (struct twist_origintab *tab, const char *key,
+                          struct twist_loop *loop);
+/* False if a connection made to KEY has been found to carry one at a time, so
+   that the next need not be waited for.  */
+int twist_origintab_may_lead (struct twist_origintab *tab, const char *key);
+/* Wait for the connection being made to KEY, if there is one: 1, and W is
+   called when it settles; 0 if there is none.  */
+int twist_origintab_park (struct twist_origintab *tab, const char *key,
+                          struct twist_origin_waiter *w);
+/* One such connection has settled: everyone who waits for KEY is told.  */
+void twist_origintab_settle (struct twist_origintab *tab, const char *key,
+                             int how);
+/* Take a connection to KEY: 1 if it is given, 0 if W waits for one (at the
+   head of the queue if FRONT), or an error.  */
+int twist_origintab_acquire (struct twist_origintab *tab, const char *key,
+                             struct twist_loop *loop,
+                             struct twist_origin_waiter *w, int front);
+/* Give a connection back.  */
+void twist_origintab_release (struct twist_origintab *tab, const char *key);
+/* A stream of a session has ended: the first that waits for room may now
+   have it.  */
+void twist_origintab_wake (struct twist_origintab *tab, const char *key);
+/* W stops waiting, or gives back what it was granted and did not take.  */
+void twist_origintab_cancel (struct twist_origin_waiter *w);
+/* The key of a granted W, which it holds; W is then idle.  Free it.  */
+char *twist_origin_waiter_take (struct twist_origin_waiter *w);
 
 /* ---- loop ---- */
 

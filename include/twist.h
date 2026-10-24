@@ -340,7 +340,24 @@ enum twist_opt
      ready, and what is read from it waits for the connection when the
      connection is behind.  The end of the input does not end the session.
      -1, the default, is none.  Other schemes ignore it.  */
-  TWISTOPT_TELNET_INPUT_FD = 72
+  TWISTOPT_TELNET_INPUT_FD = 72,
+  /* A long.  Non-zero, the default, has an HTTP transfer that finds no
+     connection it can share to its origin, but a connection to it that is
+     still being made and may turn out to carry several transfers (HTTP/2 or
+     HTTP/3), wait for that one, and use it if it does.  Zero has it make a
+     connection of its own at once.  Only HTTP uses it.  */
+  TWISTOPT_PIPEWAIT = 73
+};
+
+/* Options of a runtime (twist_runtime_setopt).  */
+enum twist_runtime_option
+{
+  /* A long: the most connections a runtime has open or being made to one
+     origin (the scheme, host and port, and the proxy) for HTTP transfers.  A
+     transfer that would make another waits until one is closed or kept for
+     reuse.  Streams that share an HTTP/2 or HTTP/3 connection are not
+     connections.  0, the default, is no limit.  */
+  TWIST_RUNTIMEOPT_MAX_HOST_CONNECTIONS = 1
 };
 
 enum twist_use_ssl
@@ -431,6 +448,12 @@ int twist_runtime_start (twist_runtime *runtime, twist_transfer *transfer,
                          twist_done_callback done, void *user);
 /* End TRANSFER early.  Its callback is called with TWIST_ERR_ABORTED.  */
 int twist_runtime_cancel (twist_runtime *runtime, twist_transfer *transfer);
+
+/* Set an option of RUNTIME: OPTION is a twist_runtime_option, followed by its
+   value.  TWIST_ERR_INVAL for an option that is not known or a value that is
+   not right for it, and for any option once a transfer has been started in
+   the runtime.  */
+int twist_runtime_setopt (twist_runtime *runtime, int option, ...);
 
 int twist_url_parse (const char *input, twist_url **out);
 void twist_url_free (twist_url *url);

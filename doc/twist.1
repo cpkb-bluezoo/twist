@@ -599,12 +599,25 @@ transfers at once.  The default is 50.  More than 300 is 300, and 0 is the
 default.  A transfer that is not yet started is not prepared, so a pattern
 that makes a great many URLs does not open a great many files.  Global.
 .TP
+.BI \-\-parallel\-max\-host " n"
+With
+.BR \-Z ,
+keep at most
+.I n
+HTTP connections open, or being made, to one host: the scheme, host and port,
+and the proxy.  A transfer that would make another waits until a connection to
+that host is closed or is kept for the next transfer.  Transfers that share an
+HTTP/2 or HTTP/3 connection do not count as connections.  0, the default, is no
+limit, and more than 65535 is 65535.  Only HTTP, HTTPS and WebSocket transfers
+are held to it.  Global.
+.TP
 .B \-\-parallel\-immediate
 With
 .BR \-Z ,
-start each transfer at once rather than waiting to see whether a connection
-that is being made can be shared.  A transfer does not wait, so this changes
-nothing.
+start each transfer at once, making a connection of its own, rather than
+waiting for a connection to the same host that is being made, to share it if the
+server speaks HTTP/2 or HTTP/3.  By default a transfer waits, so a number of
+URLs of one host make one connection.
 .B \-\-no\-parallel\-immediate
 undoes it.  Global.
 .TP

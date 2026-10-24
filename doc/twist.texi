@@ -477,6 +477,13 @@ when its host is in the runtime's HSTS list.  Only HTTP uses it.
 @item TWISTOPT_USE_ALTSVC
 A long.  Non-zero has the transfer keep the alternative services that servers
 offer in the runtime's Alt-Svc list, and use them.  Only HTTP uses it.
+@item TWISTOPT_PIPEWAIT
+A long.  Non-zero, the default, has an HTTP transfer that finds no connection
+to share, but a connection to its host that is being made and may carry several
+transfers (HTTP/2 or HTTP/3), wait for that one and use it if it does.  If the
+server turns out to speak HTTP/1.1, or the connection fails, the transfer goes
+on by itself.  0 has the transfer make a connection of its own at once.  Only
+HTTP uses it.
 @end table
 
 @node Callbacks
@@ -594,6 +601,22 @@ deadline moves.  @var{user} is passed to both.
 Free the runtime.  A transfer that is still in it is dropped, without a call to
 its @code{twist_done_callback}, and stays valid to free.  From a callback this
 does nothing.
+@end deftypefun
+
+@deftypefun int twist_runtime_setopt (twist_runtime *@var{runtime}, int @var{option}, ...)
+Set an option of the runtime.  It returns @code{TWIST_ERR_INVAL} for an option
+that is not known, for a value that is not right for it, and for any option once
+a transfer has been started in the runtime.  The options are:
+
+@table @code
+@item TWIST_RUNTIMEOPT_MAX_HOST_CONNECTIONS
+A long: the most connections the runtime has open, or is making, to one host
+(the scheme, host and port, and the proxy), for HTTP transfers.  A transfer that
+would make another waits until a connection to the host is closed or is kept
+for reuse.  A connection that is kept idle holds no place, and the streams of
+an HTTP/2 or HTTP/3 connection are not connections.  0, the default, is no
+limit.
+@end table
 @end deftypefun
 
 @deftypefun int twist_runtime_start (twist_runtime *@var{runtime}, twist_transfer *@var{transfer}, twist_done_callback @var{done}, void *@var{user})
@@ -758,6 +781,13 @@ not ask neither keeps nor uses them.  The connections that are kept for reuse
 and the answers of DNS lookups are the runtime's too, and every transfer in it
 uses them.  Each belongs to one runtime and lives as long as it does, so two
 runtimes share nothing.
+
+Transfers that are started together to one HTTPS or HTTP/2 host share a
+connection if the server speaks HTTP/2 (or HTTP/3), and not otherwise: the first
+makes the connection, the others wait to see what it is
+(@code{TWISTOPT_PIPEWAIT}), and then each uses it as a stream, or makes a
+connection of its own if the server speaks HTTP/1.1 or the connection could not
+be made.  A transfer that is waiting and is cancelled stops waiting.
 
 @heading The cookie jar
 
@@ -995,11 +1025,19 @@ With @option{-Z}, run at most @var{n} transfers at once.  The default is 50.
 More than 300 is 300, and 0 is the default.  A transfer that is not yet
 started is not prepared, so a pattern that makes a great many URLs does not
 open a great many files.  Global.
+@item --parallel-max-host @var{n}
+With @option{-Z}, keep at most @var{n} HTTP connections open, or being made,
+to one host: the scheme, host and port, and the proxy.  A transfer that would
+make another waits until a connection to that host is closed or is kept for
+the next transfer.  Transfers that share an HTTP/2 or HTTP/3 connection do not
+count as connections.  0, the default, is no limit, and more than 65535 is
+65535.  Only HTTP, HTTPS and WebSocket transfers are held to it.  Global.
 @item --parallel-immediate
-With @option{-Z}, start each transfer at once rather than waiting to see
-whether a connection that is being made can be shared.  A transfer does not
-wait, so this changes nothing.  @option{--no-parallel-immediate} undoes it.
-Global.
+With @option{-Z}, start each transfer at once, making a connection of its
+own, rather than waiting for a connection to the same host that is being made,
+to share it if the server speaks HTTP/2 or HTTP/3.  By default a transfer
+waits, so a number of URLs of one host make one connection.
+@option{--no-parallel-immediate} undoes it.  Global.
 @item --compressed
 Ask for a compressed response and decompress it: @code{br}, @code{gzip} and
 @code{deflate}, or @code{gzip} and @code{deflate} when twist was built without

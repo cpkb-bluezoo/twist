@@ -23,6 +23,7 @@
 #include "meter.h"
 #include "twist-int.h"
 
+#include <stdio.h>
 #include <string.h>
 
 void
@@ -63,6 +64,7 @@ twist_meter_done (struct twist_meter *meter, struct twist_meter_xfer *xfer)
 
   meter->dlalready += xfer->dlnow;
   meter->ulalready += xfer->ulnow;
+  /* A size that was not yet counted into the whole counts now.  */
   if (!xfer->dltotal_added)
     {
       meter->dltotal += xfer->dltotal;
@@ -77,139 +79,125 @@ twist_meter_done (struct twist_meter *meter, struct twist_meter_xfer *xfer)
     if (*link == xfer)
       {
         *link = xfer->next;
+        xfer->next = NULL;
         meter->running--;
         break;
       }
+}
+
+/* The share of a whole that is done, as the text of the column: dashes
+   unless every transfer has a size.  */
+static void
+share_text (char *buf, size_t cap, int all_known, long long now,
+            long long whole)
+{
+  if (all_known && whole != 0)
+    snprintf (buf, cap, "%3lld", now * 100 / whole);
+  else
+    snprintf (buf, cap, "--");
 }
 
 int
 twist_meter_draw (struct twist_meter *meter, uint64_t now_ms, int final)
 {
   struct twist_meter_xfer *x;
-  char dlpercen[4] = "--";
-  char ulpercen[4] = "--";
-  char time_left[10];
-  char time_total[10];
-  char time_spent[10];
-  char buffer[3][10];
   long long dlnow = meter->dlalready;
   long long ulnow = meter->ulalready;
+  int dl_known = 1;
+  int ul_known = 1;
+  unsigned oldest;
+  uint64_t since;
+  long long dl_moved;
+  long long ul_moved;
+  long long dl_rate;
+  long long ul_rate;
   long long speed;
-  long long spent;
-  int dlknown = 1;
-  int ulknown = 1;
-  unsigned int i;
-  uint64_t delta;
-  long long dl;
-  long long ul;
+  long long total_time = 0;
+  long long left_time = 0;
+  char dl_pct[16], ul_pct[16];
+  char dl_bytes[16], ul_bytes[16], speed_text[16];
+  char total_text[16], spent_text[16], left_text[16];
 
   if (!meter->header)
     {
+      fputs ("DL% UL%  Dled  Uled  Xfers  Live Total     Current  Left    Speed\n",
+             meter->out);
       meter->header = 1;
-      fputs ("DL% UL%  Dled  Uled  Xfers  Live "
-             "Total     Current  Left    Speed\n", meter->out);
     }
-  if (!final && meter->drawn && now_ms - meter->stamp_ms <= 500)
+  if (!final && meter->drawn && now_ms <= meter->stamp_ms + 500)
     return 0;
-  meter->drawn = 1;
-  meter->stamp_ms = now_ms;
-  spent = (long long) (now_ms - meter->start_ms) / 1000;
 
-  /* What the transfers that are over moved, and what the others have.  */
   for (x = meter->xfers; x != NULL; x = x->next)
     {
       dlnow += x->dlnow;
       ulnow += x->ulnow;
-      if (!x->dltotal)
-        dlknown = 0;
+      if (x->dltotal == 0)
+        dl_known = 0;
       else if (!x->dltotal_added)
         {
-          /* Only add the size once.  */
           meter->dltotal += x->dltotal;
           x->dltotal_added = 1;
         }
-      if (!x->ultotal)
-        ulknown = 0;
+      if (x->ultotal == 0)
+        ul_known = 0;
       else if (!x->ultotal_added)
         {
           meter->ultotal += x->ultotal;
           x->ultotal_added = 1;
         }
     }
-  if (dlknown && meter->dltotal)
-    snprintf (dlpercen, sizeof dlpercen, "%3lld",
-              dlnow * 100 / meter->dltotal);
-  if (ulknown && meter->ultotal)
-    snprintf (ulpercen, sizeof ulpercen, "%3lld",
-              ulnow * 100 / meter->ultotal);
+  share_text (dl_pct, sizeof dl_pct, dl_known, dlnow, meter->dltotal);
+  share_text (ul_pct, sizeof ul_pct, ul_known, ulnow, meter->ultotal);
 
-  /* The speed is the higher of the two, over the last ten lines drawn, or
-     since the start until there have been so many.  */
-  i = meter->index;
-  meter->speeds[i].dl = dlnow;
-  meter->speeds[i].ul = ulnow;
-  meter->speeds[i].stamp_ms = now_ms;
-  if (++meter->index >= TWIST_METER_SPEEDS)
-    {
-      meter->wrapped = 1;
-      meter->index = 0;
-    }
+  /* The speed is measured over the last ten lines once there have been that
+     many, and over the whole run before.  */
+  meter->speeds[meter->index].dl = dlnow;
+  meter->speeds[meter->index].ul = ulnow;
+  meter->speeds[meter->index].stamp_ms = now_ms;
+  meter->index = (meter->index + 1) % TWIST_METER_SPEEDS;
+  if (meter->index == 0)
+    meter->wrapped = 1;
   if (meter->wrapped)
     {
-      /* The index is now at the oldest.  */
-      delta = now_ms - meter->speeds[meter->index].stamp_ms;
-      dl = dlnow - meter->speeds[meter->index].dl;
-      ul = ulnow - meter->speeds[meter->index].ul;
+      oldest = meter->index;
+      since = meter->speeds[oldest].stamp_ms;
+      dl_moved = dlnow - meter->speeds[oldest].dl;
+      ul_moved = ulnow - meter->speeds[oldest].ul;
     }
   else
     {
-      delta = now_ms - meter->start_ms;
-      dl = dlnow;
-      ul = ulnow;
+      since = meter->start_ms;
+      dl_moved = dlnow;
+      ul_moved = ulnow;
     }
-  if (delta == 0)
-    delta++;
   {
-    long long dls = (long long) ((double) dl / ((double) delta / 1000.0));
-    long long uls = (long long) ((double) ul / ((double) delta / 1000.0));
+    uint64_t span = now_ms > since ? now_ms - since : 0;
+    double span_s = (double) (span < 1 ? 1 : span) / 1000.0;
 
-    speed = dls > uls ? dls : uls;
+    dl_rate = (long long) ((double) dl_moved / span_s);
+    ul_rate = (long long) ((double) ul_moved / span_s);
   }
+  speed = dl_rate > ul_rate ? dl_rate : ul_rate;
 
-  if (dlknown && speed)
+  if (dl_known && meter->dltotal != 0 && speed > 0)
     {
-      long long est = meter->dltotal / speed;
-      long long left = (meter->dltotal - dlnow) / speed;
-
-      twist_progress_time2str (left, time_left);
-      twist_progress_time2str (est, time_total);
+      total_time = meter->dltotal / speed;
+      left_time = (meter->dltotal - dlnow) / speed;
     }
-  else
-    {
-      twist_progress_time2str (0, time_left);
-      twist_progress_time2str (0, time_total);
-    }
-  twist_progress_time2str (spent, time_spent);
 
-  fprintf (meter->out,
-           "\r"
-           "%-3s "              /* Percent downloaded.  */
-           "%-3s "              /* Percent uploaded.  */
-           "%s "                /* Dled.  */
-           "%s "                /* Uled.  */
-           "%5lld "             /* Xfers.  */
-           "%5lld "             /* Live.  */
-           " %s "               /* Total time.  */
-           "%s "                /* Current time.  */
-           "%s "                /* Time left.  */
-           "%s "                /* Speed.  */
-           "%5s",               /* The final newline.  */
-           dlpercen, ulpercen,
-           twist_progress_max5 (dlnow, buffer[0]),
-           twist_progress_max5 (ulnow, buffer[1]),
+  fprintf (meter->out, "\r%-3s %-3s %s %s %5lld %5lld  %s %s %s %s %5s",
+           dl_pct, ul_pct,
+           twist_progress_max5 (dlnow, dl_bytes),
+           twist_progress_max5 (ulnow, ul_bytes),
            meter->started, meter->running,
-           time_total, time_spent, time_left,
-           twist_progress_max5 (speed, buffer[2]),
+           twist_progress_time2str (total_time, total_text),
+           twist_progress_time2str ((long long) ((now_ms - meter->start_ms)
+                                                 / 1000u), spent_text),
+           twist_progress_time2str (left_time, left_text),
+           twist_progress_max5 (speed, speed_text),
            final ? "\n" : "");
+  fflush (meter->out);
+  meter->stamp_ms = now_ms;
+  meter->drawn = 1;
   return 1;
 }

@@ -66,199 +66,195 @@ fit (char *buf, size_t cap, const char *text)
   return buf;
 }
 
-/* A size in at most five columns: 12345, 1234k, 12.3M, 1234M, 12.3G...  */
-char *
-twist_progress_max5 (long long bytes, char *buf)
-{
-  char t[48];
-
-  if (bytes < 100000LL)
-    snprintf (t, sizeof t, "%5lld", bytes);
-  else if (bytes < 10000LL * KILO)
-    snprintf (t, sizeof t, "%4lldk", bytes / KILO);
-  else if (bytes < 100LL * MEGA)
-    snprintf (t, sizeof t, "%2lld.%0lldM", bytes / MEGA,
-              (bytes % MEGA) / (MEGA / 10));
-  else if (bytes < 10000LL * MEGA)
-    snprintf (t, sizeof t, "%4lldM", bytes / MEGA);
-  else if (bytes < 100LL * GIGA)
-    snprintf (t, sizeof t, "%2lld.%0lldG", bytes / GIGA,
-              (bytes % GIGA) / (GIGA / 10));
-  else if (bytes < 10000LL * GIGA)
-    snprintf (t, sizeof t, "%4lldG", bytes / GIGA);
-  else if (bytes < 10000LL * TERA)
-    snprintf (t, sizeof t, "%4lldT", bytes / TERA);
-  else
-    snprintf (t, sizeof t, "%4lldP", bytes / PETA);
-  return fit (buf, 6, t);
-}
-
-/* Eight columns: hours, minutes and seconds, or days and hours.  */
-char *
-twist_progress_time2str (long long seconds, char *buf)
-{
-  char t[48];
-  long long h;
-
-  if (seconds <= 0)
-    return fit (buf, 10, "--:--:--");
-  h = seconds / 3600;
-  if (h <= 99)
-    {
-      long long m = (seconds - h * 3600) / 60;
-      long long s = (seconds - h * 3600) - m * 60;
-
-      snprintf (t, sizeof t, "%2lld:%02lld:%02lld", h, m, s);
-    }
-  else
-    {
-      long long d = seconds / 86400;
-
-      h = (seconds - d * 86400) / 3600;
-      if (d <= 999)
-        snprintf (t, sizeof t, "%3lldd %02lldh", d, h);
-      else
-        snprintf (t, sizeof t, "%7lldd", d);
-    }
-  return fit (buf, 9, t);
-}
-
-/* Bytes a second over US microseconds.  */
+/* Adds two counts that are not negative, and stops at the largest number
+   where the sum would be past it.  */
 static long long
-speed (long long size, long long us)
+sum_up (long long a, long long b)
 {
-  if (us < 1)
-    return size < LLONG_MAX / 1000000 ? size * 1000000 : LLONG_MAX;
-  if (size < LLONG_MAX / 1000000)
-    return (size * 1000000) / us;
-  if (us >= 1000000)
-    return size / (us / 1000000);
-  return LLONG_MAX;
-}
-
-/* The averages, and once a second the speed over the last few seconds.
-   Returns 1 if the second has changed, which is when the meter draws.  */
-static int
-calculate (struct twist_progress *p, uint64_t now_ms)
-{
-  int show = 0;
-
-  p->timespent_us = (long long) (now_ms - p->start_ms) * 1000;
-  p->dlspeed = speed (p->downloaded, p->timespent_us);
-  p->ulspeed = speed (p->uploaded, p->timespent_us);
-  if (p->lastshow != (long long) (now_ms / 1000))
-    {
-      unsigned nowindex = p->speeder_n % TWIST_PROGRESS_HISTORY;
-      unsigned count;
-
-      p->lastshow = (long long) (now_ms / 1000);
-      show = 1;
-      p->speeder[nowindex] = p->downloaded + p->uploaded;
-      p->speeder_ms[nowindex] = now_ms;
-      p->speeder_n++;
-      count = (p->speeder_n >= TWIST_PROGRESS_HISTORY
-               ? TWIST_PROGRESS_HISTORY : p->speeder_n) - 1;
-      if (count > 0)
-        {
-          unsigned check = p->speeder_n >= TWIST_PROGRESS_HISTORY
-            ? p->speeder_n % TWIST_PROGRESS_HISTORY : 0;
-          long long span = (long long) (now_ms - p->speeder_ms[check]);
-          long long amount = p->speeder[nowindex] - p->speeder[check];
-
-          if (span == 0)
-            span = 1;
-          if (amount > 4294967LL)
-            p->current_speed = (long long) ((double) amount
-                                            / ((double) span / 1000.0));
-          else
-            p->current_speed = amount * 1000 / span;
-        }
-      else
-        p->current_speed = p->ulspeed + p->dlspeed;
-    }
-  return show;
-}
-
-/* A + B, or the largest number if that is more.  Both are not negative.  */
-static long long
-sat_add (long long a, long long b)
-{
-  if (b > 0 && a > LLONG_MAX - b)
+  if (a > LLONG_MAX - b)
     return LLONG_MAX;
   return a + b;
 }
 
+/* A count of bytes over a span of microseconds, as bytes a second.  A span
+   that is not there yet makes it the count of a whole second's worth, and a
+   count too large to be scaled to microseconds is divided over whole seconds
+   instead.  */
+static long long
+per_second (long long bytes, long long span_us)
+{
+  if (bytes <= 0)
+    return 0;
+  if (span_us < 1)
+    return bytes > LLONG_MAX / 1000000LL ? LLONG_MAX : bytes * 1000000LL;
+  if (bytes <= LLONG_MAX / 1000000LL)
+    return bytes * 1000000LL / span_us;
+  if (span_us >= 1000000LL)
+    return bytes / (span_us / 1000000LL);
+  return LLONG_MAX;
+}
+
+/* How much of WHOLE is PART, in percent.  A large whole is divided first,
+   so that the product cannot overflow.  */
+static long long
+percent_of (long long part, long long whole)
+{
+  if (whole > 10000)
+    return part / (whole / 100);
+  if (whole > 0)
+    return part * 100 / whole;
+  return 0;
+}
+
+char *
+twist_progress_max5 (long long bytes, char *buf)
+{
+  char text[32];
+
+  if (bytes < 100000LL)
+    snprintf (text, sizeof text, "%5lld", bytes);
+  else if (bytes < 10000 * KILO)
+    snprintf (text, sizeof text, "%4lldk", bytes / KILO);
+  else if (bytes < 100 * MEGA)
+    snprintf (text, sizeof text, "%2lld.%lldM", bytes / MEGA,
+              (bytes % MEGA) / (MEGA / 10));
+  else if (bytes < 10000 * MEGA)
+    snprintf (text, sizeof text, "%4lldM", bytes / MEGA);
+  else if (bytes < 100 * GIGA)
+    snprintf (text, sizeof text, "%2lld.%lldG", bytes / GIGA,
+              (bytes % GIGA) / (GIGA / 10));
+  else if (bytes < 10000 * GIGA)
+    snprintf (text, sizeof text, "%4lldG", bytes / GIGA);
+  else if (bytes < 10000 * TERA)
+    snprintf (text, sizeof text, "%4lldT", bytes / TERA);
+  else
+    snprintf (text, sizeof text, "%4lldP", bytes / PETA);
+  return fit (buf, 6, text);
+}
+
+char *
+twist_progress_time2str (long long seconds, char *buf)
+{
+  char text[32];
+  long long hours = seconds / 3600;
+
+  if (seconds <= 0)
+    return fit (buf, 9, "--:--:--");
+  if (hours <= 99)
+    snprintf (text, sizeof text, "%2lld:%02lld:%02lld", hours,
+              (seconds % 3600) / 60, seconds % 60);
+  else if (seconds / 86400 <= 999)
+    snprintf (text, sizeof text, "%3lldd %02lldh", seconds / 86400,
+              hours % 24);
+  else
+    snprintf (text, sizeof text, "%7lldd", seconds / 86400);
+  return fit (buf, 9, text);
+}
+
+/* Takes the averages up to NOW_MS, and, if the line is to be drawn, the
+   speed of the last few draws.  Returns 1 if the second has changed since the
+   last draw.  */
+static int
+refresh (struct twist_progress *p, uint64_t now_ms)
+{
+  long long second = (long long) (now_ms / 1000u);
+  long long total;
+  unsigned draws;
+
+  p->timespent_us = (long long) (now_ms - p->start_ms) * 1000LL;
+  p->dlspeed = per_second (p->downloaded, p->timespent_us);
+  p->ulspeed = per_second (p->uploaded, p->timespent_us);
+  if (second == p->lastshow)
+    return 0;
+  p->lastshow = second;
+
+  total = sum_up (p->downloaded, p->uploaded);
+  p->hist_bytes[p->draws % TWIST_PROGRESS_HISTORY] = total;
+  p->hist_ms[p->draws % TWIST_PROGRESS_HISTORY] = now_ms;
+  p->draws++;
+  draws = p->draws;
+  if (draws < 2)
+    p->current_speed = sum_up (p->dlspeed, p->ulspeed);
+  else
+    {
+      /* The oldest entry still kept: the next to be overwritten once the
+         history is full.  */
+      unsigned oldest = draws >= TWIST_PROGRESS_HISTORY
+        ? draws % TWIST_PROGRESS_HISTORY : 0;
+      long long span = (long long) (now_ms - p->hist_ms[oldest]);
+      long long amount = total - p->hist_bytes[oldest];
+
+      if (span < 1)
+        span = 1;
+      if (amount > 4294967LL)
+        p->current_speed = (long long) ((double) amount * 1000.0
+                                        / (double) span);
+      else
+        p->current_speed = amount * 1000LL / span;
+    }
+  return 1;
+}
+
+/* The line, with the heading above the first.  */
 static void
-meter (struct twist_transfer *transfer)
+draw_line (struct twist_transfer *transfer)
 {
   struct twist_progress *p = &transfer->progress;
   FILE *out = p->err != NULL ? p->err : stderr;
-  char max5[6][10];
-  char time_left[10];
-  char time_total[10];
-  char time_spent[10];
-  long long dlpercen = 0;
-  long long ulpercen = 0;
-  long long total_percen = 0;
-  long long ulestimate = 0;
-  long long dlestimate = 0;
-  long long total_estimate;
-  long long total_expected;
-  long long total_transfer;
-  long long timespent = p->timespent_us / 1000000;
+  long long dl_est = 0;
+  long long ul_est = 0;
+  long long dl_pct = 0;
+  long long ul_pct = 0;
+  long long est;
+  long long spent;
+  long long left;
+  long long expected;
+  long long moved;
+  char total_size[16], dl_count[16], ul_count[16];
+  char dl_avg[16], ul_avg[16], speed[16];
+  char est_time[16], spent_time[16], left_time[16];
 
   if (!p->headers_out)
     {
       if (transfer->resume_from > 0)
         fprintf (out, "** Resuming transfer from byte position %lld\n",
                  transfer->resume_from);
-      fputs ("  % Total    % Received % Xferd  Average Speed   "
-             "Time    Time     Time  Current\n"
-             "                                 Dload  Upload   "
-             "Total   Spent    Left  Speed\n", out);
+      fputs ("  % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current\n"
+             "                                 Dload  Upload   Total   Spent    Left  Speed\n",
+             out);
       p->headers_out = 1;
     }
+  p->shown = 1;
+
   if (p->ul_known && p->ulspeed > 0)
     {
-      ulestimate = p->size_ul / p->ulspeed;
-      if (p->size_ul > 10000)
-        ulpercen = p->uploaded / (p->size_ul / 100);
-      else if (p->size_ul > 0)
-        ulpercen = (p->uploaded * 100) / p->size_ul;
+      ul_est = p->size_ul / p->ulspeed;
+      ul_pct = percent_of (p->uploaded, p->size_ul);
     }
   if (p->dl_known && p->dlspeed > 0)
     {
-      dlestimate = p->size_dl / p->dlspeed;
-      if (p->size_dl > 10000)
-        dlpercen = p->downloaded / (p->size_dl / 100);
-      else if (p->size_dl > 0)
-        dlpercen = (p->downloaded * 100) / p->size_dl;
+      dl_est = p->size_dl / p->dlspeed;
+      dl_pct = percent_of (p->downloaded, p->size_dl);
     }
-  /* The slower of the two is when it will be done.  */
-  total_estimate = ulestimate > dlestimate ? ulestimate : dlestimate;
-  twist_progress_time2str (total_estimate > 0 ? total_estimate - timespent : 0,
-                           time_left);
-  twist_progress_time2str (total_estimate, time_total);
-  twist_progress_time2str (timespent, time_spent);
-  /* Sizes are what a peer says, up to the largest number, so the sums do not
-     wrap.  */
-  total_expected = sat_add (p->ul_known ? p->size_ul : p->uploaded,
-                            p->dl_known ? p->size_dl : p->downloaded);
-  total_transfer = sat_add (p->downloaded, p->uploaded);
-  if (total_expected > 10000)
-    total_percen = total_transfer / (total_expected / 100);
-  else if (total_expected > 0)
-    total_percen = (total_transfer * 100) / total_expected;
+  est = ul_est > dl_est ? ul_est : dl_est;
+  spent = p->timespent_us / 1000000LL;
+  left = est > 0 ? est - spent : 0;
+  expected = sum_up (p->ul_known ? p->size_ul : p->uploaded,
+                     p->dl_known ? p->size_dl : p->downloaded);
+  moved = sum_up (p->downloaded, p->uploaded);
+
   fprintf (out, "\r%3lld %s  %3lld %s  %3lld %s  %s  %s %s %s %s %s",
-           total_percen, twist_progress_max5 (total_expected, max5[2]),
-           dlpercen, twist_progress_max5 (p->downloaded, max5[0]),
-           ulpercen, twist_progress_max5 (p->uploaded, max5[1]),
-           twist_progress_max5 (p->dlspeed, max5[3]),
-           twist_progress_max5 (p->ulspeed, max5[4]),
-           time_total, time_spent, time_left,
-           twist_progress_max5 (p->current_speed, max5[5]));
+           percent_of (moved, expected),
+           twist_progress_max5 (expected, total_size),
+           dl_pct, twist_progress_max5 (p->downloaded, dl_count),
+           ul_pct, twist_progress_max5 (p->uploaded, ul_count),
+           twist_progress_max5 (p->dlspeed, dl_avg),
+           twist_progress_max5 (p->ulspeed, ul_avg),
+           twist_progress_time2str (est, est_time),
+           twist_progress_time2str (spent, spent_time),
+           twist_progress_time2str (left, left_time),
+           twist_progress_max5 (p->current_speed, speed));
   fflush (out);
-  p->shown = 1;
 }
 
 static void
@@ -317,7 +313,7 @@ twist_progress_update (struct twist_transfer *transfer)
 
   if (!p->begun || p->hide || transfer->loop == NULL)
     return 0;
-  show = calculate (p, twist_loop_now (transfer->loop));
+  show = refresh (p, twist_loop_now (transfer->loop));
   p->tick_due = twist_loop_now (transfer->loop) + TICK_MS;
   if (p->xferinfo != NULL)
     {
@@ -341,7 +337,7 @@ twist_progress_update (struct twist_transfer *transfer)
         }
     }
   if (show)
-    meter (transfer);
+    draw_line (transfer);
   return 0;
 }
 
@@ -357,7 +353,7 @@ finish_line (struct twist_transfer *transfer)
     return;
   if (!p->hide && p->xferinfo == NULL)
     fputc ('\n', p->err != NULL ? p->err : stderr);
-  p->speeder_n = 0;
+  p->draws = 0;
 }
 
 static void
@@ -394,7 +390,7 @@ twist_progress_begin (struct twist_transfer *transfer)
   p->shown = 0;
   p->headers_out = 0;
   p->lastshow = -1;
-  p->speeder_n = 0;
+  p->draws = 0;
   p->begun = 1;
   if (transfer->loop != NULL)
     p->start_ms = twist_loop_now (transfer->loop);

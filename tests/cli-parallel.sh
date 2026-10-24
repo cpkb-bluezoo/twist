@@ -198,4 +198,86 @@ fresh
   2>/dev/null; st=$?
 check "$(is "$st" 0)" "--no-parallel is serial again: the last transfer's status ($st)"
 
+# --parallel-max-host: with a server of python's that keeps connections open
+# and notes how many are open at once, six URLs at once make several
+# connections, and with a limit of one never more than one at a request.
+if command -v python3 >/dev/null 2>&1; then
+  cat > "$work/srv.py" <<'PY'
+import socketserver, http.server, sys, threading
+
+lock = threading.Lock()
+state = {"open": 0, "max": 0}
+
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def setup(self):
+        super().setup()
+        with lock:
+            state["open"] += 1
+
+    def finish(self):
+        with lock:
+            state["open"] -= 1
+        super().finish()
+
+    def do_GET(self):
+        if self.path == "/max":
+            body = str(state["max"]).encode()
+        else:
+            with lock:
+                state["max"] = max(state["max"], state["open"])
+            body = b"hello\n"
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args):
+        pass
+
+
+class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
+    daemon_threads = True
+
+
+srv = Server(("127.0.0.1", 0), Handler)
+print(srv.server_address[1], flush=True)
+srv.serve_forever()
+PY
+  : > "$work/port"
+  python3 -I "$work/srv.py" > "$work/port" 2>/dev/null &
+  srvpid=$!
+  n=0
+  while [ ! -s "$work/port" ] && [ $n -lt 50 ]; do sleep 0.1; n=$((n + 1)); done
+  port=$(cat "$work/port")
+  if [ -n "$port" ]; then
+    h="http://127.0.0.1:$port"
+    fresh
+    "$TWIST" -Z -s -S -o 'h#1' "$h/[1-6]" 2>/dev/null; st=$?
+    check "$(is "$st" 0)" "-Z with six URLs of one host: status 0 ($st)"
+    top=$("$TWIST" -s "$h/max")
+    check "$([ "$top" -gt 1 ] 2>/dev/null && echo ok)" \
+      "-Z makes several connections to one host ($top)"
+    kill "$srvpid" 2>/dev/null
+    wait "$srvpid" 2>/dev/null
+    : > "$work/port"
+    python3 -I "$work/srv.py" > "$work/port" 2>/dev/null &
+    srvpid=$!
+    n=0
+    while [ ! -s "$work/port" ] && [ $n -lt 50 ]; do sleep 0.1; n=$((n + 1)); done
+    port=$(cat "$work/port")
+    h="http://127.0.0.1:$port"
+    fresh
+    "$TWIST" -Z --parallel-max-host 1 -s -S -o 'h#1' "$h/[1-6]" 2>/dev/null; st=$?
+    check "$(is "$st" 0)" "-Z --parallel-max-host 1: status 0 ($st)"
+    check "$(is "$(cat h6 2>/dev/null)" "hello")" "and the files arrive"
+    top=$("$TWIST" -s "$h/max")
+    check "$(is "$top" 1)" "and never more than one connection was open ($top)"
+  fi
+  kill "$srvpid" 2>/dev/null
+  wait "$srvpid" 2>/dev/null
+fi
+
 [ $fail = 0 ]

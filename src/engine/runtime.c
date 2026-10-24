@@ -22,6 +22,7 @@
 
 #include "twist-int.h"
 
+#include <stdarg.h>
 #include <stdlib.h>
 
 /* The runtime: one event loop, the transfers that run on it, and what
@@ -61,9 +62,12 @@ runtime_new (int embedded, twist_watch_callback watch,
   runtime->jar = twist_jar_new ();
   runtime->hsts = twist_hsts_new ();
   runtime->altsvc = twist_altsvc_new ();
+  runtime->origintab = twist_origintab_new ();
   if (runtime->pool == NULL || runtime->dns == NULL || runtime->jar == NULL
-      || runtime->hsts == NULL || runtime->altsvc == NULL)
+      || runtime->hsts == NULL || runtime->altsvc == NULL
+      || runtime->origintab == NULL)
     {
+      twist_origintab_free (runtime->origintab);
       twist_altsvc_free (runtime->altsvc);
       twist_hsts_free (runtime->hsts);
       twist_jar_free (runtime->jar);
@@ -203,6 +207,7 @@ twist_runtime_free (twist_runtime *runtime)
   twist_hsts_free (runtime->hsts);
   twist_altsvc_free (runtime->altsvc);
   twist_session_free_all (runtime);
+  twist_origintab_free (runtime->origintab);
   twist_storage_free (runtime->storage);
   /* The storage threads are joined, so every job has run and posted its
      completion.  Deliver them: each owns its job and what the job carries,
@@ -298,6 +303,7 @@ twist_runtime_start (twist_runtime *runtime, twist_transfer *transfer,
   transfer->done_user = user;
   transfer->started = 1;
   transfer->done = 0;
+  runtime->started_any = 1;
   /* A transfer that cannot begin ends here, and is reported as any other.  */
   runtime->in_call++;
   twist_transfer_start (transfer);
@@ -325,6 +331,35 @@ twist_runtime_cancel (twist_runtime *runtime, twist_transfer *transfer)
     }
   twist_runtime_notify_timer (runtime);
   return TWIST_OK;
+}
+
+int
+twist_runtime_setopt (twist_runtime *runtime, int option, ...)
+{
+  va_list ap;
+  int rc = TWIST_OK;
+
+  if (runtime == NULL || runtime->started_any)
+    return TWIST_ERR_INVAL;
+  va_start (ap, option);
+  switch (option)
+    {
+    case TWIST_RUNTIMEOPT_MAX_HOST_CONNECTIONS:
+      {
+        long n = va_arg (ap, long);
+
+        if (n < 0)
+          rc = TWIST_ERR_INVAL;
+        else
+          twist_origintab_set_cap (runtime->origintab, n);
+      }
+      break;
+    default:
+      rc = TWIST_ERR_INVAL;
+      break;
+    }
+  va_end (ap);
+  return rc;
 }
 
 int

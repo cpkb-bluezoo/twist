@@ -11,7 +11,6 @@ Version 0.1 - unreleased
   * telnet sessions: the server's text is written out, its option
     negotiation is answered, and standard input (or -T) is sent; -t sets the
     terminal type, display, environment and window size
-  * quickstep is an installed library found by pkg-config
   * gzip and deflate request and response coding, via zlib
   * the progress meter and the bar (-#), and the library's
     TWISTOPT_XFERINFOFUNCTION
@@ -30,3 +29,8 @@ Version 0.1 - unreleased
   * the progress meter of -Z is one line for the run, in curl's layout for
     parallel transfers, and is drawn on standard error unless -s,
     --no-progress-meter, or a body going to a terminal says not
+  * transfers started together to one host share an HTTP/2 or HTTP/3
+    connection, over TLS as well as in the clear (TWISTOPT_PIPEWAIT, and
+    --parallel-immediate for none), and twist_runtime_setopt with
+    TWIST_RUNTIMEOPT_MAX_HOST_CONNECTIONS, or --parallel-max-host with -Z, keeps
+    the connections to one host to a number

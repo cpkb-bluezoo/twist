@@ -73,6 +73,7 @@ twist_transfer_new (void)
   transfer->proxy_verifypeer = 1;
   transfer->progress.lastshow = -1;
   transfer->telnet_input_fd = -1;
+  transfer->pipewait = 1;
   return transfer;
 }
 
@@ -427,6 +428,9 @@ twist_transfer_setopt (twist_transfer *transfer, int opt, ...)
       break;
     case TWISTOPT_USE_ALTSVC:
       transfer->use_altsvc = va_arg (ap, long) != 0;
+      break;
+    case TWISTOPT_PIPEWAIT:
+      transfer->pipewait = va_arg (ap, long) != 0;
       break;
     case TWISTOPT_PRIVATE:
       transfer->private_data = va_arg (ap, void *);
