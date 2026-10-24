@@ -874,9 +874,109 @@ announce (const char *name)
     fprintf (stderr, "%s\n", name);
 }
 
+/* A connection is made under the TLS settings of the transfer that made it,
+   and another transfer may use it only if its own are the same: one that
+   checks the server must not be handed a connection made without checking,
+   nor one that sends no client certificate a connection that sent another's.
+   The settings are part of the origin's key, when they matter, and the key of
+   a transfer that has only defaults is what it always was.  */
+static char key_buf[3][512];
+
+static const char *
+tls_key (int slot, const char *url, const char *proxy, long verify,
+         const char *cainfo, const char *capath, const char *cert,
+         const char *key, long proxy_verify, const char *proxy_cainfo,
+         const char *proxy_userpwd)
+{
+  twist_transfer *t = twist_transfer_new ();
+
+  twist_url_parse_int (url, &t->url);
+  if (proxy != NULL)
+    twist_transfer_setopt (t, TWISTOPT_PROXY, proxy);
+  twist_transfer_setopt (t, TWISTOPT_SSL_VERIFYPEER, verify);
+  twist_transfer_setopt (t, TWISTOPT_CAINFO, cainfo);
+  twist_transfer_setopt (t, TWISTOPT_CAPATH, capath);
+  twist_transfer_setopt (t, TWISTOPT_SSLCERT, cert);
+  twist_transfer_setopt (t, TWISTOPT_SSLKEY, key);
+  twist_transfer_setopt (t, TWISTOPT_PROXY_SSL_VERIFYPEER, proxy_verify);
+  twist_transfer_setopt (t, TWISTOPT_PROXY_CAINFO, proxy_cainfo);
+  twist_transfer_setopt (t, TWISTOPT_PROXYUSERPWD, proxy_userpwd);
+  key_buf[slot][0] = 0;
+  twist_transfer_origin_okey (t, key_buf[slot], sizeof key_buf[slot]);
+  twist_transfer_free (t);
+  return key_buf[slot];
+}
+
+#define H "https://example.test/"
+#define SAME(a, b) (strcmp ((a), (b)) == 0)
+
+static void
+test_tls_identity (void)
+{
+  const char *plain = tls_key (0, H, NULL, 1, NULL, NULL, NULL, NULL, 1, NULL,
+                               NULL);
+  char def[512];
+
+  snprintf (def, sizeof def, "%s", plain);
+  check (SAME (def, "https|example.test|443|-"),
+         "the key of a transfer with defaults is unchanged");
+  check (!SAME (tls_key (1, H, NULL, 0, NULL, NULL, NULL, NULL, 1, NULL, NULL),
+                def), "verifying and not verifying do not share a connection");
+  check (!SAME (tls_key (1, H, NULL, 1, "/a.pem", NULL, NULL, NULL, 1, NULL,
+                         NULL), def), "nor does a CA file");
+  check (!SAME (tls_key (1, H, NULL, 1, "/a.pem", NULL, NULL, NULL, 1, NULL,
+                         NULL),
+                tls_key (2, H, NULL, 1, "/b.pem", NULL, NULL, NULL, 1, NULL,
+                         NULL)), "or two");
+  check (SAME (tls_key (1, H, NULL, 1, "/a.pem", NULL, NULL, NULL, 1, NULL,
+                        NULL),
+               tls_key (2, H, NULL, 1, "/a.pem", NULL, NULL, NULL, 1, NULL,
+                        NULL)), "but the same CA file does");
+  check (!SAME (tls_key (1, H, NULL, 1, NULL, "/ca.d", NULL, NULL, 1, NULL,
+                         NULL), def), "a CA directory");
+  check (!SAME (tls_key (1, H, NULL, 1, NULL, NULL, "/c.pem", NULL, 1, NULL,
+                         NULL), def), "a client certificate");
+  check (!SAME (tls_key (1, H, NULL, 1, NULL, NULL, NULL, "/k.pem", 1, NULL,
+                         NULL), def), "a client key");
+  check (!SAME (tls_key (1, H, NULL, 1, NULL, NULL, "ab", "", 1, NULL, NULL),
+                tls_key (2, H, NULL, 1, NULL, NULL, "a", "b", 1, NULL, NULL)),
+         "and where one setting ends and the next begins is not lost");
+
+  /* Over plain http nothing of this is used, and nothing splits.  */
+  check (SAME (tls_key (1, "http://example.test/", NULL, 0, "/a.pem", "/d",
+                        "/c.pem", "/k.pem", 1, NULL, NULL),
+               tls_key (2, "http://example.test/", NULL, 1, NULL, NULL, NULL,
+                        NULL, 1, NULL, NULL)),
+         "plain http has no TLS settings");
+
+  /* A proxy that is spoken to in TLS has its own.  */
+  check (!SAME (tls_key (1, H, "https://proxy.test:8443", 1, NULL, NULL, NULL,
+                         NULL, 0, NULL, NULL),
+                tls_key (2, H, "https://proxy.test:8443", 1, NULL, NULL, NULL,
+                         NULL, 1, NULL, NULL)),
+         "an https proxy that is verified and one that is not");
+  check (!SAME (tls_key (1, "http://example.test/", "https://proxy.test:8443",
+                         1, NULL, NULL, NULL, NULL, 1, "/p.pem", NULL),
+                tls_key (2, "http://example.test/", "https://proxy.test:8443",
+                         1, NULL, NULL, NULL, NULL, 1, NULL, NULL)),
+         "an https proxy's CA, even to a plain http target");
+  check (SAME (tls_key (1, "http://example.test/", "http://proxy.test:3128",
+                        1, NULL, NULL, NULL, NULL, 0, "/p.pem", NULL),
+               tls_key (2, "http://example.test/", "http://proxy.test:3128",
+                        1, NULL, NULL, NULL, NULL, 1, NULL, NULL)),
+         "an http proxy has none");
+  check (!SAME (tls_key (1, H, "http://proxy.test:3128", 1, NULL, NULL, NULL,
+                         NULL, 1, NULL, "u:p"),
+                tls_key (2, H, "http://proxy.test:3128", 1, NULL, NULL, NULL,
+                         NULL, 1, NULL, "v:q")),
+         "a tunnel is not shared by those with other proxy credentials");
+}
+
 int
 main (void)
 {
+  announce ("test_tls_identity");
+  test_tls_identity ();
   announce ("test_pipewait_option");
   test_pipewait_option ();
   announce ("test_setopt");

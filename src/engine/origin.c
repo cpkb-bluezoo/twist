@@ -24,6 +24,7 @@
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 /* What a runtime knows of each origin its transfers go to.  An origin is
    named by a key without a loop (the scheme, host and port, and the proxy or
@@ -111,6 +112,103 @@ okey_of (const char *key)
   return bar != NULL ? bar + 1 : key;
 }
 
+/* Whether the string is an https URL.  */
+static int
+is_https (const char *url)
+{
+  return url != NULL && strncasecmp (url, "https:", 6) == 0;
+}
+
+/* What of the transfer's TLS settings a connection depends on, as a bar and a
+   hex digest to add to the origin's key, or nothing at all when they are the
+   defaults, so that the key of an ordinary transfer is as it always was.  The
+   target's are those of a TLS connection (verification, the authorities, the
+   client certificate and key), and count only for an https or wss URL; the
+   proxy's count when it is spoken to in TLS, and its credentials when there
+   is a proxy, since a tunnel opened by one user is not for another.  A
+   connection is made under these and may be used only by a transfer whose own
+   are the same, so a key that cannot be made is an error, and never one that
+   leaves them out.  Each setting is hashed as a length and its bytes, or an
+   N, and a semicolon, so that where one ends and the next begins is not
+   lost.  */
+static int
+tls_identity (const struct twist_transfer *transfer, char *out, size_t cap)
+{
+  const char *scheme = transfer->url->scheme;
+  const char *proxy = twist_transfer_proxy (transfer);
+  int tls = scheme != NULL
+            && (strcmp (scheme, "https") == 0 || strcmp (scheme, "wss") == 0);
+  int proxy_tls = is_https (proxy);
+  const char *field[8];
+  int nfield = 0;
+  int custom = 0;
+  size_t total = 0;
+  char *text;
+  size_t len = 0;
+  uint8_t digest[32];
+  int i;
+  int rc;
+
+  out[0] = 0;
+  if (tls)
+    {
+      field[nfield++] = transfer->verifypeer ? "v" : "n";
+      field[nfield++] = transfer->cainfo;
+      field[nfield++] = transfer->capath;
+      field[nfield++] = transfer->sslcert;
+      field[nfield++] = transfer->sslkey;
+      custom |= !transfer->verifypeer || transfer->cainfo != NULL
+                || transfer->capath != NULL || transfer->sslcert != NULL
+                || transfer->sslkey != NULL;
+    }
+  if (proxy_tls)
+    {
+      field[nfield++] = transfer->proxy_verifypeer ? "v" : "n";
+      field[nfield++] = transfer->proxy_cainfo;
+      custom |= !transfer->proxy_verifypeer || transfer->proxy_cainfo != NULL;
+    }
+  if (proxy != NULL)
+    {
+      field[nfield++] = transfer->proxy_userpwd;
+      custom |= transfer->proxy_userpwd != NULL;
+    }
+  /* All defaults: nothing to tell one transfer from another.  */
+  if (!custom)
+    return TWIST_OK;
+  if (cap < 34)
+    return TWIST_ERR_NOMEM;
+  for (i = 0; i < nfield; i++)
+    total += (field[i] != NULL ? strlen (field[i]) : 0) + 24;
+  text = malloc (total + 1);
+  if (text == NULL)
+    return TWIST_ERR_NOMEM;
+  for (i = 0; i < nfield; i++)
+    {
+      int n;
+
+      if (field[i] == NULL)
+        n = snprintf (text + len, total + 1 - len, "N;");
+      else
+        n = snprintf (text + len, total + 1 - len, "%zu:%s;",
+                      strlen (field[i]), field[i]);
+      if (n < 0 || (size_t) n > total - len)
+        {
+          free (text);
+          return TWIST_ERR_NOMEM;
+        }
+      len += (size_t) n;
+    }
+  rc = twist_sha256 (text, len, digest);
+  memset (text, 0, total + 1);
+  free (text);
+  if (rc != TWIST_OK)
+    return rc;
+  out[0] = '|';
+  for (i = 0; i < 16; i++)
+    snprintf (out + 1 + 2 * i, 3, "%02x", digest[i]);
+  return TWIST_OK;
+}
+
 int
 twist_transfer_origin_okey (struct twist_transfer *transfer, char *buf,
                             size_t cap)
@@ -139,7 +237,7 @@ twist_transfer_origin_okey (struct twist_transfer *transfer, char *buf,
                 url->host != NULL ? url->host : "", port, proxy);
   if (n < 0 || (size_t) n >= cap)
     return TWIST_ERR_NOMEM;
-  return TWIST_OK;
+  return tls_identity (transfer, buf + n, cap - (size_t) n);
 }
 
 int

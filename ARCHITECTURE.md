@@ -394,7 +394,14 @@ kept in the pool like any other, under a key that holds the proxy and its
 credentials; once the tunnel is open the proxy is out of the path.
 
 The connection cache is keyed by scheme, authority, proxy, TLS identity
-and loop. Idle endpoints are never migrated.
+and loop. The TLS identity is a digest of the settings a connection is made
+under: whether the server is verified, the CA file and directory, the client
+certificate and key, and, for a proxy spoken to in TLS, the same for the proxy,
+and the proxy's credentials. A transfer with the defaults has none, so its key
+is what it would be without. A connection is used only by a transfer whose
+identity is the same, and the same key counts the connections to an origin
+against the limit, so transfers with other settings count apart. Idle endpoints
+are never migrated.
 
 `FILE` is not a socket. It is a job on the storage pool, and the result
 comes back through `execute`. TFTP and DNS are datagram handlers on the

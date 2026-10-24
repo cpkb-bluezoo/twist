@@ -20,6 +20,9 @@ Version 0.1 - unreleased
   * -i, -I and -D write an HTTP/1 status line with its reason phrase, as the
     server sent it, and an HTTP/2 or HTTP/3 one as "HTTP/2 200", not the
     pseudo-header ":status"; -w %{http_version}; TWISTINFO_HTTP_VERSION
+  * a connection is shared only between transfers with the same TLS settings
+    (verification, CA, client certificate and key, an https proxy's, and
+    proxy credentials)
   * gzip and deflate request and response coding, via zlib
   * the progress meter and the bar (-#), and the library's
     TWISTOPT_XFERINFOFUNCTION
