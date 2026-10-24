@@ -34,3 +34,8 @@ Version 0.1 - unreleased
     --parallel-immediate for none), and twist_runtime_setopt with
     TWIST_RUNTIMEOPT_MAX_HOST_CONNECTIONS, or --parallel-max-host with -Z, keeps
     the connections to one host to a number
+  * twist_runtime_setopt with TWIST_RUNTIMEOPT_THREADS, and --threads, run
+    transfers on several event loops, each in a thread of its own but the
+    first; transfers that can share a connection go to one loop, the rest are
+    spread, the limit on connections to a host holds across them, and the done
+    callback is always called on the thread that drives the runtime

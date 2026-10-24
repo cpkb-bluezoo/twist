@@ -353,11 +353,18 @@ enum twist_opt
 enum twist_runtime_option
 {
   /* A long: the most connections a runtime has open or being made to one
-     origin (the scheme, host and port, and the proxy) for HTTP transfers.  A
-     transfer that would make another waits until one is closed or kept for
-     reuse.  Streams that share an HTTP/2 or HTTP/3 connection are not
-     connections.  0, the default, is no limit.  */
-  TWIST_RUNTIMEOPT_MAX_HOST_CONNECTIONS = 1
+     origin (the scheme, host and port, and the proxy) for HTTP transfers,
+     counting those kept idle for reuse.  A transfer that would make another
+     waits until one is closed, or takes an idle one, and an idle one of
+     another loop is closed to make room.  Streams that share an HTTP/2 or
+     HTTP/3 connection are not connections.  0, the default, is no limit.  */
+  TWIST_RUNTIMEOPT_MAX_HOST_CONNECTIONS = 1,
+  /* A long, 1 to 64: how many event loops the runtime runs transfers on, each
+     in a thread of its own but the first, which is the program's, driven by
+     twist_runtime_run_once.  1, the default, is one loop and no thread.  The
+     threads are started by the first twist_runtime_start.  A runtime made with
+     twist_runtime_new_embedded refuses it.  */
+  TWIST_RUNTIMEOPT_THREADS = 2
 };
 
 enum twist_use_ssl

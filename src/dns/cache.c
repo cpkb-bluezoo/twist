@@ -22,6 +22,7 @@
 
 #include "twist-int.h"
 
+#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
@@ -57,6 +58,9 @@ struct dns_flight
 
 struct twist_dns_cache
 {
+  /* Loops on several threads share the entries, and so the list of flights.
+     It is held for the lists only, and never while a waiter is called.  */
+  pthread_mutex_t mu;
   struct dns_ent *head;
   size_t n;
   struct dns_flight *flights;
@@ -73,7 +77,11 @@ struct msg_box
 struct twist_dns_cache *
 twist_dns_cache_new (void)
 {
-  return calloc (1, sizeof (struct twist_dns_cache));
+  struct twist_dns_cache *c = calloc (1, sizeof (struct twist_dns_cache));
+
+  if (c != NULL)
+    pthread_mutex_init (&c->mu, NULL);
+  return c;
 }
 
 static void
@@ -114,6 +122,7 @@ twist_dns_cache_free (struct twist_dns_cache *cache)
       free (f);
       f = next;
     }
+  pthread_mutex_destroy (&cache->mu);
   free (cache);
 }
 
@@ -232,10 +241,9 @@ store_addrs (struct twist_dns_cache *c, const char *name, int type,
   e->expiry = now_ms + (uint64_t) ttl_sec * 1000u;
 }
 
-int
-twist_dns_cache_put_msg (struct twist_dns_cache *cache, const char *name,
-                         int qtype, const uint8_t *msg, size_t len,
-                         uint64_t now_ms)
+static int
+put_msg (struct twist_dns_cache *cache, const char *name,
+         int qtype, const uint8_t *msg, size_t len, uint64_t now_ms)
 {
   struct msg_box box;
   struct twist_dns_events ev;
@@ -254,9 +262,9 @@ twist_dns_cache_put_msg (struct twist_dns_cache *cache, const char *name,
   return box.have_ttl && box.ttl > 0 ? TWIST_OK : TWIST_ERR_RESOLVE;
 }
 
-int
-twist_dns_cache_get (struct twist_dns_cache *cache, const char *name,
-                     int qtype, struct twist_dns_addr *out, uint64_t now_ms)
+static int
+cache_get (struct twist_dns_cache *cache, const char *name,
+           int qtype, struct twist_dns_addr *out, uint64_t now_ms)
 {
   struct dns_ent *e;
   int hit = 0;
@@ -289,11 +297,11 @@ find_flight (struct twist_dns_cache *c, struct twist_loop *loop,
   return NULL;
 }
 
-int
-twist_dns_cache_begin (struct twist_dns_cache *cache, struct twist_loop *loop,
-                       const char *name, int qtype,
-                       void (*cb) (void *, int, const struct twist_dns_addr *),
-                       void *user, uint64_t now_ms, struct twist_dns_addr *hit)
+static int
+cache_begin (struct twist_dns_cache *cache, struct twist_loop *loop,
+             const char *name, int qtype,
+             void (*cb) (void *, int, const struct twist_dns_addr *),
+             void *user, uint64_t now_ms, struct twist_dns_addr *hit)
 {
   struct dns_ent *e;
   struct dns_flight *f;
@@ -345,6 +353,51 @@ twist_dns_cache_begin (struct twist_dns_cache *cache, struct twist_loop *loop,
   return 0;
 }
 
+int
+twist_dns_cache_put_msg (struct twist_dns_cache *cache, const char *name,
+                         int qtype, const uint8_t *msg, size_t len,
+                         uint64_t now_ms)
+{
+  int rc;
+
+  if (cache == NULL)
+    return TWIST_ERR_INVAL;
+  pthread_mutex_lock (&cache->mu);
+  rc = put_msg (cache, name, qtype, msg, len, now_ms);
+  pthread_mutex_unlock (&cache->mu);
+  return rc;
+}
+
+int
+twist_dns_cache_get (struct twist_dns_cache *cache, const char *name,
+                     int qtype, struct twist_dns_addr *out, uint64_t now_ms)
+{
+  int rc;
+
+  if (cache == NULL)
+    return 0;
+  pthread_mutex_lock (&cache->mu);
+  rc = cache_get (cache, name, qtype, out, now_ms);
+  pthread_mutex_unlock (&cache->mu);
+  return rc;
+}
+
+int
+twist_dns_cache_begin (struct twist_dns_cache *cache, struct twist_loop *loop,
+                       const char *name, int qtype,
+                       void (*cb) (void *, int, const struct twist_dns_addr *),
+                       void *user, uint64_t now_ms, struct twist_dns_addr *hit)
+{
+  int rc;
+
+  if (cache == NULL)
+    return TWIST_ERR_INVAL;
+  pthread_mutex_lock (&cache->mu);
+  rc = cache_begin (cache, loop, name, qtype, cb, user, now_ms, hit);
+  pthread_mutex_unlock (&cache->mu);
+  return rc;
+}
+
 void
 twist_dns_cache_end (struct twist_dns_cache *cache, struct twist_loop *loop,
                      const char *name, int qtype, int err,
@@ -357,6 +410,7 @@ twist_dns_cache_end (struct twist_dns_cache *cache, struct twist_loop *loop,
 
   if (cache == NULL || name == NULL)
     return;
+  pthread_mutex_lock (&cache->mu);
   if (err == TWIST_OK && addr != NULL && addr->family != 0 && ttl_sec > 0)
     store_addrs (cache, name, qtype, addr, 1, ttl_sec, now_ms);
   pp = &cache->flights;
@@ -372,10 +426,16 @@ twist_dns_cache_end (struct twist_dns_cache *cache, struct twist_loop *loop,
       pp = &(*pp)->next;
     }
   if (f == NULL)
-    return;
+    {
+      pthread_mutex_unlock (&cache->mu);
+      return;
+    }
   w = f->waiters;
   free (f->name);
   free (f);
+  /* The waiters are called with the cache free, as a waiter may ask it for
+     something.  */
+  pthread_mutex_unlock (&cache->mu);
   while (w != NULL)
     {
       struct dns_wait *next = w->next;

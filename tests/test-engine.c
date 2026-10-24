@@ -1943,6 +1943,7 @@ test_runtime_lists (void)
   struct twist_runtime *runtime = twist_runtime_new ();
   twist_transfer *transfer = twist_transfer_new ();
   char *hdr = NULL;
+  char alt[32];
 
   check (runtime != NULL && transfer != NULL, "lists setup");
   check (twist_transfer_jar (transfer) == NULL
@@ -1967,9 +1968,11 @@ test_runtime_lists (void)
          "a cookie is kept and sent");
   free (hdr);
   check (twist_altsvc_note (runtime->altsvc, "h.example", "h3:443") == TWIST_OK
-         && strcmp (twist_altsvc_lookup (runtime->altsvc, "h.example"),
-                    "h3:443") == 0
-         && twist_altsvc_lookup (runtime->altsvc, "other.example") == NULL,
+         && twist_altsvc_lookup (runtime->altsvc, "h.example", alt,
+                                 sizeof alt) == 0
+         && strcmp (alt, "h3:443") == 0
+         && twist_altsvc_lookup (runtime->altsvc, "other.example", alt,
+                                 sizeof alt) != 0,
          "an Alt-Svc entry is kept");
   check (!twist_hsts_upgrade (runtime->hsts, "h.example", 0), "HSTS has none");
   check (twist_hsts_note (runtime->hsts, "h.example", 100) == TWIST_OK

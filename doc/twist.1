@@ -606,7 +606,7 @@ keep at most
 .I n
 HTTP connections open, or being made, to one host: the scheme, host and port,
 and the proxy.  A transfer that would make another waits until a connection to
-that host is closed or is kept for the next transfer.  Transfers that share an
+that host is closed or can be taken from those kept.  Transfers that share an
 HTTP/2 or HTTP/3 connection do not count as connections.  0, the default, is no
 limit, and more than 65535 is 65535.  Only HTTP, HTTPS and WebSocket transfers
 are held to it.  Global.
@@ -620,6 +620,16 @@ server speaks HTTP/2 or HTTP/3.  By default a transfer waits, so a number of
 URLs of one host make one connection.
 .B \-\-no\-parallel\-immediate
 undoes it.  Global.
+.TP
+.BI \-\-threads " n"
+Run the transfers on
+.I n
+threads, 1 to 64; the default, 1, is the program's thread alone.  The URLs that
+can share a connection go to one thread, and the rest are spread, so the option
+is for
+.BR \-Z .
+The thread that runs twist writes the diagnostics, and the files are written
+by the thread of the transfer.  curl has no option like it.  Global.
 .TP
 .B \-\-compressed
 Ask for a compressed response and decompress it: br, gzip and deflate, or gzip
@@ -934,6 +944,7 @@ user, or timeouts.
 .BR \-\-no\-progress\-meter ,
 .BR \-\-stderr ,
 .BR \-\-fail\-early ,
+.BR \-\-threads ,
 and the options of
 .B \-Z
 still apply.  A URL is required before

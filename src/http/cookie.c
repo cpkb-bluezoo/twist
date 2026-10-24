@@ -23,6 +23,7 @@
 #include "twist-int.h"
 
 #include <stdio.h>
+#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
@@ -40,13 +41,18 @@ struct twist_cookie
 
 struct twist_jar
 {
+  pthread_mutex_t mu;           /* Loops on several threads share it.  */
   struct twist_cookie *head;
 };
 
 struct twist_jar *
 twist_jar_new (void)
 {
-  return calloc (1, sizeof (struct twist_jar));
+  struct twist_jar *jar = calloc (1, sizeof (struct twist_jar));
+
+  if (jar != NULL)
+    pthread_mutex_init (&jar->mu, NULL);
+  return jar;
 }
 
 void
@@ -67,19 +73,22 @@ twist_jar_free (struct twist_jar *jar)
       free (c);
       c = next;
     }
+  pthread_mutex_destroy (&jar->mu);
   free (jar);
 }
 
 size_t
-twist_jar_count (const struct twist_jar *jar)
+twist_jar_count (struct twist_jar *jar)
 {
   const struct twist_cookie *c;
   size_t n = 0;
 
   if (jar == NULL)
     return 0;
+  pthread_mutex_lock (&jar->mu);
   for (c = jar->head; c != NULL; c = c->next)
     n++;
+  pthread_mutex_unlock (&jar->mu);
   return n;
 }
 
@@ -214,9 +223,9 @@ evict_oldest (struct twist_jar *jar, const char *domain)
     }
 }
 
-int
-twist_jar_store (struct twist_jar *jar, const char *set_cookie,
-                 const char *host, const char *path, int https)
+static int
+jar_store (struct twist_jar *jar, const char *set_cookie,
+           const char *host, const char *path, int https)
 {
   const char *semi;
   const char *eq;
@@ -374,9 +383,9 @@ twist_jar_store (struct twist_jar *jar, const char *set_cookie,
   return TWIST_OK;
 }
 
-int
-twist_jar_header (struct twist_jar *jar, const char *host, const char *path,
-                  int https, char **out)
+static int
+jar_header (struct twist_jar *jar, const char *host, const char *path,
+            int https, char **out)
 {
   struct twist_cookie *c;
   size_t cap = 64;
@@ -426,4 +435,32 @@ twist_jar_header (struct twist_jar *jar, const char *host, const char *path,
     }
   *out = buf;
   return TWIST_OK;
+}
+
+int
+twist_jar_store (struct twist_jar *jar, const char *set_cookie,
+                 const char *host, const char *path, int https)
+{
+  int rc;
+
+  if (jar == NULL)
+    return TWIST_ERR_INVAL;
+  pthread_mutex_lock (&jar->mu);
+  rc = jar_store (jar, set_cookie, host, path, https);
+  pthread_mutex_unlock (&jar->mu);
+  return rc;
+}
+
+int
+twist_jar_header (struct twist_jar *jar, const char *host, const char *path,
+                  int https, char **out)
+{
+  int rc;
+
+  if (jar == NULL)
+    return TWIST_ERR_INVAL;
+  pthread_mutex_lock (&jar->mu);
+  rc = jar_header (jar, host, path, https, out);
+  pthread_mutex_unlock (&jar->mu);
+  return rc;
 }

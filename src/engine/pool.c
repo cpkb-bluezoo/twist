@@ -42,6 +42,7 @@ struct twist_pool_slot
   uint64_t idle_at;
   int queued;
   int discarded;
+  int held;			/* It holds a place under a limit; see below.  */
   struct twist_pool *pool;
   struct twist_pool_slot *next;
 };
@@ -50,9 +51,18 @@ struct twist_pool
 {
   struct twist_pool_slot *head;
   size_t n;
+  /* Told of a connection that held a place under the limit on connections
+     and is discarded, once it is closed; not of one that is taken.  */
+  void (*discard_cb) (void *user, const char *key);
+  void *discard_user;
 };
 
 static void slot_discard (struct twist_pool *pool, struct twist_pool_slot *s);
+static int pool_take (struct twist_pool *pool, const char *key,
+                      struct twist_connection **out, void **payload, int *held);
+static int pool_put (struct twist_pool *pool, const char *key,
+                     struct twist_connection *conn, uint64_t now_ms,
+                     void *payload, void (*payload_free) (void *), int held);
 
 static void
 unlink_slot (struct twist_pool *pool, struct twist_pool_slot *s)
@@ -145,6 +155,8 @@ slot_discard (struct twist_pool *pool, struct twist_pool_slot *s)
     }
   if (s->payload_free != NULL)
     s->payload_free (s->payload);
+  if (s->held && s->pool != NULL && s->pool->discard_cb != NULL)
+    s->pool->discard_cb (s->pool->discard_user, s->key);
   free (s->key);
   free (s);
 }
@@ -238,12 +250,30 @@ int
 twist_pool_take_payload (struct twist_pool *pool, const char *key,
                          struct twist_connection **out, void **payload)
 {
+  return pool_take (pool, key, out, payload, NULL);
+}
+
+/* As twist_pool_take; *HELD says whether the connection held a place under the
+   limit on connections, which is now the taker's.  */
+int
+twist_pool_take_held (struct twist_pool *pool, const char *key,
+                      struct twist_connection **out, int *held)
+{
+  return pool_take (pool, key, out, NULL, held);
+}
+
+static int
+pool_take (struct twist_pool *pool, const char *key,
+           struct twist_connection **out, void **payload, int *held)
+{
   struct twist_pool_slot **pp;
 
   if (out != NULL)
     *out = NULL;
   if (payload != NULL)
     *payload = NULL;
+  if (held != NULL)
+    *held = 0;
   if (pool == NULL || key == NULL)
     return TWIST_ERR_INVAL;
   for (pp = &pool->head; *pp != NULL; pp = &(*pp)->next)
@@ -263,6 +293,8 @@ twist_pool_take_payload (struct twist_pool *pool, const char *key,
           *out = s->conn;
         if (payload != NULL)
           *payload = s->payload;
+        if (held != NULL)
+          *held = s->held;
         s->conn = NULL;
         s->payload_free = NULL;
         s->discarded = 1;
@@ -284,6 +316,14 @@ int
 twist_pool_put_idle_payload (struct twist_pool *pool, const char *key,
                              struct twist_connection *conn, uint64_t now_ms,
                              void *payload, void (*payload_free) (void *))
+{
+  return pool_put (pool, key, conn, now_ms, payload, payload_free, 0);
+}
+
+static int
+pool_put (struct twist_pool *pool, const char *key,
+          struct twist_connection *conn, uint64_t now_ms,
+          void *payload, void (*payload_free) (void *), int held)
 {
   struct twist_pool_slot *s;
   struct twist_endpoint *ep;
@@ -308,6 +348,7 @@ twist_pool_put_idle_payload (struct twist_pool *pool, const char *key,
   s->payload_free = payload_free;
   s->loop = loop;
   s->idle_at = now_ms;
+  s->held = held;
   s->pool = pool;
   while (count_key (pool, key) >= TWIST_POOL_PER_KEY
          || pool->n >= TWIST_POOL_TOTAL)
@@ -337,6 +378,45 @@ twist_pool_put_idle_payload (struct twist_pool *pool, const char *key,
   pool->head = s;
   pool->n++;
   return TWIST_OK;
+}
+
+/* As twist_pool_put, for a connection that holds a place under the limit on
+   connections for as long as it is kept.  */
+int
+twist_pool_put_held (struct twist_pool *pool, const char *key,
+                     struct twist_connection *conn)
+{
+  struct twist_loop *loop = NULL;
+  uint64_t now = 0;
+
+  if (conn != NULL)
+    loop = twist_endpoint_loop (twist_connection_endpoint (conn));
+  if (loop != NULL)
+    now = twist_loop_now (loop);
+  return pool_put (pool, key, conn, now, NULL, NULL, 1);
+}
+
+void
+twist_pool_set_discard (struct twist_pool *pool,
+                        void (*cb) (void *user, const char *key), void *user)
+{
+  pool->discard_cb = cb;
+  pool->discard_user = user;
+}
+
+/* Close one idle connection kept for KEY.  1 if there was one.  */
+int
+twist_pool_evict_one (struct twist_pool *pool, const char *key)
+{
+  struct twist_pool_slot *s;
+
+  for (s = pool->head; s != NULL; s = s->next)
+    if (!s->queued && !s->discarded && strcmp (s->key, key) == 0)
+      {
+        slot_discard (pool, s);
+        return 1;
+      }
+  return 0;
 }
 
 int

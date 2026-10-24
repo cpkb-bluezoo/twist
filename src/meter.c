@@ -50,10 +50,12 @@ twist_meter_callback (void *clientp, long long dltotal, long long dlnow,
 {
   struct twist_meter_xfer *xfer = clientp;
 
-  xfer->dltotal = dltotal;
-  xfer->dlnow = dlnow;
-  xfer->ultotal = ultotal;
-  xfer->ulnow = ulnow;
+  /* This runs on the thread of the transfer's loop, and the run reads the
+     counts from another.  Each is a word of its own.  */
+  __atomic_store_n (&xfer->dltotal, dltotal, __ATOMIC_RELAXED);
+  __atomic_store_n (&xfer->dlnow, dlnow, __ATOMIC_RELAXED);
+  __atomic_store_n (&xfer->ultotal, ultotal, __ATOMIC_RELAXED);
+  __atomic_store_n (&xfer->ulnow, ulnow, __ATOMIC_RELAXED);
   return 0;
 }
 
@@ -62,17 +64,17 @@ twist_meter_done (struct twist_meter *meter, struct twist_meter_xfer *xfer)
 {
   struct twist_meter_xfer **link;
 
-  meter->dlalready += xfer->dlnow;
-  meter->ulalready += xfer->ulnow;
+  meter->dlalready += __atomic_load_n (&xfer->dlnow, __ATOMIC_RELAXED);
+  meter->ulalready += __atomic_load_n (&xfer->ulnow, __ATOMIC_RELAXED);
   /* A size that was not yet counted into the whole counts now.  */
   if (!xfer->dltotal_added)
     {
-      meter->dltotal += xfer->dltotal;
+      meter->dltotal += __atomic_load_n (&xfer->dltotal, __ATOMIC_RELAXED);
       xfer->dltotal_added = 1;
     }
   if (!xfer->ultotal_added)
     {
-      meter->ultotal += xfer->ultotal;
+      meter->ultotal += __atomic_load_n (&xfer->ultotal, __ATOMIC_RELAXED);
       xfer->ultotal_added = 1;
     }
   for (link = &meter->xfers; *link != NULL; link = &(*link)->next)
@@ -129,20 +131,23 @@ twist_meter_draw (struct twist_meter *meter, uint64_t now_ms, int final)
 
   for (x = meter->xfers; x != NULL; x = x->next)
     {
-      dlnow += x->dlnow;
-      ulnow += x->ulnow;
-      if (x->dltotal == 0)
+      long long xdl = __atomic_load_n (&x->dltotal, __ATOMIC_RELAXED);
+      long long xul = __atomic_load_n (&x->ultotal, __ATOMIC_RELAXED);
+
+      dlnow += __atomic_load_n (&x->dlnow, __ATOMIC_RELAXED);
+      ulnow += __atomic_load_n (&x->ulnow, __ATOMIC_RELAXED);
+      if (xdl == 0)
         dl_known = 0;
       else if (!x->dltotal_added)
         {
-          meter->dltotal += x->dltotal;
+          meter->dltotal += xdl;
           x->dltotal_added = 1;
         }
-      if (x->ultotal == 0)
+      if (xul == 0)
         ul_known = 0;
       else if (!x->ultotal_added)
         {
-          meter->ultotal += x->ultotal;
+          meter->ultotal += xul;
           x->ultotal_added = 1;
         }
     }

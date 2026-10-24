@@ -23,7 +23,7 @@ noinst_HEADERS = check.h http-ev.h feed.h body.h
 PROGRAM_TESTS = test-reactor test-engine test-http test-auth test-dns \
 	test-ftp test-mail test-mqtt test-ldap test-ws test-gopher test-dict test-telnet \
 	test-tftp test-file test-tls test-errors test-coding test-ssh \
-	test-quote test-rate test-glob test-vars test-progress test-bar test-meter test-origin test-proxyenv test-env test-template test-masque test-threads
+	test-quote test-rate test-glob test-vars test-progress test-bar test-meter test-origin test-runtime-threads test-proxyenv test-env test-template test-masque test-threads
 ## The tool itself, on local files.
 SCRIPT_TESTS = cli-glob.sh cli-vars.sh cli-progress.sh cli-misc.sh cli-parallel.sh
 TESTS = $(PROGRAM_TESTS) $(SCRIPT_TESTS)
@@ -61,6 +61,8 @@ test_template_SOURCES = test-template.c check.c
 test_masque_SOURCES = test-masque.c check.c
 test_threads_SOURCES = test-threads.c check.c
 test_origin_SOURCES = test-origin.c check.c
+test_runtime_threads_SOURCES = test-runtime-threads.c check.c
+test_runtime_threads_LDADD = $(LDADD) -lpthread
 test_origin_LDADD = $(LDADD) -lpthread
 test_threads_LDADD = $(LDADD) -ldl
 test_env_LDADD = $(LDADD) $(QUICKSTEP_LIBS)

@@ -83,6 +83,37 @@ check "$([ "$(tail -c 1 "$work/err" | od -An -c | tr -d ' ')" = '\n' ] && echo o
 check "$(is "$(tr -cd '\n' < "$work/err" | wc -c | tr -d ' ')" 2)" \
   "and there is no other newline"
 
+# On several threads the result is the same: the files arrive, the status is
+# that of the failure, and the meter ends as it does on one.  A number of
+# threads that is not one is a bad command line.
+fresh
+"$TWIST" -Z --threads 3 -o 'out#1' "$u/f[1-10].txt" 2>"$work/err"; st=$?
+check "$(is "$st" 0)" "-Z --threads 3: status 0 ($st)"
+ok=ok
+n=1
+while [ $n -le 10 ]; do
+  [ "$(cat "out$n" 2>/dev/null)" = "content-$n" ] || ok=bad
+  n=$((n + 1))
+done
+check "$ok" "-Z --threads 3: every file has its contents"
+last=$(tr '\r' '\n' < "$work/err" | grep -v '^$' | tail -n 1)
+check "$(printf '%s\n' "$last" | grep -q "^100 --  *$bytes  *0  *10  *0 " && echo ok)" \
+  "-Z --threads 3: the last line is complete ($last)"
+fresh
+"$TWIST" -Z --threads 3 -s -S "$u/f1.txt" -o o1 "$u/none" -o o2 "$u/f3.txt" -o o3 \
+  2>/dev/null; st=$?
+check "$(is "$st" 37)" "-Z --threads 3: a failure among good URLs is the status ($st)"
+check "$(is "$(cat o1 o3 2>&1)" "$(printf 'content-1\ncontent-3')")" \
+  "-Z --threads 3: the good ones arrive"
+fresh
+"$TWIST" --threads 3 -s -S -o 'out#1' "$u/f[1-3].txt" 2>/dev/null; st=$?
+check "$(is "$st" 0)" "--threads 3 without -Z: status 0 ($st)"
+check "$(is "$(cat out3 2>/dev/null)" content-3)" "and the files arrive"
+for bad in 0 65 lots; do
+  "$TWIST" --threads $bad -s -S "$u/f1.txt" >/dev/null 2>&1; st=$?
+  check "$(is "$st" 2)" "--threads $bad is a bad command line ($st)"
+done
+
 # -# is ignored: the same line, and no bar.  -s and --no-progress-meter draw
 # nothing, and the files still arrive.
 fresh

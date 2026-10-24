@@ -22,6 +22,7 @@
 
 #include "twist-int.h"
 
+#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
@@ -39,13 +40,18 @@ struct twist_hsts_entry
 
 struct twist_hsts
 {
+  pthread_mutex_t mu;           /* Loops on several threads share it.  */
   struct twist_hsts_entry *head;
 };
 
 struct twist_hsts *
 twist_hsts_new (void)
 {
-  return calloc (1, sizeof (struct twist_hsts));
+  struct twist_hsts *h = calloc (1, sizeof (struct twist_hsts));
+
+  if (h != NULL)
+    pthread_mutex_init (&h->mu, NULL);
+  return h;
 }
 
 void
@@ -63,11 +69,12 @@ twist_hsts_free (struct twist_hsts *h)
       free (e);
       e = next;
     }
+  pthread_mutex_destroy (&h->mu);
   free (h);
 }
 
-int
-twist_hsts_note (struct twist_hsts *h, const char *host, uint64_t expiry)
+static int
+hsts_note (struct twist_hsts *h, const char *host, uint64_t expiry)
 {
   struct twist_hsts_entry *e;
 
@@ -94,8 +101,8 @@ twist_hsts_note (struct twist_hsts *h, const char *host, uint64_t expiry)
   return TWIST_OK;
 }
 
-int
-twist_hsts_upgrade (struct twist_hsts *h, const char *host, uint64_t now)
+static int
+hsts_upgrade (struct twist_hsts *h, const char *host, uint64_t now)
 {
   struct twist_hsts_entry *e;
 
@@ -105,4 +112,30 @@ twist_hsts_upgrade (struct twist_hsts *h, const char *host, uint64_t now)
     if (strcasecmp (e->host, host) == 0 && e->expiry > now)
       return 1;
   return 0;
+}
+
+int
+twist_hsts_note (struct twist_hsts *h, const char *host, uint64_t expiry)
+{
+  int rc;
+
+  if (h == NULL)
+    return TWIST_ERR_INVAL;
+  pthread_mutex_lock (&h->mu);
+  rc = hsts_note (h, host, expiry);
+  pthread_mutex_unlock (&h->mu);
+  return rc;
+}
+
+int
+twist_hsts_upgrade (struct twist_hsts *h, const char *host, uint64_t now)
+{
+  int rc;
+
+  if (h == NULL)
+    return 0;
+  pthread_mutex_lock (&h->mu);
+  rc = hsts_upgrade (h, host, now);
+  pthread_mutex_unlock (&h->mu);
+  return rc;
 }

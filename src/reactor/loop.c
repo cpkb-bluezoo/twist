@@ -65,6 +65,7 @@ struct twist_loop
   void (*watch_cb) (void *, int fd, int interest);
   void *watch_user;
   struct twist_runtime *runtime;
+  int *in_call;
   struct twist_rbuf *rbufs;
 };
 
@@ -229,6 +230,12 @@ void
 twist_loop_set_runtime (struct twist_loop *loop, struct twist_runtime *runtime)
 {
   loop->runtime = runtime;
+}
+
+void
+twist_loop_set_in_call (struct twist_loop *loop, int *in_call)
+{
+  loop->in_call = in_call;
 }
 
 uint8_t *
@@ -457,15 +464,15 @@ dispatch_fd (struct twist_loop *loop, int fd, int readable, int writable)
 static void
 calls_begin (struct twist_loop *loop)
 {
-  if (loop->runtime != NULL)
-    loop->runtime->in_call++;
+  if (loop->in_call != NULL)
+    (*loop->in_call)++;
 }
 
 static void
 calls_end (struct twist_loop *loop)
 {
-  if (loop->runtime != NULL)
-    loop->runtime->in_call--;
+  if (loop->in_call != NULL)
+    (*loop->in_call)--;
 }
 
 void

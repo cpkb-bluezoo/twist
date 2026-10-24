@@ -136,7 +136,9 @@ The loop exposes:
 - `next_timeout()` - Next timer deadline
 
 **Critical**: The loop does NOT start its own thread. It's a passive component
-that the runtime pumps, or that the application's own poll loop drives.
+that the runtime pumps, or that the application's own poll loop drives. A
+runtime told to use several loops (`TWIST_RUNTIMEOPT_THREADS`) starts a thread
+for each loop but the first, which is still the application's.
 
 ### Runtime
 
@@ -166,9 +168,14 @@ struct twist_runtime {
 };
 ```
 
-There is one loop and no locks. Nothing is shared between runtimes, so a
-program that wants several threads makes a runtime for each. The library does
-not arrange that.
+A runtime has one loop, the application's, or with `TWIST_RUNTIMEOPT_THREADS`
+several, each a lane: the loop, its pool of idle connections and its sessions.
+The application calls the runtime from one thread; everything that crosses to
+another lane is a command in that lane's queue. The first lane runs the done
+callbacks. The stores that lanes share (DNS answers, cookies, HSTS, Alt-Svc, the
+table of origins) each have a lock held for their own memory only. A transfer is
+placed when it starts and stays: those that can share a connection (HTTP/2,
+HTTP/3) go to the lane their origin was put on, the rest to the least loaded.
 
 A runtime is made in one of two forms. `twist_runtime_new` has a poller of its
 own and is driven with `twist_runtime_run_once`. `twist_runtime_new_embedded`

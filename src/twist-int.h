@@ -26,6 +26,7 @@
 
 #include <quickstep/frame.h>
 
+#include <pthread.h>
 #include <stdio.h>
 #include <sys/socket.h>
 #include <sys/types.h>
@@ -200,6 +201,13 @@ struct twist_transfer
   int pipewait;  /* TWISTOPT_PIPEWAIT.  */
   struct twist_runtime *runtime;
   struct twist_loop *loop;
+  /* The loop's lane, and what a lane other than the first is told of the
+     transfer: its place in the runtime's list, and the command that reports
+     its end to the program (runtime.c).  */
+  struct twist_lane *lane;
+  unsigned long serial;
+  struct twist_cmd *deliver_node;
+  void *deliver;
   /* Told the result when the transfer ends (twist_runtime_start); and the
      timer that does it, from the loop, once the handler is out of the way.  */
   twist_done_callback done_cb;
@@ -228,6 +236,44 @@ struct twist_transfer
   struct twist_progress progress;
 };
 
+struct twist_cmd;
+struct twist_lane_live;
+
+/* One event loop of a runtime and what belongs to it alone: the connections it
+   keeps and the sessions on them, which only its own thread touches.  The
+   first lane is the program's, driven by twist_runtime_run_once; the others
+   have a thread each.  */
+struct twist_lane
+{
+  struct twist_runtime *runtime;
+  int index;
+  struct twist_loop *loop;
+  struct twist_pool *pool;
+  struct twist_session *sessions;
+  int in_call;			/* Of a lane but the first.  */
+  pthread_t thread;
+  int threaded;
+  int stop;
+  struct twist_cmd *stop_node;	/* Made with the lane, so that it can be sent.  */
+  long load;			/* Transfers on it; the driving thread's.  */
+  /* The transfers running on it, by serial: the lane thread's.  */
+  struct twist_lane_live *live;
+  size_t n_live;
+  size_t live_cap;
+};
+
+/* A transfer that was started in a runtime, and what is to be told when it
+   ends.  */
+struct twist_started
+{
+  struct twist_transfer *transfer;
+  unsigned long serial;
+  twist_done_callback done_cb;
+  void *done_user;
+  char *place_key;
+  int lane;
+};
+
 struct twist_runtime
 {
   struct twist_loop *loop;
@@ -237,9 +283,10 @@ struct twist_runtime
   twist_watch_callback watch_cb;
   twist_timer_callback timer_cb;
   void *hook_user;
-  struct twist_transfer **transfers;
+  struct twist_started *transfers;
   size_t n_transfers;
   size_t transfers_cap;
+  unsigned long next_serial;
   long long last_deadline;
   /* How many calls into the application (write, header, progress, done and
      hook callbacks) are under way from this handle's loop.  While there is
@@ -249,9 +296,15 @@ struct twist_runtime
      touches only the transfer.  */
   int in_call;
   struct twist_storage *storage;
-  struct twist_pool *pool;
+  struct twist_pool *pool;	/* The first lane's.  */
   struct twist_dns_cache *dns;
-  struct twist_session *sessions;
+  /* The lanes, the first of which is the one above, and how many threads were
+     asked for.  The others exist once a transfer has been started.  */
+  struct twist_lane **lanes;
+  size_t n_lanes;
+  long threads;
+  size_t rotate;		/* Where the search for a lane begins.  */
+  int closing;
   /* What transfers that ask for them share: the cookies that servers set,
      the hosts that want https only, and the alternative services that
      servers offer.  */
@@ -315,6 +368,8 @@ enum
   TWIST_RESUME_WOKEN
 };
 
+/* The loop it waits on, and a command to post there, are the waiter's own, so
+   that the callback needs nothing else.  */
 struct twist_origin_waiter
 {
   struct twist_origin_waiter *next;
@@ -323,6 +378,8 @@ struct twist_origin_waiter
   void (*resume) (void *user, int why);
   void *user;
   int state;
+  struct twist_loop *loop;
+  struct twist_cmd *node;
 };
 
 /* How a connection that was being made to an origin turned out.  */
@@ -335,16 +392,21 @@ enum
 
 struct twist_origintab;
 
-/* The key of the origin TRANSFER is going to: its loop, scheme, host, port, and
-   the proxy or Unix socket it goes through.  */
+/* The key of the origin TRANSFER is going to: its loop, a bar, and then what
+   twist_transfer_origin_okey makes, the scheme, host, port, and the proxy or
+   Unix socket it goes through.  */
 int twist_transfer_origin_key (struct twist_transfer *transfer, char *buf,
                                size_t cap);
+int twist_transfer_origin_okey (struct twist_transfer *transfer, char *buf,
+                                size_t cap);
+/* Whether the transfer may share a connection with others to its origin
+   (HTTP/2 or HTTP/3 may be had), from its options and URL alone.  */
+int twist_http_may_multiplex (struct twist_transfer *transfer);
 struct twist_origintab *twist_origintab_new (void);
 void twist_origintab_free (struct twist_origintab *tab);
 void twist_origintab_set_cap (struct twist_origintab *tab, long cap);
 /* A connection that may carry several transfers is being made to KEY.  */
-int twist_origintab_lead (struct twist_origintab *tab, const char *key,
-                          struct twist_loop *loop);
+int twist_origintab_lead (struct twist_origintab *tab, const char *key);
 /* False if a connection made to KEY has been found to carry one at a time, so
    that the next need not be waited for.  */
 int twist_origintab_may_lead (struct twist_origintab *tab, const char *key);
@@ -358,17 +420,46 @@ void twist_origintab_settle (struct twist_origintab *tab, const char *key,
 /* Take a connection to KEY: 1 if it is given, 0 if W waits for one (at the
    head of the queue if FRONT), or an error.  */
 int twist_origintab_acquire (struct twist_origintab *tab, const char *key,
-                             struct twist_loop *loop,
                              struct twist_origin_waiter *w, int front);
 /* Give a connection back.  */
 void twist_origintab_release (struct twist_origintab *tab, const char *key);
+/* The loop of the transfer that is next to be given a connection to KEY, if
+   there is one that waits.  */
+int twist_origintab_next_waiter (struct twist_origintab *tab, const char *key,
+                                 struct twist_loop **loop);
+/* A connection that holds a place is kept idle by LOOP, or is no longer idle
+   (taken, or closed).  A transfer that has to wait for a place asks the table's
+   evict callback to have one of the idle connections closed.  */
+void twist_origintab_idle_add (struct twist_origintab *tab, const char *key,
+                               struct twist_loop *loop);
+void twist_origintab_idle_del (struct twist_origintab *tab, const char *key,
+                               struct twist_loop *loop);
+void twist_origintab_set_evict (struct twist_origintab *tab,
+                                void (*evict) (void *user,
+                                               struct twist_loop *loop,
+                                               const char *key), void *user);
 /* A stream of a session has ended: the first that waits for room may now
    have it.  */
 void twist_origintab_wake (struct twist_origintab *tab, const char *key);
 /* W stops waiting, or gives back what it was granted and did not take.  */
-void twist_origintab_cancel (struct twist_origin_waiter *w);
+void twist_origintab_cancel (struct twist_origintab *tab,
+                             struct twist_origin_waiter *w);
 /* The key of a granted W, which it holds; W is then idle.  Free it.  */
 char *twist_origin_waiter_take (struct twist_origin_waiter *w);
+/* Which loop transfers to the origin OKEY that may share a connection go on:
+   1 and *LANE if one has been chosen (and the transfer is counted on it); 0 if
+   none has; -1 if the origin has been found not to share, so that its
+   transfers go where they like.  twist_origintab_pin_set records a choice for
+   a transfer, and unpin says that one is over.  */
+int twist_origintab_pin (struct twist_origintab *tab, const char *okey,
+                         int *lane);
+int twist_origintab_pin_set (struct twist_origintab *tab, const char *okey,
+                             int lane);
+void twist_origintab_unpin (struct twist_origintab *tab, const char *okey);
+/* A session to the origin of the per-loop KEY is opened (DELTA 1) or lost
+   (-1); its origin stays on its loop while one is open.  */
+void twist_origintab_session (struct twist_origintab *tab, const char *key,
+                              int delta);
 
 /* ---- loop ---- */
 
@@ -410,6 +501,8 @@ void twist_loop_unwatch_fd (struct twist_loop *loop, int fd);
 struct twist_runtime *twist_loop_runtime (struct twist_loop *loop);
 void twist_loop_set_runtime (struct twist_loop *loop,
                              struct twist_runtime *runtime);
+/* The count of calls into the program that this loop's work is part of.  */
+void twist_loop_set_in_call (struct twist_loop *loop, int *in_call);
 int twist_loop_waker (struct twist_loop *loop);
 uint8_t *twist_loop_take_rbuf (struct twist_loop *loop);
 void twist_loop_give_rbuf (struct twist_loop *loop, uint8_t *buf);
@@ -901,6 +994,14 @@ int twist_pool_put (struct twist_pool *pool, const char *key,
                     struct twist_connection *conn);
 int twist_pool_put_idle (struct twist_pool *pool, const char *key,
                          struct twist_connection *conn, uint64_t now_ms);
+int twist_pool_take_held (struct twist_pool *pool, const char *key,
+                          struct twist_connection **out, int *held);
+int twist_pool_put_held (struct twist_pool *pool, const char *key,
+                         struct twist_connection *conn);
+void twist_pool_set_discard (struct twist_pool *pool,
+                             void (*cb) (void *user, const char *key),
+                             void *user);
+int twist_pool_evict_one (struct twist_pool *pool, const char *key);
 int twist_pool_take_payload (struct twist_pool *pool, const char *key,
                              struct twist_connection **out, void **payload);
 int twist_pool_put_idle_payload (struct twist_pool *pool, const char *key,
@@ -1104,7 +1205,7 @@ int twist_http_status_result (int failonerror, int status);
 
 struct twist_jar *twist_jar_new (void);
 /* How many cookies the jar holds.  */
-size_t twist_jar_count (const struct twist_jar *jar);
+size_t twist_jar_count (struct twist_jar *jar);
 void twist_jar_free (struct twist_jar *jar);
 int twist_jar_store (struct twist_jar *jar, const char *set_cookie,
                      const char *host, const char *path, int https);
@@ -1399,7 +1500,10 @@ struct twist_altsvc *twist_altsvc_new (void);
 void twist_altsvc_free (struct twist_altsvc *a);
 int twist_altsvc_note (struct twist_altsvc *a, const char *origin,
                        const char *alt);
-const char *twist_altsvc_lookup (struct twist_altsvc *a, const char *origin);
+/* The alternative service noted for ORIGIN, copied to OUT (CAP bytes): 0, or
+   -1 if there is none.  */
+int twist_altsvc_lookup (struct twist_altsvc *a, const char *origin, char *out,
+                         size_t cap);
 
 char *twist_strdup (const char *s);
 /* The user's home directory: $HOME if it is set and not empty, else the one

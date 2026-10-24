@@ -132,6 +132,7 @@ struct twist_http
   char *lead_key;
   int resume_quic;
   int requeue;                      /* Woken for room that was not there.  */
+  int resume_why;                   /* What the table said, atomically.  */
   int peer_minor;
   int req_http10;
   struct twist_dns_addr peer;
@@ -188,12 +189,25 @@ session_emit (void *user, const uint8_t *data, size_t len)
   return twist_endpoint_send (twist_connection_endpoint (s->conn), data, len);
 }
 
+/* The lane of the runtime that has LOOP; the first if none has.  */
+static struct twist_lane *
+lane_of_loop (struct twist_runtime *runtime, struct twist_loop *loop)
+{
+  size_t i;
+
+  for (i = 0; i < runtime->n_lanes; i++)
+    if (runtime->lanes[i]->loop == loop)
+      return runtime->lanes[i];
+  return runtime->lanes[0];
+}
+
 struct twist_session *
 twist_session_add (struct twist_runtime *runtime, const char *key,
                    struct twist_loop *loop, struct twist_connection *conn,
                    struct twist_h2 *h2)
 {
   struct twist_session *s;
+  struct twist_lane *lane;
 
   if (runtime == NULL || key == NULL)
     return NULL;
@@ -212,8 +226,10 @@ twist_session_add (struct twist_runtime *runtime, const char *key,
   s->h2 = h2;
   if (h2 != NULL)
     twist_h2_set_emit (h2, session_emit, s);
-  s->next = runtime->sessions;
-  runtime->sessions = s;
+  lane = lane_of_loop (runtime, loop);
+  twist_origintab_session (runtime->origintab, key, 1);
+  s->next = lane->sessions;
+  lane->sessions = s;
   return s;
 }
 
@@ -225,7 +241,7 @@ twist_session_find (struct twist_runtime *runtime, const char *key,
 
   if (runtime == NULL || key == NULL)
     return NULL;
-  for (s = runtime->sessions; s != NULL; s = s->next)
+  for (s = lane_of_loop (runtime, loop)->sessions; s != NULL; s = s->next)
     {
       if (s->loop != loop || s->closed || strcmp (s->key, key) != 0)
         continue;
@@ -255,22 +271,26 @@ void
 twist_session_free_all (struct twist_runtime *runtime)
 {
   struct twist_session *s;
+  size_t i;
 
   if (runtime == NULL)
     return;
-  s = runtime->sessions;
-  while (s != NULL)
+  for (i = 0; i < runtime->n_lanes; i++)
     {
-      struct twist_session *next = s->next;
+      s = runtime->lanes[i]->sessions;
+      while (s != NULL)
+        {
+          struct twist_session *next = s->next;
 
-      twist_connection_free (s->conn);
-      twist_h2_free (s->h2);
-      free (s->slot_key);
-      free (s->key);
-      free (s);
-      s = next;
+          twist_connection_free (s->conn);
+          twist_h2_free (s->h2);
+          free (s->slot_key);
+          free (s->key);
+          free (s);
+          s = next;
+        }
+      runtime->lanes[i]->sessions = NULL;
     }
-  runtime->sessions = NULL;
 }
 
 static struct twist_pool *
@@ -408,14 +428,43 @@ http_park (struct twist_http *h)
   pool = http_pool (h);
   if (pool == NULL || http_pool_key (h, key, sizeof key) != TWIST_OK)
     return;
+  /* A connection kept here is for the transfers of this loop only.  If the
+     next in line for one is on another loop, this one is closed (when the
+     transfer is let go), and its place goes to that transfer, so that the
+     limit on connections holds between loops.  */
+  {
+    struct twist_loop *next = NULL;
+    struct twist_origintab *tab = http_tab (h);
+
+    if (tab != NULL && twist_origintab_next_waiter (tab, key, &next)
+        && next != h->transfer->loop)
+      return;
+  }
   c = h->conn;
   h->conn = NULL;
-  if (twist_pool_put (pool, key, c) != TWIST_OK)
-    h->conn = c;
-  else
-    /* An idle connection holds no place under the limit; whoever waits for
-       one may take this.  */
-    http_slot_release (h);
+  {
+    struct twist_origintab *tab = http_tab (h);
+    int held = tab != NULL && h->slot_key != NULL;
+
+    if ((held ? twist_pool_put_held (pool, key, c)
+         : twist_pool_put (pool, key, c)) != TWIST_OK)
+      {
+        h->conn = c;
+        return;
+      }
+    if (held)
+      {
+        /* The connection keeps the place it was made under while it is kept:
+           the limit counts the connections that are open, whoever has them.
+           The pool gives the place back when it closes one, and the transfer
+           that takes this one has it.  The first in line for a place is told
+           to look again, for this connection.  */
+        free (h->slot_key);
+        h->slot_key = NULL;
+        twist_origintab_idle_add (tab, key, h->transfer->loop);
+        twist_origintab_wake (tab, key);
+      }
+  }
 }
 
 static void
@@ -1380,9 +1429,14 @@ send_request (struct twist_http *h)
 static int
 http_post (struct twist_http *h, void (*fn) (void *))
 {
+  /* Counted before it is posted: the loop may run it at once, and the count
+     is touched from other threads (http_resume).  */
+  __atomic_add_fetch (&h->posted, 1, __ATOMIC_ACQ_REL);
   if (twist_loop_post (h->transfer->loop, fn, h) != TWIST_OK)
-    return TWIST_ERR_NOMEM;
-  h->posted++;
+    {
+      __atomic_sub_fetch (&h->posted, 1, __ATOMIC_ACQ_REL);
+      return TWIST_ERR_NOMEM;
+    }
   return TWIST_OK;
 }
 
@@ -1391,10 +1445,11 @@ http_post (struct twist_http *h, void (*fn) (void *))
 static int
 http_posted_done (struct twist_http *h)
 {
-  h->posted--;
-  if (!h->dead)
+  int left = __atomic_sub_fetch (&h->posted, 1, __ATOMIC_ACQ_REL);
+
+  if (!__atomic_load_n (&h->dead, __ATOMIC_ACQUIRE))
     return 0;
-  if (h->posted == 0)
+  if (left == 0)
     free (h);
   return 1;
 }
@@ -2148,6 +2203,34 @@ session_wanted (const struct twist_http *h)
   return h->https && h->how == TWIST_DISC_ALPN && !h->req_http10;
 }
 
+/* Whether the transfer may share a connection with others to its origin, from
+   its URL and options alone, before there is a handler: the same as
+   session_wanted would say of the handler it is to have.  Only http and https
+   transfers can; a websocket, a proxy or a tunnel cannot; HTTP forced to 1.0
+   or 1.1 cannot; https can unless that, and cleartext only with HTTP/2 from
+   the first byte.  */
+int
+twist_http_may_multiplex (struct twist_transfer *transfer)
+{
+  const struct twist_url *url = transfer->url;
+  int v = transfer->http_version;
+  int https;
+
+  if (url == NULL || url->scheme == NULL || url->host == NULL
+      || url->host[0] == 0)
+    return 0;
+  https = strcmp (url->scheme, "https") == 0;
+  if (!https && strcmp (url->scheme, "http") != 0)
+    return 0;
+  if (twist_transfer_proxy (transfer) != NULL)
+    return 0;
+  if (v == TWIST_HTTP_VERSION_1_0 || v == TWIST_HTTP_VERSION_1_1)
+    return 0;
+  if (https)
+    return 1;
+  return v == TWIST_HTTP_VERSION_2_PRIOR_KNOWLEDGE;
+}
+
 /* Whether HTTP/2 was asked for, and not HTTP/3 in its place.  */
 static int
 h2_pinned (const struct twist_http *h)
@@ -2236,6 +2319,8 @@ http_resume_posted (void *user)
     return;
   if (h->finished)
     return;
+  h->requeue = __atomic_load_n (&h->resume_why, __ATOMIC_ACQUIRE)
+               == TWIST_RESUME_WOKEN;
   if (h->waiter.state == TWIST_WAIT_GRANTED)
     {
       free (h->slot_key);
@@ -2319,6 +2404,8 @@ session_lost (struct twist_session *s, struct twist_http *except, int err)
   if (s->closed)
     return;
   s->closed = 1;
+  if (s->runtime != NULL && s->runtime->origintab != NULL)
+    twist_origintab_session (s->runtime->origintab, s->key, -1);
   if (s->slot_key != NULL)
     {
       char *key = s->slot_key;
@@ -2336,29 +2423,40 @@ session_lost (struct twist_session *s, struct twist_http *except, int err)
     }
 }
 
-/* Called by the table, when what the transfer waited for has come.  Nothing
-   is done here but to post the next step: the table is in the middle of its
-   own work, and this may be on another transfer's stack.  */
+/* Called by the table, when what the transfer waited for has come, with the
+   table's lock held and on any thread.  It reads nothing of the transfer, and
+   does no more than count a command for it and post one, made ahead, to the
+   loop it waits on: the command does every check, there.  The lock is what
+   orders this against the transfer's leaving the queue
+   (twist_origintab_cancel), so the record is there until this has run.  */
 static void
 http_resume (void *user, int why)
 {
   struct twist_http *h = user;
+  struct twist_cmd *node = h->waiter.node;
 
-  if (h->finished)
+  /* There is a node whenever the waiter is in a queue: http_gate makes one
+     before it queues, and this takes it as the waiter leaves the queue, so it
+     is taken once for each time the waiter was queued.  */
+  if (node == NULL)
     return;
-  h->requeue = why == TWIST_RESUME_WOKEN;
-  if (http_post (h, http_resume_posted) != TWIST_OK)
-    http_complete (h, TWIST_ERR_NOMEM);
+  h->waiter.node = NULL;
+  __atomic_store_n (&h->resume_why, why, __ATOMIC_RELEASE);
+  __atomic_add_fetch (&h->posted, 1, __ATOMIC_ACQ_REL);
+  twist_loop_cmd_post (h->waiter.loop, node);
 }
 
 /* Before a connection is made or taken: wait for a connection to the origin
    that is being made, if it may be shared; then take a place under the limit
    on connections, which are open ones and those being made.  1 if the
    transfer is to wait, to be started again from the top when it is its turn,
-   0 if it goes on.  A connection that is idle in the pool holds no place, so a
-   transfer takes one before it takes that, and the places held plus the
-   connections being made stay within the limit.  A place is held until the
-   connection is parked, closed, or the session's.  */
+   0 if it goes on.  A connection that is kept idle in the pool keeps its place
+   (http_park), and a transfer that takes it has the place, so the places held
+   are the connections open or being made, wherever they are, and stay within
+   the limit.  The transfer is here only when it found no connection to take on
+   its own loop; if one is kept idle on another loop, the table has it closed
+   to make a place.  A place is held until the connection is kept, closed, or
+   the session's.  */
 static int
 http_gate (struct twist_http *h, int quic)
 {
@@ -2371,13 +2469,21 @@ http_gate (struct twist_http *h, int quic)
     return 0;
   h->waiter.resume = http_resume;
   h->waiter.user = h;
+  h->waiter.loop = h->transfer->loop;
+  /* The command that resumes it, made now, so that waking it cannot fail.  */
+  if (h->waiter.node == NULL)
+    h->waiter.node = twist_loop_cmd_new (http_resume_posted, h);
+  if (h->waiter.node == NULL)
+    {
+      http_fail (h, TWIST_ERR_NOMEM);
+      return 1;
+    }
   h->resume_quic = quic;
   if (h->transfer->pipewait && session_wanted (h)
       && twist_origintab_park (tab, key, &h->waiter))
     return 1;
   /* One that was woken and found no room goes back to the head.  */
-  rc = twist_origintab_acquire (tab, key, h->transfer->loop, &h->waiter,
-                                h->requeue);
+  rc = twist_origintab_acquire (tab, key, &h->waiter, h->requeue);
   h->requeue = 0;
   if (rc == 0)
     return 1;
@@ -2407,7 +2513,7 @@ http_lead (struct twist_http *h)
       || http_pool_key (h, key, sizeof key) != TWIST_OK
       || !twist_origintab_may_lead (tab, key))
     return;
-  if (twist_origintab_lead (tab, key, h->transfer->loop) != TWIST_OK)
+  if (twist_origintab_lead (tab, key) != TWIST_OK)
     return;
   h->lead_key = twist_strdup (key);
   if (h->lead_key == NULL)
@@ -2421,14 +2527,29 @@ http_reuse (struct twist_http *h)
   struct twist_connection *c = NULL;
   struct twist_endpoint *ep;
   char key[1024];
+  int held = 0;
 
   if (h->mode != HTTP_H1 || via_tunnel (h))
     return 0;
   pool = http_pool (h);
   if (pool == NULL || http_pool_key (h, key, sizeof key) != TWIST_OK)
     return 0;
-  if (twist_pool_take (pool, key, &c) != TWIST_OK || c == NULL)
+  if (twist_pool_take_held (pool, key, &c, &held) != TWIST_OK || c == NULL)
     return 0;
+  if (held)
+    {
+      /* Its place is ours.  One that was already ours is not needed.  */
+      struct twist_origintab *tab = http_tab (h);
+
+      if (tab != NULL)
+        {
+          twist_origintab_idle_del (tab, key, h->transfer->loop);
+          if (h->slot_key != NULL)
+            twist_origintab_release (tab, key);
+          else
+            h->slot_key = twist_strdup (key);
+        }
+    }
   h->conn = c;
   ep = twist_connection_endpoint (c);
   ep->user_data = h;
@@ -2495,9 +2616,11 @@ dial (struct twist_http *h, const struct twist_dns_addr *addr)
       http_slot_release (h);
       return;
     }
-  if (http_gate (h, 0))
-    return;
+  /* A connection that is kept is used before a new one is made, and with its
+     place.  */
   if (http_reuse (h))
+    return;
+  if (http_gate (h, 0))
     return;
   http_lead (h);
   if (h->tls_tunnel)
@@ -2874,7 +2997,10 @@ http_free (void *p)
   if (h->timer != NULL)
     twist_timer_cancel (h->timer);
   /* Out of every queue first: what it was granted, it gives back.  */
-  twist_origintab_cancel (&h->waiter);
+  twist_origintab_cancel (http_tab (h), &h->waiter);
+  if (h->waiter.node != NULL)
+    twist_loop_cmd_free (h->waiter.node);
+  h->waiter.node = NULL;
   http_leave_session (h);
   twist_connection_free (h->conn);
   http_slot_release (h);
@@ -2900,9 +3026,9 @@ http_free (void *p)
     }
   free (h->hdr_line);
   free (h->h3_tail);
-  if (h->posted > 0)
+  if (__atomic_load_n (&h->posted, __ATOMIC_ACQUIRE) > 0)
     {
-      h->dead = 1;
+      __atomic_store_n (&h->dead, 1, __ATOMIC_RELEASE);
       return;
     }
   free (h);

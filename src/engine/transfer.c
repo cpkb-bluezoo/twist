@@ -81,7 +81,8 @@ struct twist_pool *
 twist_transfer_pool (struct twist_transfer *transfer)
 {
   if (transfer != NULL && transfer->runtime != NULL)
-    return transfer->runtime->pool;
+    return transfer->lane != NULL ? transfer->lane->pool
+           : transfer->runtime->pool;
   return NULL;
 }
 

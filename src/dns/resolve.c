@@ -30,6 +30,7 @@
 #include <net/if.h>
 #include <netinet/in.h>
 #include <stdio.h>
+#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -189,12 +190,29 @@ dns_release (struct dns_query *q)
   free (q);
 }
 
+/* The nameserver is read from resolv.conf and kept, and read again when the
+   file changes.  Loops on several threads ask for it; the lock covers the
+   check and the read, and nothing is called with it held.  */
+static pthread_mutex_t ns_lock = PTHREAD_MUTEX_INITIALIZER;
 static struct sockaddr_in ns_addr;
 static time_t ns_mtime;
 static int ns_ready;
 
+static int nameserver_locked (struct sockaddr_in *sin);
+
 static int
 nameserver (struct sockaddr_in *sin)
+{
+  int rc;
+
+  pthread_mutex_lock (&ns_lock);
+  rc = nameserver_locked (sin);
+  pthread_mutex_unlock (&ns_lock);
+  return rc;
+}
+
+static int
+nameserver_locked (struct sockaddr_in *sin)
 {
   FILE *fp;
   char line[256];

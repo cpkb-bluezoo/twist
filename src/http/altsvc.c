@@ -22,6 +22,8 @@
 
 #include "twist-int.h"
 
+#include <pthread.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -38,13 +40,18 @@ struct twist_altsvc_entry
 
 struct twist_altsvc
 {
+  pthread_mutex_t mu;           /* Loops on several threads share it.  */
   struct twist_altsvc_entry *head;
 };
 
 struct twist_altsvc *
 twist_altsvc_new (void)
 {
-  return calloc (1, sizeof (struct twist_altsvc));
+  struct twist_altsvc *a = calloc (1, sizeof (struct twist_altsvc));
+
+  if (a != NULL)
+    pthread_mutex_init (&a->mu, NULL);
+  return a;
 }
 
 void
@@ -63,11 +70,12 @@ twist_altsvc_free (struct twist_altsvc *a)
       free (e);
       e = next;
     }
+  pthread_mutex_destroy (&a->mu);
   free (a);
 }
 
-int
-twist_altsvc_note (struct twist_altsvc *a, const char *origin, const char *alt)
+static int
+altsvc_note (struct twist_altsvc *a, const char *origin, const char *alt)
 {
   struct twist_altsvc_entry *e;
 
@@ -100,15 +108,48 @@ twist_altsvc_note (struct twist_altsvc *a, const char *origin, const char *alt)
   return TWIST_OK;
 }
 
-const char *
-twist_altsvc_lookup (struct twist_altsvc *a, const char *origin)
+static int
+altsvc_lookup (struct twist_altsvc *a, const char *origin, char *out,
+               size_t cap)
 {
   struct twist_altsvc_entry *e;
+  int found = -1;
 
-  if (a == NULL || origin == NULL)
-    return NULL;
+  if (a == NULL || origin == NULL || out == NULL || cap == 0)
+    return -1;
   for (e = a->head; e != NULL; e = e->next)
     if (strcmp (e->origin, origin) == 0)
-      return e->alt;
-  return NULL;
+      {
+        snprintf (out, cap, "%s", e->alt);
+        found = 0;
+        break;
+      }
+  return found;
+}
+
+int
+twist_altsvc_note (struct twist_altsvc *a, const char *origin, const char *alt)
+{
+  int rc;
+
+  if (a == NULL)
+    return TWIST_ERR_INVAL;
+  pthread_mutex_lock (&a->mu);
+  rc = altsvc_note (a, origin, alt);
+  pthread_mutex_unlock (&a->mu);
+  return rc;
+}
+
+int
+twist_altsvc_lookup (struct twist_altsvc *a, const char *origin, char *out,
+                     size_t cap)
+{
+  int rc;
+
+  if (a == NULL)
+    return -1;
+  pthread_mutex_lock (&a->mu);
+  rc = altsvc_lookup (a, origin, out, cap);
+  pthread_mutex_unlock (&a->mu);
+  return rc;
 }

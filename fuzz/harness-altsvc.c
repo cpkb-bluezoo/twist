@@ -49,8 +49,12 @@ LLVMFuzzerTestOneInput (const uint8_t *data, size_t size)
     {
       twist_altsvc_note (a, "example.com", s);
       twist_altsvc_note (a, s, s);
-      twist_altsvc_lookup (a, "example.com");
-      twist_altsvc_lookup (a, s);
+      {
+        char out[64];
+
+        twist_altsvc_lookup (a, "example.com", out, sizeof out);
+        twist_altsvc_lookup (a, s, out, sizeof out);
+      }
       twist_altsvc_free (a);
     }
   free (s);

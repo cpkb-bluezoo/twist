@@ -61,6 +61,7 @@ static int parallel;
 static long parallel_max = 50;
 static int parallel_immediate;
 static long parallel_max_host;
+static long threads = 1;    /* Loops of the runtime, --threads.  */
 
 struct cli_item
 {
@@ -254,6 +255,8 @@ usage (void)
          stdout);
   fputs (_("      --parallel-max-host N  at most N connections to one host\n"),
          stdout);
+  fputs (_("      --threads N         run transfers on N threads (default 1, most 64)\n"),
+         stdout);
   fputs (_("      --parallel-immediate  do not wait to share a connection\n"),
          stdout);
   fputs (_("      --no-parallel, --no-parallel-immediate\n"
@@ -337,8 +340,8 @@ usage (void)
   fputs (_("  -q, --disable           accepted; no config file is read\n"),
          stdout);
   fputs (_("      --next              start a new URL; only -s, -S, -#, --stderr,\n"
-           "                          --no-progress-meter, --fail-early and the\n"
-           "                          parallel options carry over\n"),
+           "                          --no-progress-meter, --fail-early, --threads\n"
+           "                          and the parallel options carry over\n"),
          stdout);
   fputs (_("      --http1.0           use HTTP/1.0\n"), stdout);
   fputs (_("      --http1.1           use HTTP/1.1\n"), stdout);
@@ -2023,6 +2026,14 @@ run_all (struct cli_op *ops)
       diag_code (27, twist_strerror (TWIST_ERR_NOMEM));
       return 27;
     }
+  if (threads > 1
+      && twist_runtime_setopt (run.runtime, TWIST_RUNTIMEOPT_THREADS, threads)
+         != TWIST_OK)
+    {
+      diag_code (27, twist_strerror (TWIST_ERR_NOMEM));
+      twist_runtime_free (run.runtime);
+      return 27;
+    }
   if (parallel && parallel_max_host > 0)
     twist_runtime_setopt (run.runtime, TWIST_RUNTIMEOPT_MAX_HOST_CONNECTIONS,
                           parallel_max_host);
@@ -2242,6 +2253,7 @@ main (int argc, char **argv)
     { "parallel-immediate", no_argument, NULL, 55 },
     { "no-parallel-immediate", no_argument, NULL, 56 },
     { "parallel-max-host", required_argument, NULL, 57 },
+    { "threads", required_argument, NULL, 59 },
     { "compressed", no_argument, NULL, 30 },
     { "content-encoding", required_argument, NULL, 31 },
     { "insecure", no_argument, NULL, 'k' },
@@ -2524,6 +2536,20 @@ main (int argc, char **argv)
               parallel_max = n > 300 ? 300 : n < 1 ? 50 : n;
             else
               parallel_max_host = n > 65535 ? 65535 : n;
+          }
+          break;
+        case 59:
+          {
+            long n;
+
+            if (parse_count (optarg, &n) != 0 || n < 1 || n > 64)
+              {
+                diag (_("--threads takes a number from 1 to 64"));
+                suggest ();
+                status = 2;
+              }
+            else
+              threads = n;
           }
           break;
         case 55:

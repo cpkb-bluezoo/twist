@@ -66,7 +66,8 @@ header files are Twist's own.
 The schemes that are implemented are listed under @ref{Protocols}.
 Schemes that are not yet implemented have a row in the scheme table, so
 a handler can be added without changing the transfer engine.  TLS and QUIC come from
-GNU Quickstep.  The reactor does not start a thread of its own.  A
+GNU Quickstep.  The reactor starts a thread only when a runtime is asked to
+run transfers on several loops (@pxref{Runtime}).  A
 transfer's sockets stay on one loop, and QUIC is one UDP socket on
 that same loop.
 
@@ -576,8 +577,8 @@ The two hook callbacks above may not call the runtime at all.
 
 A runtime runs many transfers on one event loop, and keeps what they can use
 again: the connections that are kept, the answers of DNS lookups, and the
-cookie jar and the HSTS and Alt-Svc lists (@pxref{Stores}).  It does not start a
-thread, and nothing in it blocks.  A transfer is started, and the loop tells
+cookie jar and the HSTS and Alt-Svc lists (@pxref{Stores}).  It starts no
+thread unless it is asked to (@pxref{Runtime}), and nothing in it blocks.  A transfer is started, and the loop tells
 the program when it has ended; the program does the waiting, or has its own
 poll loop do it.
 
@@ -612,10 +613,17 @@ a transfer has been started in the runtime.  The options are:
 @item TWIST_RUNTIMEOPT_MAX_HOST_CONNECTIONS
 A long: the most connections the runtime has open, or is making, to one host
 (the scheme, host and port, and the proxy), for HTTP transfers.  A transfer that
-would make another waits until a connection to the host is closed or is kept
-for reuse.  A connection that is kept idle holds no place, and the streams of
-an HTTP/2 or HTTP/3 connection are not connections.  0, the default, is no
-limit.
+would make another waits until a connection to the host is closed, or takes one
+that is kept idle.  A connection that is kept idle counts, and is closed to make
+room for a transfer that waits on another loop, since a loop uses only its own
+(@pxref{Runtime}).  The streams of an HTTP/2 or HTTP/3 connection are not
+connections.  0, the default, is no limit.
+@item TWIST_RUNTIMEOPT_THREADS
+A long from 1 to 64: how many event loops the runtime runs transfers on.  The
+default, 1, is the program's own loop and no thread.  A greater number starts
+that many less one threads, when the first transfer is started.  An embedded
+runtime refuses it, and so does any runtime once a transfer has been started in
+it (@pxref{Runtime}).
 @end table
 @end deftypefun
 
@@ -812,9 +820,48 @@ program keeps no jar.
 
 @heading Threads
 
-A runtime and the transfers in it are for one thread at a time, and nothing in
-them is locked.  A program with several threads makes a runtime for each, and
-they share nothing.
+A runtime has one event loop, the program's, unless it is told otherwise with
+@code{TWIST_RUNTIMEOPT_THREADS}.  With a number @var{n} greater than 1 it has
+@var{n} loops: the first is the program's, driven by
+@code{twist_runtime_run_once}, and the others each run in a thread that the
+runtime starts when the first transfer is started and ends, with its transfers
+that are still running dropped, in @code{twist_runtime_free}.
+
+All calls into the runtime, and into its transfers, are made from one thread, the
+one that drives it, or by the program in turn, as for a runtime with one loop.
+The runtime locks what the loops share (the answers of DNS lookups, the cookie
+jar, and the HSTS and Alt-Svc lists), and what each loop keeps alone (its idle
+connections and its sessions) it does not.  A callback on a loop's thread may
+not call the runtime: it gets @code{TWIST_ERR_RECURSIVE}, and
+@code{twist_transfer_free} does nothing.
+
+A transfer runs on one loop for its life.  Transfers that can share a
+connection to their origin, because HTTP/2 or HTTP/3 may be had (an @code{https}
+URL not held to HTTP/1, or @code{http} with HTTP/2 from the first byte), go to
+the loop that the first of them to that origin was put on, so that they find the
+connection; the rest go to the loop with the fewest transfers.  When an origin
+turns out to speak HTTP/1.1 only, the transfers that follow are spread as the
+rest.  A connection that a loop keeps idle is used again only by that loop.  The
+limit on connections to a host (@code{TWIST_RUNTIMEOPT_MAX_HOST_CONNECTIONS})
+holds for the runtime, not for each loop, and counts the connections that a
+loop keeps idle as well as those in use or being made.  A transfer that has to
+wait for a place when a connection is kept idle on another loop has that one
+closed to make room, and one that is finished with a connection while the next
+in line for a place is on another loop closes it instead of keeping it.  A
+transfer that is redirected to another origin stays on its loop, and the
+placement of its new origin is not changed.
+
+The callbacks run where the transfer's loop is.  The write, header, read and
+progress callbacks, and the one that supplies a telnet session's input, run on
+the thread of the transfer's loop, which is the program's own thread for the
+first loop; they may use only what belongs to their transfer, or what the
+program has made safe for threads.  The @code{twist_done_callback} is always
+called on the thread that drives the runtime, from inside
+@code{twist_runtime_run_once}, after the transfer's loop has let go of the
+transfer.  The transfer may be examined, started again or freed from it.  Until
+then a transfer that is running may be cancelled (@code{twist_runtime_cancel}) or
+freed from the driving thread; freeing one that runs on another loop waits for
+that loop to let go of it.
 
 @node URL functions
 @section URL functions
@@ -1028,8 +1075,8 @@ open a great many files.  Global.
 @item --parallel-max-host @var{n}
 With @option{-Z}, keep at most @var{n} HTTP connections open, or being made,
 to one host: the scheme, host and port, and the proxy.  A transfer that would
-make another waits until a connection to that host is closed or is kept for
-the next transfer.  Transfers that share an HTTP/2 or HTTP/3 connection do not
+make another waits until a connection to that host is closed or can be taken
+from those kept.  Transfers that share an HTTP/2 or HTTP/3 connection do not
 count as connections.  0, the default, is no limit, and more than 65535 is
 65535.  Only HTTP, HTTPS and WebSocket transfers are held to it.  Global.
 @item --parallel-immediate
@@ -1038,6 +1085,12 @@ own, rather than waiting for a connection to the same host that is being made,
 to share it if the server speaks HTTP/2 or HTTP/3.  By default a transfer
 waits, so a number of URLs of one host make one connection.
 @option{--no-parallel-immediate} undoes it.  Global.
+@item --threads @var{n}
+Run the transfers on @var{n} threads, 1 to 64 (@pxref{Runtime}); the default,
+1, is the program's thread alone.  The URLs that can share a connection go to one
+thread, and the rest are spread, so the option is for @option{-Z}.  The thread
+that runs twist writes the diagnostics, and the files are written by the thread
+of the transfer.  curl has no option like it.  Global.
 @item --compressed
 Ask for a compressed response and decompress it: @code{br}, @code{gzip} and
 @code{deflate}, or @code{gzip} and @code{deflate} when twist was built without
@@ -1247,7 +1300,7 @@ Start a separate transfer for the following URL.  Options after it do
 not inherit the previous URL's method, body, headers, output, proxy,
 user, or timeouts.  @option{-s}, @option{-S}, @option{-#},
 @option{--no-progress-meter}, @option{--stderr},
-@option{--fail-early}, and the options of @option{-Z} still apply.  A URL is required before
+@option{--fail-early}, @option{--threads}, and the options of @option{-Z} still apply.  A URL is required before
 @option{--next}.  The transfers of the whole command line, whatever
 the @option{--next} between them, share the connections that are kept and the
 names that were looked up.

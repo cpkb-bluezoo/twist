@@ -209,7 +209,7 @@ int
 twist_origin_h3 (struct twist_transfer *transfer, const char *host, int *port)
 {
   struct twist_origin_hint *e = find_hint (transfer, host, 0);
-  const char *alt;
+  char alt[64];
 
   if (port != NULL)
     *port = 0;
@@ -221,8 +221,8 @@ twist_origin_h3 (struct twist_transfer *transfer, const char *host, int *port)
     }
   if (twist_transfer_altsvc (transfer) == NULL)
     return 0;
-  alt = twist_altsvc_lookup (twist_transfer_altsvc (transfer), host);
-  if (alt == NULL)
+  if (twist_altsvc_lookup (twist_transfer_altsvc (transfer), host, alt,
+                           sizeof alt) != 0)
     return 0;
   if (strcmp (alt, "none") == 0)
     return -1;
