@@ -211,6 +211,8 @@ cli_status (int err, const char *url)
       return 67;
     case TWIST_ERR_AGAIN:
       return 81;
+    case TWIST_ERR_RTSP_CSEQ:
+      return 85;
     default:
       return 2;
     }
@@ -1144,6 +1146,7 @@ write_body (char *ptr, size_t size, size_t nmemb, void *userdata)
   size_t n = size * nmemb;
   size_t got;
 
+  finish_headers (&job->hdrs);
   got = fwrite (ptr, 1, n, job->body);
   if (got < n)
     job->body_short = 1;
@@ -2480,6 +2483,7 @@ main (int argc, char **argv)
           break;
         case 'I':
           op->head = 1;
+          op->include = 1;
           break;
         case 'i':
           op->include = 1;

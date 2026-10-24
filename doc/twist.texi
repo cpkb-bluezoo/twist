@@ -1498,6 +1498,9 @@ The file does not exist on the @code{sftp} or @code{scp} server.
 The @code{sftp} or @code{scp} server could not do what was asked.
 @item 81
 The operation could not be started.
+@item 85
+The @code{CSeq} of an RTSP reply was not that of the request, or was missing,
+or @option{-H} tried to set it.
 @item 93
 The loop was run again from inside a callback.  Only a program that uses the
 library can cause this.
@@ -1558,6 +1561,16 @@ Subscribes to the topic in the URL path, or publishes @option{--data}
 and disconnects.
 @item pop3, pop3s
 Retrieves a message, or lists the messages in the maildrop.
+@item rtsp
+Sends one @code{OPTIONS} request, as the curl tool does, whatever the path of
+the URL says, and writes the reply: the body, as far as @code{Content-Length}
+says, to the output, and with @option{-i}, @option{-I} or @option{-D} the
+status line and the headers as the server sent them.  The @code{CSeq} of the
+reply must be the request's, or the transfer ends with status 85.  An error
+status is not a failure unless @option{-f} asks (status 22), and a redirect is
+not followed.  @option{-X}, @option{-d}, @option{-T} and @option{-r} change
+nothing.  @option{-H} cannot set @code{CSeq} (status 85) or @code{Session}
+(status 43), which belong to the protocol.
 @item scp, sftp
 Both run over SFTP on an SSH connection: a file up or down and, for
 @code{sftp}, a directory listing.  There is no SCP wire protocol.  SSH
@@ -1621,7 +1634,7 @@ it is not taken as part of the encrypted session: the transfer ends with exit
 status 8.
 
 These schemes are recognised, but are not implemented, and exit 1:
-@code{rtmp}, @code{rtmps}, @code{rtsp}, @code{smb} and @code{smbs}.
+@code{rtmp}, @code{rtmps}, @code{smb} and @code{smbs}.
 
 @heading URLs
 

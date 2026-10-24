@@ -80,6 +80,8 @@ twist_strerror (int err)
       return _("an unknown option was given");
     case TWIST_ERR_OPTION_SYNTAX:
       return _("an option is not written as it must be");
+    case TWIST_ERR_RTSP_CSEQ:
+      return _("the CSeq of the reply did not match the request");
     case TWIST_ERR_RECURSIVE:
       return _("an API function was called from inside a callback");
     case TWIST_ERR_PROXY:

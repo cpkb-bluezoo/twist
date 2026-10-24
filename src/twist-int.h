@@ -1398,6 +1398,15 @@ size_t twist_gopher_receive (struct twist_gopher *gopher, const uint8_t *data,
 void twist_gopher_closed (struct twist_gopher *gopher, int err);
 int twist_gopher_attach (struct twist_transfer *transfer);
 
+struct twist_rtsp;
+struct twist_rtsp *twist_rtsp_new (struct twist_transfer *transfer, int live);
+void twist_rtsp_free (void *rtsp);
+const uint8_t *twist_rtsp_request (const struct twist_rtsp *rtsp, size_t *len);
+size_t twist_rtsp_receive (struct twist_rtsp *rtsp, const uint8_t *data,
+                           size_t len);
+void twist_rtsp_closed (struct twist_rtsp *rtsp, int err);
+int twist_rtsp_attach (struct twist_transfer *transfer);
+
 /* Telnet (RFC 854).  twist_telnet_receive takes what the server sent and
    writes the text in it to the transfer's write callback, answering the
    server's negotiation.  twist_telnet_input takes what is to be sent, and

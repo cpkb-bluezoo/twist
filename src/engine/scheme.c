@@ -86,6 +86,12 @@ attach_gopher (struct twist_transfer *transfer)
 }
 
 static int
+attach_rtsp (struct twist_transfer *transfer)
+{
+  return twist_rtsp_attach (transfer);
+}
+
+static int
 attach_dict (struct twist_transfer *transfer)
 {
   return twist_dict_attach (transfer);
@@ -141,7 +147,7 @@ static const struct twist_scheme schemes[] = {
   { "gophers", 70, TWIST_SCHEME_TLS | TWIST_SCHEME_PROXY_OK | TWIST_SCHEME_READY,
     attach_gopher },
   { "telnet", 23, TWIST_SCHEME_PROXY_OK | TWIST_SCHEME_READY, attach_telnet },
-  { "rtsp", 554, TWIST_SCHEME_PROXY_OK, twist_scheme_unsupported },
+  { "rtsp", 554, TWIST_SCHEME_PROXY_OK | TWIST_SCHEME_READY, attach_rtsp },
   { "tftp", 69, TWIST_SCHEME_DATAGRAM | TWIST_SCHEME_READY, attach_tftp },
   { "file", 0, TWIST_SCHEME_READY, attach_file },
   { "scp", 22, TWIST_SCHEME_PROXY_OK | TWIST_SCHEME_READY, attach_ssh },

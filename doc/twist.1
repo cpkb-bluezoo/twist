@@ -94,6 +94,9 @@ Subscribes to the topic in the URL path, or publishes \fB\-\-data\fR and disconn
 .B pop3, pop3s
 Retrieves a message, or lists the messages in the maildrop.
 .TP
+.B rtsp
+Sends one OPTIONS request, as the curl tool does, whatever the path of the URL says, and writes the reply: the body, as far as Content\-Length says, to the output, and with \fB\-i\fR, \fB\-I\fR or \fB\-D\fR the status line and the headers as the server sent them.  The CSeq of the reply must be the request's, or the transfer ends with status 85.  An error status is not a failure unless \fB\-f\fR asks (status 22), and a redirect is not followed.  \fB\-X\fR, \fB\-d\fR, \fB\-T\fR and \fB\-r\fR change nothing.  \fB\-H\fR cannot set CSeq (status 85) or Session (status 43), which belong to the protocol.
+.TP
 .B scp, sftp
 Both run over SFTP on an SSH connection: a file up or down, and, for \fBsftp\fR, a directory listing.  There is no SCP wire protocol.  SSH provides the encryption, so there is no TLS variant.
 .TP
@@ -157,7 +160,6 @@ status 8.
 .PP
 These schemes are recognised, but are not implemented, and exit 1:
 .B rtmp, rtmps,
-.B rtsp,
 .B smb, smbs.
 .SH TELNET
 .B telnet://host[:port]/
@@ -1393,6 +1395,11 @@ The sftp or scp server could not do what was asked.
 .TP
 .B 81
 The operation could not be started.
+.TP
+.B 85
+The CSeq of an RTSP reply was not that of the request, or was missing, or
+.B \-H
+tried to set it.
 .TP
 .B 93
 The loop was run again from inside a callback.  Only a program that uses the

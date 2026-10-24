@@ -1,7 +1,6 @@
 Twist TODO List
 ================
 
-  [ ] RTSP
   [ ] SCP/SFTP, one handler over foxtrot (../foxtrot).  scp:// runs over
       SFTP; there is no SCP wire protocol.  Done: logging in with a key
       file or a password, known_hosts (~/.ssh/known_hosts,

@@ -7,10 +7,14 @@ Please send Twist bug reports to <dog@gnu.org>
 Version 0.1 - unreleased
 
   * HTTP/1, HTTP/2, and HTTP/3, plus FTP, mail, MQTT, LDAP,
-    WebSocket, Gopher, DICT, Telnet, TFTP, and FILE
+    WebSocket, Gopher, DICT, Telnet, RTSP, TFTP, and FILE
   * telnet sessions: the server's text is written out, its option
     negotiation is answered, and standard input (or -T) is sent; -t sets the
     terminal type, display, environment and window size
+  * rtsp:// as the curl tool does it: one OPTIONS request, the reply written
+    as the server sent it, exit status 85 for a CSeq that does not match;
+    -I now writes the headers, and -i the blank line before the body, not
+    after it
   * gzip and deflate request and response coding, via zlib
   * the progress meter and the bar (-#), and the library's
     TWISTOPT_XFERINFOFUNCTION

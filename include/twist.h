@@ -78,7 +78,10 @@ enum twist_error
      transfer does not have.  */
   TWIST_ERR_UNKNOWN_OPTION = 26,
   /* An option in such a list that is not written as it must be.  */
-  TWIST_ERR_OPTION_SYNTAX = 27
+  TWIST_ERR_OPTION_SYNTAX = 27,
+  /* The CSeq of an RTSP reply was not that of the request, or the caller
+     tried to set CSeq as a header of its own.  */
+  TWIST_ERR_RTSP_CSEQ = 28
 };
 
 const char *twist_strerror (int err);

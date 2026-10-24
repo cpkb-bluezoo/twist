@@ -21,7 +21,7 @@ AM_TESTS_ENVIRONMENT = \
 noinst_HEADERS = check.h http-ev.h feed.h body.h
 
 PROGRAM_TESTS = test-reactor test-engine test-http test-auth test-dns \
-	test-ftp test-mail test-mqtt test-ldap test-ws test-gopher test-dict test-telnet \
+	test-ftp test-mail test-mqtt test-ldap test-ws test-gopher test-rtsp test-dict test-telnet \
 	test-tftp test-file test-tls test-errors test-coding test-ssh \
 	test-quote test-rate test-glob test-vars test-progress test-bar test-meter test-origin test-runtime-threads test-proxyenv test-env test-template test-masque test-threads
 ## The tool itself, on local files.
@@ -41,6 +41,7 @@ test_mqtt_SOURCES = test-mqtt.c check.c feed.c body.c
 test_ldap_SOURCES = test-ldap.c check.c feed.c body.c
 test_ws_SOURCES = test-ws.c check.c feed.c body.c http-ev.c
 test_gopher_SOURCES = test-gopher.c check.c feed.c body.c
+test_rtsp_SOURCES = test-rtsp.c check.c feed.c body.c
 test_dict_SOURCES = test-dict.c check.c feed.c body.c
 test_telnet_SOURCES = test-telnet.c check.c feed.c
 test_tftp_SOURCES = test-tftp.c check.c body.c
