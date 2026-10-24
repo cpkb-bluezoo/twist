@@ -222,6 +222,7 @@ struct twist_transfer
   int proto_status;
   char *error;
   long http_code;
+  int http_version_seen;	/* TWIST_HTTP_VERSION_* of the response.  */
   char *effective_url;
   char *content_type;
   size_t size_download;

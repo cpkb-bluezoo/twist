@@ -707,17 +707,23 @@ static void
 on_status (void *user, int code, const char *reason, size_t n)
 {
   struct twist_http *h = user;
-  char line[64];
+  char line[128];
   int wr;
 
-  (void) reason;
-  (void) n;
   h->status = code;
   h->transfer->http_code = code;
+  h->transfer->http_version_seen = h->peer_minor == 0
+                                   ? TWIST_HTTP_VERSION_1_0
+                                   : TWIST_HTTP_VERSION_1_1;
   if (h->transfer->header_cb == NULL)
     return;
-  wr = snprintf (line, sizeof line, "HTTP/1.%d %d\r\n",
-                 h->peer_minor == 0 ? 0 : 1, code);
+  /* The line as the server sent it: the reason phrase is the server's own
+     words, and a long one is cut off.  */
+  if (n > 64)
+    n = 64;
+  wr = snprintf (line, sizeof line, "HTTP/1.%d %d%s%.*s\r\n",
+                 h->peer_minor == 0 ? 0 : 1, code, n > 0 ? " " : "",
+                 (int) n, reason != NULL ? reason : "");
   if (wr > 0)
     h->transfer->header_cb (line, 1, (size_t) wr, h->transfer->header_data);
 }
@@ -743,9 +749,28 @@ on_header (void *user, const char *name, size_t name_len, const char *value,
         }
       if (i == value_len && value_len > 0)
         {
+          char status_line[32];
+          int wr;
+
           h->status = code;
           h->transfer->http_code = code;
+          h->transfer->http_version_seen = h->mode == HTTP_H3
+                                           ? TWIST_HTTP_VERSION_3
+                                           : TWIST_HTTP_VERSION_2_0;
+          /* The pseudo-header is the status line of an HTTP/2 or HTTP/3
+             response, "HTTP/2 200 " as the curl tool writes it, and is not
+             a header of its own.  */
+          if (h->transfer->header_cb != NULL)
+            {
+              wr = snprintf (status_line, sizeof status_line,
+                             "HTTP/%d %d \r\n", h->mode == HTTP_H3 ? 3 : 2,
+                             code);
+              if (wr > 0)
+                h->transfer->header_cb (status_line, 1, (size_t) wr,
+                                        h->transfer->header_data);
+            }
         }
+      return;
     }
   else if (name_len == 14 && strncasecmp (name, "content-length", 14) == 0)
     {

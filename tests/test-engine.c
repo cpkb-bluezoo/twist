@@ -1885,6 +1885,56 @@ test_http_ipv6_host (void)
   ka_stop (&k);
 }
 
+/* What a transfer says of the response: the status line as the server sent
+   it, reason phrase and all, to the header callback, and the version of the
+   response through TWISTINFO_HTTP_VERSION.  The curl tool writes the same.  */
+static char status_seen[128];
+
+static size_t
+status_header (char *ptr, size_t size, size_t nmemb, void *user)
+{
+  size_t n = size * nmemb;
+
+  (void) user;
+  if (status_seen[0] == 0 && n < sizeof status_seen)
+    {
+      memcpy (status_seen, ptr, n);
+      status_seen[n] = 0;
+    }
+  return n;
+}
+
+static void
+test_http_status_line (void)
+{
+  struct ka k;
+  char url[64];
+  twist_transfer *transfer;
+  size_t total = 0;
+  long version = -1;
+
+  check (ka_start (&k) == 0, "status line setup");
+  snprintf (url, sizeof url, "http://127.0.0.1:%d/", k.port);
+  transfer = twist_transfer_new ();
+  status_seen[0] = 0;
+  twist_transfer_setopt (transfer, TWISTOPT_URL, url);
+  twist_transfer_setopt (transfer, TWISTOPT_WRITEFUNCTION, ka_body);
+  twist_transfer_setopt (transfer, TWISTOPT_WRITEDATA, &total);
+  twist_transfer_setopt (transfer, TWISTOPT_HEADERFUNCTION, status_header);
+  check (twist_transfer_getinfo (transfer, TWISTINFO_HTTP_VERSION, &version)
+         == TWIST_OK && version == TWIST_HTTP_VERSION_NONE,
+         "no version before a response");
+  check (check_perform (transfer) == TWIST_OK && total == 6, "a transfer");
+  check (strcmp (status_seen, "HTTP/1.1 200 OK\r\n") == 0,
+         "the status line has its reason phrase");
+  version = -1;
+  check (twist_transfer_getinfo (transfer, TWISTINFO_HTTP_VERSION, &version)
+         == TWIST_OK && version == TWIST_HTTP_VERSION_1_1,
+         "and the version is HTTP/1.1");
+  twist_transfer_free (transfer);
+  ka_stop (&k);
+}
+
 /* The cookie jar, the HSTS list and the Alt-Svc list are the runtime's,
    and a transfer uses them only when it asks to.  Two transfers in one runtime
    handle that ask share the jar: the cookie that the first was given is sent
@@ -2137,6 +2187,7 @@ main (void)
   test_done_chain ();
   test_runtime_lists ();
   test_runtime_stores ();
+  test_http_status_line ();
   test_cleanup_handle_in_runtime ();
   test_runtime_embedded ();
   test_unix_socket_options ();

@@ -1014,6 +1014,17 @@ emit_writeout (const char *fmt, twist_transfer *transfer, int code)
             fputs (effective != NULL ? effective : "", stdout);
           else if (n == 12 && memcmp (p + 2, "content_type", 12) == 0)
             fputs (ctype != NULL ? ctype : "", stdout);
+          else if (n == 12 && memcmp (p + 2, "http_version", 12) == 0)
+            {
+              long version = 0;
+
+              twist_transfer_getinfo (transfer, TWISTINFO_HTTP_VERSION,
+                                      &version);
+              fputs (version == TWIST_HTTP_VERSION_1_0 ? "1"
+                     : version == TWIST_HTTP_VERSION_1_1 ? "1.1"
+                     : version == TWIST_HTTP_VERSION_2_0 ? "2"
+                     : version == TWIST_HTTP_VERSION_3 ? "3" : "0", stdout);
+            }
           else if (n == 8 && memcmp (p + 2, "exitcode", 8) == 0)
             printf ("%d", code);
           else if (n == 8 && memcmp (p + 2, "errormsg", 8) == 0)

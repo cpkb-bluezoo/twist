@@ -165,9 +165,6 @@ Twist TODO List
           carry many.
         - quickstep's gq_tls_free does not free the selected transcript
           (t->tr), so each TLS connection leaks about 1.3 KB.
-  [ ] -D and -i show an HTTP/2 or HTTP/3 response as its pseudo-header
-      ":status: 200" and not as a status line "HTTP/2 200", and -w
-      %{http_version} is empty.
   [ ] URL globbing is done for URLs and for -o names (#N).  Not done: globbing
       the file given to -T ({a,b} there, with #N in the URL), and #N in
       --output-dir.  -T takes the name as written.

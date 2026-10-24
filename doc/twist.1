@@ -910,10 +910,11 @@ Print \fIformat\fR on standard output after the body.
 .BR %{size_download} ,
 .BR %{url_effective} ,
 .BR %{content_type} ,
+.BR %{http_version} ,
 .BR %{exitcode} ,
 and
 .B %{errormsg}
-are replaced.  \fB%{url_effective}\fR is the URL the transfer ended on, after
+are replaced.  \fB%{http_version}\fR is 1 for HTTP/1.0, 1.1, 2 or 3, and 0 when there was no HTTP response.  \fB%{url_effective}\fR is the URL the transfer ended on, after
 any redirect, and has no user name or password in it, so that a log of it holds
 no secret.
 .BR \en ,

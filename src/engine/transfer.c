@@ -591,6 +591,9 @@ twist_transfer_getinfo (twist_transfer *transfer, int info, ...)
     case TWISTINFO_PRIVATE:
       *va_arg (ap, void **) = transfer->private_data;
       break;
+    case TWISTINFO_HTTP_VERSION:
+      *va_arg (ap, long *) = transfer->http_version_seen;
+      break;
     default:
       va_end (ap);
       return TWIST_ERR_UNSUPPORTED;

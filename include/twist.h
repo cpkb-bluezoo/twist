@@ -391,7 +391,10 @@ enum twist_info
   TWISTINFO_EFFECTIVE_URL = 2,
   TWISTINFO_SIZE_DOWNLOAD = 3,
   TWISTINFO_CONTENT_TYPE = 4,
-  TWISTINFO_PRIVATE = 5
+  TWISTINFO_PRIVATE = 5,
+  /* A long *: the HTTP version of the response, as TWIST_HTTP_VERSION_1_0,
+     _1_1, _2_0 or _3, or TWIST_HTTP_VERSION_NONE until there is one.  */
+  TWISTINFO_HTTP_VERSION = 6
 };
 
 twist_transfer *twist_transfer_new (void);

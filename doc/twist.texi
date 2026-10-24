@@ -151,6 +151,10 @@ A @code{size_t *}: the bytes of body delivered to the write callback.
 @item TWISTINFO_CONTENT_TYPE
 A @code{char **}: the @code{Content-Type} of the response, or @code{NULL} when
 it had none.  The string is good as long as the effective URL is.
+@item TWISTINFO_HTTP_VERSION
+A @code{long *}: the version of the last HTTP response, as
+@code{TWIST_HTTP_VERSION_1_0}, @code{_1_1}, @code{_2_0} or @code{_3}, and
+@code{TWIST_HTTP_VERSION_NONE} (0) when there was none.
 @item TWISTINFO_PRIVATE
 A @code{void **}: the pointer set with @code{TWISTOPT_PRIVATE}.  It is how a
 program finds its own record of the transfer that a @code{twist_done_callback}
@@ -1272,8 +1276,10 @@ applies to every URL.
 Print @var{format} on standard output after the body.
 @code{@{http_code@}}, @code{@{response_code@}},
 @code{@{size_download@}}, @code{@{url_effective@}},
-@code{@{content_type@}}, @code{@{exitcode@}}, and @code{@{errormsg@}}
-are replaced.  @code{\n}, @code{\r}, @code{\t}, and @code{%%} are
+@code{@{content_type@}}, @code{@{http_version@}}, @code{@{exitcode@}}, and
+@code{@{errormsg@}} are replaced.  @code{@{http_version@}} is @samp{1} for
+HTTP/1.0, @samp{1.1}, @samp{2} or @samp{3}, and @samp{0} when there was no
+HTTP response.  @code{\n}, @code{\r}, @code{\t}, and @code{%%} are
 recognised.  An unknown @code{@{name@}} is empty.  @code{@{url_effective@}} is
 the URL the transfer ended on, after any redirect, and has no user name or
 password in it, so that a log of it holds no secret.
