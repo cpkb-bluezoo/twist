@@ -1175,15 +1175,25 @@ enum twist_proxy_kind
 {
   TWIST_PROXY_NONE = 0,
   TWIST_PROXY_HTTP,
-  TWIST_PROXY_SOCKS5,
-  TWIST_PROXY_HTTPS
+  TWIST_PROXY_SOCKS5,		/* The target is looked up here.  */
+  TWIST_PROXY_HTTPS,
+  TWIST_PROXY_SOCKS5H,		/* The proxy looks the target up.  */
+  TWIST_PROXY_SOCKS4,		/* Looked up here, and IPv4 only.  */
+  TWIST_PROXY_SOCKS4A		/* The proxy looks the target up.  */
 };
 
-/* Read a proxy URL: http://, socks5:// or socks5h:// (a name is given to the
-   proxy to resolve in either case), with an optional user and password, which
-   are returned decoded, and an optional port.  The scheme alone is not enough
-   to be taken for a proxy of another kind: https and socks4 are refused
-   (TWIST_ERR_UNSUPPORTED).  USER and PASS are NULL, or a string to free.  */
+/* A proxy that is spoken to as SOCKS, of either version.  */
+#define TWIST_PROXY_IS_SOCKS(kind) \
+  ((kind) == TWIST_PROXY_SOCKS5 || (kind) == TWIST_PROXY_SOCKS5H \
+   || (kind) == TWIST_PROXY_SOCKS4 || (kind) == TWIST_PROXY_SOCKS4A)
+
+/* Read a proxy URL: http://, https://, socks5://, socks5h://, socks4:// or
+   socks4a://, with an optional user and password, which are returned decoded,
+   and an optional port.  With socks5h and socks4a the name of the target is
+   given to the proxy to look up; with socks5 and socks4 it is looked up here,
+   and the proxy is given an address (which for socks4 can only be IPv4).  A
+   scheme that is not one of these is TWIST_ERR_UNSUPPORTED, and is not taken
+   for a proxy of another kind.  USER and PASS are NULL, or a string to free.  */
 int twist_proxy_parse (const char *s, int *kind, char **host, int *port,
                        char **user, char **pass);
 struct twist_proxy *twist_proxy_new (int kind, const char *host, int port,
@@ -1204,6 +1214,10 @@ int twist_proxy_feed (struct twist_proxy *proxy, const uint8_t *data,
 const char *twist_proxy_error (const struct twist_proxy *proxy, int *status);
 void twist_proxy_set_credentials (struct twist_proxy *proxy, const char *user,
                                   const char *pass);
+/* "Proxy-Authorization: Basic ..." for the proxy's user and password, to
+   free; NULL if there are none (or no memory).  For a request sent to the
+   proxy itself, as a plain http:// URL through an HTTP proxy is.  */
+char *twist_proxy_auth_header (const struct twist_proxy *proxy);
 /* The transfer a refusal is reported to.  */
 void twist_proxy_set_transfer (struct twist_proxy *proxy,
                                struct twist_transfer *transfer);

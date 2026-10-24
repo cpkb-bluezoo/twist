@@ -750,7 +750,7 @@ test_proxy_socks (void)
   static const uint8_t okay[] = { 5, 0, 0, 1, 0, 0, 0, 0, 0, 0 };
 
   /* No credentials: only "no authentication" is offered.  */
-  p = twist_proxy_new (TWIST_PROXY_SOCKS5, "127.0.0.1", 1080, NULL);
+  p = twist_proxy_new (TWIST_PROXY_SOCKS5H, "127.0.0.1", 1080, NULL);
   twist_proxy_set_target (p, "example.com", 80);
   out = px_next (p, &len);
   check (out != NULL && len == 3 && out[0] == 5 && out[1] == 1 && out[2] == 0,
@@ -768,7 +768,7 @@ test_proxy_socks (void)
   twist_proxy_free (p);
 
   /* The reply and the server's banner in one read.  */
-  p = twist_proxy_new (TWIST_PROXY_SOCKS5, "127.0.0.1", 1080, NULL);
+  p = twist_proxy_new (TWIST_PROXY_SOCKS5H, "127.0.0.1", 1080, NULL);
   twist_proxy_set_target (p, "h", 22);
   free (px_next (p, &len));
   px_feed (p, none, 2, &used, &ready);
@@ -785,7 +785,7 @@ test_proxy_socks (void)
   twist_proxy_free (p);
 
   /* A reply in pieces.  */
-  p = twist_proxy_new (TWIST_PROXY_SOCKS5, "127.0.0.1", 1080, NULL);
+  p = twist_proxy_new (TWIST_PROXY_SOCKS5H, "127.0.0.1", 1080, NULL);
   twist_proxy_set_target (p, "h", 22);
   free (px_next (p, &len));
   px_feed (p, none, 2, &used, &ready);
@@ -803,7 +803,7 @@ test_proxy_socks (void)
   twist_proxy_free (p);
 
   /* Address types: the target as it is.  */
-  p = twist_proxy_new (TWIST_PROXY_SOCKS5, "127.0.0.1", 1080, NULL);
+  p = twist_proxy_new (TWIST_PROXY_SOCKS5H, "127.0.0.1", 1080, NULL);
   twist_proxy_set_target (p, "10.1.2.3", 22);
   free (px_next (p, &len));
   px_feed (p, none, 2, &used, &ready);
@@ -814,7 +814,7 @@ test_proxy_socks (void)
   free (out);
   twist_proxy_free (p);
 
-  p = twist_proxy_new (TWIST_PROXY_SOCKS5, "127.0.0.1", 1080, NULL);
+  p = twist_proxy_new (TWIST_PROXY_SOCKS5H, "127.0.0.1", 1080, NULL);
   twist_proxy_set_target (p, "2001:db8::1", 2222);
   free (px_next (p, &len));
   px_feed (p, none, 2, &used, &ready);
@@ -826,7 +826,7 @@ test_proxy_socks (void)
   twist_proxy_free (p);
 
   /* A zone cannot be said to a proxy; the address is.  */
-  p = twist_proxy_new (TWIST_PROXY_SOCKS5, "127.0.0.1", 1080, NULL);
+  p = twist_proxy_new (TWIST_PROXY_SOCKS5H, "127.0.0.1", 1080, NULL);
   twist_proxy_set_target (p, "fe80::1%eth0", 22);
   free (px_next (p, &len));
   px_feed (p, none, 2, &used, &ready);
@@ -837,7 +837,7 @@ test_proxy_socks (void)
   twist_proxy_free (p);
 
   /* Username and password (RFC 1929).  */
-  p = twist_proxy_new (TWIST_PROXY_SOCKS5, "127.0.0.1", 1080, NULL);
+  p = twist_proxy_new (TWIST_PROXY_SOCKS5H, "127.0.0.1", 1080, NULL);
   twist_proxy_set_target (p, "h", 22);
   twist_proxy_set_credentials (p, "pxuser", "pxpass");
   out = px_next (p, &len);
@@ -858,7 +858,7 @@ test_proxy_socks (void)
   free (out);
   twist_proxy_free (p);
 
-  p = twist_proxy_new (TWIST_PROXY_SOCKS5, "127.0.0.1", 1080, NULL);
+  p = twist_proxy_new (TWIST_PROXY_SOCKS5H, "127.0.0.1", 1080, NULL);
   twist_proxy_set_target (p, "h", 22);
   twist_proxy_set_credentials (p, "pxuser", "bad");
   free (px_next (p, &len));
@@ -871,7 +871,7 @@ test_proxy_socks (void)
   twist_proxy_free (p);
 
   /* A server that wants credentials when there are none.  */
-  p = twist_proxy_new (TWIST_PROXY_SOCKS5, "127.0.0.1", 1080, NULL);
+  p = twist_proxy_new (TWIST_PROXY_SOCKS5H, "127.0.0.1", 1080, NULL);
   twist_proxy_set_target (p, "h", 22);
   free (px_next (p, &len));
   check (px_feed (p, refuse, 2, &used, &ready) == TWIST_ERR_PROXY
@@ -880,7 +880,7 @@ test_proxy_socks (void)
          && st == 97, "no method it will do");
   twist_proxy_free (p);
 
-  p = twist_proxy_new (TWIST_PROXY_SOCKS5, "127.0.0.1", 1080, NULL);
+  p = twist_proxy_new (TWIST_PROXY_SOCKS5H, "127.0.0.1", 1080, NULL);
   twist_proxy_set_target (p, "h", 22);
   free (px_next (p, &len));
   check (px_feed (p, pw, 2, &used, &ready) == TWIST_ERR_PROXY,
@@ -888,7 +888,7 @@ test_proxy_socks (void)
   twist_proxy_free (p);
 
   /* The request refused.  */
-  p = twist_proxy_new (TWIST_PROXY_SOCKS5, "127.0.0.1", 1080, NULL);
+  p = twist_proxy_new (TWIST_PROXY_SOCKS5H, "127.0.0.1", 1080, NULL);
   twist_proxy_set_target (p, "10.9.9.9", 22);
   free (px_next (p, &len));
   px_feed (p, none, 2, &used, &ready);
@@ -906,7 +906,7 @@ test_proxy_socks (void)
                                   11, 12, 13, 14, 15, 16, 0, 80, 'S' };
     static const uint8_t nm[] = { 5, 0, 0, 3, 3, 'a', 'b', 'c', 0, 80, 'S' };
 
-    p = twist_proxy_new (TWIST_PROXY_SOCKS5, "127.0.0.1", 1080, NULL);
+    p = twist_proxy_new (TWIST_PROXY_SOCKS5H, "127.0.0.1", 1080, NULL);
     twist_proxy_set_target (p, "h", 22);
     free (px_next (p, &len));
     px_feed (p, none, 2, &used, &ready);
@@ -914,7 +914,7 @@ test_proxy_socks (void)
     check (px_feed (p, v6, sizeof v6, &used, &ready) == TWIST_OK && ready
            && used == sizeof v6 - 1, "a bound IPv6 address");
     twist_proxy_free (p);
-    p = twist_proxy_new (TWIST_PROXY_SOCKS5, "127.0.0.1", 1080, NULL);
+    p = twist_proxy_new (TWIST_PROXY_SOCKS5H, "127.0.0.1", 1080, NULL);
     twist_proxy_set_target (p, "h", 22);
     free (px_next (p, &len));
     px_feed (p, none, 2, &used, &ready);
@@ -923,6 +923,89 @@ test_proxy_socks (void)
            && used == sizeof nm - 1, "a bound name");
     twist_proxy_free (p);
   }
+}
+
+/* SOCKS4 and SOCKS4a: one request, one reply of eight bytes.  The user id is
+   the proxy user, or empty.  An IPv4 address is the address; for 4a a name
+   is sent after the user id, with 0.0.0.1 as the address; for 4 a name is
+   looked up before the request, which the proxy asks for by saying it is not
+   ready (TWIST_ERR_AGAIN).  */
+static void
+test_proxy_socks4 (void)
+{
+  struct twist_proxy *p;
+  uint8_t *out;
+  size_t len, used;
+  int ready, st = 0;
+  static const uint8_t granted[] = { 0, 90, 0, 0, 0, 0, 0, 0 };
+  static const uint8_t rejected[] = { 0, 91, 0, 0, 0, 0, 0, 0 };
+
+  p = twist_proxy_new (TWIST_PROXY_SOCKS4, "127.0.0.1", 1080, NULL);
+  twist_proxy_set_target (p, "10.1.2.3", 22);
+  out = px_next (p, &len);
+  check (out != NULL && len == 9 && out[0] == 4 && out[1] == 1
+         && out[2] == 0 && out[3] == 22 && out[4] == 10 && out[5] == 1
+         && out[6] == 2 && out[7] == 3 && out[8] == 0,
+         "an IPv4 address, no user");
+  free (out);
+  check (px_feed (p, granted, 5, &used, &ready) == TWIST_OK && !ready
+         && used == 5, "a reply in pieces");
+  check (px_feed (p, granted + 5, 3, &used, &ready) == TWIST_OK && ready
+         && used == 3, "granted");
+  twist_proxy_free (p);
+
+  p = twist_proxy_new (TWIST_PROXY_SOCKS4, "127.0.0.1", 1080, NULL);
+  twist_proxy_set_target (p, "10.1.2.3", 22);
+  twist_proxy_set_credentials (p, "bob", "ignored");
+  out = px_next (p, &len);
+  check (out != NULL && len == 12 && memcmp (out + 8, "bob", 4) == 0,
+         "the user id is the user");
+  free (out);
+  check (px_feed (p, rejected, 8, &used, &ready) == TWIST_ERR_PROXY
+         && strcmp (twist_proxy_error (p, &st),
+                    "Can't complete SOCKS4 connection to 10.1.2.3. (91)") == 0
+         && st == 97, "rejected");
+  twist_proxy_free (p);
+
+  p = twist_proxy_new (TWIST_PROXY_SOCKS4, "127.0.0.1", 1080, NULL);
+  twist_proxy_set_target (p, "example.com", 22);
+  check (px_next (p, &len) == NULL, "a name is not sent to a socks4 proxy");
+  twist_proxy_free (p);
+
+  p = twist_proxy_new (TWIST_PROXY_SOCKS4A, "127.0.0.1", 1080, NULL);
+  twist_proxy_set_target (p, "example.com", 80);
+  out = px_next (p, &len);
+  check (out != NULL && len == 9 + 12 && out[4] == 0 && out[5] == 0
+         && out[6] == 0 && out[7] == 1 && out[8] == 0
+         && memcmp (out + 9, "example.com", 12) == 0,
+         "socks4a sends the name after the user");
+  free (out);
+  twist_proxy_free (p);
+
+  p = twist_proxy_new (TWIST_PROXY_SOCKS4A, "127.0.0.1", 1080, NULL);
+  twist_proxy_set_target (p, "2001:db8::1", 80);
+  check (px_next (p, &len) == NULL
+         && twist_proxy_feed (p, granted, 8, &used, &ready) == TWIST_ERR_PROXY
+         && strstr (twist_proxy_error (p, &st), "IPv6") != NULL,
+         "there is no IPv6 address in socks4");
+  twist_proxy_free (p);
+
+  /* socks5:// with an address in hand is the same request as socks5h://.  */
+  p = twist_proxy_new (TWIST_PROXY_SOCKS5, "127.0.0.1", 1080, NULL);
+  twist_proxy_set_target (p, "10.1.2.3", 22);
+  free (px_next (p, &len));
+  px_feed (p, "\x05\x00", 2, &used, &ready);
+  out = px_next (p, &len);
+  check (out != NULL && len == 10 && out[3] == 1, "socks5, an address");
+  free (out);
+  twist_proxy_free (p);
+
+  p = twist_proxy_new (TWIST_PROXY_SOCKS5, "127.0.0.1", 1080, NULL);
+  twist_proxy_set_target (p, "example.com", 22);
+  free (px_next (p, &len));
+  px_feed (p, "\x05\x00", 2, &used, &ready);
+  check (px_next (p, &len) == NULL, "socks5 does not send a name");
+  twist_proxy_free (p);
 }
 
 static void
@@ -940,8 +1023,12 @@ test_proxy_parse (void)
          && port == 8080, "no scheme: http, 8080");
   check (PARSE ("socks5://s:9050") == TWIST_OK && kind == TWIST_PROXY_SOCKS5
          && port == 9050, "socks5");
-  check (PARSE ("socks5h://s") == TWIST_OK && kind == TWIST_PROXY_SOCKS5
+  check (PARSE ("socks5h://s") == TWIST_OK && kind == TWIST_PROXY_SOCKS5H
          && port == 1080, "socks5h, 1080");
+  check (PARSE ("socks4://s:1081") == TWIST_OK && kind == TWIST_PROXY_SOCKS4
+         && port == 1081, "socks4");
+  check (PARSE ("socks4a://u@s") == TWIST_OK && kind == TWIST_PROXY_SOCKS4A
+         && port == 1080 && strcmp (user, "u") == 0, "socks4a, a user");
   check (PARSE ("http://u:p%40w@h:3128/") == TWIST_OK
          && strcmp (user, "u") == 0 && strcmp (pass, "p@w") == 0
          && strcmp (host, "h") == 0 && port == 3128, "credentials, decoded");
@@ -958,7 +1045,7 @@ test_proxy_parse (void)
          && strcmp (host, "h") == 0 && port == 443, "https, 443");
   check (PARSE ("HTTPS://u:p@h:8443/") == TWIST_OK && kind == TWIST_PROXY_HTTPS
          && port == 8443 && strcmp (user, "u") == 0, "https, any case, with more");
-  check (PARSE ("socks4://h") == TWIST_ERR_UNSUPPORTED, "socks4");
+  check (PARSE ("socks4x://h") == TWIST_ERR_UNSUPPORTED, "another scheme");
   check (PARSE ("ftp://h") == TWIST_ERR_UNSUPPORTED, "another scheme");
   check (PARSE ("http://") != TWIST_OK, "no host");
   check (PARSE ("http://h:99999") != TWIST_OK, "a port that is too big");
@@ -2272,6 +2359,7 @@ main (void)
   test_proxy_http ();
   test_proxy_long_credentials ();
   test_proxy_socks ();
+  test_proxy_socks4 ();
   test_proxy_parse ();
   test_conn_pool ();
   test_runtime_run_once ();

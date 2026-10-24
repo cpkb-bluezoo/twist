@@ -1187,6 +1187,20 @@ request_headers (struct twist_http *h)
         continue;
       list = twist_slist_append (list, scan->data);
     }
+  if (h->proxy != NULL && !h->tunnel
+      && !header_named (transfer->headers, "Proxy-Authorization"))
+    {
+      /* A request to the proxy itself; one that is tunnelled has said it in
+         the CONNECT.  */
+      char *line = twist_proxy_auth_header (h->proxy);
+
+      if (line != NULL)
+        {
+          list = twist_slist_append (list, line);
+          memset (line, 0, strlen (line));
+          free (line);
+        }
+    }
   if (transfer->accept_encoding != NULL
       && !header_named (transfer->headers, "Accept-Encoding"))
     {
@@ -2196,7 +2210,7 @@ prepare_dial (struct twist_http *h)
           h->tun_pass = ppass;
           puser = ppass = NULL;
         }
-      h->tunnel = h->https || kind == TWIST_PROXY_SOCKS5;
+      h->tunnel = h->https || TWIST_PROXY_IS_SOCKS (kind);
       if (kind == TWIST_PROXY_HTTPS)
         h->tunnel = 0;
       if (h->tunnel || kind == TWIST_PROXY_HTTP)
@@ -2216,7 +2230,11 @@ prepare_dial (struct twist_http *h)
             }
         }
       else if (kind == TWIST_PROXY_HTTP)
-        h->proxy = twist_proxy_new (kind, phost, pport, NULL);
+        {
+          h->proxy = twist_proxy_new (kind, phost, pport, NULL);
+          /* Its credentials go in the requests to it.  */
+          twist_proxy_configure (h->proxy, transfer, puser, ppass);
+        }
     }
   free (h->dial_host);
   h->dial_host = twist_strdup (dial != NULL ? dial : "");

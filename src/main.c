@@ -293,7 +293,7 @@ usage (void)
          stdout);
   fputs (_("      --abstract-unix-socket NAME  the same, in the abstract namespace\n"),
          stdout);
-  fputs (_("  -x, --proxy URL         proxy (http://, https:// or socks5://), may hold\n"
+  fputs (_("  -x, --proxy URL         proxy (http://, https://, socks4://, socks4a://, socks5:// or socks5h://), may hold\n"
            "                          user:password@\n"), stdout);
   fputs (_("      --proxy-cacert FILE CA bundle for an https proxy\n"), stdout);
   fputs (_("      --proxy-insecure    do not check the certificate of an https proxy\n"),

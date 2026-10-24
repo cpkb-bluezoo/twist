@@ -63,6 +63,11 @@ Version 0.1 - unreleased
     and no upload has been read, the transfer goes again on a new connection
   * an sftp or scp transfer that fails because the file is missing or may not
     be opened keeps its session for the next URL
+  * socks4:// and socks4a:// proxies; socks5:// and socks4:// look the name up
+    here and give the proxy an address, socks5h:// and socks4a:// give it the
+    name
+  * a plain http:// URL through an HTTP proxy sends the proxy's credentials
+    as Proxy-Authorization
   * gzip and deflate request and response coding, via zlib
   * the progress meter and the bar (-#), and the library's
     TWISTOPT_XFERINFOFUNCTION

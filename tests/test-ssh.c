@@ -4674,7 +4674,8 @@ test_ipv6_known_hosts (void)
 enum
 {
   PX_HTTP_KIND = 0,
-  PX_SOCKS_KIND
+  PX_SOCKS_KIND,
+  PX_SOCKS4_KIND
 };
 
 struct px
@@ -4691,6 +4692,7 @@ struct px
   unsigned connects;		/* Tunnels opened.  */
   char target[320];		/* What the last was asked for.  */
   int atyp;			/* SOCKS: the address type.  */
+  const char *scheme;		/* In the proxy's URL, or NULL for the kind's. */
   unsigned active;		/* Threads at work.  */
 };
 
@@ -4725,6 +4727,9 @@ px_upstream (const char *host, const char *port)
   memset (&hints, 0, sizeof hints);
   hints.ai_socktype = SOCK_STREAM;
   hints.ai_flags = AI_NUMERICHOST | AI_NUMERICSERV;
+  /* The one name a proxy of this kind is given: the loopback.  */
+  if (strcmp (host, "localhost") == 0)
+    host = "127.0.0.1";
   if (getaddrinfo (host, port, &hints, &res) != 0)
     return -1;
   for (a = res; a != NULL && fd < 0; a = a->ai_next)
@@ -5001,6 +5006,64 @@ px_socks (struct px *px, int fd)
   close (up);
 }
 
+/* SOCKS4, and SOCKS4a when the address is 0.0.0.x: the name follows the
+   user id.  The reply is granted (90), or rejected (91) if told to refuse.  */
+static void
+px_socks4 (struct px *px, int fd)
+{
+  uint8_t req[8], reply[8], c;
+  char host[260], port[16], target[300];
+  int up, atyp = 1;
+  size_t n = 0;
+
+  if (px_read_exact (fd, req, 8) != 0 || req[0] != 4 || req[1] != 1)
+    return;
+  /* The user id, to its NUL.  */
+  do
+    {
+      if (px_read_exact (fd, &c, 1) != 0)
+        return;
+    }
+  while (c != 0);
+  snprintf (port, sizeof port, "%u", (req[2] << 8) | req[3]);
+  if (req[4] == 0 && req[5] == 0 && req[6] == 0 && req[7] != 0)
+    {
+      atyp = 3;
+      do
+        {
+          if (px_read_exact (fd, &c, 1) != 0 || n + 1 >= sizeof host)
+            return;
+          host[n++] = (char) c;
+        }
+      while (c != 0);
+    }
+  else
+    inet_ntop (AF_INET, req + 4, host, sizeof host);
+  snprintf (target, sizeof target, "%s:%s", host, port);
+  px_note (px, target, atyp);
+  memset (reply, 0, sizeof reply);
+  if (px->refuse_socks != 0)
+    {
+      reply[1] = (uint8_t) px->refuse_socks;
+      send (fd, reply, 8, MSG_NOSIGNAL);
+      return;
+    }
+  up = px_upstream (host, port);
+  if (up < 0)
+    {
+      reply[1] = 91;
+      send (fd, reply, 8, MSG_NOSIGNAL);
+      return;
+    }
+  reply[1] = 90;
+  pthread_mutex_lock (&px->mu);
+  px->connects++;
+  pthread_mutex_unlock (&px->mu);
+  send (fd, reply, 8, MSG_NOSIGNAL);
+  px_relay (px, fd, up);
+  close (up);
+}
+
 static void *
 px_serve_conn (void *arg)
 {
@@ -5008,6 +5071,8 @@ px_serve_conn (void *arg)
 
   if (c->px->kind == PX_HTTP_KIND)
     px_http (c->px, c->fd);
+  else if (c->px->kind == PX_SOCKS4_KIND)
+    px_socks4 (c->px, c->fd);
   else
     px_socks (c->px, c->fd);
   close (c->fd);
@@ -5133,7 +5198,9 @@ static void
 px_url (const struct px *px, const char *userinfo, char *out, size_t cap)
 {
   snprintf (out, cap, "%s://%s%s127.0.0.1:%d",
-            px->kind == PX_HTTP_KIND ? "http" : "socks5",
+            px->scheme != NULL ? px->scheme
+            : px->kind == PX_HTTP_KIND ? "http"
+            : px->kind == PX_SOCKS4_KIND ? "socks4" : "socks5",
             userinfo != NULL ? userinfo : "", userinfo != NULL ? "@" : "",
             px->port);
 }
@@ -5145,6 +5212,81 @@ proxied_transfer (const char *proxy_url)
 
   twist_transfer_setopt (transfer, TWISTOPT_PROXY, proxy_url);
   return transfer;
+}
+
+/* Where the name is looked up.  socks5:// and socks4:// look the target up
+   here and give the proxy an address; socks5h:// and socks4a:// give it the
+   name.  The server is reached as "localhost", which is the loopback without
+   a nameserver.  */
+static void
+test_proxy_resolution (void)
+{
+  static const struct
+  {
+    int kind;
+    const char *scheme;
+    int atyp;			/* What the proxy is to be given: 1 an address, 3 a name.  */
+    const char *what;
+  } cases[] = {
+    { PX_SOCKS_KIND, "socks5", 1, "socks5:// looks the name up itself" },
+    { PX_SOCKS_KIND, "socks5h", 3, "socks5h:// gives the proxy the name" },
+    { PX_SOCKS4_KIND, "socks4", 1, "socks4:// looks the name up itself" },
+    { PX_SOCKS4_KIND, "socks4a", 3, "socks4a:// gives the proxy the name" }
+  };
+  size_t i;
+
+  for (i = 0; i < sizeof cases / sizeof cases[0]; i++)
+    {
+      struct tcp_server ts;
+      struct px px;
+      struct twist_runtime *runtime;
+      struct twist_transfer *transfer;
+      char url[200], target[320], want[160], proxy[100];
+      int atyp;
+
+      check (ts_start (&ts) == 0 && px_start (&px, cases[i].kind) == 0,
+             "servers");
+      px.scheme = cases[i].scheme;
+      runtime = twist_runtime_new ();
+      px_url (&px, NULL, proxy, sizeof proxy);
+      transfer = proxied_transfer (proxy);
+      snprintf (url, sizeof url, "sftp://alice@localhost:%d/data.bin", ts.port);
+      twist_transfer_setopt (transfer, TWISTOPT_URL, url);
+      got_len = 0;
+      check (check_perform_in (runtime, transfer) == TWIST_OK && got_data (),
+             cases[i].what);
+      px_target (&px, target, sizeof target, &atyp);
+      snprintf (want, sizeof want, cases[i].atyp == 1 ? "127.0.0.1:%d"
+                                                      : "localhost:%d",
+                ts.port);
+      check (strcmp (target, want) == 0 && atyp == cases[i].atyp,
+             "and the proxy was given what it should be");
+      twist_transfer_free (transfer);
+      twist_runtime_free (runtime);
+      px_stop (&px);
+      ts_stop (&ts);
+    }
+}
+
+/* SOCKS4 has no way to say an IPv6 address.  */
+static void
+test_proxy_socks4_v6 (void)
+{
+  struct px px;
+  struct twist_runtime *runtime;
+  struct twist_transfer *transfer;
+  char proxy[100];
+
+  check (px_start (&px, PX_SOCKS4_KIND) == 0, "server");
+  runtime = twist_runtime_new ();
+  px_url (&px, NULL, proxy, sizeof proxy);
+  transfer = proxied_transfer (proxy);
+  twist_transfer_setopt (transfer, TWISTOPT_URL, "sftp://alice@[::1]:22/x");
+  check (check_perform_in (runtime, transfer) == TWIST_ERR_PROXY
+         && px_connects (&px) == 0, "an IPv6 address is refused");
+  twist_transfer_free (transfer);
+  twist_runtime_free (runtime);
+  px_stop (&px);
 }
 
 static void
@@ -5284,10 +5426,10 @@ test_proxy_refusals (void)
 
   /* A kind that is not spoken.  */
   runtime = twist_runtime_new ();
-  transfer = proxied_transfer ("socks4://127.0.0.1:1080");
+  transfer = proxied_transfer ("socks4x://127.0.0.1:1080");
   check (tcp_get (runtime, transfer, &ts, "sftp", "/data.bin") == TWIST_ERR_UNSUPPORTED
          && detail_has (transfer, "not supported"),
-         "a SOCKS4 proxy is refused");
+         "a proxy kind that is not spoken is refused");
   twist_transfer_free (transfer);
   /* An https proxy is spoken to, in TLS; with none there it is a refused
      connection and not the clear text of the SSH banner.  */
@@ -5429,6 +5571,8 @@ test_proxies (void)
 {
   test_proxy_kind (PX_HTTP_KIND);
   test_proxy_kind (PX_SOCKS_KIND);
+  test_proxy_resolution ();
+  test_proxy_socks4_v6 ();
   test_proxy_banner_with_reply (PX_HTTP_KIND);
   test_proxy_banner_with_reply (PX_SOCKS_KIND);
   test_proxy_long_reply ();

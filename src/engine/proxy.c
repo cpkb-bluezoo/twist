@@ -51,6 +51,7 @@ enum
   PX_SOCKS_AUTHWAIT,
   PX_SOCKS_ASK,			/* Send the request.  */
   PX_SOCKS_CONNECT,
+  PX_SOCKS4_WAIT,
   PX_READY,
   PX_FAILED
 };
@@ -73,8 +74,31 @@ struct twist_proxy
   size_t acc_len, acc_cap;
   char error[200];
   int status;
+  int err_code;			/* What the transfer's handler is told.  */
+  /* The target is to be looked up here before the request can be made; the
+     lookup under way, which cannot be cancelled, so it is told if the proxy
+     goes first.  */
+  int want_resolve;
+  struct px_resolve *resolving;
   struct twist_protocol_handler handler;
 };
+
+struct px_resolve
+{
+  struct twist_proxy *p;
+};
+
+static int
+kind_is5 (int kind)
+{
+  return kind == TWIST_PROXY_SOCKS5 || kind == TWIST_PROXY_SOCKS5H;
+}
+
+static int
+kind_is4 (int kind)
+{
+  return kind == TWIST_PROXY_SOCKS4 || kind == TWIST_PROXY_SOCKS4A;
+}
 
 static void
 swap_user (struct twist_proxy *p, int to_inner)
@@ -99,6 +123,7 @@ failed (struct twist_proxy *p, int status, const char *fmt, ...)
   vsnprintf (p->error, sizeof p->error, fmt, ap);
   va_end (ap);
   p->status = status;
+  p->err_code = TWIST_ERR_PROXY;
   p->state = PX_FAILED;
   return TWIST_ERR_PROXY;
 }
@@ -127,19 +152,36 @@ target_address (const struct twist_proxy *p, char *out, size_t cap)
   out[n] = 0;
 }
 
+static void proxy_refused (struct twist_proxy *p, struct twist_endpoint *ep);
+static void proxy_resolve_start (struct twist_proxy *p);
+
+/* What the proxy sends next, if anything; or the lookup of the target that it
+   waits for is begun.  */
 static void
-proxy_connected (struct twist_endpoint *ep)
+proxy_step (struct twist_proxy *p, struct twist_endpoint *ep)
 {
-  struct twist_proxy *p = ep->user_data;
   uint8_t *out = NULL;
   size_t len = 0;
+  int rc = twist_proxy_opening (p, &out, &len);
 
-  p->ep = ep;
-  if (twist_proxy_opening (p, &out, &len) == TWIST_OK && out != NULL)
+  if (rc == TWIST_OK && out != NULL)
     {
       twist_endpoint_send (ep, out, len);
       free (out);
     }
+  else if (rc != TWIST_OK && rc != TWIST_ERR_AGAIN && p->state == PX_FAILED)
+    proxy_refused (p, ep);
+  else if (p->want_resolve && p->resolving == NULL)
+    proxy_resolve_start (p);
+}
+
+static void
+proxy_connected (struct twist_endpoint *ep)
+{
+  struct twist_proxy *p = ep->user_data;
+
+  p->ep = ep;
+  proxy_step (p, ep);
 }
 
 /* The proxy refused: the transfer gets the words, and an error.  */
@@ -154,8 +196,81 @@ proxy_refused (struct twist_proxy *p, struct twist_endpoint *ep)
   if (p->inner != NULL && p->inner->error != NULL)
     {
       swap_user (p, 1);
-      p->inner->error (ep, TWIST_ERR_PROXY);
+      p->inner->error (ep, p->err_code != 0 ? p->err_code : TWIST_ERR_PROXY);
       swap_user (p, 0);
+    }
+}
+
+/* The lookup of the target is over.  The proxy may have gone meanwhile.  */
+static void
+proxy_resolved (void *user, int err, const struct twist_dns_addr *addr)
+{
+  struct px_resolve *r = user;
+  struct twist_proxy *p = r->p;
+
+  free (r);
+  if (p == NULL)
+    return;
+  p->resolving = NULL;
+  p->want_resolve = 0;
+  if (p->state == PX_FAILED || p->ep == NULL)
+    return;
+  if (err != TWIST_OK || addr == NULL)
+    {
+      snprintf (p->error, sizeof p->error, _("Could not resolve host: %s"),
+                p->target_host != NULL ? p->target_host : "");
+      p->status = 0;
+      p->err_code = TWIST_ERR_RESOLVE;
+      p->state = PX_FAILED;
+      proxy_refused (p, p->ep);
+      return;
+    }
+  if (kind_is4 (p->kind) && addr->family != 4)
+    {
+      failed (p, 97, _("SOCKS4 cannot reach an IPv6 address (%s)"),
+              p->target_host != NULL ? p->target_host : "");
+      proxy_refused (p, p->ep);
+      return;
+    }
+  free (p->target_host);
+  p->target_host = twist_strdup (addr->text);
+  proxy_step (p, p->ep);
+}
+
+static void
+proxy_resolve_start (struct twist_proxy *p)
+{
+  struct px_resolve *r;
+
+  if (p->transfer == NULL || p->target_host == NULL)
+    {
+      failed (p, 97, _("the target cannot be looked up"));
+      if (p->ep != NULL)
+        proxy_refused (p, p->ep);
+      return;
+    }
+  r = calloc (1, sizeof *r);
+  if (r == NULL)
+    {
+      failed (p, 97, _("%s"), twist_strerror (TWIST_ERR_NOMEM));
+      if (p->ep != NULL)
+        proxy_refused (p, p->ep);
+      return;
+    }
+  r->p = p;
+  p->resolving = r;
+  if (twist_dns_resolve_transfer (p->transfer, p->target_host, proxy_resolved,
+                                  r) != TWIST_OK)
+    {
+      p->resolving = NULL;
+      free (r);
+      snprintf (p->error, sizeof p->error, _("Could not resolve host: %s"),
+                p->target_host);
+      p->status = 0;
+      p->err_code = TWIST_ERR_RESOLVE;
+      p->state = PX_FAILED;
+      if (p->ep != NULL)
+        proxy_refused (p, p->ep);
     }
 }
 
@@ -163,8 +278,7 @@ static size_t
 proxy_receive (struct twist_endpoint *ep, const uint8_t *data, size_t len)
 {
   struct twist_proxy *p = ep->user_data;
-  uint8_t *out = NULL;
-  size_t out_len = 0, used = 0;
+  size_t used = 0;
   int ready = 0;
 
   p->ep = ep;
@@ -185,11 +299,7 @@ proxy_receive (struct twist_endpoint *ep, const uint8_t *data, size_t len)
       return len;
     }
   /* The credentials, or the request, are next.  */
-  if (twist_proxy_opening (p, &out, &out_len) == TWIST_OK && out != NULL)
-    {
-      twist_endpoint_send (ep, out, out_len);
-      free (out);
-    }
+  proxy_step (p, ep);
   if (ready && p->inner != NULL && p->inner->connected != NULL)
     {
       swap_user (p, 1);
@@ -303,15 +413,29 @@ twist_proxy_parse (const char *s, int *kind, char **host, int *port,
           k = TWIST_PROXY_HTTPS;
           def = 443;
         }
-      else if ((sl == 6 && strncasecmp (s, "socks5", 6) == 0)
-               || (sl == 7 && strncasecmp (s, "socks5h", 7) == 0))
+      else if (sl == 6 && strncasecmp (s, "socks5", 6) == 0)
         {
           k = TWIST_PROXY_SOCKS5;
           def = 1080;
         }
+      else if (sl == 7 && strncasecmp (s, "socks5h", 7) == 0)
+        {
+          k = TWIST_PROXY_SOCKS5H;
+          def = 1080;
+        }
+      else if (sl == 6 && strncasecmp (s, "socks4", 6) == 0)
+        {
+          k = TWIST_PROXY_SOCKS4;
+          def = 1080;
+        }
+      else if (sl == 7 && strncasecmp (s, "socks4a", 7) == 0)
+        {
+          k = TWIST_PROXY_SOCKS4A;
+          def = 1080;
+        }
       else
-        /* socks4, anything else: not spoken here, and not to be taken for
-           something that is.  */
+        /* Anything else: not spoken here, and not to be taken for something
+           that is.  */
         return TWIST_ERR_UNSUPPORTED;
       p = sep + 3;
     }
@@ -427,6 +551,7 @@ twist_proxy_new (int kind, const char *host, int port,
   if (p == NULL)
     return NULL;
   p->kind = kind;
+  p->err_code = TWIST_ERR_PROXY;
   p->port = port;
   p->host = twist_strdup (host != NULL ? host : "");
   p->inner = inner;
@@ -448,6 +573,8 @@ twist_proxy_free (struct twist_proxy *proxy)
 {
   if (proxy == NULL)
     return;
+  if (proxy->resolving != NULL)
+    proxy->resolving->p = NULL;
   free (proxy->host);
   free (proxy->target_host);
   if (proxy->pass != NULL)
@@ -533,6 +660,42 @@ twist_proxy_configure (struct twist_proxy *proxy,
     }
 }
 
+char *
+twist_proxy_auth_header (const struct twist_proxy *proxy)
+{
+  static const char lead[] = "Proxy-Authorization: Basic ";
+  size_t ul, pl;
+  char *cred, *enc = NULL, *line;
+
+  if (proxy == NULL || proxy->user == NULL)
+    return NULL;
+  ul = strlen (proxy->user);
+  pl = proxy->pass != NULL ? strlen (proxy->pass) : 0;
+  cred = twist_xmalloc (ul + pl + 2);
+  if (cred == NULL)
+    return NULL;
+  memcpy (cred, proxy->user, ul);
+  cred[ul] = ':';
+  if (pl > 0)
+    memcpy (cred + ul + 1, proxy->pass, pl);
+  if (twist_b64_encode ((const uint8_t *) cred, ul + 1 + pl, &enc)
+      != TWIST_OK)
+    enc = NULL;
+  memset (cred, 0, ul + pl + 2);
+  free (cred);
+  if (enc == NULL)
+    return NULL;
+  line = twist_xmalloc (sizeof lead + strlen (enc));
+  if (line != NULL)
+    {
+      memcpy (line, lead, sizeof lead - 1);
+      strcpy (line + sizeof lead - 1, enc);
+    }
+  memset (enc, 0, strlen (enc));
+  free (enc);
+  return line;
+}
+
 int
 twist_proxy_opening (struct twist_proxy *proxy, uint8_t **out, size_t *len)
 {
@@ -611,7 +774,7 @@ twist_proxy_opening (struct twist_proxy *proxy, uint8_t **out, size_t *len)
       proxy->state = PX_HTTP;
       return TWIST_OK;
     }
-  if (proxy->kind == TWIST_PROXY_SOCKS5 && proxy->state == PX_START)
+  if (kind_is5 (proxy->kind) && proxy->state == PX_START)
     {
       /* "No authentication", and with credentials, "user and password".  */
       size_t n = proxy->user != NULL ? 4 : 3;
@@ -628,7 +791,7 @@ twist_proxy_opening (struct twist_proxy *proxy, uint8_t **out, size_t *len)
       proxy->state = PX_SOCKS_GREET;
       return TWIST_OK;
     }
-  if (proxy->kind == TWIST_PROXY_SOCKS5 && proxy->state == PX_SOCKS_AUTH)
+  if (kind_is5 (proxy->kind) && proxy->state == PX_SOCKS_AUTH)
     {
       size_t ul = strlen (proxy->user), pl = strlen (proxy->pass);
       uint8_t *buf;
@@ -649,7 +812,56 @@ twist_proxy_opening (struct twist_proxy *proxy, uint8_t **out, size_t *len)
       proxy->state = PX_SOCKS_AUTHWAIT;
       return TWIST_OK;
     }
-  if (proxy->kind == TWIST_PROXY_SOCKS5 && proxy->state == PX_SOCKS_ASK)
+  if (kind_is4 (proxy->kind) && proxy->state == PX_START)
+    {
+      char host[256];
+      struct in_addr a4;
+      const char *user = proxy->user != NULL ? proxy->user : "";
+      size_t ul = strlen (user), hl;
+      uint8_t *buf;
+      int is_ip;
+
+      target_address (proxy, host, sizeof host);
+      hl = strlen (host);
+      is_ip = inet_pton (AF_INET, host, &a4) == 1;
+      if (!is_ip && strchr (host, ':') != NULL)
+        return failed (proxy, 97, _("SOCKS4 cannot reach an IPv6 address (%s)"),
+                       host);
+      if (!is_ip && proxy->kind == TWIST_PROXY_SOCKS4)
+        {
+          /* Looked up here, and the proxy is given the address.  */
+          proxy->want_resolve = 1;
+          return TWIST_ERR_AGAIN;
+        }
+      if (hl > 255 || ul > 255)
+        return failed (proxy, 97, _("the name is too long for SOCKS4"));
+      buf = twist_xmalloc (9 + ul + (is_ip ? 0 : hl + 1));
+      if (buf == NULL)
+        return TWIST_ERR_NOMEM;
+      buf[0] = 4;
+      buf[1] = 1;
+      buf[2] = (uint8_t) (proxy->target_port >> 8);
+      buf[3] = (uint8_t) proxy->target_port;
+      if (is_ip)
+        memcpy (buf + 4, &a4, 4);
+      else
+        {
+          /* SOCKS4a: 0.0.0.x with x not 0, and the name after the user.  */
+          buf[4] = buf[5] = buf[6] = 0;
+          buf[7] = 1;
+        }
+      memcpy (buf + 8, user, ul + 1);
+      *len = 9 + ul;
+      if (!is_ip)
+        {
+          memcpy (buf + 9 + ul, host, hl + 1);
+          *len += hl + 1;
+        }
+      *out = buf;
+      proxy->state = PX_SOCKS4_WAIT;
+      return TWIST_OK;
+    }
+  if (kind_is5 (proxy->kind) && proxy->state == PX_SOCKS_ASK)
     {
       char host[256];
       struct in_addr a4;
@@ -659,6 +871,12 @@ twist_proxy_opening (struct twist_proxy *proxy, uint8_t **out, size_t *len)
 
       target_address (proxy, host, sizeof host);
       hl = strlen (host);
+      if (proxy->kind == TWIST_PROXY_SOCKS5 && inet_pton (AF_INET, host, &a4) != 1
+          && inet_pton (AF_INET6, host, &a6) != 1)
+        {
+          proxy->want_resolve = 1;
+          return TWIST_ERR_AGAIN;
+        }
       if (inet_pton (AF_INET, host, &a4) == 1)
         {
           n = 10;
@@ -794,7 +1012,8 @@ twist_proxy_feed (struct twist_proxy *proxy, const uint8_t *data, size_t len,
       /* The proxy has said all it will until it is spoken to again.  */
       if (proxy->state != PX_HTTP && proxy->state != PX_SOCKS_GREET
           && proxy->state != PX_SOCKS_AUTHWAIT
-          && proxy->state != PX_SOCKS_CONNECT)
+          && proxy->state != PX_SOCKS_CONNECT
+          && proxy->state != PX_SOCKS4_WAIT)
         return failed (proxy, proxy->kind == TWIST_PROXY_HTTP ? 56 : 97,
                        _("the proxy sent more than was asked for"));
       rc = acc_add (proxy, data[i++]);
@@ -813,6 +1032,9 @@ twist_proxy_feed (struct twist_proxy *proxy, const uint8_t *data, size_t len,
         case PX_SOCKS_GREET:
         case PX_SOCKS_AUTHWAIT:
           done = proxy->acc_len >= 2;
+          break;
+        case PX_SOCKS4_WAIT:
+          done = proxy->acc_len >= 8;
           break;
         case PX_SOCKS_CONNECT:
           done = socks_reply_complete (proxy, &bad);
@@ -844,6 +1066,18 @@ twist_proxy_feed (struct twist_proxy *proxy, const uint8_t *data, size_t len,
           *ready = 1;
         break;
       }
+    case PX_SOCKS4_WAIT:
+      if (proxy->acc[0] != 0)
+        return failed (proxy, 97, _("the SOCKS4 reply is not one"));
+      if (proxy->acc[1] != 90)
+        return failed (proxy, 97,
+                       _("Can't complete SOCKS4 connection to %s. (%d)"),
+                       proxy->target_host != NULL ? proxy->target_host : "",
+                       proxy->acc[1]);
+      proxy->state = PX_READY;
+      if (ready != NULL)
+        *ready = 1;
+      break;
     case PX_SOCKS_GREET:
       if (proxy->acc[0] != 5)
         return failed (proxy, 97, _("the SOCKS5 reply is not one"));

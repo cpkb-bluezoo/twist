@@ -1129,11 +1129,18 @@ the environment names and that cannot be read does not matter then.  For
 @option{--hostpubsha256} is still checked.
 @item -x @var{url}
 @itemx --proxy @var{url}
-Proxy.  Use @code{http://}, @code{https://} or @code{socks5://}
-(@code{socks5h://} is the same), with a port (the default is 8080 for HTTP,
-443 for HTTPS and 1080 for SOCKS) and, if the proxy wants them,
-@samp{user:password@@} before the host, percent-encoded.  An IPv6 proxy is in
-brackets.  @code{socks4://} proxies are refused.  For @code{sftp} and
+Proxy.  Use @code{http://}, @code{https://}, @code{socks5://},
+@code{socks5h://}, @code{socks4://} or @code{socks4a://}, with a port (the
+default is 8080 for HTTP, 443 for HTTPS and 1080 for SOCKS) and, if the proxy
+wants them, @samp{user:password@@} before the host, percent-encoded.  An IPv6
+proxy is in brackets.  With @code{socks5h://} and @code{socks4a://} the proxy
+is given the name of the server to look up; with @code{socks5://} and
+@code{socks4://} twist looks it up itself and gives the proxy an address (which
+for SOCKS4, that has no IPv6 address, is an IPv4 one; a name that has none is
+refused).  The user and password of a SOCKS4 proxy are only the user id.  A
+plain @code{http://} URL through an HTTP proxy is sent to the proxy with its
+user and password as @code{Proxy-Authorization: Basic}, unless a header of that
+name is given with @option{-H}.  For @code{sftp} and
 @code{scp} (@pxref{SFTP and SCP}) the proxy opens a tunnel.  @option{-x ""}
 uses no proxy, whatever the environment says.  A proxy is also taken from the
 environment (@pxref{Environment}).
@@ -1563,7 +1570,7 @@ or @option{-H} tried to set it.
 The loop was run again from inside a callback.  Only a program that uses the
 library can cause this.
 @item 97
-A SOCKS5 proxy refused the connection or could not complete it.
+A SOCKS proxy refused the connection or could not complete it.
 @end table
 
 @node Protocols
@@ -2082,8 +2089,7 @@ a proxy may say a good deal before it opens the tunnel; both are handled.
 
 The server is named to the proxy as the URL gives it: a name is sent as a name,
 and an IP address as an address (an IPv6 one in brackets for @code{CONNECT}).
-@code{socks5://} and @code{socks5h://} are the same: twist does not look the
-name up itself before giving it to a SOCKS5 proxy.  The tunnel is kept for the next URL as a connection is, but
+With @code{socks5://} and @code{socks4://} twist looks the name up itself first.  The tunnel is kept for the next URL as a connection is, but
 only for the same proxy with the same credentials: a login made through one
 proxy is not used by a transfer through another, or through none.
 

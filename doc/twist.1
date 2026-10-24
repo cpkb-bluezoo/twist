@@ -677,13 +677,18 @@ is still checked.
 .BI \-x ", " \-\-proxy " url"
 Proxy.  Use
 .IR http:// ,
-.I https://
-or
+.IR https:// ,
 .IR socks5:// ,
+.IR socks5h:// ,
+.I socks4://
+or
+.IR socks4a:// ,
 with
 .I user:password@
 before the host if the proxy wants them.
-socks4 proxies are refused.
+With socks5h and socks4a the proxy is given the name to look up; with socks5 and socks4
+twist looks it up itself and gives the proxy an address (SOCKS4 has only IPv4 ones).
+A plain http URL through an http proxy is sent with the proxy's credentials as Proxy-Authorization.
 .B \-x ""
 uses no proxy, whatever the environment says.
 A proxy is also taken from the environment (see
@@ -1462,7 +1467,7 @@ The loop was run again from inside a callback.  Only a program that uses the
 library can cause this.
 .TP
 .B 97
-A SOCKS5 proxy refused the connection or could not complete it.
+A SOCKS proxy refused the connection or could not complete it.
 .SH AUTHOR
 Chris Burdess.
 .SH SEE ALSO

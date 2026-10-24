@@ -3,18 +3,10 @@ Twist TODO List
 
 SCP/SFTP (src/ssh, over foxtrot)
 
-  - A transfer that fails after the file is open (a read or write that the
-    server refuses, a directory listing that stops) still closes its
-    connection, as the handle on the server would have to be closed first.
-    Only a status to the open, or to a request before it, keeps the session.
   - There is no way to forbid reuse, in the library or in the tool.
   - Ask foxtrot for the number of requests outstanding in an SFTP client.
     gf_sftp_client_pending is the bytes queued, so twist counts its own (sftp.c
     sent () and inflight).
-  - Proxies: socks5:// is treated as socks5h:// (the name goes to the proxy to
-    look up; socks5:// should look it up itself).  socks4:// proxies are
-    refused.  Credentials are sent for tunnels only: a plain http:// URL
-    through an HTTP proxy gets no Proxy-Authorization.
   - statvfs, and the other commands the sftp tool has, as -Q commands;
     --create-file-mode and the directory mode.
   - Quote commands for scp URLs.
