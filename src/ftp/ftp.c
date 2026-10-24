@@ -75,6 +75,7 @@ struct twist_ftp
   struct twist_ftp_parser *parser;
   struct twist_connection *ctrl;
   struct twist_connection *data;
+  struct twist_race *race;      /* The control connection, being made.  */
   struct twist_proxy *proxy;
   /* The data connection's own tunnel through the same proxy.  */
   struct twist_proxy *data_proxy;
@@ -932,6 +933,9 @@ ftp_connected (struct twist_endpoint *ep)
   int rc;
 
   f->ep = ep;
+  /* The data connection goes where the control connection went.  */
+  if (f->race != NULL)
+    twist_race_peer (f->race, &f->peer);
   if (!f->implicit_tls)
     return;
   rc = twist_connection_start_tls (ep->conn, f->transfer->url->host,
@@ -1186,11 +1190,22 @@ twist_ftp_data_host (const struct twist_ftp *f)
   return f != NULL ? f->data_host : "";
 }
 
+/* The name could not be had: nothing was tried.  */
+static void
+ftp_race_failed (void *user, int err)
+{
+  ftp_complete (user, err);
+}
+
+/* The control connection, made and given its handler, and then the name looked
+   up and its addresses raced: the connection can be up before the lookup is
+   over.  */
 static void
 dial_control (struct twist_ftp *f)
 {
   void *user = f;
   const struct twist_protocol_handler *handler = &ftp_ctrl_handler;
+  struct twist_connection *c;
   int rc;
 
   if (f->proxy != NULL)
@@ -1199,25 +1214,19 @@ dial_control (struct twist_ftp *f)
       handler = twist_proxy_handler (f->proxy);
       twist_proxy_set_user (f->proxy, f);
     }
-  rc = dial_tcp (f, &f->ctrl, handler, user, &f->peer, f->dial_port);
-  if (rc != TWIST_OK)
-    ftp_complete (f, rc);
-}
-
-static void
-on_resolved (void *user, int err, const struct twist_dns_addr *addr)
-{
-  struct twist_ftp *f = user;
-
-  if (f->finished)
-    return;
-  if (err != TWIST_OK || addr == NULL)
+  c = twist_connection_new (f->transfer->loop);
+  if (c == NULL)
     {
-      ftp_complete (f, err != TWIST_OK ? err : TWIST_ERR_RESOLVE);
+      ftp_complete (f, TWIST_ERR_NOMEM);
       return;
     }
-  f->peer = *addr;
-  dial_control (f);
+  f->ctrl = c;
+  twist_connection_endpoint (c)->user_data = user;
+  twist_connection_set_handler (c, handler);
+  rc = twist_race_dial (f->transfer, c, f->dial_host, f->dial_port,
+                        ftp_race_failed, f, &f->race);
+  if (rc != TWIST_OK)
+    ftp_complete (f, rc);
 }
 
 static void
@@ -1287,13 +1296,7 @@ ftp_begin (struct twist_ftp *f)
                          on_timeout, f, &f->timer);
   /* From the lookup to the login, in the time allowed for connecting.  */
   twist_phase_begin (&f->phase, transfer, ftp_phase_fail, f);
-  {
-    int rc = twist_dns_resolve_transfer (transfer, f->dial_host, on_resolved,
-                                         f);
-
-    if (rc != TWIST_OK)
-      ftp_complete (f, rc);
-  }
+  dial_control (f);
 }
 
 void
@@ -1306,6 +1309,7 @@ twist_ftp_free (void *p)
   if (f->timer != NULL)
     twist_timer_cancel (f->timer);
   twist_phase_end (&f->phase);
+  twist_race_free (f->race);
   twist_connection_free (f->ctrl);
   twist_connection_free (f->data);
   twist_proxy_free (f->proxy);

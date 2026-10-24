@@ -100,6 +100,7 @@ struct dns_query
   struct twist_timer *hold;
   struct twist_timer *linger;
   int use_sink;
+  int cache_lists;              /* Keep the lists when it is done.  */
   struct twist_dns_sink sink;
   struct twist_dns_service https;
   int saw_tc;
@@ -167,6 +168,7 @@ static void dns_send (struct twist_endpoint *ep);
 static int have_addr (const struct dns_query *q);
 static void progress (struct dns_query *q, struct twist_endpoint *ep);
 static void give_addresses (struct dns_query *q);
+static struct dns_sub *sub_of (struct dns_query *q, int qtype);
 
 /* The first address a caller that takes one is given: an IPv4 one, so that a
    path that cannot be had does not stop what always worked, or else an IPv6
@@ -210,6 +212,20 @@ dns_finish (struct dns_query *q, int err)
       /* Whatever was not given, and then what was not answered, and last.  */
       if (err == TWIST_OK)
         give_addresses (q);
+      /* What was answered is kept, so that the next lookup does not ask.  A
+         type that was not answered is not: that is not "none".  */
+      if (q->cache_lists && q->cache != NULL && q->loop != NULL)
+        {
+          uint32_t ttl = q->ttl_sec == 0xffffffffu ? 0 : q->ttl_sec;
+          struct dns_sub *a4 = sub_of (q, 1), *a6 = sub_of (q, 28);
+
+          if (a6 != NULL && a6->done)
+            twist_dns_cache_keep (q->cache, q->host, 28, q->got[1],
+                                  q->ngot[1], ttl, twist_loop_now (q->loop));
+          if (a4 != NULL && a4->done)
+            twist_dns_cache_keep (q->cache, q->host, 1, q->got[0],
+                                  q->ngot[0], ttl, twist_loop_now (q->loop));
+        }
       for (i = 0; i < q->nsub; i++)
         if (!q->sub[i].done && q->sink.type_error != NULL)
           q->sink.type_error (q->sink.user, q->sub[i].qtype,
@@ -1879,6 +1895,25 @@ resolve (struct twist_loop *loop, const char *host, const int *order,
   /* A name that this machine knows, from its hosts file, or that is its own
      (localhost): answered here, at once, before the cache and before any
      network, as an address is.  */
+  if (sink != NULL)
+    {
+      /* The sink is given each family the machine knows the name by.  */
+      struct twist_dns_addr both[2];
+      int nb = twist_hosts_lookup_all (NULL, host, both);
+      int i;
+
+      if (nb == 0)
+        nb = twist_dns_local_addrs (host, both);
+      if (nb > 0)
+        {
+          for (i = 0; i < nb; i++)
+            if (sink->address != NULL)
+              sink->address (sink->user, &both[i]);
+          if (sink->complete != NULL)
+            sink->complete (sink->user, TWIST_OK);
+          return TWIST_OK;
+        }
+    }
   if (twist_hosts_lookup (NULL, host, &lit.addr) == 1
       || twist_dns_local_name (host, &lit.addr) == 1)
     {
@@ -1891,6 +1926,39 @@ resolve (struct twist_loop *loop, const char *host, const int *order,
     }
   if (loop == NULL)
     return TWIST_ERR_INVAL;
+  if (sink != NULL && !want_https && cache != NULL)
+    {
+      /* Both lists are kept (a list may be kept as empty): then there is
+         nothing to ask.  */
+      struct twist_dns_addr l6[MAX_GOT], l4[MAX_GOT], all[2 * MAX_GOT];
+      uint64_t now = twist_loop_now (loop);
+      int n6 = twist_dns_cache_list (cache, host, 28, l6, MAX_GOT, now);
+      int n4 = twist_dns_cache_list (cache, host, 1, l4, MAX_GOT, now);
+
+      if (n6 >= 0 && n4 >= 0)
+        {
+          size_t n = 0, i;
+
+          for (i = 0; i < (size_t) n6; i++)
+            all[n++] = l6[i];
+          for (i = 0; i < (size_t) n4; i++)
+            all[n++] = l4[i];
+          twist_dns_sort (all, n);
+          for (i = 0; i < n && sink->address != NULL; i++)
+            sink->address (sink->user, &all[i]);
+          if (n == 0)
+            {
+              if (sink->type_error != NULL)
+                {
+                  sink->type_error (sink->user, 28, TWIST_ERR_RESOLVE);
+                  sink->type_error (sink->user, 1, TWIST_ERR_RESOLVE);
+                }
+            }
+          if (sink->complete != NULL)
+            sink->complete (sink->user, n > 0 ? TWIST_OK : TWIST_ERR_RESOLVE);
+          return TWIST_OK;
+        }
+    }
   if (!want_https && cache != NULL && cb != NULL && sink == NULL)
     {
       struct twist_dns_addr hit;
@@ -1927,7 +1995,8 @@ resolve (struct twist_loop *loop, const char *host, const int *order,
   q->loop = loop;
   q->ttl_sec = 0xffffffffu;
   q->cache = !want_https ? cache : NULL;
-  q->cache_lead = q->cache != NULL;
+  q->cache_lead = q->cache != NULL && sink == NULL;
+  q->cache_lists = q->cache != NULL && sink != NULL;
   q->host = twist_strdup (host);
   q->cb = cb;
   q->svc_cb = svc_cb;
@@ -2079,12 +2148,13 @@ twist_dns_resolve_service_transfer (struct twist_transfer *transfer,
 int
 twist_dns_resolve_sink (struct twist_loop *loop, const char *host,
                         const int *order, size_t norder, int want_https,
+                        struct twist_dns_cache *cache,
                         const struct twist_dns_sink *sink)
 {
   if (sink == NULL)
     return TWIST_ERR_INVAL;
   return resolve (loop, host, order, norder, want_https, NULL, NULL, NULL, 1, NULL,
-                  NULL, NULL, NULL, 0, NULL, NULL, NULL, sink, NULL);
+                  NULL, NULL, NULL, 0, cache, NULL, NULL, sink, NULL);
 }
 
 int
@@ -2103,5 +2173,7 @@ twist_dns_resolve_sink_transfer (struct twist_transfer *transfer,
                   transfer->doh_url, transfer->doq_url, transfer->dot_url,
                   transfer->doh_verifypeer, transfer->cainfo, transfer->capath,
                   transfer->sslcert, transfer->sslkey,
-                  transfer_timeout (transfer), NULL, NULL, NULL, sink, NULL);
+                  transfer_timeout (transfer),
+                  want_https ? NULL : transfer_cache (transfer), NULL, NULL,
+                  sink, NULL);
 }

@@ -54,6 +54,8 @@ struct twist_session_user
   struct twist_http *h;
 };
 
+#define HTTP_ADDRS 8
+
 struct twist_http
 {
   struct twist_transfer *transfer;
@@ -136,6 +138,13 @@ struct twist_http
   int peer_minor;
   int req_http10;
   struct twist_dns_addr peer;
+  /* What the name gave, in the order to try it (RFC 8305), when it gave more
+     than one: the connection is raced over them.  PEER is the one that
+     HTTP/3 and the proxy paths use.  */
+  struct twist_dns_addr addrs[HTTP_ADDRS];
+  int naddrs;
+  struct twist_dns_service svc;
+  struct twist_race *race;
   char *hdr_line;
   size_t hdr_cap;
   struct twist_coding *coding;
@@ -2767,6 +2776,23 @@ dial (struct twist_http *h, const struct twist_dns_addr *addr)
         http_fail (h, rc);
       return;
     }
+  if (h->naddrs > 1 && addr == &h->peer)
+    {
+      int i;
+
+      twist_race_free (h->race);
+      h->race = twist_race_new (h->transfer, h->conn, h->dial_port);
+      if (h->race == NULL)
+        {
+          http_fail (h, TWIST_ERR_NOMEM);
+          return;
+        }
+      for (i = 0; i < h->naddrs && h->race != NULL; i++)
+        twist_race_add (h->race, &h->addrs[i]);
+      if (h->race != NULL)
+        twist_race_end (h->race);
+      return;
+    }
   if (addr->family == 6)
     {
       memset (&sin6, 0, sizeof sin6);
@@ -2806,6 +2832,7 @@ on_proxy_resolved (void *user, int err, const struct twist_dns_addr *addr)
     }
   h->peer = *addr;
   h->have_peer = 1;
+  h->naddrs = 0;
   if (h->masque)
     start_quic (h, &h->peer);
   else
@@ -2980,6 +3007,61 @@ on_resolved (void *user, int err, const struct twist_dns_service *svc)
   start_attempt (h);
 }
 
+/* The name is looked up with the sink: the addresses are kept in the order
+   they come in and the HTTPS record is kept, and when all is in the
+   transfer goes on as it did with one answer.  HTTP/3 and the proxy paths want
+   one address, IPv4 first as they always did; TCP races the rest.  */
+static void
+gather_address (void *user, const struct twist_dns_addr *addr)
+{
+  struct twist_http *h = user;
+
+  if (h->naddrs < HTTP_ADDRS)
+    h->addrs[h->naddrs++] = *addr;
+}
+
+static void
+gather_https (void *user, const struct twist_dns_service *svc)
+{
+  struct twist_http *h = user;
+
+  h->svc = *svc;
+  h->svc.have_https = 1;
+}
+
+static void
+gather_type_error (void *user, int qtype, int err)
+{
+  (void) user;
+  (void) qtype;
+  (void) err;
+}
+
+static void
+gather_complete (void *user, int err)
+{
+  struct twist_http *h = user;
+  struct twist_dns_service svc;
+  int i, pick = 0;
+
+  if (h->finished)
+    return;
+  if (err != TWIST_OK || h->naddrs == 0)
+    {
+      http_complete (h, err != TWIST_OK ? err : TWIST_ERR_RESOLVE);
+      return;
+    }
+  for (i = 0; i < h->naddrs; i++)
+    if (h->addrs[i].family == 4)
+      {
+        pick = i;
+        break;
+      }
+  svc = h->svc;
+  svc.addr = h->addrs[pick];
+  on_resolved (h, TWIST_OK, &svc);
+}
+
 static void
 http_begin (struct twist_http *h)
 {
@@ -3068,9 +3150,18 @@ http_begin (struct twist_http *h)
       return;
     }
   {
-    int rc = twist_dns_resolve_service_transfer (transfer, url->host,
-                                                 on_resolved, h);
+    struct twist_dns_sink sink;
+    int rc;
 
+    memset (&sink, 0, sizeof sink);
+    sink.user = h;
+    sink.address = gather_address;
+    sink.https = gather_https;
+    sink.type_error = gather_type_error;
+    sink.complete = gather_complete;
+    memset (&h->svc, 0, sizeof h->svc);
+    h->naddrs = 0;
+    rc = twist_dns_resolve_sink_transfer (transfer, url->host, 1, &sink);
     if (rc != TWIST_OK)
       http_complete (h, rc);
   }
@@ -3102,6 +3193,8 @@ http_free (void *p)
     twist_loop_cmd_free (h->waiter.node);
   h->waiter.node = NULL;
   http_leave_session (h);
+  twist_race_free (h->race);
+  h->race = NULL;
   twist_connection_free (h->conn);
   http_slot_release (h);
   http_settle (h, TWIST_SETTLE_UNKNOWN);

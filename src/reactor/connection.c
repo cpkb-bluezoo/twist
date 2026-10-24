@@ -146,6 +146,30 @@ refresh_interest (struct twist_connection *c)
     }
 }
 
+int
+twist_connection_adopt (struct twist_connection *dst,
+                        struct twist_connection *src)
+{
+  int fd;
+
+  if (dst == NULL || src == NULL || src->fd < 0 || dst->fd >= 0
+      || dst->loop != src->loop)
+    return TWIST_ERR_INVAL;
+  fd = src->fd;
+  twist_loop_unwatch_fd (src->loop, fd);
+  src->fd = -1;
+  src->interest = 0;
+  src->connecting = 0;
+  if (src->connect_timer != NULL)
+    {
+      twist_timer_cancel (src->connect_timer);
+      src->connect_timer = NULL;
+    }
+  twist_connection_set_fd (dst, fd);
+  twist_connection_connected (dst);
+  return TWIST_OK;
+}
+
 void
 twist_connection_hold_read (struct twist_connection *c, int hold)
 {

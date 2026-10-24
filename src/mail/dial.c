@@ -109,36 +109,39 @@ arm_timeout (struct twist_mail_link *link)
                          on_timeout, link, &link->timer);
 }
 
+/* Through an https proxy: the tunnel makes its own connection to the proxy, to
+   the one address that was found.  */
 static int
-dial_tcp (struct twist_mail_link *link, const struct twist_dns_addr *addr)
+dial_tunnel (struct twist_mail_link *link, const struct twist_dns_addr *addr)
 {
   struct twist_connection *c;
-  struct sockaddr_in sin;
-  struct sockaddr_in6 sin6;
-  const void *sa;
-  size_t salen;
+  struct twist_tunnel_spec spec;
+  int rc;
+
+  memset (&spec, 0, sizeof spec);
+  spec.proxy_host = link->dial_host;
+  spec.proxy_port = link->dial_port;
+  spec.user = link->tun_user;
+  spec.pass = link->tun_pass;
+  spec.host = link->transfer->url->host;
+  spec.port = link->transfer->url->port > 0
+    ? link->transfer->url->port
+    : twist_url_default_port (link->transfer->url->scheme);
+  rc = twist_tunnel_connect (link->transfer, &spec, addr, link->handler,
+                             link->user, &c);
+  link->conn = c;
+  return rc;
+}
+
+/* The connection that is to be made, not yet connected: its handler is the
+   protocol's, or the proxy's, which speaks first.  */
+static int
+make_connection (struct twist_mail_link *link)
+{
+  struct twist_connection *c;
   void *user = link->user;
   const struct twist_protocol_handler *handler = link->handler;
 
-  if (link->tls_tunnel)
-    {
-      struct twist_tunnel_spec spec;
-      int rc;
-
-      memset (&spec, 0, sizeof spec);
-      spec.proxy_host = link->dial_host;
-      spec.proxy_port = link->dial_port;
-      spec.user = link->tun_user;
-      spec.pass = link->tun_pass;
-      spec.host = link->transfer->url->host;
-      spec.port = link->transfer->url->port > 0
-        ? link->transfer->url->port
-        : twist_url_default_port (link->transfer->url->scheme);
-      rc = twist_tunnel_connect (link->transfer, &spec, addr, handler, user,
-                                 &c);
-      link->conn = c;
-      return rc;
-    }
   c = twist_connection_new (link->transfer->loop);
   if (c == NULL)
     return TWIST_ERR_NOMEM;
@@ -151,27 +154,17 @@ dial_tcp (struct twist_mail_link *link, const struct twist_dns_addr *addr)
     }
   twist_connection_endpoint (c)->user_data = user;
   twist_connection_set_handler (c, handler);
-  if (addr->family == 6)
-    {
-      memset (&sin6, 0, sizeof sin6);
-      sin6.sin6_family = AF_INET6;
-      memcpy (&sin6.sin6_addr, addr->addr, 16);
-      sin6.sin6_scope_id = addr->scope_id;
-      sin6.sin6_port = htons ((uint16_t) link->dial_port);
-      sa = &sin6;
-      salen = sizeof sin6;
-    }
-  else
-    {
-      memset (&sin, 0, sizeof sin);
-      sin.sin_family = AF_INET;
-      memcpy (&sin.sin_addr, addr->addr, 4);
-      sin.sin_port = htons ((uint16_t) link->dial_port);
-      sa = &sin;
-      salen = sizeof sin;
-    }
-  return twist_connection_connect
-    (c, sa, salen, (uint64_t) link->transfer->connect_timeout_ms);
+  return TWIST_OK;
+}
+
+/* The name could not be had: no address, so nothing was tried.  */
+static void
+race_failed (void *user, int err)
+{
+  struct twist_mail_link *link = user;
+
+  if (link->fail != NULL)
+    link->fail (link->user, err);
 }
 
 static void
@@ -186,7 +179,7 @@ on_resolved (void *user, int err, const struct twist_dns_addr *addr)
         link->fail (link->user, err != TWIST_OK ? err : TWIST_ERR_RESOLVE);
       return;
     }
-  rc = dial_tcp (link, addr);
+  rc = dial_tunnel (link, addr);
   if (rc != TWIST_OK && link->fail != NULL)
     link->fail (link->user, rc);
 }
@@ -268,14 +261,26 @@ twist_mail_link_open (struct twist_mail_link *link,
   if (link->dial_host == NULL)
     return TWIST_ERR_NOMEM;
   arm_timeout (link);
-  {
-    int rc = twist_dns_resolve_transfer (transfer, link->dial_host,
-                                         on_resolved, link);
+  if (link->tls_tunnel)
+    {
+      int rc = twist_dns_resolve_transfer (transfer, link->dial_host,
+                                           on_resolved, link);
 
-    if (rc != TWIST_OK)
-      return rc;
+      if (rc != TWIST_OK)
+        return rc;
+      return TWIST_OK;
+    }
+  /* The connection is made, and its handler set, before the name is looked up:
+     the first address that comes is tried at once, and the connection can be
+     up before the lookup is over.  */
+  {
+    int rc = make_connection (link);
+
+    if (rc == TWIST_OK)
+      rc = twist_race_dial (transfer, link->conn, link->dial_host,
+                            link->dial_port, race_failed, link, &link->race);
+    return rc;
   }
-  return TWIST_OK;
 }
 
 struct twist_connection *
@@ -289,6 +294,8 @@ twist_mail_link_detach (struct twist_mail_link *link)
       link->timer = NULL;
     }
   twist_mail_link_phase_end (link);
+  twist_race_free (link->race);
+  link->race = NULL;
   link->conn = NULL;
   return c;
 }
@@ -313,6 +320,8 @@ twist_mail_link_close (struct twist_mail_link *link)
   if (link->timer != NULL)
     twist_timer_cancel (link->timer);
   twist_mail_link_phase_end (link);
+  twist_race_free (link->race);
+  link->race = NULL;
   twist_connection_free (link->conn);
   twist_proxy_free (link->proxy);
   free (link->dial_host);

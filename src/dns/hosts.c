@@ -318,6 +318,32 @@ twist_hosts_lookup (const char *path, const char *host,
   return found;
 }
 
+int
+twist_hosts_lookup_all (const char *path, const char *host,
+                        struct twist_dns_addr out[2])
+{
+  char name[NAME_MAX_LEN + 2];
+  const struct host_rec *r;
+  int n = 0;
+
+  if (host == NULL || out == NULL || !normalise (host, name, sizeof name))
+    return 0;
+  pthread_mutex_lock (&hosts_lock);
+  if (path == NULL)
+    path = hosts_override != NULL ? hosts_override : HOSTS_DEFAULT;
+  table_refresh (path);
+  r = hosts_tab != NULL ? table_find (hosts_tab, name) : NULL;
+  if (r != NULL)
+    {
+      if (r->has6)
+        out[n++] = r->a6;
+      if (r->has4)
+        out[n++] = r->a4;
+    }
+  pthread_mutex_unlock (&hosts_lock);
+  return n;
+}
+
 void
 twist_dns_set_hosts_file (const char *path)
 {
@@ -358,4 +384,16 @@ twist_dns_local_name (const char *host, struct twist_dns_addr *out)
       snprintf (out->text, sizeof out->text, "127.0.0.1");
     }
   return 1;
+}
+
+int
+twist_dns_local_addrs (const char *host, struct twist_dns_addr out[2])
+{
+  if (!twist_dns_local_name (host, &out[1]))
+    return 0;
+  memset (&out[0], 0, sizeof out[0]);
+  out[0].family = 6;
+  out[0].addr[15] = 1;
+  snprintf (out[0].text, sizeof out[0].text, "::1");
+  return 2;
 }

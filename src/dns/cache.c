@@ -285,6 +285,86 @@ cache_get (struct twist_dns_cache *cache, const char *name,
   return hit;
 }
 
+/* How long it is kept that a name has no address of a type.  */
+#define DNS_NEGATIVE_TTL 10u
+
+int
+twist_dns_cache_list (struct twist_dns_cache *cache, const char *name,
+                      int qtype, struct twist_dns_addr *out, int max,
+                      uint64_t now_ms)
+{
+  struct dns_ent *e;
+  int n = -1;
+
+  if (cache == NULL || name == NULL)
+    return -1;
+  pthread_mutex_lock (&cache->mu);
+  e = find_ent (cache, name, qtype);
+  if (e != NULL && e->expiry <= now_ms)
+    {
+      drop_ent (cache, e);
+      e = NULL;
+    }
+  if (e != NULL)
+    {
+      n = e->naddr < max ? e->naddr : max;
+      if (out != NULL && n > 0)
+        memcpy (out, e->addr, (size_t) n * sizeof *out);
+    }
+  pthread_mutex_unlock (&cache->mu);
+  return n;
+}
+
+void
+twist_dns_cache_keep (struct twist_dns_cache *cache, const char *name,
+                      int qtype, const struct twist_dns_addr *addrs, int n,
+                      uint32_t ttl_sec, uint64_t now_ms)
+{
+  struct dns_ent *e;
+  char *copy;
+
+  if (cache == NULL || name == NULL)
+    return;
+  if (n <= 0)
+    {
+      /* A name with none of a type: kept for a short while, so that the
+         next lookup does not ask for what is not there.  */
+      n = 0;
+      ttl_sec = DNS_NEGATIVE_TTL;
+    }
+  else if (ttl_sec == 0)
+    return;
+  if (ttl_sec > DNS_TTL_MAX)
+    ttl_sec = DNS_TTL_MAX;
+  if (n > DNS_ADDRS)
+    n = DNS_ADDRS;
+  pthread_mutex_lock (&cache->mu);
+  e = find_ent (cache, name, qtype);
+  if (e == NULL)
+    {
+      evict_soonest (cache);
+      copy = twist_strdup (name);
+      e = calloc (1, sizeof *e);
+      if (copy == NULL || e == NULL)
+        {
+          free (copy);
+          free (e);
+          pthread_mutex_unlock (&cache->mu);
+          return;
+        }
+      e->name = copy;
+      e->type = qtype;
+      e->next = cache->head;
+      cache->head = e;
+      cache->n++;
+    }
+  if (n > 0)
+    memcpy (e->addr, addrs, (size_t) n * sizeof *addrs);
+  e->naddr = n;
+  e->expiry = now_ms + (uint64_t) ttl_sec * 1000u;
+  pthread_mutex_unlock (&cache->mu);
+}
+
 static struct dns_flight *
 find_flight (struct twist_dns_cache *c, struct twist_loop *loop,
              const char *name, int type)

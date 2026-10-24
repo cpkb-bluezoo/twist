@@ -866,6 +866,12 @@ int twist_hosts_lookup (const char *path, const char *host,
 /* 1 and the address in OUT if HOST is one (an IPv4 address, or an IPv6 one
    with or without a zone that is an interface of this machine), else 0.  */
 int twist_dns_literal (const char *host, struct twist_dns_addr *out);
+/* As twist_hosts_lookup, but both of the name's addresses if it has them: the
+   IPv6 one first.  Returns how many (0 to 2).  */
+int twist_hosts_lookup_all (const char *path, const char *host,
+                            struct twist_dns_addr out[2]);
+/* As twist_dns_local_name, but ::1 and then 127.0.0.1.  */
+int twist_dns_local_addrs (const char *host, struct twist_dns_addr out[2]);
 void twist_dns_set_hosts_file (const char *path);
 /* "localhost" and any name under it are the loopback (RFC 6761), and are not
    looked up anywhere else.  Returns 1 and fills OUT, or 0.  */
@@ -910,16 +916,63 @@ struct twist_dns_sink
   void (*complete) (void *user, int err);
 };
 
+struct twist_dns_cache;
+
 /* Ask for HOST.  TWIST_OK means the callbacks will be called (some before this
    returns: an address, the hosts file, localhost).  Anything else, none will.
    SINK is copied.  The transfer's variant uses its DNS options, its cache and
    its timeout.  */
 int twist_dns_resolve_sink (struct twist_loop *loop, const char *host,
                             const int *order, size_t norder, int want_https,
+                            struct twist_dns_cache *cache,
                             const struct twist_dns_sink *sink);
 int twist_dns_resolve_sink_transfer (struct twist_transfer *transfer,
                                      const char *host, int want_https,
                                      const struct twist_dns_sink *sink);
+/* A connection made by racing the addresses of a name (RFC 8305, section 5).
+   The first address is tried at once; the next after the connection attempt
+   delay (250 ms), or at once if the attempt before it fails, without giving up
+   the earlier ones; the first to connect is the connection, and the others are
+   closed.  Addresses can be added as they are found (a late AAAA answer), in
+   the order they are to be tried in.  When all are tried and none connected the
+   TARGET connection fails as a connection that could not be made does, with
+   TWIST_ERR_CONNECT, or with TWIST_ERR_TIMEOUT when the transfer's connect
+   timeout passes first.  The winner's socket is given to TARGET, whose
+   handler is then told it is connected.
+
+   twist_race_free must be called before TARGET is freed, and may be called
+   from any callback: what it frees is freed later, from the loop.  */
+struct twist_race;
+typedef void (*twist_race_fail_fn) (void *user, int err);
+struct twist_race *twist_race_new (struct twist_transfer *transfer,
+                                   struct twist_connection *target, int port);
+int twist_race_add (struct twist_race *race, const struct twist_dns_addr *addr);
+/* No more addresses are coming.  */
+void twist_race_end (struct twist_race *race);
+/* Resolve HOST (the sink, with its resolution delay) and race what it gives.
+   *SLOT is the race, set before anything can happen, since the target can be
+   connected, and its handler run, before this returns.  If the name gives
+   nothing, FAIL is called with why, later, and TARGET is not touched.  The
+   return is TWIST_OK, or why the lookup could not be begun (no race, then).  */
+int twist_race_dial (struct twist_transfer *transfer,
+                     struct twist_connection *target, const char *host,
+                     int port, twist_race_fail_fn fail, void *user,
+                     struct twist_race **slot);
+void twist_race_free (struct twist_race *race);
+/* The address the connection was made to: 1 and OUT filled once TARGET has
+   connected (and its handler can ask), else 0.  */
+int twist_race_peer (struct twist_race *race, struct twist_dns_addr *out);
+/* For tests: the connection attempt delay in ms (0 restores 250), and a
+   predicate that says which addresses hang: an attempt to one is made, takes
+   its place, and never completes, as a connect to a place that drops the
+   packets does (NULL restores real ones).  Loopback cannot be made to hang.  */
+void twist_race_set_delay (long ms);
+void twist_race_set_stall (int (*stall) (const struct twist_dns_addr *addr));
+/* Give SRC's socket, which has connected, to DST, which is told it is
+   connected.  SRC is left with none.  */
+int twist_connection_adopt (struct twist_connection *dst,
+                            struct twist_connection *src);
+
 /* IPv6 first, then IPv4 and IPv6 taking turns, each family in the order it
    was given: the order addresses are tried in.  Returns N.  */
 size_t twist_dns_sort (struct twist_dns_addr *addrs, size_t n);
@@ -1410,6 +1463,9 @@ struct twist_mail_link
   /* The time to be connected in, from the start: see
      twist_mail_link_phase_begin.  */
   struct twist_phase phase;
+  /* The race for the connection, while there is one.  Freed before the
+     connection.  */
+  struct twist_race *race;
   char *dial_host;
   int dial_port;
   int tls_tunnel;		/* Through an https proxy: tunnel.c.  */
@@ -1578,6 +1634,15 @@ struct twist_altsvc *twist_transfer_altsvc (struct twist_transfer *transfer);
 struct twist_dns_cache;
 
 struct twist_dns_cache *twist_dns_cache_new (void);
+/* The addresses cached for NAME of QTYPE (1 or 28), at most MAX: how many, 0 if
+   it was kept that there are none, or -1 if nothing is kept.  */
+int twist_dns_cache_list (struct twist_dns_cache *cache, const char *name,
+                          int qtype, struct twist_dns_addr *out, int max,
+                          uint64_t now_ms);
+/* Keep N addresses (0: that there are none) for NAME of QTYPE.  */
+void twist_dns_cache_keep (struct twist_dns_cache *cache, const char *name,
+                           int qtype, const struct twist_dns_addr *addrs,
+                           int n, uint32_t ttl_sec, uint64_t now_ms);
 void twist_dns_cache_free (struct twist_dns_cache *cache);
 int twist_dns_cache_put_msg (struct twist_dns_cache *cache, const char *name,
                              int qtype, const uint8_t *msg, size_t len,

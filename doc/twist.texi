@@ -1393,15 +1393,18 @@ been made unreachable, ends the lookup and does not send the name to the
 system resolver in the clear.  List @code{udp} to allow it.  UDP retries
 over TCP when the answer is truncated.  A host that is an IPv4 or IPv6
 address is used as that address.  A name is looked for before any of this in
-the hosts file, @file{/etc/hosts}, whose first IPv4 address for it is the
-answer (or else its first IPv6 one), and @samp{localhost} and any name under it
-are the loopback address 127.0.0.1 (RFC 6761); neither is sent to a nameserver,
+the hosts file, @file{/etc/hosts}, whose first IPv4 and first IPv6 address for
+it are the answer, and @samp{localhost} and any name under it are the loopback
+addresses ::1 and 127.0.0.1 (RFC 6761); neither is sent to a nameserver,
 so a name that is only on this machine can be reached, and is not asked of one
 that does not know it.  The file is read again when it changes.  The search
 domains of the system are not used.  The addresses of a name (AAAA, A and, for
 an http URL, the HTTPS record) are asked for together, as separate queries sent
 at once, so that it takes a single round trip.  A name with only an IPv6 address
-is reached over IPv6; one with both is reached over its IPv4 address.
+is reached over IPv6.  When a name has several addresses the connection is
+raced (RFC 8305): IPv6 is tried first, then IPv4, the families taking turns,
+the next address after 250 ms or at once if an attempt fails, and the first
+to connect is used.  HTTP/3 and connections through a proxy use one address.
 @item --doh-url @var{url}
 Resolve host names through this DNS-over-HTTPS server instead of
 @option{--dns-order}.  The URL must use HTTPS.  The server's name is

@@ -372,6 +372,8 @@ g_complete (void *user, int err)
   g->done = 1;
 }
 
+static struct twist_dns_cache *g_cache;
+
 /* Ask for HOST of the fake and run until it is complete, or MS have passed.  */
 static int
 ask (struct fake_ns *ns, struct twist_loop *loop, struct got *g,
@@ -391,7 +393,7 @@ ask (struct fake_ns *ns, struct twist_loop *loop, struct got *g,
   sink.complete = g_complete;
   twist_dns_set_nameserver ("127.0.0.1", ns->port);
   g->start = now_ms ();
-  rc = twist_dns_resolve_sink (loop, host, &udp, 1, want_https, &sink);
+  rc = twist_dns_resolve_sink (loop, host, &udp, 1, want_https, g_cache, &sink);
   end = g->start + ms;
   while (rc == TWIST_OK && !g->done && now_ms () < end)
     twist_loop_run_once_ms (loop, 5);
@@ -711,6 +713,107 @@ test_one_address (struct fake_ns *ns, struct twist_loop *loop)
          "one address, with AAAA never answered: IPv4, after the delay");
 }
 
+/* What was answered is kept: asked again, a name sends no query, and a name
+   that has no AAAA is not asked for it again either.  */
+static void
+test_cache (struct fake_ns *ns, struct twist_loop *loop)
+{
+  struct got g;
+  int before;
+
+  g_cache = twist_dns_cache_new ();
+  fresh (ns);
+  set_v4 (&ns->cfg[0], "192.0.2.60");
+  ns->cfg[1].mode = NODATA;
+  ask (ns, loop, &g, "cached.test", 0, 3000);
+  check (strcmp (seq (&g), "192.0.2.60") == 0 && completed (&g) == TWIST_OK,
+         "a name is resolved");
+  pthread_mutex_lock (&ns->mu);
+  before = ns->nq;
+  pthread_mutex_unlock (&ns->mu);
+  check (before == 2, "with two queries");
+  ask (ns, loop, &g, "cached.test", 0, 3000);
+  pthread_mutex_lock (&ns->mu);
+  check (ns->nq == before, "asked again, it sends none");
+  pthread_mutex_unlock (&ns->mu);
+  check (strcmp (seq (&g), "192.0.2.60") == 0 && completed (&g) == TWIST_OK
+         && has_type_error (&g, 28) == 0,
+         "and gives the same");
+
+  /* Both families, kept.  */
+  fresh (ns);
+  set_v4 (&ns->cfg[0], "192.0.2.61");
+  set_v6 (&ns->cfg[1], "2001:db8::61");
+  ask (ns, loop, &g, "cached2.test", 0, 3000);
+  ask (ns, loop, &g, "cached2.test", 0, 3000);
+  pthread_mutex_lock (&ns->mu);
+  check (ns->nq == 2, "two families, kept: still two queries in all");
+  pthread_mutex_unlock (&ns->mu);
+  check (strcmp (seq (&g), "2001:db8::61 192.0.2.61") == 0,
+         "and given IPv6 first from the cache");
+
+  /* A name that is not there is kept as not there.  */
+  fresh (ns);
+  ns->cfg[0].mode = NXDOMAIN;
+  ns->cfg[1].mode = NXDOMAIN;
+  ask (ns, loop, &g, "gone.test", 0, 3000);
+  ask (ns, loop, &g, "gone.test", 0, 3000);
+  pthread_mutex_lock (&ns->mu);
+  check (ns->nq == 2, "a name that is not there: not asked for again");
+  pthread_mutex_unlock (&ns->mu);
+  check (count_kind (&g, C_ADDRESS) == 0 && completed (&g) != TWIST_OK
+         && completed (&g) != -999, "and it is said so");
+
+  /* A type that never came is not kept as none.  */
+  fresh (ns);
+  set_v4 (&ns->cfg[0], "192.0.2.62");
+  ns->cfg[1].mode = DROP;
+  ask (ns, loop, &g, "slow.test", 0, 3000);
+  ask (ns, loop, &g, "slow.test", 0, 3000);
+  pthread_mutex_lock (&ns->mu);
+  check (ns->nq == 4, "a type that never came is asked for again, and the other with it");
+  pthread_mutex_unlock (&ns->mu);
+  twist_dns_cache_free (g_cache);
+  g_cache = NULL;
+}
+
+/* A name the machine knows is not asked for, and gives both of its families,
+   IPv6 first, as a name from the network does.  */
+static void
+test_local (struct fake_ns *ns, struct twist_loop *loop)
+{
+  struct got g;
+  char path[] = "/tmp/twist-hosts-XXXXXX";
+  int fd = mkstemp (path);
+  FILE *f = fd >= 0 ? fdopen (fd, "w") : NULL;
+
+  fresh (ns);
+  ask (ns, loop, &g, "localhost", 1, 1000);
+  check (strcmp (seq (&g), "::1 127.0.0.1") == 0,
+         "localhost is ::1 and then 127.0.0.1");
+  check (completed (&g) == TWIST_OK, "and the lookup is complete");
+  ask (ns, loop, &g, "web.localhost", 0, 1000);
+  check (strcmp (seq (&g), "::1 127.0.0.1") == 0,
+         "so is a name under it");
+  if (f != NULL)
+    {
+      fputs ("192.0.2.1 both.test\n2001:db8::1 both.test\n"
+             "192.0.2.2 four.test\n", f);
+      fclose (f);
+      twist_dns_set_hosts_file (path);
+      ask (ns, loop, &g, "both.test", 0, 1000);
+      check (strcmp (seq (&g), "2001:db8::1 192.0.2.1") == 0,
+             "a hosts line with both gives both");
+      ask (ns, loop, &g, "four.test", 0, 1000);
+      check (strcmp (seq (&g), "192.0.2.2") == 0, "one family gives one");
+      twist_dns_set_hosts_file ("/nonexistent/twist-hosts");
+      unlink (path);
+    }
+  pthread_mutex_lock (&ns->mu);
+  check (ns->nq == 0, "none of it was asked of a nameserver");
+  pthread_mutex_unlock (&ns->mu);
+}
+
 int
 main (void)
 {
@@ -729,6 +832,8 @@ main (void)
   test_delay (&ns, loop);
   test_failures (&ns, loop);
   test_one_address (&ns, loop);
+  test_cache (&ns, loop);
+  test_local (&ns, loop);
   twist_dns_set_timing (0, 0);
   twist_dns_set_nameserver (NULL, 0);
   twist_dns_set_hosts_file (NULL);

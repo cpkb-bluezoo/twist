@@ -41,12 +41,16 @@ Version 0.1 - unreleased
     password; --proto-redir is accepted, warns that it has no effect, and does
     nothing
   * names are looked for in /etc/hosts before any DNS is asked, and localhost
-    and any name under it are the loopback (RFC 6761), as they are not known
-    to a public resolver
+    and any name under it are the loopback (::1 and 127.0.0.1, RFC 6761), as
+    they are not known to a public resolver
   * the resolver asks for AAAA, A and HTTPS together, as separate queries in one
     flight, with the resolution delay of RFC 8305, and so a name that has only
-    an IPv6 address can be reached; a name with both is still reached over IPv4
-    until the connection is raced
+    an IPv6 address can be reached
+  * a connection to a name with several addresses is raced (Happy Eyeballs,
+    RFC 8305): IPv6 first, the families taking turns, the next address tried
+    after 250 ms or at once when an attempt fails, and the first to connect
+    kept; for http, https, ftp, ftps and the mail and other line protocols
+    (not HTTP/3 or a connection through a proxy, which use one address)
   * gzip and deflate request and response coding, via zlib
   * the progress meter and the bar (-#), and the library's
     TWISTOPT_XFERINFOFUNCTION
