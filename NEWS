@@ -23,3 +23,7 @@ Version 0.1 - unreleased
     [scheme]_PROXY, ALL_PROXY, NO_PROXY, COLUMNS, SSL_CERT_FILE, SSL_CERT_DIR,
     SSLKEYLOGFILE, QLOGDIR; with --noproxy and --capath; TWIST_CA_BUNDLE names
     a CA bundle
+  * -Z/--parallel runs the URLs of a command line together, up to
+    --parallel-max (50 by default, 300 at most), with curl's exit status for
+    them; --fail-early ends the transfers under way, and standard input goes
+    to one transfer only

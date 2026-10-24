@@ -882,7 +882,8 @@ exits @var{n}, a status from the table below.  A bad command line exits
 2, with no number in parentheses, and suggests @option{--help}.
 @option{-s} hides a transfer diagnostic.  @option{-S} shows it again.
 Several URLs leave the status of the last transfer, unless
-@option{--fail-early} stops at the first failure.
+@option{--fail-early} stops at the first failure, or @option{-Z} is given
+(see @emph{Exit status} below).
 
 @table @option
 @item -h
@@ -972,7 +973,33 @@ write the body.  Without this option a 404 is a successful transfer:
 the status is recorded and the body is written.
 @item --fail-early
 Stop at the first failed URL.  This applies to every URL on the
-command line.
+command line.  With @option{-Z} the transfers that are under way are ended
+too, and each says @samp{Transfer aborted due to critical error in another
+transfer}.
+@item -Z
+@itemx --parallel
+Run the transfers together and not one after another, up to
+@option{--parallel-max} at a time.  The URLs of every @option{--next} group
+are taken in the order they were given, as places come free.  Transfers end
+in any order, and bodies that go to standard output are mixed as they arrive,
+so give each URL an @option{-o} unless that is wanted.  Neither the meter
+nor the bar is drawn.  The exit status is that of the most recent failure
+(see @emph{Exit status} below).  Standard input goes to one transfer only: a
+transfer that would read it, because of @samp{-T -} or because it is a
+@code{telnet} URL that is given nothing to send, is refused with
+@samp{only one transfer can read standard input with --parallel} when
+another has it, and the command exits 2.  @option{--no-parallel} undoes it.
+Like @option{-s} and @option{--stderr}, it is not undone by @option{--next}.
+@item --parallel-max @var{n}
+With @option{-Z}, run at most @var{n} transfers at once.  The default is 50.
+More than 300 is 300, and 0 is the default.  A transfer that is not yet
+started is not prepared, so a pattern that makes a great many URLs does not
+open a great many files.  Global.
+@item --parallel-immediate
+With @option{-Z}, start each transfer at once rather than waiting to see
+whether a connection that is being made can be shared.  A transfer does not
+wait, so this changes nothing.  @option{--no-parallel-immediate} undoes it.
+Global.
 @item --compressed
 Ask for a compressed response and decompress it: @code{br}, @code{gzip} and
 @code{deflate}, or @code{gzip} and @code{deflate} when twist was built without
@@ -1181,8 +1208,8 @@ Accepted.  No config file is read.
 Start a separate transfer for the following URL.  Options after it do
 not inherit the previous URL's method, body, headers, output, proxy,
 user, or timeouts.  @option{-s}, @option{-S}, @option{-#},
-@option{--no-progress-meter}, @option{--stderr}, and
-@option{--fail-early} still apply.  A URL is required before
+@option{--no-progress-meter}, @option{--stderr},
+@option{--fail-early}, and the options of @option{-Z} still apply.  A URL is required before
 @option{--next}.  The transfers of the whole command line, whatever
 the @option{--next} between them, share the connections that are kept and the
 names that were looked up.
@@ -1277,10 +1304,17 @@ lost packet.  A proxy is not used.  A server error packet exits 68
 through 74.
 
 There is no config file, @option{--fail-with-body}, verbose trace,
-cookie jar, or parallel transfer.
+or cookie jar.
 
 @heading Exit status
 The numbers are curl's, so that a script that tests them works with either.
+
+Several URLs leave the status of the last transfer to end.  With
+@option{-Z} the transfers end in any order, and the status is that of the
+most recent one that failed: a success after it does not clear it.  A
+transfer that was ended because another failed (status 42) is the status
+only when no other transfer has failed.  A command line that sends
+standard input to more than one transfer under @option{-Z} exits 2.
 
 @table @asis
 @item 0
@@ -1757,7 +1791,7 @@ text, as is a @samp{#} with no number; a backslash does not stop it.  The
 URL makes: a name with no @samp{#} is written by each in turn.  @option{-O}
 names each file from its own URL.  Each transfer is a transfer: a failure of
 one does not stop the rest unless @option{--fail-early} says so, and the
-status is the last one's.  @option{-g} turns it all off.
+status is the last one's (with @option{-Z}, the most recent failure).  @option{-g} turns it all off.
 
 Over @code{sftp} the URLs for one server share a connection, so
 @samp{sftp://host/dir/f[1-100].txt} logs in once.  There is no wildcard

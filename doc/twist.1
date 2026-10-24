@@ -52,7 +52,10 @@ hides a transfer diagnostic.
 shows it again.
 Several URLs leave the status of the last transfer, unless
 .B \-\-fail\-early
-stops at the first failure.
+stops at the first failure, or
+.B \-Z
+is given (see
+.BR "EXIT STATUS" ).
 .PP
 The schemes that are implemented are listed under
 .BR PROTOCOLS .
@@ -514,7 +517,54 @@ status is recorded and the body is written.
 .TP
 .B \-\-fail\-early
 Stop at the first failed URL.  This applies to every URL on the
-command line.
+command line.  With
+.B \-Z
+the transfers that are under way are ended too, and each says
+"Transfer aborted due to critical error in another transfer".
+.TP
+.B \-Z, \-\-parallel
+Run the transfers together and not one after another, up to
+.B \-\-parallel\-max
+at a time.  The URLs of every
+.B \-\-next
+group are taken in the order they were given, as places come free.
+Transfers end in any order, and bodies that go to standard output are mixed
+as they arrive, so give each URL an
+.B \-o
+unless that is wanted.  Neither the meter nor the bar is drawn.  The exit
+status is that of the most recent failure (see
+.BR "EXIT STATUS" ).
+Standard input goes to one transfer only: a transfer that would read it,
+because of
+.B "\-T \-"
+or because it is a telnet URL that is given nothing to send, is refused with
+"only one transfer can read standard input with \-\-parallel" when another
+has it, and the command exits 2.
+.B \-\-no\-parallel
+undoes it.  Like
+.B \-s
+and
+.BR \-\-stderr ,
+it is not undone by
+.BR \-\-next .
+.TP
+.BI \-\-parallel\-max " n"
+With
+.BR \-Z ,
+run at most
+.I n
+transfers at once.  The default is 50.  More than 300 is 300, and 0 is the
+default.  A transfer that is not yet started is not prepared, so a pattern
+that makes a great many URLs does not open a great many files.  Global.
+.TP
+.B \-\-parallel\-immediate
+With
+.BR \-Z ,
+start each transfer at once rather than waiting to see whether a connection
+that is being made can be shared.  A transfer does not wait, so this changes
+nothing.
+.B \-\-no\-parallel\-immediate
+undoes it.  Global.
 .TP
 .B \-\-compressed
 Ask for a compressed response and decompress it: br, gzip and deflate, or gzip
@@ -828,8 +878,9 @@ user, or timeouts.
 .BR \-# ,
 .BR \-\-no\-progress\-meter ,
 .BR \-\-stderr ,
-and
-.B \-\-fail\-early
+.BR \-\-fail\-early ,
+and the options of
+.B \-Z
 still apply.  A URL is required before
 .BR \-\-next .
 The transfers of the whole command line, whatever the
@@ -991,7 +1042,7 @@ with an optional port.  The default port is 853.  Discovery matches
 .PP
 There is no config file,
 .BR \-\-fail\-with\-body ,
-verbose trace, cookie jar, or parallel transfer.
+verbose trace, or cookie jar.
 .SH ENVIRONMENT
 The variables can be in lower case or upper case, and the lower case one has
 precedence.
@@ -1123,6 +1174,16 @@ Twist reads no configuration file.  Variables can also be imported by
 .IR %name .
 .SH "EXIT STATUS"
 The numbers are curl's, so that a script that tests them works with either.
+.PP
+Several URLs leave the status of the last transfer to end.  With
+.B \-Z
+the transfers end in any order, and the status is that of the most recent one
+that failed: a success after it does not clear it.  A transfer that was ended
+because another failed (status 42) is the status only when no other transfer
+has failed.  A command line that sends standard input to more than one
+transfer under
+.B \-Z
+exits 2.
 .TP
 .B 0
 The transfer finished.

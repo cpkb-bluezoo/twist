@@ -27,6 +27,7 @@
 #include <ctype.h>
 #include <errno.h>
 #include <getopt.h>
+#include <limits.h>
 #include <locale.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -50,6 +51,13 @@ static int show_error;
 static int progress_bar;
 static int no_progress;
 static int fail_early;
+/* -Z: transfers run together, at most parallel_max of them.  All of these are
+   global.  --parallel-immediate and --parallel-max-host are read, and have no
+   say in how a transfer is made.  */
+static int parallel;
+static long parallel_max = 50;
+static int parallel_immediate;
+static long parallel_max_host;
 
 struct cli_item
 {
@@ -238,6 +246,13 @@ usage (void)
   fputs (_("  -f, --fail              fail on HTTP errors (400 and above)\n"),
          stdout);
   fputs (_("      --fail-early        stop at the first failed URL\n"), stdout);
+  fputs (_("  -Z, --parallel          run the transfers together\n"), stdout);
+  fputs (_("      --parallel-max N    at most N transfers at once (default 50, most 300)\n"),
+         stdout);
+  fputs (_("      --parallel-immediate  do not wait to share a connection\n"),
+         stdout);
+  fputs (_("      --no-parallel, --no-parallel-immediate\n"
+           "                          undo the option\n"), stdout);
   fputs (_("      --compressed        request a compressed response (gzip, deflate or br)\n"),
          stdout);
   fputs (_("      --content-encoding C  compress the request body (gzip, deflate or br)\n"),
@@ -317,7 +332,8 @@ usage (void)
   fputs (_("  -q, --disable           accepted; no config file is read\n"),
          stdout);
   fputs (_("      --next              start a new URL; only -s, -S, -#, --stderr,\n"
-           "                          --no-progress-meter and --fail-early carry over\n"),
+           "                          --no-progress-meter, --fail-early and the\n"
+           "                          parallel options carry over\n"),
          stdout);
   fputs (_("      --http1.0           use HTTP/1.0\n"), stdout);
   fputs (_("      --http1.1           use HTTP/1.1\n"), stdout);
@@ -650,6 +666,27 @@ parse_rate (const char *s, uint64_t *out)
   if (shift > 0 && v > (UINT64_MAX >> shift))
     return -1;
   *out = v << shift;
+  return 0;
+}
+
+/* A count: digits and nothing else, no sign.  A number past what a long holds
+   is the greatest one.  */
+static int
+parse_count (const char *s, long *out)
+{
+  long v = 0;
+
+  if (*s < '0' || *s > '9')
+    return -1;
+  for (; *s >= '0' && *s <= '9'; s++)
+    {
+      int d = *s - '0';
+
+      v = v > (LONG_MAX - d) / 10 ? LONG_MAX : v * 10 + d;
+    }
+  if (*s != 0)
+    return -1;
+  *out = v;
   return 0;
 }
 
@@ -1087,6 +1124,7 @@ struct cli_job
   int bar_used;
   int body_short;               /* A write to the body came up short.  */
   int reads_stdin;              /* The transfer reads standard input.  */
+  int aborted;                  /* Ended because another failed.  */
 };
 
 static size_t
@@ -1195,6 +1233,9 @@ struct cli_run
   int cap;                      /* Jobs under way at most.  */
   int status;                   /* What the run exits with.  */
   int stop;                     /* No more are to be started.  */
+  int parallel;                 /* -Z.  */
+  int stdin_taken;              /* A job has been given standard input.  */
+  int refused;                  /* A job was refused for want of it.  */
 };
 
 /* What a URL of the cursor is: its text, the output name a pattern made for
@@ -1209,15 +1250,39 @@ struct cli_next
   const char *upload;
 };
 
-/* The exit status is that of the last transfer to end, or of the last thing
-   that failed before there was one.  --fail-early stops the run at the first
+/* End every transfer under way, and say of each that it was for another's
    failure.  */
 static void
-run_note (struct cli_run *run, int code)
+run_abort_all (struct cli_run *run)
 {
-  run->status = code;
-  if (code != 0 && fail_early)
-    run->stop = 1;
+  struct cli_job *job;
+
+  for (job = run->jobs; job != NULL; job = job->next)
+    {
+      job->aborted = run->parallel;
+      twist_runtime_cancel (run->runtime, job->transfer);
+    }
+}
+
+/* Note how a transfer ended, or what failed before there was one.  Without
+   -Z the exit status is the last one's.  With -Z it is the most recent
+   failure, and a transfer that was aborted for another's only fills it while
+   it is empty.  --fail-early stops the run at the first failure, and in a
+   parallel run so does running out of memory; both end the transfers under
+   way.  */
+static void
+run_note (struct cli_run *run, int code, int aborted)
+{
+  if (!run->parallel)
+    run->status = code;
+  else if (code != 0 && (!aborted || run->status == 0))
+    run->status = code;
+  if (code != 0 && !aborted
+      && (fail_early || (run->parallel && code == 27)))
+    {
+      run->stop = 1;
+      run_abort_all (run);
+    }
 }
 
 /* The next URL, in order, across URLs and operations: 1, or 0 when there is
@@ -1252,7 +1317,7 @@ run_next_url (struct cli_run *run, struct cli_next *next)
                       twist_glob_free (run->glob);
                       run->glob = NULL;
                       diag_code (27, twist_strerror (TWIST_ERR_NOMEM));
-                      run_note (run, 27);
+                      run_note (run, 27, 0);
                       continue;
                     }
                 }
@@ -1266,10 +1331,10 @@ run_next_url (struct cli_run *run, struct cli_next *next)
           if (rc < 0)
             {
               diag_code (27, twist_strerror (TWIST_ERR_NOMEM));
-              run_note (run, 27);
+              run_note (run, 27, 0);
             }
           else if (run->glob_yielded == 0)
-            run_note (run, 0);
+            run_note (run, 0, 0);
           twist_glob_free (run->glob);
           run->glob = NULL;
           continue;
@@ -1285,7 +1350,7 @@ run_next_url (struct cli_run *run, struct cli_next *next)
             {
               diag (_("no URL specified"));
               suggest ();
-              run_note (run, 2);
+              run_note (run, 2, 0);
               continue;
             }
           run->url = run->op->urls;
@@ -1318,7 +1383,7 @@ run_next_url (struct cli_run *run, struct cli_next *next)
             if (url == NULL)
               {
                 diag_code (27, twist_strerror (TWIST_ERR_NOMEM));
-                run_note (run, 27);
+                run_note (run, 27, 0);
                 continue;
               }
             next->url = url;
@@ -1336,12 +1401,12 @@ run_next_url (struct cli_run *run, struct cli_next *next)
             if (rc == TWIST_ERR_URL)
               {
                 diag_code (3, err);
-                run_note (run, 3);
+                run_note (run, 3, 0);
               }
             else if (rc != TWIST_OK)
               {
                 diag_code (27, twist_strerror (rc));
-                run_note (run, 27);
+                run_note (run, 27, 0);
               }
             else
               {
@@ -1418,6 +1483,22 @@ job_prepare (struct cli_run *run, struct cli_next *next, struct cli_job **out)
   job->ustream.fd = -1;
   job->use_url = job->url;
   url = job->url;
+  /* A transfer reads standard input when it is told to send it, or is a
+     telnet session that is given nothing else to send.  */
+  job->reads_stdin = (upload != NULL && strcmp (upload, "-") == 0)
+                     || (upload == NULL && is_telnet_url (url));
+  if (run->parallel && job->reads_stdin)
+    {
+      if (run->stdin_taken)
+        {
+          diag_code (2, _("only one transfer can read standard input "
+                          "with --parallel"));
+          run->refused = 1;
+          rc = 2;
+          goto fail;
+        }
+      run->stdin_taken = 1;
+    }
   if (next->remote)
     {
       out_name = remote_file (url);
@@ -1597,8 +1678,6 @@ job_prepare (struct cli_run *run, struct cli_next *next, struct cli_job **out)
       if (job->named_url != NULL)
         job->use_url = job->named_url;
     }
-  job->reads_stdin = (job->streaming && job->ustream.fd == STDIN_FILENO)
-                     || (is_telnet_url (job->use_url) && !job->streaming);
   transfer = twist_transfer_new ();
   if (transfer == NULL)
     {
@@ -1632,8 +1711,9 @@ job_prepare (struct cli_run *run, struct cli_next *next, struct cli_job **out)
     twist_transfer_setopt (transfer, TWISTOPT_INFILESIZE, usize);
   }
   /* The meter is drawn unless -s or --no-progress-meter says not, or the
-     body is going to the terminal.  -# draws a bar instead.  */
-  hide_progress = silent || no_progress
+     body is going to the terminal.  -# draws a bar instead.  Transfers that
+     run together draw neither.  */
+  hide_progress = silent || no_progress || run->parallel
                   || (job->body == stdout
                       && output_expected (job->use_url, upload)
                       && isatty (fileno (stdout)));
@@ -1753,7 +1833,10 @@ job_finish (struct cli_job *job, int rc)
     code = 23;
   if (code != 0)
     {
-      detail = twist_transfer_error (transfer);
+      detail = job->aborted ? NULL : twist_transfer_error (transfer);
+      if (job->aborted)
+        detail = _("Transfer aborted due to critical error in another "
+                   "transfer");
       if (write_failed && detail == NULL)
         detail = _("failure writing output to destination");
       diag_code (code, detail != NULL ? detail : twist_strerror (rc));
@@ -1772,6 +1855,7 @@ run_job_ended (struct cli_job *job, int rc)
 {
   struct cli_run *run = job->run;
   struct cli_job **link;
+  int aborted;
 
   for (link = &run->jobs; *link != NULL; link = &(*link)->next)
     if (*link == job)
@@ -1780,7 +1864,10 @@ run_job_ended (struct cli_job *job, int rc)
         break;
       }
   run->inflight--;
-  run_note (run, job_finish (job, rc));
+  /* It was aborted only if that is how it ended.  */
+  job->aborted = job->aborted && rc == TWIST_ERR_ABORTED;
+  aborted = job->aborted;
+  run_note (run, job_finish (job, rc), aborted);
 }
 
 /* Called from the loop, when the transfer has ended.  */
@@ -1802,6 +1889,13 @@ run_start (struct cli_run *run, struct cli_job *job)
   /* Let the loop see what happened to the connections kept since the last
      transfer, so that one the server has closed is not taken.  */
   twist_runtime_run_once (run->runtime, 0);
+  if (run->stop)
+    {
+      /* A transfer that ended just now has stopped the run.  */
+      job->aborted = 1;
+      run_job_ended (job, TWIST_ERR_ABORTED);
+      return;
+    }
   rc = twist_runtime_start (run->runtime, job->transfer, job_done, job);
   if (rc != TWIST_OK)
     run_job_ended (job, rc);
@@ -1821,7 +1915,7 @@ run_fill (struct cli_run *run)
 
       free (next.name);
       if (code != 0)
-        run_note (run, code);
+        run_note (run, code, 0);
       else
         run_start (run, job);
     }
@@ -1832,10 +1926,9 @@ run_fill (struct cli_run *run)
 static void
 run_loop_failed (struct cli_run *run, int rc)
 {
-  struct cli_job *job;
-
-  for (job = run->jobs; job != NULL; job = job->next)
-    twist_runtime_cancel (run->runtime, job->transfer);
+  if (run->parallel)
+    run->stop = 1;
+  run_abort_all (run);
   twist_runtime_run_once (run->runtime, 0);
   while (run->jobs != NULL)
     run_job_ended (run->jobs, rc);
@@ -1849,7 +1942,8 @@ run_all (struct cli_op *ops)
 
   memset (&run, 0, sizeof run);
   run.next_op = ops;
-  run.cap = 1;
+  run.parallel = parallel;
+  run.cap = parallel ? (int) parallel_max : 1;
   run.runtime = twist_runtime_new ();
   if (run.runtime == NULL)
     {
@@ -1869,7 +1963,9 @@ run_all (struct cli_op *ops)
     }
   twist_glob_free (run.glob);
   twist_runtime_free (run.runtime);
-  return run.status;
+  /* A command line that asks for two readers of standard input is wrong,
+     whatever else happened.  */
+  return run.refused ? 2 : run.status;
 }
 
 static void
@@ -2060,6 +2156,12 @@ main (int argc, char **argv)
     { "max-redirs", required_argument, NULL, 1 },
     { "fail", no_argument, NULL, 'f' },
     { "fail-early", no_argument, NULL, 27 },
+    { "parallel", no_argument, NULL, 'Z' },
+    { "no-parallel", no_argument, NULL, 53 },
+    { "parallel-max", required_argument, NULL, 54 },
+    { "parallel-immediate", no_argument, NULL, 55 },
+    { "no-parallel-immediate", no_argument, NULL, 56 },
+    { "parallel-max-host", required_argument, NULL, 57 },
     { "compressed", no_argument, NULL, 30 },
     { "content-encoding", required_argument, NULL, 31 },
     { "insecure", no_argument, NULL, 'k' },
@@ -2189,7 +2291,7 @@ main (int argc, char **argv)
           continue;
         }
       c = getopt_long (argc, argv,
-                       "+:o:X:H:d:Lkx:A:u:Iw:fE:hm:e:r:b:sS#OT:t:GgiD:qC:lQ:U:",
+                       "+:o:X:H:d:Lkx:A:u:Iw:fE:hm:e:r:b:sS#OT:t:GgiD:qC:lQ:U:Z",
                        expandable, NULL);
       if (c == -1)
         break;
@@ -2319,6 +2421,36 @@ main (int argc, char **argv)
           break;
         case 27:
           fail_early = 1;
+          break;
+        case 'Z':
+          parallel = 1;
+          break;
+        case 53:
+          parallel = 0;
+          break;
+        case 54:
+        case 57:
+          {
+            long n;
+
+            if (parse_count (optarg, &n) != 0)
+              {
+                diag (_("numerical parameter expected"));
+                suggest ();
+                status = 2;
+              }
+            else if (c == 54)
+              /* More than 300 is 300, and none at all is the default.  */
+              parallel_max = n > 300 ? 300 : n < 1 ? 50 : n;
+            else
+              parallel_max_host = n > 65535 ? 65535 : n;
+          }
+          break;
+        case 55:
+          parallel_immediate = 1;
+          break;
+        case 56:
+          parallel_immediate = 0;
           break;
         case 30:
           op_set_str (op, TWISTOPT_ACCEPT_ENCODING, "");
