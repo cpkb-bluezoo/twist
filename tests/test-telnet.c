@@ -738,6 +738,7 @@ test_live_text (void)
   check (rc == TWIST_OK, "a session ends when the server closes");
   check (is_hex (text, text_len, "68690d0a78"), "its text, without commands");
   check (transfer->size_download == 5, "and counts it");
+  peer_free (&p);
   twist_transfer_free (transfer);
 }
 
@@ -778,6 +779,7 @@ test_live_read_callback (void)
   rc = check_perform (transfer);
   peer_stop (&p);
   check (rc == TWIST_ERR_ABORTED, "a read callback that cannot read");
+  peer_free (&p);
   twist_transfer_free (transfer);
 }
 
