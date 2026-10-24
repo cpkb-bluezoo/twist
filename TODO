@@ -1,175 +1,172 @@
 Twist TODO List
 ================
 
-  [ ] SCP/SFTP, one handler over foxtrot (../foxtrot).  scp:// runs over
-      SFTP; there is no SCP wire protocol.  Done: logging in with a key
-      file or a password, known_hosts (~/.ssh/known_hosts,
-      -k skips, no accept-new), a pinned fingerprint, downloading and
-      uploading a file to each URL, resuming either way (-C), ranges (-r),
-      directory listings, keys in an ssh-agent, keyboard-interactive login
-      with the password, and one connection for the URLs of a command
-      line.
-      Still to do:
-        - a transfer that fails, even for a missing file, closes its
-          connection, so the next URL logs in again.  An SFTP status
-          that leaves the channel sound could keep it.
-        - a parked connection that the server closed an instant before
-          it is taken fails the transfer with "closed" and does not retry
-          on a new one.  The command line runs the loop
-          once before each URL, which catches closes that have already
-          arrived; the window left is a race.
-        - nothing parked is sent a disconnect when it is dropped (idle
-          for two minutes, or at exit); the TCP connection just closes.
-        - no way to forbid reuse, in the library or in the tool.
-        - ask foxtrot for the number of requests outstanding in an SFTP
-          client.  gf_sftp_client_pending is the bytes queued, so twist
-          counts its own (sftp.c sent () and inflight).
-        - proxies: socks5:// is treated as socks5h:// (the name goes to the
-          proxy to look up; socks5:// should look it up itself).
-          socks4:// proxies are refused.  Credentials are
-          sent for tunnels only: a plain http:// URL through an HTTP
-          proxy gets no Proxy-Authorization.
-        - statvfs, and the other commands the sftp tool has, as -Q
-          commands; --create-file-mode and the directory mode.
-        - quote commands for scp URLs.
-        - an HTTP/3 URL does not take a zone: quic_connect reads the host
-          with inet_pton itself.  Only the TCP dialers pass the scope.
-        - --limit-rate for the other protocols: the pacer is in
-          src/engine/rate.c; only the SFTP pumps use it.  Until then the
-          command line refuses the option for other URLs.
-        - certificates are found only as KEY-cert.pub beside a key file;
-          there is no option to name a certificate elsewhere (ssh's
-          CertificateFile).
-        - -l for ftp URLs, which would send NLST; it only affects sftp
-          now
-        - -C and -T completion of the URL for the other schemes (done for
-          sftp and scp only)
-        - FIDO keys held in a file are not supported, and will not be: no
-          libfido2.  Keys held by an ssh-agent work, with the agent doing
-          the token I/O.
-        - keyboard-interactive questions that need a person, such as a
-          one-time code: twist answers only a single hidden question
-          with the password.  A prompt on the terminal
-          would need a way for the application to be asked.
-      Requires libgcrypt >= 1.12.4.
-  [ ] ftps (src/ftp/ftp.c).  The control connection is TLS from the first byte
-      and the data connection is protected (PBSZ 0, PROT P) and resumes the
-      control session.  Left:
-        - session reuse needs a TLS 1.3 ticket from the control connection.
-          Against a TLS 1.2 server, or one that gave none, the data
-          connection does a full handshake, and a server that requires
-          reuse then refuses it.
-        - a data connection that ends without a close_notify is taken as the
-          end of the file, as it is for ftp, so a truncated transfer is not
-          noticed (the size in the 150 reply is parsed and not used for this).
-        - no CCC, and no PROT C or PROT S choice: PROT P or nothing.
-        - through an http:// or socks5:// proxy the data connection is
-          tunnelled as well as the control connection (integration/
-          ftp-proxy.sh, with plain ftp).  ftps through a proxy, which runs
-          TLS on that tunnel, has not been run.
-  [ ] Cookies (src/http/cookie.c).  Every cookie is for the host that set it
-      and the Domain attribute only has to be one the host is under, so no
-      Public Suffix List is needed; cookies shared by sibling hosts are not
-      supported.  Expires and
-      Max-Age are not read: a cookie lives as long as the jar, and a
-      Max-Age=0 does not delete.  SameSite and HttpOnly are not looked at.
-  [ ] Redirects.  A redirect is followed only to http, https, ws and wss; there
-      is no --proto-redir to change that.
-  [ ] STARTTLS for ldap, and a TLS upgrade for mqtt, are not done; curl has
-      the first through OpenLDAP only, and mqtt has no upgrade command.  A
-      user name and password for those schemes without the s go in the clear
-      (the manual says so).  PLAIN and LOGIN are tried when an smtp, imap or
-      pop3 server advertises no mechanism, and --ssl-reqd keeps them off the
-      wire until the connection is encrypted.
-  [ ] The output buffer of a connection has no limit.  A handler that queues
-      without end against a peer that does not read grows it, so each handler
-      limits itself (SFTP does, by its window); none does for a body given in
-      one piece, which the application chose the size of.
-  [ ] HTTP/3 closes the connection when the server opens a bidirectional stream
-      (twist_quic_stream_action, tested), but the callback that does it
-      (ev_stream_data in quic.c) is not run by any test: it needs a QUIC peer
-      that opens one, and there is none in the tree.
-  [ ] Discovered resolvers (RFC 9462).  A DoT or DoQ resolver found with a
-      _dns.resolver.arpa query must have a certificate valid for the address
-      that was asked as well as for its own name (twist_verify_chain_names,
-      tested with a certificate in tests/test-tls.c).  The wiring from the
-      resolver through twist_connection_require_name and the quic option has
-      no test that runs it: the nameserver is read from /etc/resolv.conf, so a
-      fake one cannot be put in front of twist without root.  The lookup of a
-      named resolver's own host name still uses plain UDP, as it must.
-  [ ] --connect-timeout covers the greeting and login for SSH only.  The
-      other protocols on the shared dialer (SMTP, POP3, IMAP, LDAP, ...) have
-      it for the lookup and the TCP connect, and a server that takes the
-      connection and sends no greeting is waited for until --max-time.  They
-      can call twist_mail_link_phase_begin and _end when they are up.  FTP
-      and HTTP dial themselves and do the same.
-  [ ] Passphrase-protected OpenSSH-format private keys.  Blocked on
-      bcrypt-pbkdf being available in libgcrypt; it is deliberately not
-      taken from anywhere else.  An ssh-agent holding the key is the
-      workaround, and works.
-  [ ] Fuzzing covers the parsers in the library (see HACKING).  Not reached:
-      the command line's own parsing (main.c: options, the speed and time
-      arguments, --write-out), which is static there; the DNS cache and
-      resolver state machines; the SFTP engine's use of foxtrot, which could
-      be driven by a fuzzed server session; the Set-Cookie/HSTS persistence;
-      and the file scheme.  A fuzzer of a whole transfer, with a scripted peer
-      on a socketpair, would reach the connection and handler glue.
-  [ ] The progress meter (see HACKING).  Left out, or different:
-        - an upload is counted when the body is handed to the connection (HTTP,
-          SMTP, MQTT, TFTP), not when the socket has taken it; sftp counts when
-          the server has acknowledged a write.  A large POST on a slow link is
-          at 100% sooner than it should be.
-        - no size is known for POP3, LDAP, DICT, Gopher, WebSocket, MQTT or a
-          directory listing.  For FTP the size is the number the reply to
-          RETR may carry; asking the server (SIZE) would give it more often.
-        - an HTTP response that is coded (--compressed) is counted by its
-          bytes on the wire, which is what Content-Length counts;
-          TWISTINFO_SIZE_DOWNLOAD is the decoded.
-        - sftp and scp ask for the size of the file (one more round trip) only
-          when the meter is on.
-  [ ] The environment (see the manual).  Not done: a configuration file.
-      A script that sets CURL_CA_BUNDLE gets the system's authorities;
-      whether to read it is undecided.  SSL_CERT_DIR
-      is read as a directory of PEM files by name (.pem, .crt, .cer or a
-      c_rehash name), not through OpenSSL's rules.
-  [ ] https proxies (engine/tunnel.c) are done for TCP: TLS to the proxy, then
-      CONNECT in HTTP/2 or HTTP/1.1.  Left:
-        - CONNECT-UDP (RFC 9298, engine/masque.c) has no end-to-end test: the
-          only proxy to test against was a Go program, which has been
-          removed.  The unit tests (tests/test-masque.c) remain.  HTTP/3
-          directly has none either.
-        - CONNECT-UDP (RFC 9298, engine/masque.c) is done for HTTP/3, with
-          --proxy-template-udp.  Left: HTTP/3 under a proxy is chosen only by
-          --http3-only (the target's HTTPS record and Alt-Svc are not asked
-          for, since the proxy does the lookup); DNS over QUIC does not use a
-          proxy; the tunnel's packets are at most 1200 bytes (twist asks for
-          that with max_udp_payload_size, or a peer's path MTU probes could
-          exceed what the proxy's own datagrams hold, and some proxies then
-          end the flow), and so a larger path MTU is not used.
-        - templated CONNECT-TCP (draft-ietf-httpbis-connect-tcp), and
-          --proxy-template-tcp for it, when it is an RFC.
-        - ftp and ftps through an https proxy (the data connection too).
-        - an http:// URL is tunnelled (CONNECT) and not sent in the proxy's
-          absolute form, which some proxies would rather have.
-        - a tunnel has an HTTP/2 connection of its own; one connection could
-          carry many.
-        - quickstep's gq_tls_free does not free the selected transcript
-          (t->tr), so each TLS connection leaks about 1.3 KB.
-  [ ] URL globbing is done for URLs and for -o names (#N).  Not done: globbing
-      the file given to -T ({a,b} there, with #N in the URL), and #N in
-      --output-dir.  -T takes the name as written.
-  [ ] SMB/SMBS
-  [ ] RTMP/RTMPS
-  [ ] NTLM and Negotiate, only after an explicit dependency decision
-  [ ] Decide how integration peers are provided.  make check stays
-      in-process.  make check-integration dials a peer and skips with
-      exit 77 when the peer is absent.  A podman lab is one candidate
-      and is not chosen yet.
-  [ ] io_uring poll backend
-  [ ] The storage pool has two threads, shared by the file handler's reads
-      and the SSH key and known_hosts loads.  Letting go of a file transfer
-      no longer waits for its worker, but a read that never comes back
-      still holds one of the two until the process ends, and two such
-      reads hold up every file transfer and SSH load behind them.  A
-      larger pool only moves the limit; a read that can be given up on
-      would need a thread to be cancelled, or a different way to read.
+Work that is still to be done.  What is done is in NEWS and the manual, and
+what was decided against is not here.
+
+
+SCP/SFTP (src/ssh, over foxtrot, ../foxtrot)
+
+  - A transfer that fails, even for a missing file, closes its connection, so
+    the next URL logs in again.  An SFTP status that leaves the channel sound
+    could keep it.
+  - A parked connection that the server closed an instant before it is taken
+    fails the transfer with "closed" and does not retry on a new one.  The
+    command line runs the loop once before each URL, which catches closes that
+    have already arrived; the window left is a race.
+  - Nothing parked is sent a disconnect when it is dropped (idle for two
+    minutes, or at exit); the TCP connection just closes.
+  - There is no way to forbid reuse, in the library or in the tool.
+  - Ask foxtrot for the number of requests outstanding in an SFTP client.
+    gf_sftp_client_pending is the bytes queued, so twist counts its own (sftp.c
+    sent () and inflight).
+  - Proxies: socks5:// is treated as socks5h:// (the name goes to the proxy to
+    look up; socks5:// should look it up itself).  socks4:// proxies are
+    refused.  Credentials are sent for tunnels only: a plain http:// URL
+    through an HTTP proxy gets no Proxy-Authorization.
+  - statvfs, and the other commands the sftp tool has, as -Q commands;
+    --create-file-mode and the directory mode.
+  - Quote commands for scp URLs.
+  - An HTTP/3 URL does not take a zone: quic_connect reads the host with
+    inet_pton itself.  Only the TCP dialers pass the scope.
+  - --limit-rate for the other protocols: the pacer is in src/engine/rate.c,
+    and only the SFTP pumps use it.  Until then the command line refuses the
+    option for other URLs.
+  - Certificates are found only as KEY-cert.pub beside a key file; there is no
+    option to name a certificate elsewhere (ssh's CertificateFile).
+  - -l for ftp URLs, which would send NLST; it only affects sftp now.
+  - -C and -T completion of the URL for the schemes other than sftp and scp.
+  - Keyboard-interactive questions that need a person, such as a one-time
+    code: twist answers only a single hidden question with the password.  A
+    prompt on the terminal would need a way for the application to be asked.
+  - Passphrase-protected OpenSSH-format private keys.  Blocked on bcrypt-pbkdf
+    being available in libgcrypt; it is deliberately not taken from anywhere
+    else.  An ssh-agent holding the key is the workaround, and works.
+
+
+FTPS (src/ftp/ftp.c)
+
+  - Session reuse needs a TLS 1.3 ticket from the control connection.  Against
+    a TLS 1.2 server, or one that gave none, the data connection does a full
+    handshake, and a server that requires reuse then refuses it.
+  - A data connection that ends without a close_notify is taken as the end of
+    the file, as it is for ftp, so a truncated transfer is not noticed (the
+    size in the 150 reply is parsed and not used for this).
+  - No CCC, and no PROT C or PROT S choice: PROT P or nothing.
+  - ftps through an http:// or socks5:// proxy, which runs TLS on the tunnel,
+    has not been run (integration/ftp-proxy.sh does plain ftp).
+
+
+HTTP
+
+  - Cookies (src/http/cookie.c): Expires and Max-Age are not read, so a cookie
+    lives as long as the jar and Max-Age=0 does not delete.  SameSite and
+    HttpOnly are not looked at.
+  - A redirect is followed only to http, https, ws and wss; there is no
+    --proto-redir to change that.
+  - The output buffer of a connection has no limit.  A handler that queues
+    without end against a peer that does not read grows it, so each handler
+    limits itself (SFTP does, by its window); none does for a body given in
+    one piece, which the application chose the size of.
+  - --connect-timeout covers the greeting and login for SSH only.  The other
+    protocols on the shared dialer (SMTP, POP3, IMAP, LDAP, ...) have it for
+    the lookup and the TCP connect, and a server that takes the connection and
+    sends no greeting is waited for until --max-time.  They can call
+    twist_mail_link_phase_begin and _end when they are up.  FTP and HTTP dial
+    themselves and do the same.
+  - URL globbing does not reach the file given to -T ({a,b} there, with #N in
+    the URL), nor #N in --output-dir.  -T takes the name as written.
+  - STARTTLS for ldap (curl has it through OpenLDAP only).  A user name and
+    password for ldap without the s go in the clear.
+
+
+https proxies (src/engine/tunnel.c, masque.c)
+
+  - CONNECT-UDP (RFC 9298) has no end-to-end test: the only proxy to test
+    against was a Go program, which has been removed.  The unit tests
+    (tests/test-masque.c) remain.  HTTP/3 directly has none either.
+  - HTTP/3 under a proxy is chosen only by --http3-only (the target's HTTPS
+    record and Alt-Svc are not asked for, since the proxy does the lookup).
+  - DNS over QUIC does not use a proxy.
+  - The tunnel's packets are at most 1200 bytes (twist asks for that with
+    max_udp_payload_size, or a peer's path MTU probes could exceed what the
+    proxy's own datagrams hold, and some proxies then end the flow), so a
+    larger path MTU is not used.
+  - Templated CONNECT-TCP (draft-ietf-httpbis-connect-tcp), and
+    --proxy-template-tcp for it, when it is an RFC.
+  - ftp and ftps through an https proxy (the data connection too).
+  - An http:// URL is tunnelled (CONNECT) and not sent in the proxy's absolute
+    form, which some proxies would rather have.
+  - A tunnel has an HTTP/2 connection of its own; one connection could carry
+    many.
+  - quickstep's gq_tls_free does not free the selected transcript (t->tr), so
+    each TLS connection leaks about 1.3 KB.
+
+
+Progress meter (see HACKING)
+
+  - An upload is counted when the body is handed to the connection (HTTP,
+    SMTP, MQTT, TFTP), not when the socket has taken it; sftp counts when the
+    server has acknowledged a write.  A large POST on a slow link is at 100%
+    sooner than it should be.
+  - No size is known for POP3, LDAP, DICT, Gopher, WebSocket, MQTT or a
+    directory listing.  For FTP the size is the number the reply to RETR may
+    carry; asking the server (SIZE) would give it more often.
+  - An HTTP response that is coded (--compressed) is counted by its bytes on
+    the wire, which is what Content-Length counts; TWISTINFO_SIZE_DOWNLOAD is
+    the decoded.
+  - sftp and scp ask for the size of the file (one more round trip) only when
+    the meter is on.
+
+
+Environment
+
+  - A configuration file.
+  - A script that sets CURL_CA_BUNDLE gets the system's authorities; whether
+    to read it is undecided.
+  - SSL_CERT_DIR is read as a directory of PEM files by name (.pem, .crt, .cer
+    or a c_rehash name), not through OpenSSL's rules.
+
+
+Tests
+
+  - HTTP/3 closes the connection when the server opens a bidirectional stream
+    (twist_quic_stream_action, tested), but the callback that does it
+    (ev_stream_data in quic.c) is not run by any test: it needs a QUIC peer
+    that opens one, and there is none in the tree.
+  - Discovered resolvers (RFC 9462).  A DoT or DoQ resolver found with a
+    _dns.resolver.arpa query must have a certificate valid for the address that
+    was asked as well as for its own name (twist_verify_chain_names, tested
+    with a certificate in tests/test-tls.c).  The wiring from the resolver
+    through twist_connection_require_name and the quic option has no test that
+    runs it: the nameserver is read from /etc/resolv.conf, so a fake one cannot
+    be put in front of twist without root.
+  - Fuzzing covers the parsers in the library (see HACKING).  Not reached: the
+    command line's own parsing (main.c: options, the speed and time arguments,
+    --write-out), which is static there; the DNS cache and resolver state
+    machines; the SFTP engine's use of foxtrot, which could be driven by a
+    fuzzed server session; the Set-Cookie/HSTS persistence; and the file
+    scheme.  A fuzzer of a whole transfer, with a scripted peer on a
+    socketpair, would reach the connection and handler glue.
+  - Decide how integration peers are provided.  make check stays in-process.
+    make check-integration dials a peer and skips with exit 77 when the peer is
+    absent.  A podman lab is one candidate and is not chosen yet.
+
+
+Runtime
+
+  - The storage pool has two threads, shared by the file handler's reads and
+    the SSH key and known_hosts loads.  Letting go of a file transfer no longer
+    waits for its worker, but a read that never comes back still holds one of
+    the two until the process ends, and two such reads hold up every file
+    transfer and SSH load behind them.  A larger pool only moves the limit; a
+    read that can be given up on would need a thread to be cancelled, or a
+    different way to read.
+  - An io_uring poll backend.
+
+
+Protocols not yet done
+
+  - SMB/SMBS.
+  - RTMP/RTMPS.
+  - NTLM and Negotiate, only after an explicit dependency decision.
