@@ -75,6 +75,13 @@ struct twist_connection
      twist_connection_start_tls passes on (see twist_connection_require_name).  */
   char *also_name;
   struct twist_timer *connect_timer;
+  /* The limits on what is read and written (twist_connection_set_rate), and
+     the waits for the next chunk to be earned: while one is on, that
+     direction is not watched.  */
+  struct twist_rate rrate;
+  struct twist_rate wrate;
+  struct twist_timer *rtimer;
+  struct twist_timer *wtimer;
   /* While closing with output that has not gone: the end of the wait for it.  */
   struct twist_timer *close_timer;
 };
@@ -128,10 +135,11 @@ refresh_interest (struct twist_connection *c)
 {
   int want = 0;
 
-  if (!c->paused && !c->closing && !c->hold_read
+  if (!c->paused && !c->closing && !c->hold_read && c->rtimer == NULL
       && pending_in (c) < TWIST_IN_CEILING && c->fd >= 0)
     want |= TWIST_INTEREST_READ;
-  if ((c->out_len > 0 || c->connecting || c->force_write) && c->fd >= 0)
+  if ((c->out_len > 0 || c->connecting || c->force_write) && c->fd >= 0
+      && c->wtimer == NULL)
     want |= TWIST_INTEREST_WRITE;
   if (want != c->interest)
     {
@@ -177,6 +185,66 @@ twist_connection_hold_read (struct twist_connection *c, int hold)
     return;
   c->hold_read = hold;
   refresh_interest (c);
+}
+
+void
+twist_connection_set_rate (struct twist_connection *c, uint64_t recv_limit,
+                           uint64_t send_limit)
+{
+  if (c == NULL)
+    return;
+  twist_rate_init (&c->rrate, recv_limit);
+  twist_rate_init (&c->wrate, send_limit);
+}
+
+static void on_rate_read (void *user);
+static void on_rate_write (void *user);
+
+/* If another chunk may not go yet, wait for it: TIMER is set and the
+   direction is not watched until it goes off.  Returns 1 if waiting.  */
+static int
+rate_wait (struct twist_connection *c, struct twist_rate *r,
+           struct twist_timer **timer, void (*fn) (void *))
+{
+  uint64_t now, wait;
+
+  if (r->limit == 0 || *timer != NULL)
+    return *timer != NULL;
+  now = twist_loop_now (c->loop);
+  wait = twist_rate_wait (r, now, 0);
+  if (wait == 0)
+    return 0;
+  if (twist_loop_schedule (c->loop, now + wait, fn, c, timer) != TWIST_OK)
+    {
+      *timer = NULL;
+      return 0;
+    }
+  refresh_interest (c);
+  return 1;
+}
+
+static void
+on_rate_read (void *user)
+{
+  struct twist_connection *c = user;
+
+  c->rtimer = NULL;
+  if (c->failed)
+    return;
+  refresh_interest (c);
+  twist_connection_on_readable (c);
+}
+
+static void
+on_rate_write (void *user)
+{
+  struct twist_connection *c = user;
+
+  c->wtimer = NULL;
+  if (c->failed)
+    return;
+  refresh_interest (c);
+  twist_connection_on_writable (c);
 }
 
 void
@@ -424,6 +492,10 @@ twist_connection_free (struct twist_connection *c)
     twist_timer_cancel (c->connect_timer);
   if (c->close_timer != NULL)
     twist_timer_cancel (c->close_timer);
+  if (c->rtimer != NULL)
+    twist_timer_cancel (c->rtimer);
+  if (c->wtimer != NULL)
+    twist_timer_cancel (c->wtimer);
   if (c->owner_free != NULL)
     c->owner_free (c->owner);
   if (c->free_tls != NULL && c->tls != NULL)
@@ -706,6 +778,9 @@ twist_connection_on_readable (struct twist_connection *c)
       room = TWIST_IN_CEILING - pending_in (c);
       if (room > 16384)
         room = 16384;
+      if (rate_wait (c, &c->rrate, &c->rtimer, on_rate_read))
+        break;
+      room = twist_rate_chunk (&c->rrate, room);
       if (c->tls != NULL)
         dst = tlsbuf;
       else
@@ -728,6 +803,8 @@ twist_connection_on_readable (struct twist_connection *c)
           dst = c->inbuf + c->in_off + c->in_len;
         }
       n = c->read_fn (c->io_user, dst, room);
+      if (n > 0)
+        twist_rate_note (&c->rrate, (uint64_t) n);
       if (n > 0 && c->tls == NULL)
         {
           c->in_len += (size_t) n;
@@ -778,9 +855,15 @@ twist_connection_on_writable (struct twist_connection *c)
     }
   while (c->out_len > 0)
     {
-      ssize_t n = c->write_fn (c->io_user, c->outbuf + c->out_off, c->out_len);
+      ssize_t n;
+
+      if (rate_wait (c, &c->wrate, &c->wtimer, on_rate_write))
+        break;
+      n = c->write_fn (c->io_user, c->outbuf + c->out_off,
+                       twist_rate_chunk (&c->wrate, c->out_len));
       if (n > 0)
         {
+          twist_rate_note (&c->wrate, (uint64_t) n);
           /* Progress: the wait for a close to finish begins again.  */
           if (c->closing && c->close_timer != NULL)
             arm_close_timer (c);

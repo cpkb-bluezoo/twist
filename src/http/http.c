@@ -2757,6 +2757,7 @@ dial (struct twist_http *h, const struct twist_dns_addr *addr)
       http_fail (h, TWIST_ERR_NOMEM);
       return;
     }
+  twist_connection_limit (h->conn, h->transfer);
   ep = twist_connection_endpoint (h->conn);
   if (h->proxy != NULL && h->tunnel)
     {
@@ -2978,6 +2979,20 @@ on_resolved (void *user, int err, const struct twist_dns_service *svc)
     {
       http_complete (h, TWIST_ERR_UNSUPPORTED);
       return;
+    }
+  if (h->how == TWIST_DISC_H3
+      && (h->transfer->max_recv_speed != 0 || h->transfer->max_send_speed != 0))
+    {
+      /* A limit is kept on a connection of the stream kind, not on QUIC.  */
+      if (h->transfer->http_version == TWIST_HTTP_VERSION_3ONLY)
+        {
+          twist_transfer_set_error (h->transfer,
+                                    twist_strdup (_("a rate limit cannot be "
+                                                    "kept over HTTP/3")));
+          http_complete (h, TWIST_ERR_UNSUPPORTED);
+          return;
+        }
+      h->how = TWIST_DISC_ALPN;
     }
   if (h->transfer->unix_path != NULL && h->how == TWIST_DISC_H3)
     {

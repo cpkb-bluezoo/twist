@@ -146,6 +146,7 @@ make_connection (struct twist_mail_link *link)
   if (c == NULL)
     return TWIST_ERR_NOMEM;
   link->conn = c;
+  twist_connection_limit (c, link->transfer);
   if (link->proxy != NULL)
     {
       user = link->proxy;

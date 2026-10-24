@@ -227,9 +227,7 @@ or of the URL is sent as the variable USER, which offers the environment too.
 A value with a byte above 127 is skipped without an error; a user name with one
 is refused (exit status 43).  A name that is not one of these is exit status
 48, and an option with no = or a bad value is exit status 49, both before twist
-connects.  There is no TLS variant,
-.B \-\-limit\-rate
-is refused, and the size of a terminal is not found out and sent: use WS.  A
+connects.  There is no TLS variant, and the size of a terminal is not found out and sent: use WS.  A
 proxy can be used, and the session goes through its tunnel.
 .SH URLS
 A host is a name made of letters, digits and the characters of a name, with a
@@ -845,7 +843,10 @@ Keep to
 .I speed
 bytes a second on average, for downloads and uploads.
 A whole number with an optional suffix k, m, g, t or p (1024 times the one before).
-For sftp and scp; other URLs are refused.
+The limit is on each connection the transfer makes, and stays on it while the connection lasts.
+It cannot be kept over HTTP/3 (an https URL uses HTTP/2 or HTTP/1 instead, and
+.B \-\-http3\-only
+fails) or for tftp, which is refused.
 .TP
 .B \-\-ftp\-create\-dirs
 Make the directories an sftp upload needs.

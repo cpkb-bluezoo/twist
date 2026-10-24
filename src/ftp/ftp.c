@@ -534,6 +534,7 @@ dial_tcp (struct twist_ftp *f, struct twist_connection **slot,
   c = twist_connection_new (f->transfer->loop);
   if (c == NULL)
     return TWIST_ERR_NOMEM;
+  twist_connection_limit (c, f->transfer);
   *slot = c;
   twist_connection_endpoint (c)->user_data = user;
   twist_connection_set_handler (c, handler);
@@ -1221,6 +1222,7 @@ dial_control (struct twist_ftp *f)
       return;
     }
   f->ctrl = c;
+  twist_connection_limit (c, f->transfer);
   twist_connection_endpoint (c)->user_data = user;
   twist_connection_set_handler (c, handler);
   rc = twist_race_dial (f->transfer, c, f->dial_host, f->dial_port,

@@ -684,6 +684,8 @@ twist_tunnel_connect (struct twist_transfer *transfer,
       return TWIST_ERR_NOMEM;
     }
   t->state = T_DIAL;
+  /* The proxy's own socket is the one that is kept to the limit.  */
+  twist_connection_limit (t->outer, transfer);
   twist_connection_set_io (t->inner, inner_read, inner_write, t);
   twist_connection_set_owner (t->inner, t, inner_free, inner_resume);
   twist_connection_endpoint (t->inner)->user_data = user;

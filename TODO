@@ -23,9 +23,9 @@ SCP/SFTP (src/ssh, over foxtrot)
   - statvfs, and the other commands the sftp tool has, as -Q commands;
     --create-file-mode and the directory mode.
   - Quote commands for scp URLs.
-  - --limit-rate for the other protocols: the pacer is in src/engine/rate.c,
-    and only the SFTP pumps use it.  Until then the command line refuses the
-    option for other URLs.
+  - --limit-rate is not kept over HTTP/3 (QUIC has no connection of the kind
+    the limit is kept on): an https transfer uses HTTP/2 or HTTP/1, and
+    --http3-only fails; tftp is refused.  Nor over DNS, or an ssh-agent.
   - Certificates are found only as KEY-cert.pub beside a key file; there is no
     option to name a certificate elsewhere (ssh's CertificateFile).
   - -l for ftp URLs, which would send NLST; it only affects sftp now.

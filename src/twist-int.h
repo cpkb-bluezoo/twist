@@ -543,6 +543,20 @@ void twist_connection_connected (struct twist_connection *conn);
 void twist_connection_on_readable (struct twist_connection *conn);
 void twist_connection_on_writable (struct twist_connection *conn);
 void twist_connection_hold_read (struct twist_connection *conn, int hold);
+/* The most this connection reads and writes, in bytes a second, on average
+   (0: no limit).  The limit is the connection's, not the transfer's: it is
+   kept for as long as the connection is, by whatever uses it.  */
+void twist_connection_set_rate (struct twist_connection *conn,
+                                uint64_t recv_limit, uint64_t send_limit);
+/* The limits that the transfer was given (--limit-rate), on a connection that
+   is made for it.  */
+static inline void
+twist_connection_limit (struct twist_connection *conn,
+                        const struct twist_transfer *transfer)
+{
+  twist_connection_set_rate (conn, transfer->max_recv_speed,
+                             transfer->max_send_speed);
+}
 void twist_connection_force_write (struct twist_connection *conn, int force);
 int twist_connection_queue_out (struct twist_connection *conn,
                                 const uint8_t *data, size_t len);

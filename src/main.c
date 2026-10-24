@@ -319,7 +319,7 @@ usage (void)
          stdout);
   fputs (_("      --ftp-create-dirs   make the directories of an sftp upload\n"),
          stdout);
-  fputs (_("      --limit-rate SPEED  keep to SPEED bytes a second, with k, M, G (sftp, scp)\n"),
+  fputs (_("      --limit-rate SPEED  keep to SPEED bytes a second, with k, M, G\n"),
          stdout);
   fputs (_("  -b, --cookie DATA       Cookie header data\n"), stdout);
   fputs (_("      --oauth2-bearer T   Bearer token\n"), stdout);
@@ -1612,11 +1612,10 @@ job_prepare (struct cli_run *run, struct cli_next *next, struct cli_job **out)
     }
   if ((rc = ensure_dirs (op, out_path)) != 0)
     goto fail;
-  if (op->limit_rate != 0 && !is_ssh_url (url))
+  if (op->limit_rate != 0 && strncmp (url, "tftp:", 5) == 0)
     {
-      /* Nothing else keeps to a rate yet, and a limit that is not kept is
-         worse than none.  */
-      diag_code (2, _("--limit-rate works for sftp and scp only"));
+      /* A limit that is not kept is worse than none.  */
+      diag_code (2, _("--limit-rate does not work for tftp"));
       rc = 2;
       goto fail;
     }

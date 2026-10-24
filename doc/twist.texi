@@ -1236,12 +1236,16 @@ one if @var{command} begins with @samp{-}.  A @samp{*} before it lets the
 server refuse it without ending the transfer.  May be given many times.  For
 @code{sftp} URLs only; other URLs ignore it (@pxref{SFTP and SCP}).
 @item --limit-rate @var{speed}
-Keep to @var{speed} bytes a second, for downloads and uploads, for
-@code{sftp} and @code{scp}.  The speed is a whole number with an optional
+Keep to @var{speed} bytes a second, for downloads and uploads.  The limit is
+on each connection the transfer makes, and stays on it for as long as the
+connection lasts, so a connection that is kept and used again keeps it; it
+is on the bytes the connection reads and writes (for TLS, the encrypted ones),
+and the average over the connection.  The speed is a whole number with an optional
 suffix: @samp{k}, @samp{m}, @samp{g}, @samp{t} or @samp{p}, in either case,
 each 1024 times the one before (@samp{200K}, @samp{3m}).  @samp{0} is no
-limit.  Other kinds of URL do not keep to a rate yet, and are refused with
-status 2 rather than ignoring the limit.
+limit.  A limit cannot be kept over HTTP/3 or for @code{tftp}: an https URL
+uses HTTP/2 or HTTP/1 instead, @option{--http3-only} fails, and a @code{tftp}
+URL is refused with status 2, rather than the limit being ignored.
 @item --ftp-create-dirs
 Make the directories an @code{sftp} upload needs, with mode 0755.
 @item -C @var{offset}
@@ -2150,8 +2154,11 @@ is left, and if making them does not help the error is the upload's.
 
 @subheading Rate limits
 
-@option{--limit-rate} limits the average over the transfer.
-A chunk is sent or asked for when the bytes before it have been earned at the
+@option{--limit-rate} limits the average over the connection (for sftp and
+scp, over the transfer).  On other connections the bytes read from the socket,
+and written to it, are counted, and the socket is not read from or written to
+while the bytes before the next chunk have not been earned; a chunk is at most
+16 KiB there.  For sftp and scp a chunk is sent or asked for when the bytes before it have been earned at the
 limit, so the transfer is ahead by at most one chunk.  A chunk is 32 KiB, or
 half a second's worth of the limit when that is less, so a slow limit gives
 small requests and not lumps; at 1000 bytes a second the requests are of 500
@@ -2326,7 +2333,7 @@ connects.
 
 @subheading Not done
 
-There is no TLS variant, @option{--limit-rate} is refused, and the size of a
+There is no TLS variant, and the size of a
 terminal is not found out and sent: use @code{WS}.  A proxy can be used, and the
 session goes through its tunnel.
 
