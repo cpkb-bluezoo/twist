@@ -227,6 +227,8 @@ start_box (struct twist_imap *m)
   char mailbox[300];
   int rc = parse_target (m);
 
+  /* The connection is up: what comes is the mailbox.  */
+  twist_mail_link_phase_end (&m->link);
   if (rc != TWIST_OK)
     return rc;
   rc = twist_imap_mailbox (m->box, mailbox, sizeof mailbox);
@@ -673,6 +675,10 @@ twist_imap_attach (struct twist_transfer *transfer)
   rc = twist_mail_link_open (&m->link, transfer, &imap_handler, m, imap_fail);
   if (rc != TWIST_OK)
     imap_complete (m, rc);
+  else
+    /* Connected, through a proxy if there is one, greeted and logged in, in
+       the time allowed for it.  */
+    twist_mail_link_phase_begin (&m->link);
   return transfer->done ? transfer->result : TWIST_OK;
 }
 

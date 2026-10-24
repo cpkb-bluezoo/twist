@@ -46,39 +46,57 @@ on_timeout (void *user)
 static void
 on_phase_timeout (void *user)
 {
-  struct twist_mail_link *link = user;
+  struct twist_phase *phase = user;
   char msg[128];
 
-  link->phase_timer = NULL;
-  if (twist_transfer_error (link->transfer) == NULL)
+  phase->timer = NULL;
+  if (twist_transfer_error (phase->transfer) == NULL)
     {
       snprintf (msg, sizeof msg, _("timed out after %ld ms making the "
-                                   "connection"), link->transfer->connect_timeout_ms);
-      twist_transfer_set_error (link->transfer, twist_strdup (msg));
+                                   "connection"),
+                phase->transfer->connect_timeout_ms);
+      twist_transfer_set_error (phase->transfer, twist_strdup (msg));
     }
-  if (link->fail != NULL)
-    link->fail (link->user, TWIST_ERR_TIMEOUT);
+  if (phase->fail != NULL)
+    phase->fail (phase->user, TWIST_ERR_TIMEOUT);
+}
+
+void
+twist_phase_begin (struct twist_phase *phase, struct twist_transfer *transfer,
+                   void (*fail) (void *user, int err), void *user)
+{
+  if (phase->timer != NULL || transfer->connect_timeout_ms <= 0
+      || transfer->loop == NULL)
+    return;
+  phase->transfer = transfer;
+  phase->fail = fail;
+  phase->user = user;
+  twist_loop_schedule (transfer->loop,
+                       twist_loop_now (transfer->loop)
+                       + (uint64_t) transfer->connect_timeout_ms,
+                       on_phase_timeout, phase, &phase->timer);
+}
+
+void
+twist_phase_end (struct twist_phase *phase)
+{
+  if (phase->timer != NULL)
+    {
+      twist_timer_cancel (phase->timer);
+      phase->timer = NULL;
+    }
 }
 
 void
 twist_mail_link_phase_begin (struct twist_mail_link *link)
 {
-  if (link->phase_timer == NULL && link->transfer->connect_timeout_ms > 0
-      && link->transfer->loop != NULL)
-    twist_loop_schedule (link->transfer->loop,
-                         twist_loop_now (link->transfer->loop)
-                         + (uint64_t) link->transfer->connect_timeout_ms,
-                         on_phase_timeout, link, &link->phase_timer);
+  twist_phase_begin (&link->phase, link->transfer, link->fail, link->user);
 }
 
 void
 twist_mail_link_phase_end (struct twist_mail_link *link)
 {
-  if (link->phase_timer != NULL)
-    {
-      twist_timer_cancel (link->phase_timer);
-      link->phase_timer = NULL;
-    }
+  twist_phase_end (&link->phase);
 }
 
 static void

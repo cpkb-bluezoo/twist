@@ -30,6 +30,10 @@ Version 0.1 - unreleased
     warning); --no-OPTION for every option that is a switch
   * a response to HEAD, and a 204 or a 304, has no body whatever its headers
     say: -I no longer waits for one (exit 52 on HTTP/1.0, a hang on keep-alive)
+  * --connect-timeout covers the greeting and the login of smtp, imap, pop3
+    and ftp (and the schemes with an s), as curl's does, and not only the TCP
+    connect: a server that is silent, or greets and goes quiet, ends the
+    transfer at the limit with status 28
   * gzip and deflate request and response coding, via zlib
   * the progress meter and the bar (-#), and the library's
     TWISTOPT_XFERINFOFUNCTION

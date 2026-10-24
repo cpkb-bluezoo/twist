@@ -181,6 +181,8 @@ start_transfer (struct twist_pop3 *p)
 {
   int msg = message_number (p);
 
+  /* The connection is up: what comes is the message.  */
+  twist_mail_link_phase_end (&p->link);
   if (msg < 0)
     return TWIST_ERR_URL;
   p->message = msg;
@@ -587,6 +589,10 @@ twist_pop3_attach (struct twist_transfer *transfer)
   rc = twist_mail_link_open (&p->link, transfer, &pop3_handler, p, pop3_fail);
   if (rc != TWIST_OK)
     pop3_complete (p, rc);
+  else
+    /* Connected, through a proxy if there is one, greeted and logged in, in
+       the time allowed for it.  */
+    twist_mail_link_phase_begin (&p->link);
   return transfer->done ? transfer->result : TWIST_OK;
 }
 

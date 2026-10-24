@@ -68,12 +68,10 @@ HTTP
     without end against a peer that does not read grows it, so each handler
     limits itself (SFTP does, by its window); none does for a body given in
     one piece, which the application chose the size of.
-  - --connect-timeout covers the greeting and login for SSH only.  The other
-    protocols on the shared dialer (SMTP, POP3, IMAP, LDAP, ...) have it for
-    the lookup and the TCP connect, and a server that takes the connection and
-    sends no greeting is waited for until --max-time.  They can call
-    twist_mail_link_phase_begin and _end when they are up.  FTP and HTTP dial
-    themselves and do the same.
+  - --connect-timeout for ldap covers the lookup and the TCP connect only; a
+    server that takes the connection and does not answer the bind is waited for
+    until --max-time.  What curl does for ldap is not known: the curl it was
+    compared with has no LDAP.
   - URL globbing does not reach the file given to -T ({a,b} there, with #N in
     the URL), nor #N in --output-dir.  -T takes the name as written.
   - STARTTLS for ldap (curl has it through OpenLDAP only).  A user name and

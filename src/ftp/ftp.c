@@ -80,6 +80,8 @@ struct twist_ftp
   struct twist_proxy *data_proxy;
   struct twist_endpoint *ep;
   struct twist_timer *timer;
+  /* The time allowed to be connected and logged in.  */
+  struct twist_phase phase;
   struct twist_dns_addr peer;
   struct twist_dns_addr data_addr;
   char *dial_host;
@@ -425,6 +427,7 @@ ftp_complete (struct twist_ftp *f, int err)
       twist_timer_cancel (f->timer);
       f->timer = NULL;
     }
+  twist_phase_end (&f->phase);
   twist_transfer_finish (f->transfer, err);
 }
 
@@ -673,6 +676,20 @@ ftp_begin_login (struct twist_ftp *f)
     ftp_complete (f, TWIST_ERR_PROTOCOL);
 }
 
+/* The connection is up: greeted, logged in and, on ftps, protected.  What
+   comes is the transfer.  */
+static void
+ftp_up (struct twist_ftp *f)
+{
+  twist_phase_end (&f->phase);
+}
+
+static void
+ftp_phase_fail (void *user, int err)
+{
+  ftp_complete (user, err);
+}
+
 /* The login is done.  On ftps the data connection is protected before
    anything is transferred (RFC 4217): PBSZ 0, then PROT P.  Left at the
    default, PROT C, the password would be encrypted and the file not.  */
@@ -687,6 +704,8 @@ ftp_logged_in (struct twist_ftp *f)
       f->state = FTP_PBSZ;
       cmd = "PBSZ 0\r\n";
     }
+  else
+    ftp_up (f);
   if (ftp_send (f, "%s", cmd) != TWIST_OK)
     ftp_complete (f, TWIST_ERR_PROTOCOL);
 }
@@ -810,6 +829,7 @@ ftp_on_reply (void *user, int code, int final, const char *text, size_t len)
           return;
         }
       f->prot_p = 1;
+      ftp_up (f);
       f->state = FTP_TYPE;
       if (ftp_send (f, "TYPE I\r\n") != TWIST_OK)
         ftp_complete (f, TWIST_ERR_PROTOCOL);
@@ -1260,6 +1280,8 @@ ftp_begin (struct twist_ftp *f)
     twist_loop_schedule (transfer->loop,
                          twist_loop_now (transfer->loop) + (uint64_t) transfer->timeout_ms,
                          on_timeout, f, &f->timer);
+  /* From the lookup to the login, in the time allowed for connecting.  */
+  twist_phase_begin (&f->phase, transfer, ftp_phase_fail, f);
   {
     int rc = twist_dns_resolve_transfer (transfer, f->dial_host, on_resolved,
                                          f);
@@ -1278,6 +1300,7 @@ twist_ftp_free (void *p)
     return;
   if (f->timer != NULL)
     twist_timer_cancel (f->timer);
+  twist_phase_end (&f->phase);
   twist_connection_free (f->ctrl);
   twist_connection_free (f->data);
   twist_proxy_free (f->proxy);

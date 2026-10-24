@@ -1308,6 +1308,23 @@ int twist_mail_sasl_continue (struct twist_mail_sasl *sasl, char **b64);
 const char *twist_mail_user (const struct twist_transfer *transfer);
 const char *twist_mail_pass (const struct twist_transfer *transfer);
 
+/* The time a protocol has to be connected in: the transfer's connect timeout,
+   from the start of the dial to the moment the protocol says it is up (see
+   twist_mail_link_phase_begin).  FAIL is called with TWIST_ERR_TIMEOUT, and the
+   transfer is given the words for it, if it has none.  A protocol that dials
+   for itself has one of these.  */
+struct twist_phase
+{
+  struct twist_transfer *transfer;
+  struct twist_timer *timer;
+  void (*fail) (void *user, int err);
+  void *user;
+};
+void twist_phase_begin (struct twist_phase *phase,
+                        struct twist_transfer *transfer,
+                        void (*fail) (void *user, int err), void *user);
+void twist_phase_end (struct twist_phase *phase);
+
 struct twist_mail_link
 {
   struct twist_transfer *transfer;
@@ -1316,7 +1333,7 @@ struct twist_mail_link
   struct twist_timer *timer;
   /* The time to be connected in, from the start: see
      twist_mail_link_phase_begin.  */
-  struct twist_timer *phase_timer;
+  struct twist_phase phase;
   char *dial_host;
   int dial_port;
   int tls_tunnel;		/* Through an https proxy: tunnel.c.  */

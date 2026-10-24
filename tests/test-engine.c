@@ -1468,6 +1468,90 @@ test_cancel (void)
   close (fd);
 }
 
+/* The connect timeout, as curl has it, covers the whole of making the
+   connection: for smtp, imap, pop3 and ftp that is the lookup, the TCP connect
+   and the greeting, and the login after it, so a server that takes the
+   connection and then says nothing, or says its greeting and then nothing,
+   ends the transfer at the connect timeout, and not at the transfer's.  The
+   other protocols have no greeting to wait for, and have the connect timeout
+   for the TCP connect only: a server that is silent is waited for until the
+   transfer's own.  The server here accepts, may say GREETING, and keeps the
+   connection open.  */
+static void
+connect_timeout_case (const char *scheme, const char *path,
+                      const char *greeting, int covered)
+{
+  int port = 0;
+  int fd = listen_loopback (&port);
+  int peer = -1;
+  twist_runtime *runtime = twist_runtime_new ();
+  twist_transfer *transfer = twist_transfer_new ();
+  struct check_job job = { 0, 0, 0 };
+  struct timespec nap = { 0, 5000000 };
+  char url[96];
+  char what[160];
+  int i;
+
+  snprintf (url, sizeof url, "%s://127.0.0.1:%d%s", scheme, port, path);
+  snprintf (what, sizeof what, "%s: %s, %s", scheme,
+            greeting != NULL ? "greeting and then nothing" : "nothing",
+            covered ? "ends at the connect timeout"
+            : "waits for the transfer's timeout");
+  check (fd >= 0 && runtime != NULL && transfer != NULL, "connect timeout setup");
+  if (fd < 0)
+    return;
+  twist_transfer_setopt (transfer, TWISTOPT_URL, url);
+  twist_transfer_setopt (transfer, TWISTOPT_CONNECTTIMEOUT_MS, 300L);
+  twist_transfer_setopt (transfer, TWISTOPT_TIMEOUT_MS, 20000L);
+  check (twist_runtime_start (runtime, transfer, check_job_done, &job)
+         == TWIST_OK, "connect timeout start");
+  for (i = 0; i < 200 && peer < 0; i++)
+    {
+      twist_runtime_run_once (runtime, 0);
+      peer = accept (fd, NULL, NULL);
+      if (peer < 0)
+        nanosleep (&nap, NULL);
+    }
+  check (peer >= 0, "the transfer connected");
+  if (peer >= 0 && greeting != NULL)
+    {
+      if (send (peer, greeting, strlen (greeting), 0) < 0)
+        check (0, "the greeting was sent");
+    }
+  if (covered)
+    check (check_pump (runtime, &job, 5000) && job.calls == 1
+           && job.result == TWIST_ERR_TIMEOUT, what);
+  else
+    {
+      /* Well past the connect timeout and well short of the transfer's.  */
+      check (!check_pump (runtime, &job, 1500) && !job.done, what);
+      twist_runtime_cancel (runtime, transfer);
+      check_pump (runtime, &job, 3000);
+    }
+  if (peer >= 0)
+    close (peer);
+  twist_transfer_free (transfer);
+  twist_runtime_free (runtime);
+  close (fd);
+}
+
+static void
+test_connect_timeout (void)
+{
+  connect_timeout_case ("smtp", "/", NULL, 1);
+  connect_timeout_case ("smtp", "/", "220 hello\r\n", 1);
+  connect_timeout_case ("imap", "/INBOX/", NULL, 1);
+  connect_timeout_case ("imap", "/INBOX/", "* OK hello\r\n", 1);
+  connect_timeout_case ("pop3", "/", NULL, 1);
+  connect_timeout_case ("pop3", "/", "+OK hello\r\n", 1);
+  connect_timeout_case ("ftp", "/f", NULL, 1);
+  connect_timeout_case ("ftp", "/f", "220 hello\r\n", 1);
+  connect_timeout_case ("dict", "/d:word", NULL, 0);
+  connect_timeout_case ("gopher", "/1/", NULL, 0);
+  connect_timeout_case ("http", "/", NULL, 0);
+  connect_timeout_case ("mqtt", "/x", NULL, 0);
+}
+
 /* A Unix socket in place of the host and port of the URL (TWISTOPT_UNIX_SOCKET
    and the abstract form).  The data path is in integration/http-unix.sh; here,
    what is refused and what is not looked up.  */
@@ -2193,6 +2277,7 @@ main (void)
   test_runtime_run_once ();
   test_release_transfer ();
   test_cancel ();
+  test_connect_timeout ();
   test_runtime_from_callback ();
   test_start_failure ();
   test_done_chain ();

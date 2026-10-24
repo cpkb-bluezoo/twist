@@ -879,7 +879,8 @@ accepted.
 .BI \-\-connect\-timeout " seconds"
 Limit for making the connection, in seconds; five minutes if it is not given.
 For sftp and scp it covers the lookup, the TCP connect, a proxy and the SSH
-handshake up to the login.
+handshake up to the login; for smtp, imap, pop3 and ftp, and the schemes with an s, the lookup, the TCP connect, a proxy, the TLS handshake, the server's greeting and the login.  A server that is silent, or greets and goes quiet, ends the transfer with status 28 at this limit.  The other protocols have no greeting to wait for, and a silent server is waited for until
+.BR \-\-max\-time .
 .TP
 .B \-s, \-\-silent
 Hide the progress meter and the transfer diagnostic.  The exit status is

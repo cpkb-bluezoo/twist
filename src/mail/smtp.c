@@ -191,6 +191,8 @@ start_mail (struct twist_smtp *s)
 {
   const char *from = s->transfer->mail_from;
 
+  /* The connection is up: what comes is the message.  */
+  twist_mail_link_phase_end (&s->link);
   if (bad_token (from))
     return TWIST_ERR_PROTOCOL;
   s->rcpt = s->transfer->mail_rcpt;
@@ -620,6 +622,10 @@ twist_smtp_attach (struct twist_transfer *transfer)
   rc = twist_mail_link_open (&s->link, transfer, &smtp_handler, s, smtp_fail);
   if (rc != TWIST_OK)
     smtp_complete (s, rc);
+  else
+    /* Connected, through a proxy if there is one, greeted and logged in, in
+       the time allowed for it.  */
+    twist_mail_link_phase_begin (&s->link);
   return transfer->done ? transfer->result : TWIST_OK;
 }
 

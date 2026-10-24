@@ -1256,7 +1256,10 @@ accepted.
 Limit for making the connection, in seconds; five minutes if it is not given
 (or is 0).  For @code{sftp} and @code{scp} it covers all of it: the name
 lookup, the TCP connect, a proxy, and the SSH handshake up to the login
-(@pxref{SFTP and SCP}).  Up to three decimal places are accepted.
+(@pxref{SFTP and SCP}); for @code{smtp}, @code{imap}, @code{pop3} and
+@code{ftp}, and the schemes with an @samp{s}, the lookup, the TCP connect, a
+proxy, the TLS handshake, the server's greeting and the login.  Up to three
+decimal places are accepted.
 @item -s
 @itemx --silent
 Hide the progress meter and the transfer diagnostic.  The exit status
@@ -2025,12 +2028,18 @@ A server that does not say how big a file is cannot do the last, nor
 @subheading Time limits
 
 @option{--connect-timeout} is one limit for all of making the connection: the
-name lookup, the TCP connect, a proxy's tunnel, the SSH banner, the key
-exchange and the login.  A server or a proxy that takes the connection and does
-not go on is given up on with status 28, where it would otherwise be waited for.
-It ends at the login: a transfer that takes longer than the limit is not cut
-off by it, and a session that is kept for the next URL is not connecting at all.
-The key exchange gets the same time, not a limit of its own.
+name lookup, the TCP connect, a proxy's tunnel, and then, for the protocols
+that begin with the server speaking, its greeting and the login: for
+@code{sftp} and @code{scp} the SSH banner, the key exchange and the login, for
+@code{smtp}, @code{imap}, @code{pop3} and @code{ftp} (and the schemes with an
+@samp{s}) the greeting, the capabilities, STARTTLS or the TLS handshake, and
+the login.  A server or a proxy that takes the connection and does not go on,
+or greets and goes quiet, is given up on with status 28, where it would
+otherwise be waited for.  It ends at the login: a transfer that takes longer
+than the limit is not cut off by it, and a session that is kept for the next
+URL is not connecting at all.  The key exchange gets the same time, not a limit
+of its own.  The other protocols have no greeting to wait for, and a server
+that is silent is waited for until @option{--max-time}.
 @option{--max-time} limits the whole, as before.
 
 @subheading Through a proxy
