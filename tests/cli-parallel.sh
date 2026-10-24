@@ -54,7 +54,7 @@ is () { [ "$1" = "$2" ] && echo ok; }
 fresh () { rm -rf "$work/out"; mkdir "$work/out"; cd "$work/out" || exit 77; }
 
 # Ten URLs from one pattern, all at once: every one arrives, with its own
-# contents, and nothing is drawn on the way.
+# contents.
 fresh
 "$TWIST" -Z -o 'out#1' "$u/f[1-10].txt" 2>"$work/err"; st=$?
 check "$(is "$st" 0)" "-Z with a pattern of ten: status 0 ($st)"
@@ -65,7 +65,50 @@ while [ $n -le 10 ]; do
   n=$((n + 1))
 done
 check "$ok" "-Z with a pattern of ten: every file has its contents"
-check "$([ ! -s "$work/err" ] && echo ok)" "-Z draws nothing on standard error"
+
+# One line for the whole run, on standard error, in curl's layout: the header
+# once, the line that begins with a carriage return, and at the end a line
+# whose figures are the sum of the ten files and that ends with a newline.
+# The speed and the times depend on the clock.
+header='DL% UL%  Dled  Uled  Xfers  Live Total     Current  Left    Speed'
+check "$(is "$(grep -c '^DL% UL%  Dled  Uled  Xfers  Live Total     Current  Left    Speed$' "$work/err")" 1)" \
+  "-Z draws the header once"
+check "$(is "$(head -n 1 "$work/err")" "$header")" "and first"
+last=$(tr '\r' '\n' < "$work/err" | grep -v '^$' | tail -n 1)
+bytes=$(( $(cat "$src"/f[1-9].txt "$src"/f10.txt | wc -c) ))
+check "$(printf '%s\n' "$last" | grep -q "^100 --  *$bytes  *0  *10  *0 " && echo ok)" \
+  "the last line is complete: 100%, $bytes bytes, ten started, none live ($last)"
+check "$([ "$(tail -c 1 "$work/err" | od -An -c | tr -d ' ')" = '\n' ] && echo ok)" \
+  "and ends with a newline"
+check "$(is "$(tr -cd '\n' < "$work/err" | wc -c | tr -d ' ')" 2)" \
+  "and there is no other newline"
+
+# -# is ignored: the same line, and no bar.  -s and --no-progress-meter draw
+# nothing, and the files still arrive.
+fresh
+"$TWIST" -Z -# -o 'out#1' "$u/f[1-10].txt" 2>"$work/err"; st=$?
+check "$(is "$st" 0)" "-Z -#: status 0 ($st)"
+check "$(grep -q '^DL% UL%' "$work/err" && ! grep -q '#' "$work/err" && echo ok)" \
+  "-Z -# draws the line and not the bar"
+for opt in -s --no-progress-meter; do
+  fresh
+  "$TWIST" -Z $opt -o 'out#1' "$u/f[1-10].txt" 2>"$work/err"; st=$?
+  check "$(is "$st" 0)" "-Z $opt: status 0 ($st)"
+  check "$([ ! -s "$work/err" ] && echo ok)" "-Z $opt draws nothing"
+  check "$(is "$(cat out10 2>/dev/null)" content-10)" "-Z $opt: the files arrive"
+done
+
+# A body that goes to a terminal is not mixed with the line: when any URL has
+# no file of its own, nothing is drawn.  A terminal is needed to see it.
+if command -v script >/dev/null 2>&1; then
+  fresh
+  script -qec "'$TWIST' -Z -o out1 '$u/f1.txt' '$u/f2.txt' 2>'$work/err'" /dev/null >/dev/null 2>&1
+  check "$([ ! -s "$work/err" ] && echo ok)" "-Z with a body to the terminal draws nothing"
+  fresh
+  script -qec "'$TWIST' -Z -o out1 '$u/f1.txt' -o out2 '$u/f2.txt' 2>'$work/err'" /dev/null >/dev/null 2>&1
+  check "$(grep -q '^DL% UL%' "$work/err" && echo ok)" \
+    "-Z with every body in a file draws the line even on a terminal"
+fi
 
 # The long names, and a cap of one.
 fresh

@@ -27,3 +27,6 @@ Version 0.1 - unreleased
     --parallel-max (50 by default, 300 at most), with curl's exit status for
     them; --fail-early ends the transfers under way, and standard input goes
     to one transfer only
+  * the progress meter of -Z is one line for the run, in curl's layout for
+    parallel transfers, and is drawn on standard error unless -s,
+    --no-progress-meter, or a body going to a terminal says not

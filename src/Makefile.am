@@ -121,7 +121,7 @@ libtwist_la_SOURCES = \
   tls/tls.c \
   tls/trust.c
 
-twist_SOURCES = bar.c bar.h main.c
+twist_SOURCES = bar.c bar.h main.c meter.c meter.h
 twist_LDADD = libtwist.la $(READLINE_LIBS)
 
 ## For fuzz/fuzz.sh, which compiles the library again with sanitizers and

@@ -22,6 +22,7 @@
 
 #include "gettext.h"
 #include "bar.h"
+#include "meter.h"
 #include "twist-int.h"
 
 #include <ctype.h>
@@ -32,6 +33,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <termios.h>
 
 #include <fcntl.h>
@@ -1125,6 +1127,8 @@ struct cli_job
   int body_short;               /* A write to the body came up short.  */
   int reads_stdin;              /* The transfer reads standard input.  */
   int aborted;                  /* Ended because another failed.  */
+  struct twist_meter_xfer xfer; /* What the run's meter knows of it.  */
+  int meter_added;              /* The meter has it.  */
 };
 
 static size_t
@@ -1236,6 +1240,8 @@ struct cli_run
   int parallel;                 /* -Z.  */
   int stdin_taken;              /* A job has been given standard input.  */
   int refused;                  /* A job was refused for want of it.  */
+  int meter_on;                 /* The one line for the run is drawn.  */
+  struct twist_meter meter;
 };
 
 /* What a URL of the cursor is: its text, the output name a pattern made for
@@ -1712,15 +1718,25 @@ job_prepare (struct cli_run *run, struct cli_next *next, struct cli_job **out)
   }
   /* The meter is drawn unless -s or --no-progress-meter says not, or the
      body is going to the terminal.  -# draws a bar instead.  Transfers that
-     run together draw neither.  */
-  hide_progress = silent || no_progress || run->parallel
-                  || (job->body == stdout
-                      && output_expected (job->use_url, upload)
-                      && isatty (fileno (stdout)));
+     run together are drawn as one line for the run, which -# does not
+     change, and which was decided on for all of them at the start.  */
+  if (run->parallel)
+    hide_progress = !run->meter_on;
+  else
+    hide_progress = silent || no_progress
+                    || (job->body == stdout
+                        && output_expected (job->use_url, upload)
+                        && isatty (fileno (stdout)));
   twist_transfer_setopt (transfer, TWISTOPT_STDERR, err_fp);
   twist_transfer_setopt (transfer, TWISTOPT_NOPROGRESS,
                          hide_progress ? 1L : 0L);
-  if (progress_bar && !hide_progress)
+  if (run->parallel && !hide_progress)
+    {
+      twist_transfer_setopt (transfer, TWISTOPT_XFERINFOFUNCTION,
+                             twist_meter_callback);
+      twist_transfer_setopt (transfer, TWISTOPT_XFERINFODATA, &job->xfer);
+    }
+  else if (progress_bar && !hide_progress)
     {
       twist_bar_init (&job->bar, err_fp, op->resume_set ? resume : 0);
       job->bar_used = 1;
@@ -1864,6 +1880,8 @@ run_job_ended (struct cli_job *job, int rc)
         break;
       }
   run->inflight--;
+  if (job->meter_added)
+    twist_meter_done (&run->meter, &job->xfer);
   /* It was aborted only if that is how it ended.  */
   job->aborted = job->aborted && rc == TWIST_ERR_ABORTED;
   aborted = job->aborted;
@@ -1895,6 +1913,11 @@ run_start (struct cli_run *run, struct cli_job *job)
       job->aborted = 1;
       run_job_ended (job, TWIST_ERR_ABORTED);
       return;
+    }
+  if (run->meter_on)
+    {
+      twist_meter_add (&run->meter, &job->xfer);
+      job->meter_added = 1;
     }
   rc = twist_runtime_start (run->runtime, job->transfer, job_done, job);
   if (rc != TWIST_OK)
@@ -1934,6 +1957,48 @@ run_loop_failed (struct cli_run *run, int rc)
     run_job_ended (run->jobs, rc);
 }
 
+static uint64_t
+clock_ms (void)
+{
+  struct timespec ts;
+
+  clock_gettime (CLOCK_MONOTONIC, &ts);
+  return (uint64_t) ts.tv_sec * 1000u + (uint64_t) ts.tv_nsec / 1000000u;
+}
+
+/* Whether some URL of the command line writes its body to a terminal: it has
+   no file to go to, and is not an upload that sends nothing back.  The line
+   for a parallel run would be mixed up with it.  */
+static int
+body_to_terminal (const struct cli_op *ops)
+{
+  const struct cli_op *op;
+
+  if (!isatty (fileno (stdout)))
+    return 0;
+  for (op = ops; op != NULL; op = op->next)
+    {
+      const struct cli_item *url;
+      const struct cli_item *out = op->outputs;
+      const struct cli_item *up = op->uploads;
+
+      for (url = op->urls; url != NULL; url = url->next)
+        {
+          int named = out != NULL
+                      && (out->remote || strcmp (out->text, "-") != 0);
+          const char *upload = up != NULL ? up->text : NULL;
+
+          if (out != NULL)
+            out = out->next;
+          if (up != NULL)
+            up = up->next;
+          if (!named && output_expected (url->text, upload))
+            return 1;
+        }
+    }
+  return 0;
+}
+
 /* Run everything on the command line, and return the exit status.  */
 static int
 run_all (struct cli_op *ops)
@@ -1944,6 +2009,9 @@ run_all (struct cli_op *ops)
   run.next_op = ops;
   run.parallel = parallel;
   run.cap = parallel ? (int) parallel_max : 1;
+  run.meter_on = parallel && !silent && !no_progress
+                 && !body_to_terminal (ops);
+  twist_meter_init (&run.meter, err_fp, clock_ms ());
   run.runtime = twist_runtime_new ();
   if (run.runtime == NULL)
     {
@@ -1957,10 +2025,14 @@ run_all (struct cli_op *ops)
       run_fill (&run);
       if (run.inflight == 0)
         break;
-      rc = twist_runtime_run_once (run.runtime, -1);
+      if (run.meter_on)
+        twist_meter_draw (&run.meter, clock_ms (), 0);
+      rc = twist_runtime_run_once (run.runtime, run.meter_on ? 500 : -1);
       if (rc != TWIST_OK)
         run_loop_failed (&run, rc);
     }
+  if (run.meter_on && run.meter.started > 0)
+    twist_meter_draw (&run.meter, clock_ms (), 1);
   twist_glob_free (run.glob);
   twist_runtime_free (run.runtime);
   /* A command line that asks for two readers of standard input is wrong,

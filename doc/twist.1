@@ -285,6 +285,46 @@ download, an IMAP message, and the data sent with
 .B \-T
 or an SMTP, MQTT, TFTP or sftp upload.  A redirect finishes the line, and the
 next response starts again at 0.
+.PP
+With
+.B \-Z
+the transfers share one line for the whole run, on standard error or
+.BR \-\-stderr ,
+under a heading that is printed once:
+.PP
+.nf
+DL% UL%  Dled  Uled  Xfers  Live Total     Current  Left    Speed
+ 62 --   2500     0     8     3   0:00:01  0:00:01 --:--:--  2500
+.fi
+.PP
+The line begins with a carriage return and is written over.  The columns are
+the percentage of the download that is done and of the upload; the bytes
+downloaded and uploaded; the number of transfers started so far, and of those
+that are under way; the time the whole download will take, the time spent and
+the time left; and the speed, which is the higher of the download and the
+upload over the last ten lines drawn, or since the start before there have
+been ten.  A percentage is shown only when every transfer under way has a
+size, and the sizes of all of them, those that are over too, add up to more
+than 0; otherwise it is
+.BR \-\- .
+A transfer that has ended stays in the bytes and the sizes.  The times are
+\fB\-\-:\-\-:\-\-\fR when the download size is not known for every transfer
+under way, or nothing has moved.  A line is drawn when half a second has
+passed since the last, and once more at the end, which ends with a newline.
+A message about a transfer that failed is written after the carriage return,
+as it comes, and not kept apart from the line.
+.PP
+The line is not shown with
+.B \-s
+or
+.BR \-\-no\-progress\-meter ,
+nor when the body of any URL goes to a terminal (a URL with no
+.B \-o
+or
+.BR \-O ),
+since it would mix with it.
+.B \-#
+is ignored: the line is drawn and not the bar.
 .SH VARIABLES
 A command line can set variables and use them in the parameters of options.
 .TP
@@ -531,7 +571,9 @@ group are taken in the order they were given, as places come free.
 Transfers end in any order, and bodies that go to standard output are mixed
 as they arrive, so give each URL an
 .B \-o
-unless that is wanted.  Neither the meter nor the bar is drawn.  The exit
+unless that is wanted.  One line of progress is drawn for the whole run (see
+.BR "PROGRESS METER" ).
+The exit
 status is that of the most recent failure (see
 .BR "EXIT STATUS" ).
 Standard input goes to one transfer only: a transfer that would read it,

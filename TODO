@@ -134,7 +134,6 @@ Twist TODO List
           TWISTINFO_SIZE_DOWNLOAD is the decoded.
         - sftp and scp ask for the size of the file (one more round trip) only
           when the meter is on.
-        - no parallel transfers, so no meter for them.
         - the tool's -s, -S, -# and --progress-meter have their --no- forms;
           the other boolean options do not yet.
         - --stderr - keeps standard error; it should write to standard output.

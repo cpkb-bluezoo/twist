@@ -982,8 +982,8 @@ Run the transfers together and not one after another, up to
 @option{--parallel-max} at a time.  The URLs of every @option{--next} group
 are taken in the order they were given, as places come free.  Transfers end
 in any order, and bodies that go to standard output are mixed as they arrive,
-so give each URL an @option{-o} unless that is wanted.  Neither the meter
-nor the bar is drawn.  The exit status is that of the most recent failure
+so give each URL an @option{-o} unless that is wanted.  One line of
+progress is drawn for the whole run (@pxref{Progress meter}).  The exit status is that of the most recent failure
 (see @emph{Exit status} below).  Standard input goes to one transfer only: a
 transfer that would read it, because of @samp{-T -} or because it is a
 @code{telnet} URL that is given nothing to send, is refused with
@@ -1589,6 +1589,37 @@ redirect finishes the line, and the next response starts again at 0.
 
 @option{-s}, @option{-S}, @option{-#}, @option{--no-progress-meter} and
 @option{--stderr} apply to every URL, also after @option{--next}.
+
+@subheading Transfers run together
+
+With @option{-Z} the transfers share one line for the whole run, on standard
+error or @option{--stderr}, under a heading that is printed once:
+
+@example
+DL% UL%  Dled  Uled  Xfers  Live Total     Current  Left    Speed
+ 62 --   2500     0     8     3   0:00:01  0:00:01 --:--:--  2500
+@end example
+
+The line begins with a carriage return and is written over.  The columns are
+the percentage of the download that is done and of the upload; the bytes
+downloaded and uploaded; the number of transfers started so far, and of those
+that are under way; the time the whole download will take, the time spent and
+the time left; and the speed, which is the higher of the download and the
+upload over the last ten lines drawn, or since the start before there have
+been ten.  Sizes are written as above.  A percentage is shown only when every
+transfer under way has a size, and the sizes of all of them, those that are
+over too, add up to more than 0; otherwise it is @samp{--}.  A transfer that has
+ended stays in the bytes and the sizes.  The times are @samp{--:--:--} when the
+download size is not known for every transfer under way, or nothing has moved.
+A line is drawn when half a second has passed since the last, and once more
+at the end, which ends with a newline.  A message about a transfer that
+failed is written after the carriage return, as it comes, and not kept apart
+from the line.
+
+The line is not shown with @option{-s} or @option{--no-progress-meter}, nor
+when the body of any URL goes to a terminal (a URL with no @option{-o} or
+@option{-O}, as above), since it would mix with it.  @option{-#} is ignored:
+the line is drawn and not the bar.
 
 A program that uses the library gets the same from
 @code{TWISTOPT_NOPROGRESS} (1 by default, which shows nothing),
