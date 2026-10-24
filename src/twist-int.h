@@ -32,6 +32,11 @@
 #include <sys/types.h>
 
 #define TWIST_IN_CEILING (256u * 1024u)
+/* The most a connection holds that has been sent on it and not yet written.
+   A send that would go over it fails (TWIST_ERR_NOMEM) and the handler, which
+   cannot be waited for in a call, ends its transfer.  A body that is large
+   is not sent at once but streamed (twist_connection_stream).  */
+#define TWIST_OUT_CEILING (256u * 1024u * 1024u)
 
 struct twist_loop;
 struct twist_connection;
@@ -573,6 +578,30 @@ void twist_connection_set_tls (struct twist_connection *conn, void *tls,
 void *twist_connection_tls (struct twist_connection *conn);
 int twist_endpoint_send (struct twist_endpoint *ep, const uint8_t *data,
                          size_t len);
+/* The limit on what is queued, in bytes (0: TWIST_OUT_CEILING).  For tests,
+   and for a handler that wants less.  */
+void twist_connection_set_out_limit (struct twist_connection *conn,
+                                     size_t limit);
+/* Send a body that is produced as it is wanted, and not all at once.  READ is
+   called for up to CAP bytes at a time, only when the connection has written
+   most of what it had (a peer that does not read does not make it read ahead),
+   and returns how many it put in BUF; 0 is the end, and (size_t) -1 is a
+   failure.  END is called exactly once when the stream is over: with
+   TWIST_OK after the last byte is queued (not written), or with why it did not
+   get that far (the connection failed, or was freed, first); if READ fails or
+   the connection's queue is full, END is called and then the connection is
+   failed (TWIST_ERR_ABORTED, TWIST_ERR_NOMEM), as for any error.  The handler
+   sends nothing else on the connection meanwhile: what it has to send after
+   the body it sends from END.  One stream at a time.  END must not free the
+   connection.  */
+typedef size_t (*twist_stream_read_fn) (void *user, uint8_t *buf, size_t cap);
+typedef void (*twist_stream_end_fn) (void *user, int err);
+int twist_connection_stream (struct twist_connection *conn,
+                             twist_stream_read_fn read,
+                             twist_stream_end_fn end, void *user);
+/* Whether a stream is under way on CONN: the body of a request is not all
+   sent, so the connection is not one to keep for another request.  */
+int twist_connection_streaming (const struct twist_connection *conn);
 /* How many bytes sent on EP the connection has not yet written.  A handler
    that sends without limit, such as one that copies standard input, stops when
    this is large and goes on from EP's on_write_ready.  */

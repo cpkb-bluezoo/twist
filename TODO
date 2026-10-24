@@ -40,10 +40,12 @@ HTTP
   - Cookies (src/http/cookie.c): Expires and Max-Age are not read, so a cookie
     lives as long as the jar and Max-Age=0 does not delete.  SameSite and
     HttpOnly are not looked at.
-  - The output buffer of a connection has no limit.  A handler that queues
-    without end against a peer that does not read grows it, so each handler
-    limits itself (SFTP does, by its window); none does for a body given in
-    one piece, which the application chose the size of.
+  - A connection holds at most 256 MiB of output that has not been written, and
+    a send over that fails the transfer (TWIST_ERR_NOMEM).  A body is streamed,
+    so as not to meet the limit, for HTTP/1 (64 KiB and over) and for smtp.  A
+    body over the limit still fails over HTTP/3 and in a WebSocket message
+    (both queue the whole of it), and the ws read callback is read to its end
+    at once.  HTTP/2 sends within the window the server gave.
   - --connect-timeout for ldap covers the lookup and the TCP connect only; a
     server that takes the connection and does not answer the bind is waited for
     until --max-time.  What curl does for ldap is not known: the curl it was

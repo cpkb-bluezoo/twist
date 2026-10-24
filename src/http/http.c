@@ -434,6 +434,10 @@ http_park (struct twist_http *h)
     return;
   if (via_tunnel (h))
     return;
+  /* The rest of a body is still to go: another request would be sent in the
+     middle of it.  */
+  if (twist_connection_streaming (h->conn))
+    return;
   pool = http_pool (h);
   if (pool == NULL || http_pool_key (h, key, sizeof key) != TWIST_OK)
     return;
@@ -1243,6 +1247,71 @@ request_headers (struct twist_http *h)
   return list;
 }
 
+/* A request body that is large is not copied into the connection's queue
+   whole but sent as the connection writes (twist_connection_stream): then the
+   memory held for it is the body and no more, and a server that does not read
+   it does not make a second copy grow.  */
+#define BODY_STREAM_MIN (64u * 1024u)
+
+struct body_src
+{
+  const uint8_t *p;
+  size_t len, off;
+  uint8_t *owned;		/* What P is in, if it is ours to free.  */
+};
+
+static size_t
+body_read (void *user, uint8_t *buf, size_t cap)
+{
+  struct body_src *b = user;
+  size_t n = b->len - b->off;
+
+  if (n > cap)
+    n = cap;
+  memcpy (buf, b->p + b->off, n);
+  b->off += n;
+  return n;
+}
+
+static void
+body_end (void *user, int err)
+{
+  struct body_src *b = user;
+
+  (void) err;
+  free (b->owned);
+  free (b);
+}
+
+/* The head of an HTTP/1 request, and then its body.  *OWNED is taken by the
+   stream if one is made.  */
+static int
+send_streamed (struct twist_http *h, const uint8_t *head, size_t head_len,
+               const uint8_t *body, size_t body_len, uint8_t **owned)
+{
+  struct body_src *b;
+  int rc = twist_connection_send_parts (h->conn, head, head_len, NULL, 0);
+
+  if (rc != TWIST_OK)
+    return rc;
+  b = calloc (1, sizeof *b);
+  if (b == NULL)
+    return TWIST_ERR_NOMEM;
+  b->p = body;
+  b->len = body_len;
+  /* The stream has it, and frees it when it is over, which may be before
+     the call returns.  */
+  b->owned = *owned;
+  *owned = NULL;
+  rc = twist_connection_stream (h->conn, body_read, body_end, b);
+  if (rc != TWIST_OK)
+    {
+      *owned = b->owned;
+      free (b);
+    }
+  return rc;
+}
+
 static int
 send_request_target (struct twist_http *h, const char *target)
 {
@@ -1351,6 +1420,8 @@ send_request_target (struct twist_http *h, const char *target)
       free (pre);
       h->preface_sent = 1;
     }
+  else if (h->mode == HTTP_H1 && body != NULL && body_len >= BODY_STREAM_MIN)
+    rc = send_streamed (h, out, out_len, body, body_len, &owned);
   else if (h->mode == HTTP_H1)
     rc = twist_connection_send_parts (h->conn, out, out_len, body, body_len);
   else if (h->mode == HTTP_H3)
