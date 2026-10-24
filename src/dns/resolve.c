@@ -47,10 +47,23 @@
    own name is resolved with DoQ, DoT, or UDP, never with DoH.  Plain
    UDP retries the same query over TCP when the answer is truncated.  */
 
-enum
+/* The queries of one lookup: AAAA first, then A, then HTTPS when it is wanted.
+   Over UDP, TCP and DoT they are all sent at once and are answered in any
+   order, told apart by their ids.  Over DoQ (where every id is 0 and a stream
+   is what tells them apart) and DoH they go one after another.  Whether the
+   server will take them together in one message (RFC 10029) is not tried yet:
+   none of the large public resolvers does.  */
+#define MAX_SUBS 3
+#define MAX_GOT 8
+
+struct dns_sub
 {
-  PHASE_ADDR = 0,
-  PHASE_HTTPS = 1
+  int qtype;
+  uint16_t id;
+  uint8_t *pkt;
+  size_t pktlen;
+  int sent;
+  int done;
 };
 
 struct dns_query
@@ -68,8 +81,27 @@ struct dns_query
   int sent;
   int tcp;
   int switching;
-  int phase;
   int want_https;
+  /* The lookup proper: its queries, the addresses that have come ([0] IPv4,
+     [1] IPv6) and the message being read, how many of each have been given to
+     the sink, and the timers for the waiting.  */
+  struct dns_sub sub[MAX_SUBS];
+  int nsub;
+  int cur_type;
+  struct twist_dns_addr got[2][MAX_GOT];
+  int ngot[2];
+  struct twist_dns_addr tmp[2][MAX_GOT];
+  int ntmp[2];
+  int emitted[2];
+  int released;
+  int hold_elapsed;
+  int linger_expired;
+  int https_given;
+  struct twist_timer *hold;
+  struct twist_timer *linger;
+  int use_sink;
+  struct twist_dns_sink sink;
+  struct twist_dns_service https;
   int saw_tc;
   int parse_err;
   int doh;
@@ -132,29 +164,87 @@ static int literal (const char *host, struct twist_dns_service *svc);
 
 static void dns_reap (void *user);
 static void dns_send (struct twist_endpoint *ep);
+static int have_addr (const struct dns_query *q);
+static void progress (struct dns_query *q, struct twist_endpoint *ep);
+static void give_addresses (struct dns_query *q);
+
+/* The first address a caller that takes one is given: an IPv4 one, so that a
+   path that cannot be had does not stop what always worked, or else an IPv6
+   one.  */
+static int
+first_address (const struct dns_query *q, struct twist_dns_addr *out)
+{
+  if (q->ngot[0] > 0)
+    *out = q->got[0][0];
+  else if (q->ngot[1] > 0)
+    *out = q->got[1][0];
+  else
+    return 0;
+  return 1;
+}
 
 static void
 dns_finish (struct dns_query *q, int err)
 {
   struct twist_loop *loop;
+  int i;
 
   if (q->done)
     return;
   q->done = 1;
-  if (q->cache_lead && q->cache != NULL)
+  if (q->hold != NULL)
     {
-      uint32_t ttl = q->ttl_sec == 0xffffffffu ? 0 : q->ttl_sec;
+      twist_timer_cancel (q->hold);
+      q->hold = NULL;
+    }
+  if (q->linger != NULL)
+    {
+      twist_timer_cancel (q->linger);
+      q->linger = NULL;
+    }
+  /* What was learned is an answer, though a query went wrong after it.  */
+  if (have_addr (q))
+    err = TWIST_OK;
+  if (q->use_sink)
+    {
+      /* Whatever was not given, and then what was not answered, and last.  */
+      if (err == TWIST_OK)
+        give_addresses (q);
+      for (i = 0; i < q->nsub; i++)
+        if (!q->sub[i].done && q->sink.type_error != NULL)
+          q->sink.type_error (q->sink.user, q->sub[i].qtype,
+                              err != TWIST_OK ? err : TWIST_ERR_TIMEOUT);
+      if (q->sink.complete != NULL)
+        q->sink.complete (q->sink.user, err);
+    }
+  else
+    {
+      if (err == TWIST_OK)
+        {
+          struct twist_dns_addr first;
 
-      q->cache_lead = 0;
-      twist_dns_cache_end (q->cache, q->loop, q->host, 1,
-                           err, err == TWIST_OK ? &q->svc.addr : NULL, ttl,
-                           twist_loop_now (q->loop));
+          if (first_address (q, &first))
+            q->svc.addr = first;
+          q->svc.nalpn = q->https.nalpn;
+          memcpy (q->svc.alpn, q->https.alpn, sizeof q->svc.alpn);
+          q->svc.port = q->https.port;
+          q->svc.have_https = q->https.have_https;
+        }
+      if (q->cache_lead && q->cache != NULL)
+        {
+          uint32_t ttl = q->ttl_sec == 0xffffffffu ? 0 : q->ttl_sec;
+
+          q->cache_lead = 0;
+          twist_dns_cache_end (q->cache, q->loop, q->host, 1,
+                               err, err == TWIST_OK ? &q->svc.addr : NULL, ttl,
+                               twist_loop_now (q->loop));
+        }
+      if (q->svc_cb != NULL)
+        q->svc_cb (q->user, err, err == TWIST_OK ? &q->svc : NULL);
+      else if (q->cb != NULL)
+        q->cb (q->user, err, err == TWIST_OK ? &q->svc.addr : NULL);
     }
   loop = q->loop;
-  if (q->svc_cb != NULL)
-    q->svc_cb (q->user, err, err == TWIST_OK ? &q->svc : NULL);
-  else if (q->cb != NULL)
-    q->cb (q->user, err, err == TWIST_OK ? &q->svc.addr : NULL);
   if (loop != NULL)
     twist_loop_post (loop, dns_reap, q);
   else
@@ -178,6 +268,14 @@ dns_reap (void *user)
 static void
 dns_release (struct dns_query *q)
 {
+  int i;
+
+  for (i = 0; i < q->nsub; i++)
+    free (q->sub[i].pkt);
+  if (q->hold != NULL)
+    twist_timer_cancel (q->hold);
+  if (q->linger != NULL)
+    twist_timer_cancel (q->linger);
   twist_doh_free (q->dohp);
   twist_url_free_int (q->doh_parsed);
   twist_url_free_int (q->doq_parsed);
@@ -211,6 +309,24 @@ nameserver (struct sockaddr_in *sin)
   return rc;
 }
 
+static struct sockaddr_in ns_forced;
+static int ns_forced_set;
+
+void
+twist_dns_set_nameserver (const char *ip, int port)
+{
+  pthread_mutex_lock (&ns_lock);
+  ns_forced_set = 0;
+  if (ip != NULL)
+    {
+      memset (&ns_forced, 0, sizeof ns_forced);
+      ns_forced.sin_family = AF_INET;
+      ns_forced.sin_port = htons ((uint16_t) (port > 0 ? port : 53));
+      ns_forced_set = inet_pton (AF_INET, ip, &ns_forced.sin_addr) == 1;
+    }
+  pthread_mutex_unlock (&ns_lock);
+}
+
 static int
 nameserver_locked (struct sockaddr_in *sin)
 {
@@ -219,6 +335,11 @@ nameserver_locked (struct sockaddr_in *sin)
   struct stat st;
   int have;
 
+  if (ns_forced_set)
+    {
+      *sin = ns_forced;
+      return TWIST_OK;
+    }
   have = stat ("/etc/resolv.conf", &st) == 0;
   if (ns_ready && (!have || st.st_mtime == ns_mtime))
     {
@@ -282,20 +403,149 @@ response_matches (const struct dns_query *q, const uint8_t *msg, size_t len)
     return 0;
   return twist_dns_response_ok (msg, len, q->expect_id, q->expect_name);
 }
+static struct dns_sub *
+sub_of (struct dns_query *q, int qtype)
+{
+  int i;
+
+  for (i = 0; i < q->nsub; i++)
+    if (q->sub[i].qtype == qtype)
+      return &q->sub[i];
+  return NULL;
+}
 
 static int
-ensure_pkt (struct dns_query *q)
+have_addr (const struct dns_query *q)
 {
-  int qtype = q->phase == PHASE_HTTPS ? 65 : 1;
-  uint16_t id;
-
-  if (q->pkt != NULL)
-    return TWIST_OK;
-  if (random_id (&id) != TWIST_OK)
-    return TWIST_ERR_RESOLVE;
-  set_expect (q, id, q->host);
-  return twist_dns_encode_query (q->host, qtype, id, &q->pkt, &q->pktlen);
+  return q->ngot[0] + q->ngot[1] > 0;
 }
+
+/* The queries: AAAA, A, and HTTPS if it is wanted, each with an id of its own.  */
+static int
+ensure_subs (struct dns_query *q)
+{
+  static const int order[3] = { 28, 1, 65 };
+  int i, j;
+
+  if (q->nsub > 0)
+    return TWIST_OK;
+  for (i = 0; i < 3; i++)
+    {
+      struct dns_sub *s;
+
+      if (order[i] == 65 && !q->want_https)
+        continue;
+      s = &q->sub[q->nsub];
+      s->qtype = order[i];
+      do
+        {
+          if (random_id (&s->id) != TWIST_OK)
+            return TWIST_ERR_RESOLVE;
+          for (j = 0; j < q->nsub && q->sub[j].id != s->id; j++)
+            ;
+        }
+      while (j < q->nsub);
+      if (twist_dns_encode_query (q->host, s->qtype, s->id, &s->pkt,
+                                  &s->pktlen) != TWIST_OK)
+        return TWIST_ERR_RESOLVE;
+      q->nsub++;
+    }
+  return TWIST_OK;
+}
+/* Send one of the queries.  Returns TWIST_OK, or why it could not be.  */
+static int
+send_one (struct dns_query *q, struct twist_endpoint *ep, struct dns_sub *sub)
+{
+  uint8_t *frame = NULL;
+  const uint8_t *data;
+  size_t len;
+  int rc;
+
+  if (q->doq && q->doq_sent && twist_quic_open_stream (q->conn) != TWIST_OK)
+    return TWIST_ERR_TLS;
+  sub->sent = 1;
+  if (q->doq)
+    q->doq_sent = 1;
+  if (q->doh)
+    {
+      uint8_t *http = NULL;
+      size_t hn = 0;
+
+      rc = twist_doh_encode_url (q->doh_text, sub->pkt, sub->pktlen, &http, &hn);
+      if (rc == TWIST_OK && twist_endpoint_send (ep, http, hn) != TWIST_OK)
+        rc = TWIST_ERR_RESOLVE;
+      free (http);
+      return rc;
+    }
+  if (q->tcp || q->doq)
+    {
+      rc = twist_dns_frame_stream (sub->pkt, sub->pktlen, q->doq, &frame, &len);
+      if (rc != TWIST_OK)
+        return rc;
+      data = frame;
+    }
+  else
+    {
+      data = sub->pkt;
+      len = sub->pktlen;
+    }
+  rc = twist_endpoint_send (ep, data, len) == TWIST_OK ? TWIST_OK
+                                                       : TWIST_ERR_RESOLVE;
+  free (frame);
+  return rc;
+}
+
+/* Send what is to be sent.  Over UDP, TCP and DoT that is all of it, at once:
+   the answers are told apart by their ids, and they come in one round trip.
+   Over DoQ and DoH the next is sent when the one before has been answered.  */
+static void
+send_subs (struct dns_query *q, struct twist_endpoint *ep)
+{
+  int sequential = q->doq || q->doh;
+  int i;
+
+  if (ensure_subs (q) != TWIST_OK)
+    {
+      dns_finish (q, TWIST_ERR_RESOLVE);
+      return;
+    }
+  for (i = 0; i < q->nsub && !q->done; i++)
+    {
+      struct dns_sub *sub = &q->sub[i];
+      int j, waiting = 0, rc;
+
+      if (sub->sent || sub->done)
+        continue;
+      for (j = 0; j < q->nsub; j++)
+        if (q->sub[j].sent && !q->sub[j].done)
+          waiting = 1;
+      if (sequential && waiting)
+        break;
+      rc = send_one (q, ep, sub);
+      if (rc != TWIST_OK)
+        {
+          /* This one is lost.  The others go on, and so does what has been
+             learned: a query that fails gives nothing but its own error.  */
+          sub->done = 1;
+          if (q->use_sink && q->sink.type_error != NULL)
+            q->sink.type_error (q->sink.user, sub->qtype, rc);
+          if (!have_addr (q) && sub->qtype != 65)
+            {
+              int all = 1;
+
+              for (j = 0; j < q->nsub; j++)
+                if (!q->sub[j].done && q->sub[j].qtype != 65)
+                  all = 0;
+              if (all)
+                {
+                  dns_finish (q, rc);
+                  return;
+                }
+            }
+        }
+    }
+}
+
 
 static void
 dns_send (struct twist_endpoint *ep)
@@ -305,7 +555,7 @@ dns_send (struct twist_endpoint *ep)
   const uint8_t *data;
   size_t len;
 
-  if (q->sent || q->done)
+  if (q->done || (q->ddr && q->sent))
     return;
   if (q->ddr)
     {
@@ -364,109 +614,68 @@ dns_send (struct twist_endpoint *ep)
       free (frame);
       return;
     }
-  if (q->doq && q->doq_sent)
-    {
-      if (twist_quic_open_stream (q->conn) != TWIST_OK)
-        {
-          dns_finish (q, TWIST_ERR_TLS);
-          return;
-        }
-    }
-  if (ensure_pkt (q) != TWIST_OK)
-    {
-      if (q->phase == PHASE_HTTPS && q->svc.addr.family != 0)
-        dns_finish (q, TWIST_OK);
-      else
-        dns_finish (q, TWIST_ERR_RESOLVE);
-      return;
-    }
-  q->sent = 1;
-  if (q->doq)
-    q->doq_sent = 1;
-  if (q->doh)
-    {
-      uint8_t *http = NULL;
-      size_t hn = 0;
-      int rc = twist_doh_encode_url (q->doh_text, q->pkt, q->pktlen, &http,
-                                     &hn);
-
-      if (rc != TWIST_OK || twist_endpoint_send (ep, http, hn) != TWIST_OK)
-        {
-          free (http);
-          if (q->phase == PHASE_HTTPS && q->svc.addr.family != 0)
-            dns_finish (q, TWIST_OK);
-          else
-            dns_finish (q, rc != TWIST_OK ? rc : TWIST_ERR_RESOLVE);
-        }
-      else
-        free (http);
-      return;
-    }
-  if (q->tcp || q->doq)
-    {
-      int rc = twist_dns_frame_stream (q->pkt, q->pktlen, q->doq, &frame, &len);
-
-      if (rc != TWIST_OK)
-        {
-          dns_finish (q, rc);
-          return;
-        }
-      if (q->doq)
-        q->expect_id = 0;
-      data = frame;
-    }
-  else
-    {
-      data = q->pkt;
-      len = q->pktlen;
-    }
-  if (twist_endpoint_send (ep, data, len) != TWIST_OK)
-    {
-      if (q->phase == PHASE_HTTPS && q->svc.addr.family != 0)
-        dns_finish (q, TWIST_OK);
-      else
-        dns_finish (q, TWIST_ERR_RESOLVE);
-    }
-  free (frame);
+  send_subs (q, ep);
 }
-
+/* Only the records of the type that was asked of are taken: the answer to an
+   A query can have, with a CNAME chain, anything.  They are kept for the
+   message, and taken in when it is known to be whole (not truncated).  */
 static void
 on_addr (void *user, const struct twist_dns_addr *addr)
 {
   struct dns_query *q = user;
+  int f;
 
-  if (q->phase == PHASE_ADDR && q->svc.addr.family == 0 && addr->family == 4)
-    q->svc.addr = *addr;
+  if (q->ddr || (addr->family != 4 && addr->family != 6))
+    return;
+  if ((q->cur_type == 1 && addr->family != 4)
+      || (q->cur_type == 28 && addr->family != 6) || q->cur_type == 65)
+    return;
+  f = addr->family == 6;
+  if (q->ntmp[f] < MAX_GOT)
+    q->tmp[f][q->ntmp[f]++] = *addr;
 }
 
+static void
+commit_message (struct dns_query *q)
+{
+  int f, i, j;
+
+  for (f = 0; f < 2; f++)
+    for (i = 0; i < q->ntmp[f]; i++)
+      {
+        for (j = 0; j < q->ngot[f]; j++)
+          if (strcmp (q->got[f][j].text, q->tmp[f][i].text) == 0)
+            break;
+        if (j == q->ngot[f] && q->ngot[f] < MAX_GOT)
+          q->got[f][q->ngot[f]++] = q->tmp[f][i];
+      }
+}
 static void
 on_alpn (void *user, const char *id, size_t len)
 {
   struct dns_query *q = user;
 
-  if (q->phase != PHASE_HTTPS || q->svc.nalpn >= 4 || len == 0 || len >= 16)
+  if (q->cur_type != 65 || q->https.nalpn >= 4 || len == 0 || len >= 16)
     return;
-  memcpy (q->svc.alpn[q->svc.nalpn], id, len);
-  q->svc.alpn[q->svc.nalpn][len] = 0;
-  q->svc.nalpn++;
+  memcpy (q->https.alpn[q->https.nalpn], id, len);
+  q->https.alpn[q->https.nalpn][len] = 0;
+  q->https.nalpn++;
 }
-
 static void
 on_port (void *user, int port)
 {
   struct dns_query *q = user;
 
-  if (q->phase == PHASE_HTTPS && port > 0 && port < 65536)
-    q->svc.port = port;
+  if (q->cur_type == 65 && port > 0 && port < 65536)
+    q->https.port = port;
 }
-
 static void
 on_https (void *user)
 {
   struct dns_query *q = user;
 
-  if (q->phase == PHASE_HTTPS)
-    q->svc.have_https = 1;
+  if (q->cur_type == 65)
+    q->https.have_https = 1;
 }
 
 static void
@@ -551,77 +760,235 @@ on_ttl (void *user, uint32_t ttl)
 
 static void dns_switch_tcp (void *user);
 static void after_ddr (void *user);
+/* IPv6 first, then the families taking turns (RFC 8305, section 4), each in the
+   order it was given.  */
+size_t
+twist_dns_sort (struct twist_dns_addr *addrs, size_t n)
+{
+  struct twist_dns_addr v6[32], v4[32];
+  size_t n6 = 0, n4 = 0, i = 0, j = 0, k = 0;
+
+  if (addrs == NULL || n > 32)
+    return n;
+  for (i = 0; i < n; i++)
+    if (addrs[i].family == 6)
+      v6[n6++] = addrs[i];
+    else
+      v4[n4++] = addrs[i];
+  i = j = 0;
+  while (i < n6 || j < n4)
+    {
+      if (i < n6)
+        addrs[k++] = v6[i++];
+      if (j < n4)
+        addrs[k++] = v4[j++];
+    }
+  return n;
+}
+
+/* Give the sink the addresses it has not been given, in the order to try them
+   in.  The first call is the release of the first addresses.  */
+static void
+give_addresses (struct dns_query *q)
+{
+  struct twist_dns_addr list[2 * MAX_GOT];
+  size_t n = 0, i;
+  int f;
+
+  if (!q->use_sink || (q->emitted[0] >= q->ngot[0] && q->emitted[1] >= q->ngot[1]))
+    return;
+  for (f = 1; f >= 0; f--)
+    for (i = (size_t) q->emitted[f]; i < (size_t) q->ngot[f]; i++)
+      list[n++] = q->got[f][i];
+  q->emitted[0] = q->ngot[0];
+  q->emitted[1] = q->ngot[1];
+  q->released = 1;
+  twist_dns_sort (list, n);
+  for (i = 0; i < n && q->sink.address != NULL; i++)
+    q->sink.address (q->sink.user, &list[i]);
+}
+
+static long resolution_delay_ms = 50;
+static long linger_ms = 2000;
+
+void
+twist_dns_set_timing (long delay_ms, long linger)
+{
+  resolution_delay_ms = delay_ms > 0 ? delay_ms : 50;
+  linger_ms = linger > 0 ? linger : 2000;
+}
 
 static void
-advance (struct dns_query *q, struct twist_endpoint *ep)
+hold_cb (void *user)
 {
-  if (q->ddr)
+  struct dns_query *q = user;
+
+  q->hold = NULL;
+  q->hold_elapsed = 1;
+  if (!q->done)
+    progress (q, NULL);
+}
+
+/* Waited long enough for the rest: what has come is what there is.  */
+static void
+linger_cb (void *user)
+{
+  struct dns_query *q = user;
+
+  q->linger = NULL;
+  q->linger_expired = 1;
+  if (!q->done)
+    dns_finish (q, have_addr (q) ? TWIST_OK : TWIST_ERR_TIMEOUT);
+}
+
+/* Something has come, or the time has passed: say what can be said.  With a
+   sink (RFC 8305): AAAA addresses are given at once; A addresses are given when
+   AAAA has been answered, or its resolution delay after A has passed; more that
+   come after are given as they come; HTTPS when it is in; and complete when all
+   is answered.  Without one the single address that is wanted is given when it
+   can be known: IPv4 when the delay has passed, so nothing waits long for an
+   IPv6 answer that may not come.  */
+static void
+progress (struct dns_query *q, struct twist_endpoint *ep)
+{
+  struct dns_sub *a4 = sub_of (q, 1);
+  struct dns_sub *a6 = sub_of (q, 28);
+  struct dns_sub *hs = sub_of (q, 65);
+  int a4_has = a4 != NULL && a4->done && q->ngot[0] > 0;
+  int pending = (a4 != NULL && !a4->done) || (a6 != NULL && !a6->done);
+  int i, unsent = 0;
+
+  if (q->done)
+    return;
+  /* The first address begins the wait for the rest.  */
+  if (have_addr (q) && q->linger == NULL && !q->linger_expired
+      && q->loop != NULL)
+    twist_loop_schedule (q->loop, twist_loop_now (q->loop) + (uint64_t) linger_ms,
+                         linger_cb, q, &q->linger);
+  /* A has addresses and AAAA has not been answered: a short wait for it.  */
+  if (a4_has && a6 != NULL && !a6->done && !q->hold_elapsed && q->hold == NULL
+      && q->loop != NULL)
+    twist_loop_schedule (q->loop,
+                         twist_loop_now (q->loop) + (uint64_t) resolution_delay_ms,
+                         hold_cb, q, &q->hold);
+  if (q->use_sink)
     {
-      if (q->saw_tc && !q->tcp)
+      if (q->ngot[1] > 0 || (a4_has && (a6 == NULL || a6->done || q->hold_elapsed)))
+        give_addresses (q);
+      if (hs != NULL && hs->done && !q->https_given)
         {
-          q->saw_tc = 0;
-          twist_loop_post (q->loop, dns_switch_tcp, q);
-          return;
+          q->https_given = 1;
+          if (q->https.have_https && q->sink.https != NULL)
+            q->sink.https (q->sink.user, &q->https);
         }
-      q->ddr = 0;
-      q->ddr_done = 1;
-      twist_loop_post (q->loop, after_ddr, q);
-      return;
-    }
-  q->answered = 1;
-  if (q->saw_tc && !q->tcp && !q->doh && !q->dot && !q->doq)
-    {
-      q->saw_tc = 0;
-      if (q->phase == PHASE_HTTPS)
-        {
-          q->svc.nalpn = 0;
-          q->svc.port = 0;
-        }
-      else
-        memset (&q->svc.addr, 0, sizeof q->svc.addr);
-      twist_loop_post (q->loop, dns_switch_tcp, q);
-      return;
-    }
-  if (q->parse_err != TWIST_OK)
-    {
-      if (q->phase == PHASE_HTTPS && q->svc.addr.family != 0)
-        dns_finish (q, TWIST_OK);
-      else
-        dns_finish (q, q->parse_err);
-      return;
-    }
-  if (q->phase == PHASE_ADDR)
-    {
-      if (q->svc.addr.family == 0)
+      if (!pending && !have_addr (q))
         {
           dns_finish (q, TWIST_ERR_RESOLVE);
           return;
         }
-      if (q->want_https)
+      if (!pending && (hs == NULL || hs->done))
         {
-          q->phase = PHASE_HTTPS;
-          free (q->pkt);
-          q->pkt = NULL;
-          q->pktlen = 0;
-          q->sent = 0;
-          dns_send (ep);
+          dns_finish (q, TWIST_OK);
           return;
         }
     }
-  dns_finish (q, TWIST_OK);
+  else
+    {
+      int ready = !pending || (a4_has && q->hold_elapsed);
+
+      if (ready && (!have_addr (q) || hs == NULL || hs->done))
+        {
+          dns_finish (q, have_addr (q) ? TWIST_OK : TWIST_ERR_RESOLVE);
+          return;
+        }
+    }
+  /* DoQ and DoH have one query out at a time: the next goes now.  */
+  for (i = 0; i < q->nsub; i++)
+    if (!q->sub[i].sent && !q->sub[i].done)
+      unsent = 1;
+  if (unsent && (q->doq || q->doh) && (ep != NULL || q->ep != NULL))
+    dns_send (ep != NULL ? ep : q->ep);
 }
 
+/* A query has been answered, or has failed with ERR: take what came, say what
+   is to be said, and go on.  */
+static void
+sub_answered (struct dns_query *q, struct dns_sub *s, struct twist_endpoint *ep)
+{
+  int got = q->ntmp[0] + q->ntmp[1];
+
+  q->answered = 1;
+  /* Truncated over UDP: all that is not answered goes again over TCP.  */
+  if (q->saw_tc && !q->tcp && !q->doh && !q->dot && !q->doq)
+    {
+      q->saw_tc = 0;
+      q->ntmp[0] = q->ntmp[1] = 0;
+      if (q->loop != NULL)
+        twist_loop_post (q->loop, dns_switch_tcp, q);
+      else
+        dns_finish (q, TWIST_ERR_RESOLVE);
+      return;
+    }
+  s->done = 1;
+  if (q->parse_err == TWIST_OK)
+    commit_message (q);
+  if (q->use_sink && q->sink.type_error != NULL)
+    {
+      if (q->parse_err != TWIST_OK)
+        q->sink.type_error (q->sink.user, s->qtype, q->parse_err);
+      else if (s->qtype != 65 && got == 0)
+        q->sink.type_error (q->sink.user, s->qtype, TWIST_ERR_RESOLVE);
+      else if (s->qtype == 65 && !q->https.have_https)
+        q->sink.type_error (q->sink.user, s->qtype, TWIST_ERR_RESOLVE);
+    }
+  progress (q, ep);
+}
+
+/* The query that a message answers, or NULL.  */
+static struct dns_sub *
+match_sub (struct dns_query *q, const uint8_t *msg, size_t len)
+{
+  int i;
+
+  for (i = 0; i < q->nsub; i++)
+    {
+      struct dns_sub *s = &q->sub[i];
+
+      if (!s->sent || s->done)
+        continue;
+      if (twist_dns_response_ok (msg, len, q->doq ? 0 : s->id, q->host))
+        return s;
+    }
+  return NULL;
+}
+/* A discovery (DDR) answer: only that, and only here.  */
+static void
+advance (struct dns_query *q, struct twist_endpoint *ep)
+{
+  (void) ep;
+  if (q->saw_tc && !q->tcp)
+    {
+      q->saw_tc = 0;
+      twist_loop_post (q->loop, dns_switch_tcp, q);
+      return;
+    }
+  q->ddr = 0;
+  q->ddr_done = 1;
+  twist_loop_post (q->loop, after_ddr, q);
+}
 static size_t
 dns_receive (struct twist_endpoint *ep, const uint8_t *data, size_t len)
 {
   struct dns_query *q = ep->user_data;
   struct twist_dns_events ev;
+  struct dns_sub *s = NULL;
   size_t n;
 
   if (q->done || q->switching)
     return len;
   q->saw_tc = 0;
   q->parse_err = TWIST_OK;
+  q->ntmp[0] = q->ntmp[1] = 0;
   memset (&ev, 0, sizeof ev);
   ev.user = q;
   ev.address = on_addr;
@@ -641,22 +1008,44 @@ dns_receive (struct twist_endpoint *ep, const uint8_t *data, size_t len)
       need = ((size_t) data[0] << 8) | data[1];
       if (len < 2 + need)
         return 0;
-      if (!response_matches (q, data + 2, need))
-        return 2 + need;
+      if (q->ddr)
+        {
+          if (!response_matches (q, data + 2, need))
+            return 2 + need;
+        }
+      else
+        {
+          s = match_sub (q, data + 2, need);
+          if (s == NULL)
+            return 2 + need;
+          q->cur_type = s->qtype;
+        }
       n = twist_dns_stream_receive (data, len, &ev);
     }
   else
     {
-      if (!response_matches (q, data, len))
-        return len;
+      if (q->ddr)
+        {
+          if (!response_matches (q, data, len))
+            return len;
+        }
+      else
+        {
+          s = match_sub (q, data, len);
+          if (s == NULL)
+            return len;
+          q->cur_type = s->qtype;
+        }
       n = twist_dns_datagram_receive (data, len, &ev);
     }
   if (n == 0)
     return 0;
-  advance (q, ep);
+  if (q->ddr)
+    advance (q, ep);
+  else
+    sub_answered (q, s, ep);
   return n;
 }
-
 static void
 dns_disconnected (struct twist_endpoint *ep, int error)
 {
@@ -664,7 +1053,8 @@ dns_disconnected (struct twist_endpoint *ep, int error)
 
   if (q->switching || q->done)
     return;
-  if (q->phase == PHASE_HTTPS && q->svc.addr.family != 0)
+  /* What was learned before the connection went is an answer.  */
+  if (have_addr (q))
     {
       dns_finish (q, TWIST_OK);
       return;
@@ -738,12 +1128,12 @@ open_tcp (struct dns_query *q)
     return rc;
   return TWIST_OK;
 }
-
 static void
 dns_switch_tcp (void *user)
 {
   struct dns_query *q = user;
   struct twist_connection *c;
+  int i;
 
   if (q->done)
     return;
@@ -753,33 +1143,30 @@ dns_switch_tcp (void *user)
   if (c != NULL)
     twist_connection_free (c);
   q->switching = 0;
+  /* What was not answered over UDP is asked again over TCP.  */
+  for (i = 0; i < q->nsub; i++)
+    if (!q->sub[i].done)
+      q->sub[i].sent = 0;
   if (open_tcp (q) != TWIST_OK)
-    {
-      if (q->phase == PHASE_HTTPS && q->svc.addr.family != 0)
-        dns_finish (q, TWIST_OK);
-      else
-        dns_finish (q, TWIST_ERR_RESOLVE);
-    }
+    dns_finish (q, TWIST_ERR_RESOLVE);
 }
-
 static void
 on_doh_msg (void *user, int err, const uint8_t *msg, size_t len)
 {
   struct dns_query *q = user;
   struct twist_dns_events ev;
+  struct dns_sub *s;
 
   if (q->done)
     return;
   if (err != TWIST_OK)
     {
-      if (q->phase == PHASE_HTTPS && q->svc.addr.family != 0)
-        dns_finish (q, TWIST_OK);
-      else
-        dns_finish (q, err);
+      dns_finish (q, err);
       return;
     }
   q->saw_tc = 0;
   q->parse_err = TWIST_OK;
+  q->ntmp[0] = q->ntmp[1] = 0;
   memset (&ev, 0, sizeof ev);
   ev.user = q;
   ev.address = on_addr;
@@ -789,13 +1176,19 @@ on_doh_msg (void *user, int err, const uint8_t *msg, size_t len)
   ev.truncated = on_trunc;
   ev.failure = on_fail;
   ev.ttl = on_ttl;
-  if (!response_matches (q, msg, len)
-      || twist_dns_datagram_receive (msg, len, &ev) == 0)
+  s = match_sub (q, msg, len);
+  if (s == NULL)
     {
       dns_finish (q, TWIST_ERR_PROTOCOL);
       return;
     }
-  advance (q, q->ep);
+  q->cur_type = s->qtype;
+  if (twist_dns_datagram_receive (msg, len, &ev) == 0)
+    {
+      dns_finish (q, TWIST_ERR_PROTOCOL);
+      return;
+    }
+  sub_answered (q, s, q->ep);
 }
 
 static void
@@ -937,6 +1330,7 @@ static void
 drop_conn (struct dns_query *q)
 {
   struct twist_connection *c;
+  int i;
 
   q->switching = 1;
   c = q->conn;
@@ -951,6 +1345,9 @@ drop_conn (struct dns_query *q)
   q->ddr = 0;
   q->sent = 0;
   q->doq_sent = 0;
+  for (i = 0; i < q->nsub; i++)
+    if (!q->sub[i].done)
+      q->sub[i].sent = 0;
 }
 
 static int
@@ -1427,6 +1824,27 @@ cache_abort (struct twist_dns_cache *cache, struct twist_loop *loop,
                          twist_loop_now (loop));
 }
 
+/* An answer that needs no query: to the sink, the address and complete; to a
+   caller that takes one, the one.  */
+static void
+deliver_now (const struct twist_dns_sink *sink,
+             void (*svc_cb) (void *, int, const struct twist_dns_service *),
+             void (*cb) (void *, int, const struct twist_dns_addr *),
+             void *user, const struct twist_dns_service *svc)
+{
+  if (sink != NULL)
+    {
+      if (sink->address != NULL)
+        sink->address (sink->user, &svc->addr);
+      if (sink->complete != NULL)
+        sink->complete (sink->user, TWIST_OK);
+    }
+  else if (svc_cb != NULL)
+    svc_cb (user, TWIST_OK, svc);
+  else
+    cb (user, TWIST_OK, &svc->addr);
+}
+
 static int
 resolve (struct twist_loop *loop, const char *host, const int *order,
          size_t norder, int want_https, const char *doh_url,
@@ -1435,7 +1853,7 @@ resolve (struct twist_loop *loop, const char *host, const int *order,
          const char *keyfile, long timeout_ms, struct twist_dns_cache *cache,
          void (*cb) (void *, int, const struct twist_dns_addr *),
          void (*svc_cb) (void *, int, const struct twist_dns_service *),
-         void *user)
+         const struct twist_dns_sink *sink, void *user)
 {
   struct dns_query *q;
   struct twist_dns_service lit;
@@ -1446,7 +1864,7 @@ resolve (struct twist_loop *loop, const char *host, const int *order,
   int have_dot;
   int rc;
 
-  if (host == NULL || (cb == NULL && svc_cb == NULL))
+  if (host == NULL || (cb == NULL && svc_cb == NULL && sink == NULL))
     return TWIST_ERR_INVAL;
   rc = literal (host, &lit);
   if (rc == -2)
@@ -1455,10 +1873,7 @@ resolve (struct twist_loop *loop, const char *host, const int *order,
     return TWIST_ERR_RESOLVE;
   if (rc == 1)
     {
-      if (svc_cb != NULL)
-        svc_cb (user, TWIST_OK, &lit);
-      else
-        cb (user, TWIST_OK, &lit.addr);
+      deliver_now (sink, svc_cb, cb, user, &lit);
       return TWIST_OK;
     }
   /* A name that this machine knows, from its hosts file, or that is its own
@@ -1471,15 +1886,12 @@ resolve (struct twist_loop *loop, const char *host, const int *order,
 
       memset (&lit, 0, sizeof lit);
       lit.addr = found;
-      if (svc_cb != NULL)
-        svc_cb (user, TWIST_OK, &lit);
-      else
-        cb (user, TWIST_OK, &lit.addr);
+      deliver_now (sink, svc_cb, cb, user, &lit);
       return TWIST_OK;
     }
   if (loop == NULL)
     return TWIST_ERR_INVAL;
-  if (!want_https && cache != NULL && cb != NULL)
+  if (!want_https && cache != NULL && cb != NULL && sink == NULL)
     {
       struct twist_dns_addr hit;
       int st = twist_dns_cache_begin (cache, loop, host, 1, cb, user,
@@ -1520,6 +1932,11 @@ resolve (struct twist_loop *loop, const char *host, const int *order,
   q->cb = cb;
   q->svc_cb = svc_cb;
   q->user = user;
+  if (sink != NULL)
+    {
+      q->use_sink = 1;
+      q->sink = *sink;
+    }
   q->want_https = want_https;
   q->doh_verifypeer = doh_verifypeer;
   q->cainfo = cainfo;
@@ -1590,7 +2007,7 @@ twist_dns_resolve (struct twist_loop *loop, const char *host,
                    void *user)
 {
   return resolve (loop, host, order, norder, 0, NULL, NULL, NULL, 1, NULL,
-                  NULL, NULL, NULL, 0, loop_cache (loop), cb, NULL, user);
+                  NULL, NULL, NULL, 0, loop_cache (loop), cb, NULL, NULL, user);
 }
 
 int
@@ -1601,7 +2018,7 @@ twist_dns_resolve_service (struct twist_loop *loop, const char *host,
                            void *user)
 {
   return resolve (loop, host, order, norder, 1, NULL, NULL, NULL, 1, NULL,
-                  NULL, NULL, NULL, 0, NULL, NULL, cb, user);
+                  NULL, NULL, NULL, 0, NULL, NULL, cb, NULL, user);
 }
 
 /* A name is looked up within the time to connect, and no longer than the
@@ -1633,7 +2050,7 @@ twist_dns_resolve_transfer (struct twist_transfer *transfer, const char *host,
                   transfer->cainfo, transfer->capath, transfer->sslcert,
                   transfer->sslkey,
                   transfer_timeout (transfer), transfer_cache (transfer), cb,
-                  NULL, user);
+                  NULL, NULL, user);
 }
 
 int
@@ -1656,5 +2073,35 @@ twist_dns_resolve_service_transfer (struct twist_transfer *transfer,
                   transfer->doh_verifypeer,
                   transfer->cainfo, transfer->capath, transfer->sslcert,
                   transfer->sslkey,
-                  transfer_timeout (transfer), NULL, NULL, cb, user);
+                  transfer_timeout (transfer), NULL, NULL, cb, NULL, user);
+}
+
+int
+twist_dns_resolve_sink (struct twist_loop *loop, const char *host,
+                        const int *order, size_t norder, int want_https,
+                        const struct twist_dns_sink *sink)
+{
+  if (sink == NULL)
+    return TWIST_ERR_INVAL;
+  return resolve (loop, host, order, norder, want_https, NULL, NULL, NULL, 1, NULL,
+                  NULL, NULL, NULL, 0, NULL, NULL, NULL, sink, NULL);
+}
+
+int
+twist_dns_resolve_sink_transfer (struct twist_transfer *transfer,
+                                 const char *host, int want_https,
+                                 const struct twist_dns_sink *sink)
+{
+  const int *order;
+  size_t norder;
+
+  if (transfer == NULL || sink == NULL)
+    return TWIST_ERR_INVAL;
+  order = transfer->dns_order_n > 0 ? transfer->dns_order : NULL;
+  norder = transfer->dns_order_n > 0 ? (size_t) transfer->dns_order_n : 0;
+  return resolve (transfer->loop, host, order, norder, want_https,
+                  transfer->doh_url, transfer->doq_url, transfer->dot_url,
+                  transfer->doh_verifypeer, transfer->cainfo, transfer->capath,
+                  transfer->sslcert, transfer->sslkey,
+                  transfer_timeout (transfer), NULL, NULL, NULL, sink, NULL);
 }

@@ -43,6 +43,10 @@ Version 0.1 - unreleased
   * names are looked for in /etc/hosts before any DNS is asked, and localhost
     and any name under it are the loopback (RFC 6761), as they are not known
     to a public resolver
+  * the resolver asks for AAAA, A and HTTPS together, as separate queries in one
+    flight, with the resolution delay of RFC 8305, and so a name that has only
+    an IPv6 address can be reached; a name with both is still reached over IPv4
+    until the connection is raced
   * gzip and deflate request and response coding, via zlib
   * the progress meter and the bar (-#), and the library's
     TWISTOPT_XFERINFOFUNCTION

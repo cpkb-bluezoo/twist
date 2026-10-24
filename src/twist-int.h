@@ -880,6 +880,56 @@ struct twist_dns_service
   int have_https;
 };
 
+/* A name is asked for and the answers are given as they come, by callbacks
+   that are called one after another, a call for each record, as gumdrop's
+   BatchQueryCallback is: not a list at the end, but the first address as soon
+   as it can be used, and the rest as they arrive.  The queries (AAAA, A, and
+   HTTPS if it is wanted) go out together as separate queries in one flight, so
+   all of it takes one round trip; how they are carried is not visible here.
+   RFC 8305, section 3 says when:
+
+   address    An address to try, an A or AAAA record's (family says which), one
+              call each, in the order to try them in.  The first is given when
+              it can be: at once when an AAAA answer has addresses, and, when an
+              A answer has and no AAAA answer has come, once the resolution
+              delay (50 ms) has passed since it.  When both are there at that
+              time the families take turns, IPv6 first.  What comes later is
+              given when it comes, after what has been given.
+   https      The HTTPS record: its ALPN ids and port, once, when it is wanted
+              and there is one.
+   type_error One of the types (1, 28, 65) gave nothing: err is why.  The others
+              go on, and a name with only IPv6 addresses is one where A did.
+   complete   Last, once.  err is TWIST_OK if an address was given, and else the
+              reason there was none.  Nothing is called after it.  */
+struct twist_dns_sink
+{
+  void *user;
+  void (*address) (void *user, const struct twist_dns_addr *addr);
+  void (*https) (void *user, const struct twist_dns_service *svc);
+  void (*type_error) (void *user, int qtype, int err);
+  void (*complete) (void *user, int err);
+};
+
+/* Ask for HOST.  TWIST_OK means the callbacks will be called (some before this
+   returns: an address, the hosts file, localhost).  Anything else, none will.
+   SINK is copied.  The transfer's variant uses its DNS options, its cache and
+   its timeout.  */
+int twist_dns_resolve_sink (struct twist_loop *loop, const char *host,
+                            const int *order, size_t norder, int want_https,
+                            const struct twist_dns_sink *sink);
+int twist_dns_resolve_sink_transfer (struct twist_transfer *transfer,
+                                     const char *host, int want_https,
+                                     const struct twist_dns_sink *sink);
+/* IPv6 first, then IPv4 and IPv6 taking turns, each family in the order it
+   was given: the order addresses are tried in.  Returns N.  */
+size_t twist_dns_sort (struct twist_dns_addr *addrs, size_t n);
+
+/* For tests: the nameserver to ask (IP and port) in place of resolv.conf's
+   (NULL restores it), and the resolution delay and how long to wait for the
+   rest after the first answer (0 restores the 50 ms and 2 s).  */
+void twist_dns_set_nameserver (const char *ip, int port);
+void twist_dns_set_timing (long resolution_delay_ms, long linger_ms);
+
 int twist_dns_resolve (struct twist_loop *loop, const char *host,
                        const int *order, size_t norder,
                        void (*cb) (void *user, int err,

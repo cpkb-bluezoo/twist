@@ -111,6 +111,35 @@ Progress meter (see HACKING)
     the meter is on.
 
 
+DNS (src/dns, RFC 8305)
+
+  - Happy Eyeballs for the connection.  The resolver asks for AAAA, A and HTTPS
+    together and gives the addresses through twist_dns_resolve_sink, IPv6 first
+    and the families taking turns, as they come (with the 50 ms resolution
+    delay).  No handler uses that yet: they take one address (IPv4 if there is
+    one, else IPv6), so a name with both is reached over IPv4 and a broken IPv4
+    path is not worked around.  What is wanted is a dialer that tries the next
+    address after 250 ms, or at once when an attempt fails, and keeps the first
+    to connect (a race between sockets that hands the winner's to the
+    connection), and the HTTP, mail-link and FTP code moved onto it.
+  - The hosts file gives the first IPv4 and the first IPv6 address of a name,
+    and localhost is 127.0.0.1 only; both should give both families, ::1 too.
+  - The cache holds one address for a name and is not used with the sink.
+  - DoQ and DoH send their queries one after another (three round trips for an
+    http URL); DoT, TCP and UDP send them together.  DoH can only be pipelined
+    over HTTP/2, and DoQ needs a stream for each, since every id is 0.
+  - RFC 10029: the types in one message, the extra ones in an MQTYPE-Query
+    option, and the server says which it included.  None of 1.1.1.1, 8.8.8.8
+    and 9.9.9.9 does yet (tried), so the queries go out separately in one
+    flight.  gumdrop has the codec (dns/DnsMultiQType.java); a server that
+    answers with MQTYPE-Response could be remembered and sent one message.
+  - A UDP query is not sent again when it is lost: it is waited for until the
+    transfer's timeout.
+  - With the default order a discovery query (DDR) is made before every lookup
+    that is not in the cache, and its outcome is not remembered.
+  - What has not been answered 2 s after the first address is given up on (the
+    lookup is complete then): a very slow nameserver loses its other types.
+
 Environment
 
   - A configuration file.

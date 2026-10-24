@@ -20,7 +20,7 @@ AM_TESTS_ENVIRONMENT = \
 
 noinst_HEADERS = check.h http-ev.h feed.h body.h
 
-PROGRAM_TESTS = test-reactor test-engine test-http test-auth test-dns \
+PROGRAM_TESTS = test-reactor test-engine test-http test-auth test-dns test-resolve \
 	test-ftp test-mail test-mqtt test-ldap test-ws test-gopher test-rtsp test-dict test-telnet \
 	test-tftp test-file test-tls test-errors test-coding test-ssh \
 	test-quote test-rate test-glob test-vars test-progress test-bar test-meter test-origin test-runtime-threads test-proxyenv test-env test-template test-masque test-threads
@@ -35,6 +35,7 @@ test_engine_SOURCES = test-engine.c check.c
 test_http_SOURCES = test-http.c check.c http-ev.c
 test_auth_SOURCES = test-auth.c check.c
 test_dns_SOURCES = test-dns.c check.c
+test_resolve_SOURCES = test-resolve.c check.c
 test_ftp_SOURCES = test-ftp.c check.c
 test_mail_SOURCES = test-mail.c check.c feed.c body.c
 test_mqtt_SOURCES = test-mqtt.c check.c feed.c body.c
