@@ -84,34 +84,35 @@ is_hex (const uint8_t *p, size_t n, const char *hex)
 }
 
 static struct twist_telnet *
-session (twist_easy **out, const char *const *opts, const char *user)
+session (twist_transfer **out, const char *const *opts, const char *user)
 {
-  twist_easy *easy = twist_easy_init ();
+  twist_transfer *transfer = twist_transfer_new ();
   struct twist_slist *list = NULL;
 
-  check (twist_url_parse_int ("telnet://127.0.0.1/", &easy->url) == TWIST_OK,
+  check (twist_url_parse_int ("telnet://127.0.0.1/",
+                              &transfer->url) == TWIST_OK,
          "telnet url");
   for (; opts != NULL && *opts != NULL; opts++)
     list = twist_slist_append (list, *opts);
   if (list != NULL)
     {
       /* The list is the caller's; it is kept for as long as the handle.  */
-      twist_easy_setopt (easy, TWISTOPT_TELNETOPTIONS, list);
+      twist_transfer_setopt (transfer, TWISTOPT_TELNETOPTIONS, list);
     }
   if (user != NULL)
-    twist_easy_setopt (easy, TWISTOPT_USERNAME, user);
-  easy->write_cb = collect;
+    twist_transfer_setopt (transfer, TWISTOPT_USERNAME, user);
+  transfer->write_cb = collect;
   text_len = 0;
-  *out = easy;
-  return twist_telnet_new (easy, 0);
+  *out = transfer;
+  return twist_telnet_new (transfer, 0);
 }
 
 static void
-session_end (twist_easy *easy)
+session_end (twist_transfer *transfer)
 {
-  struct twist_slist *list = easy->telnet_options;
+  struct twist_slist *list = transfer->telnet_options;
 
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
   twist_slist_free_all (list);
 }
 
@@ -289,14 +290,14 @@ static const struct oracle oracles[] = {
 static void
 run_oracle (const struct oracle *o)
 {
-  twist_easy *easy;
-  struct twist_telnet *t = session (&easy, o->opts, o->user);
+  twist_transfer *transfer;
+  struct twist_telnet *t = session (&transfer, o->opts, o->user);
   uint8_t chunk[1024];
   const uint8_t *sent;
   size_t sent_n = 0;
   size_t i;
 
-  check (t != NULL && !easy->done, o->name);
+  check (t != NULL && !transfer->done, o->name);
   for (i = 0; o->chunks[i] != NULL; i++)
     {
       size_t n = unhex (o->chunks[i], chunk);
@@ -306,8 +307,8 @@ run_oracle (const struct oracle *o)
   sent = twist_telnet_sent (t, &sent_n);
   check (is_hex (sent, sent_n, o->sent), o->name);
   check (is_hex (text, text_len, o->text), o->name);
-  check (!easy->done, o->name);
-  session_end (easy);
+  check (!transfer->done, o->name);
+  session_end (transfer);
 }
 
 /* The text is the same however the server's bytes are cut up.  What is sent
@@ -316,8 +317,8 @@ run_oracle (const struct oracle *o)
 static void
 run_split (const struct oracle *o, size_t split)
 {
-  twist_easy *easy;
-  struct twist_telnet *t = session (&easy, o->opts, o->user);
+  twist_transfer *transfer;
+  struct twist_telnet *t = session (&transfer, o->opts, o->user);
   uint8_t all[2048];
   size_t n = 0;
   size_t i;
@@ -326,8 +327,8 @@ run_split (const struct oracle *o, size_t split)
     n += unhex (o->chunks[i], all + n);
   feed_bin (telnet_recv, t, all, n, split);
   check (is_hex (text, text_len, o->text), o->name);
-  check (!easy->done, o->name);
-  session_end (easy);
+  check (!transfer->done, o->name);
+  session_end (transfer);
 }
 
 static void
@@ -347,8 +348,8 @@ test_oracles (void)
 static void
 test_input_escape (void)
 {
-  twist_easy *easy;
-  struct twist_telnet *t = session (&easy, NULL, NULL);
+  twist_transfer *transfer;
+  struct twist_telnet *t = session (&transfer, NULL, NULL);
   static const uint8_t in[] = { 'a', 0xff, 'b' };
   uint8_t *big = malloc (10000);
   const uint8_t *sent;
@@ -358,7 +359,7 @@ test_input_escape (void)
   twist_telnet_input (t, in, sizeof in);
   sent = twist_telnet_sent (t, &n);
   check (is_hex (sent, n, "61ffff62"), "a 255 in the input is doubled");
-  check (easy->progress.uploaded == 3, "the input counts as it was read");
+  check (transfer->progress.uploaded == 3, "the input counts as it was read");
   twist_telnet_sent_clear (t);
   twist_telnet_input (t, in, 0);
   sent = twist_telnet_sent (t, &n);
@@ -375,7 +376,7 @@ test_input_escape (void)
         break;
       }
   free (big);
-  session_end (easy);
+  session_end (transfer);
 }
 
 /* A carriage return is followed by a NUL or a line feed, but curl takes the
@@ -384,8 +385,8 @@ test_input_escape (void)
 static void
 test_cr_then_command (void)
 {
-  twist_easy *easy;
-  struct twist_telnet *t = session (&easy, NULL, NULL);
+  twist_transfer *transfer;
+  struct twist_telnet *t = session (&transfer, NULL, NULL);
   static const uint8_t in[] = { 'a', '\r', 0xff, 0xfd, 0x03, 'b' };
   const uint8_t *sent;
   size_t n = 0;
@@ -395,14 +396,14 @@ test_cr_then_command (void)
   check (is_hex (text, text_len, "610d62"), "text around a command after a CR");
   check (is_hex (sent, n, "fffb03fffb00fffd00fffd03"),
          "and the command is answered");
-  session_end (easy);
+  session_end (transfer);
 }
 
 static void
 test_asks_once (void)
 {
-  twist_easy *easy;
-  struct twist_telnet *t = session (&easy, NULL, NULL);
+  twist_transfer *transfer;
+  struct twist_telnet *t = session (&transfer, NULL, NULL);
   static const uint8_t will_echo[] = { 0xff, 0xfb, 0x01 };
   size_t n1 = 0, n2 = 0;
 
@@ -412,43 +413,43 @@ test_asks_once (void)
   twist_telnet_receive (t, will_echo, sizeof will_echo);
   twist_telnet_sent (t, &n2);
   check (n2 == n1, "a command again asks for nothing more");
-  session_end (easy);
+  session_end (transfer);
 }
 
 static void
 test_counts_text (void)
 {
-  twist_easy *easy;
-  struct twist_telnet *t = session (&easy, NULL, NULL);
+  twist_transfer *transfer;
+  struct twist_telnet *t = session (&transfer, NULL, NULL);
   static const uint8_t in[] = { 'a', 'b', 0xff, 0xfb, 0x01, 'c' };
 
   twist_telnet_receive (t, in, sizeof in);
-  check (easy->size_download == 3 && easy->progress.downloaded == 3,
+  check (transfer->size_download == 3 && transfer->progress.downloaded == 3,
          "what is downloaded is the text, not the commands");
-  session_end (easy);
+  session_end (transfer);
 }
 
 static void
 option_error (const char *opt, int code, const char *words)
 {
-  twist_easy *easy;
+  twist_transfer *transfer;
   const char *list[2];
   struct twist_telnet *t;
   const char *err;
 
   list[0] = opt;
   list[1] = NULL;
-  t = session (&easy, list, NULL);
-  err = twist_easy_error (easy);
-  check (t != NULL && easy->done && easy->result == code, opt);
+  t = session (&transfer, list, NULL);
+  err = twist_transfer_error (transfer);
+  check (t != NULL && transfer->done && transfer->result == code, opt);
   check (err != NULL && strstr (err, words) != NULL, opt);
-  session_end (easy);
+  session_end (transfer);
 }
 
 static void
 test_option_errors (void)
 {
-  twist_easy *easy;
+  twist_transfer *transfer;
   struct twist_telnet *t;
 
   option_error ("foo", TWIST_ERR_OPTION_SYNTAX, "syntax error in telnet option: foo");
@@ -461,16 +462,16 @@ test_option_errors (void)
   option_error ("TTYPEX=bar", TWIST_ERR_UNKNOWN_OPTION, "TTYPEX=bar");
   option_error ("NEW_ENVS=a", TWIST_ERR_UNKNOWN_OPTION, "NEW_ENVS=a");
   /* A user name that is not ASCII cannot be an environment variable here.  */
-  t = session (&easy, NULL, "caf\303\251");
-  check (t != NULL && easy->done && easy->result == TWIST_ERR_INVAL,
+  t = session (&transfer, NULL, "caf\303\251");
+  check (t != NULL && transfer->done && transfer->result == TWIST_ERR_INVAL,
          "a user name with a byte above 127");
-  session_end (easy);
+  session_end (transfer);
   /* The user name of the URL is the same as one given.  */
-  easy = twist_easy_init ();
-  check (twist_url_parse_int ("telnet://bob@127.0.0.1/", &easy->url) == TWIST_OK,
+  transfer = twist_transfer_new ();
+  check (twist_url_parse_int ("telnet://bob@127.0.0.1/", &transfer->url) == TWIST_OK,
          "url with a user");
-  easy->write_cb = collect;
-  t = twist_telnet_new (easy, 0);
+  transfer->write_cb = collect;
+  t = twist_telnet_new (transfer, 0);
   {
     static const uint8_t ask[] = { 0xff, 0xfd, 0x27 };
     static const uint8_t send[] = { 0xff, 0xfa, 0x27, 0x01, 0xff, 0xf0 };
@@ -487,26 +488,26 @@ test_option_errors (void)
            && memcmp (sent + n - sizeof reply, reply, sizeof reply) == 0,
            "the user in the URL is the USER variable");
   }
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
 }
 
 static void
 test_closed (void)
 {
-  twist_easy *easy;
-  struct twist_telnet *t = session (&easy, NULL, NULL);
+  twist_transfer *transfer;
+  struct twist_telnet *t = session (&transfer, NULL, NULL);
 
   twist_telnet_closed (t, TWIST_ERR_CLOSED);
-  check (easy->done && easy->result == TWIST_OK,
+  check (transfer->done && transfer->result == TWIST_OK,
          "the server closing ends the session");
   twist_telnet_closed (t, TWIST_ERR_CONNECT);
-  check (easy->result == TWIST_OK, "and only once");
-  session_end (easy);
-  t = session (&easy, NULL, NULL);
+  check (transfer->result == TWIST_OK, "and only once");
+  session_end (transfer);
+  t = session (&transfer, NULL, NULL);
   twist_telnet_closed (t, TWIST_ERR_CONNECT);
-  check (easy->done && easy->result == TWIST_ERR_CONNECT,
+  check (transfer->done && transfer->result == TWIST_ERR_CONNECT,
          "any other end is an error");
-  session_end (easy);
+  session_end (transfer);
 }
 
 static size_t
@@ -522,14 +523,14 @@ refuse (char *ptr, size_t size, size_t nmemb, void *user)
 static void
 test_write_refused (void)
 {
-  twist_easy *easy;
-  struct twist_telnet *t = session (&easy, NULL, NULL);
+  twist_transfer *transfer;
+  struct twist_telnet *t = session (&transfer, NULL, NULL);
 
-  easy->write_cb = refuse;
+  transfer->write_cb = refuse;
   twist_telnet_receive (t, (const uint8_t *) "x", 1);
-  check (easy->done && easy->result == TWIST_ERR_ABORTED,
+  check (transfer->done && transfer->result == TWIST_ERR_ABORTED,
          "a write callback that takes nothing ends the transfer");
-  session_end (easy);
+  session_end (transfer);
 }
 
 /* ---- a server on the loopback ---- */
@@ -655,18 +656,18 @@ peer_free (struct peer *p)
   p->got = NULL;
 }
 
-static twist_easy *
-live_easy (const struct peer *p)
+static twist_transfer *
+live_transfer (const struct peer *p)
 {
-  twist_easy *easy = twist_easy_init ();
+  twist_transfer *transfer = twist_transfer_new ();
   char url[64];
 
   snprintf (url, sizeof url, "telnet://127.0.0.1:%d/ignored?x", p->port);
-  twist_easy_setopt (easy, TWISTOPT_URL, url);
-  twist_easy_setopt (easy, TWISTOPT_WRITEFUNCTION, collect);
-  twist_easy_setopt (easy, TWISTOPT_TIMEOUT_MS, 30000L);
+  twist_transfer_setopt (transfer, TWISTOPT_URL, url);
+  twist_transfer_setopt (transfer, TWISTOPT_WRITEFUNCTION, collect);
+  twist_transfer_setopt (transfer, TWISTOPT_TIMEOUT_MS, 30000L);
   text_len = 0;
-  return easy;
+  return transfer;
 }
 
 /* A read callback that gives STEP bytes at a time.  */
@@ -703,29 +704,6 @@ source_abort (char *ptr, size_t size, size_t nmemb, void *user)
   return TWIST_READFUNC_ABORT;
 }
 
-static int saved_stdin = -2;
-
-/* Standard input is FD from here until put_stdin_back.  */
-static void
-take_stdin (int fd)
-{
-  saved_stdin = dup (STDIN_FILENO);
-  dup2 (fd, STDIN_FILENO);
-}
-
-static void
-put_stdin_back (void)
-{
-  if (saved_stdin >= 0)
-    {
-      dup2 (saved_stdin, STDIN_FILENO);
-      close (saved_stdin);
-    }
-  else
-    close (STDIN_FILENO);
-  saved_stdin = -2;
-}
-
 /* What a server sends comes out, the commands are not, and the server's
    close ends the session.  */
 static void
@@ -734,7 +712,7 @@ test_live_text (void)
   static const uint8_t script[] = { 'h', 'i', '\r', '\n', 0xff, 0xfb, 0x01,
                                     'x' };
   struct peer p;
-  twist_easy *easy;
+  twist_transfer *transfer;
   int rc;
 
   memset (&p, 0, sizeof p);
@@ -747,20 +725,20 @@ test_live_text (void)
       fputs ("test-telnet: no loopback; skipping the live tests\n", stderr);
       return;
     }
-  easy = live_easy (&p);
+  transfer = live_transfer (&p);
   /* Nothing to send: an empty source, as /dev/null would be.  */
   {
     struct source none = { NULL, 0, 0, 1 };
 
-    twist_easy_setopt (easy, TWISTOPT_READFUNCTION, source_read);
-    twist_easy_setopt (easy, TWISTOPT_READDATA, &none);
-    rc = twist_easy_perform (easy);
+    twist_transfer_setopt (transfer, TWISTOPT_READFUNCTION, source_read);
+    twist_transfer_setopt (transfer, TWISTOPT_READDATA, &none);
+    rc = check_perform (transfer);
   }
   peer_stop (&p);
   check (rc == TWIST_OK, "a session ends when the server closes");
   check (is_hex (text, text_len, "68690d0a78"), "its text, without commands");
-  check (easy->size_download == 5, "and counts it");
-  twist_easy_cleanup (easy);
+  check (transfer->size_download == 5, "and counts it");
+  twist_transfer_free (transfer);
 }
 
 static void
@@ -769,38 +747,38 @@ test_live_read_callback (void)
   static const uint8_t data[] = { 'o', 'n', 'e', 0xff, 't', 'w', 'o', '\n' };
   struct peer p;
   struct source src = { data, sizeof data, 0, 3 };
-  twist_easy *easy;
+  twist_transfer *transfer;
   int rc;
 
   memset (&p, 0, sizeof p);
   p.until = sizeof data + 1;
   if (peer_start (&p) != 0)
     return;
-  easy = live_easy (&p);
-  twist_easy_setopt (easy, TWISTOPT_READFUNCTION, source_read);
-  twist_easy_setopt (easy, TWISTOPT_READDATA, &src);
-  rc = twist_easy_perform (easy);
+  transfer = live_transfer (&p);
+  twist_transfer_setopt (transfer, TWISTOPT_READFUNCTION, source_read);
+  twist_transfer_setopt (transfer, TWISTOPT_READDATA, &src);
+  rc = check_perform (transfer);
   peer_stop (&p);
   check (rc == TWIST_OK, "read callback: the transfer ends");
   check (p.got_len == sizeof data + 1
          && is_hex (p.got, p.got_len, "6f6e65ffff74776f0a"),
          "read callback: what it gave is sent, a 255 doubled");
   peer_free (&p);
-  check (easy->progress.uploaded == (long long) sizeof data,
+  check (transfer->progress.uploaded == (long long) sizeof data,
          "read callback: and counted");
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
 
   /* One that cannot read.  */
   memset (&p, 0, sizeof p);
   p.linger_ms = 5000;
   if (peer_start (&p) != 0)
     return;
-  easy = live_easy (&p);
-  twist_easy_setopt (easy, TWISTOPT_READFUNCTION, source_abort);
-  rc = twist_easy_perform (easy);
+  transfer = live_transfer (&p);
+  twist_transfer_setopt (transfer, TWISTOPT_READFUNCTION, source_abort);
+  rc = check_perform (transfer);
   peer_stop (&p);
   check (rc == TWIST_ERR_ABORTED, "a read callback that cannot read");
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
 }
 
 struct late
@@ -827,7 +805,7 @@ static void
 test_live_pipe (void)
 {
   struct peer p;
-  twist_easy *easy;
+  twist_transfer *transfer;
   int pfd[2];
   pthread_t th;
   struct late late;
@@ -842,19 +820,18 @@ test_live_pipe (void)
   late.fd = pfd[1];
   late.text = "later";
   pthread_create (&th, NULL, write_late, &late);
-  take_stdin (pfd[0]);
-  easy = live_easy (&p);
-  rc = twist_easy_perform (easy);
-  put_stdin_back ();
+  transfer = live_transfer (&p);
+  twist_transfer_setopt (transfer, TWISTOPT_TELNET_INPUT_FD, (long) pfd[0]);
+  rc = check_perform (transfer);
   pthread_join (th, NULL);
   peer_stop (&p);
   close (pfd[0]);
   close (pfd[1]);
-  check (rc == TWIST_OK, "stdin pipe: the transfer ends");
+  check (rc == TWIST_OK, "input pipe: the transfer ends");
   check (p.got_len == 10 && memcmp (p.got, "firstlater", 10) == 0,
-         "stdin pipe: what was there and what came later");
+         "input pipe: what was there and what came later");
   peer_free (&p);
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
 }
 
 /* A descriptor that cannot be polled is read in steps: a file, and the null
@@ -863,7 +840,7 @@ static void
 test_live_unpollable (void)
 {
   struct peer p;
-  twist_easy *easy;
+  twist_transfer *transfer;
   char path[] = "/tmp/twist-telnet-XXXXXX";
   int fd = mkstemp (path);
   int rc;
@@ -877,18 +854,17 @@ test_live_unpollable (void)
   p.until = 12;
   if (peer_start (&p) != 0)
     return;
-  take_stdin (fd);
-  easy = live_easy (&p);
-  rc = twist_easy_perform (easy);
-  put_stdin_back ();
+  transfer = live_transfer (&p);
+  twist_transfer_setopt (transfer, TWISTOPT_TELNET_INPUT_FD, (long) fd);
+  rc = check_perform (transfer);
   peer_stop (&p);
   close (fd);
   unlink (path);
-  check (rc == TWIST_OK, "stdin file: the transfer ends");
+  check (rc == TWIST_OK, "input file: the transfer ends");
   check (p.got_len == 12 && memcmp (p.got, "from a file\n", 12) == 0,
-         "stdin file: sent");
+         "input file: sent");
   peer_free (&p);
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
 
   fd = open ("/dev/null", O_RDONLY);
   if (fd < 0)
@@ -897,16 +873,77 @@ test_live_unpollable (void)
   p.linger_ms = 200;
   if (peer_start (&p) != 0)
     return;
-  take_stdin (fd);
-  easy = live_easy (&p);
-  rc = twist_easy_perform (easy);
-  put_stdin_back ();
+  transfer = live_transfer (&p);
+  twist_transfer_setopt (transfer, TWISTOPT_TELNET_INPUT_FD, (long) fd);
+  rc = check_perform (transfer);
   peer_stop (&p);
   close (fd);
   check (rc == TWIST_OK && p.got_len == 0,
          "the null device: nothing to send, and the session goes on");
   peer_free (&p);
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
+}
+
+/* The library takes no descriptor for granted.  With no read callback and no
+   TWISTOPT_TELNET_INPUT_FD nothing is sent and the session is the server's,
+   though the process's standard input has something in it, and that is left
+   where it is.  A descriptor that is given is the caller's: it is open and
+   unread past what was sent when the session is over.  */
+static void
+test_live_input_descriptor (void)
+{
+  struct peer p;
+  twist_transfer *transfer;
+  struct pollfd pf;
+  int pfd[2];
+  int saved;
+  int rc;
+  char buf[16];
+  ssize_t n = 0;
+
+  memset (&p, 0, sizeof p);
+  p.linger_ms = 200;
+  if (pipe (pfd) != 0 || peer_start (&p) != 0)
+    return;
+  if (write (pfd[1], "unread", 6) < 0)
+    return;
+  saved = dup (STDIN_FILENO);
+  dup2 (pfd[0], STDIN_FILENO);
+  transfer = live_transfer (&p);
+  rc = check_perform (transfer);
+  dup2 (saved, STDIN_FILENO);
+  close (saved);
+  peer_stop (&p);
+  check (rc == TWIST_OK && p.got_len == 0, "no input: nothing is sent");
+  pf.fd = pfd[0];
+  pf.events = POLLIN;
+  if (poll (&pf, 1, 0) == 1)
+    n = read (pfd[0], buf, sizeof buf);
+  check (n == 6 && memcmp (buf, "unread", 6) == 0,
+         "and standard input was not read");
+  peer_free (&p);
+  check (twist_transfer_setopt (transfer, TWISTOPT_TELNET_INPUT_FD, -2L)
+         == TWIST_ERR_INVAL, "a descriptor below -1 is refused");
+  twist_transfer_free (transfer);
+
+  memset (&p, 0, sizeof p);
+  p.until = 3;
+  if (peer_start (&p) != 0)
+    return;
+  if (write (pfd[1], "abc", 3) < 0)
+    return;
+  transfer = live_transfer (&p);
+  twist_transfer_setopt (transfer, TWISTOPT_TELNET_INPUT_FD, (long) pfd[0]);
+  rc = check_perform (transfer);
+  peer_stop (&p);
+  check (rc == TWIST_OK && p.got_len == 3 && memcmp (p.got, "abc", 3) == 0,
+         "a descriptor that is given is read");
+  check (fcntl (pfd[0], F_GETFD) != -1 && fcntl (pfd[1], F_GETFD) != -1,
+         "and is still open afterwards");
+  peer_free (&p);
+  twist_transfer_free (transfer);
+  close (pfd[0]);
+  close (pfd[1]);
 }
 
 struct feed_pipe
@@ -935,7 +972,7 @@ feed_pipe_run (void *arg)
 
 /* More than the connection takes is held until it can: all of it arrives,
    in order, and the end of the input is not the end of the session.  The
-   input is the read callback, or standard input, which are held in different
+   input is the read callback, or a descriptor, which are held in different
    ways.  */
 static void
 backpressure (int from_pipe, const char *what)
@@ -947,7 +984,7 @@ backpressure (int from_pipe, const char *what)
   struct feed_pipe feed;
   pthread_t th;
   int pfd[2] = { -1, -1 };
-  twist_easy *easy;
+  twist_transfer *transfer;
   size_t escapes = 0;
   size_t i;
   int rc;
@@ -975,25 +1012,25 @@ backpressure (int from_pipe, const char *what)
       free (data);
       return;
     }
-  easy = live_easy (&p);
+  transfer = live_transfer (&p);
   if (from_pipe)
     {
       feed.fd = pfd[1];
       feed.data = data;
       feed.len = SIZE;
       pthread_create (&th, NULL, feed_pipe_run, &feed);
-      take_stdin (pfd[0]);
+      twist_transfer_setopt (transfer, TWISTOPT_TELNET_INPUT_FD,
+                             (long) pfd[0]);
     }
   else
     {
-      twist_easy_setopt (easy, TWISTOPT_READFUNCTION, source_read);
-      twist_easy_setopt (easy, TWISTOPT_READDATA, &src);
+      twist_transfer_setopt (transfer, TWISTOPT_READFUNCTION, source_read);
+      twist_transfer_setopt (transfer, TWISTOPT_READDATA, &src);
     }
-  rc = twist_easy_perform (easy);
+  rc = check_perform (transfer);
   if (from_pipe)
     {
-      put_stdin_back ();
-      pthread_join (th, NULL);
+          pthread_join (th, NULL);
       close (pfd[0]);
       close (pfd[1]);
     }
@@ -1013,7 +1050,7 @@ backpressure (int from_pipe, const char *what)
     check (same, what);
   }
   peer_free (&p);
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
   free (data);
 }
 
@@ -1021,21 +1058,20 @@ static void
 test_live_backpressure (void)
 {
   backpressure (0, "a large upload from the read callback");
-  backpressure (1, "a large upload from standard input");
+  backpressure (1, "a large upload from a descriptor");
 }
 
-/* Once the session is over nothing more is read from standard input: it is
-   wanted by whoever reads it next.  The handle is left in its multi, as an
-   application's may be, and the loop goes on running.  */
+/* Once the session is over nothing more is read from the input descriptor: it
+   is wanted by whoever reads it next.  The loop goes on running.  */
 static void
 test_live_input_stops (void)
 {
   struct peer p;
-  twist_multi *multi;
-  twist_easy *easy;
+  twist_runtime *runtime;
+  twist_transfer *transfer;
   struct timespec nap = { 0, 2000000 };
   int pfd[2];
-  int running = 1;
+  struct check_job job = { 0, 0, 0 };
   int i;
   char buf[16];
   ssize_t n = 0;
@@ -1045,24 +1081,23 @@ test_live_input_stops (void)
   p.linger_ms = 150;
   if (pipe (pfd) != 0 || peer_start (&p) != 0)
     return;
-  take_stdin (pfd[0]);
-  multi = twist_multi_init ();
-  easy = live_easy (&p);
-  twist_multi_add_handle (multi, easy);
-  for (i = 0; i < 5000 && running; i++)
+  runtime = twist_runtime_new ();
+  transfer = live_transfer (&p);
+  twist_transfer_setopt (transfer, TWISTOPT_TELNET_INPUT_FD, (long) pfd[0]);
+  twist_runtime_start (runtime, transfer, check_job_done, &job);
+  for (i = 0; i < 5000 && !job.done; i++)
     {
-      twist_multi_perform (multi, &running);
+      twist_runtime_run_once (runtime, 0);
       nanosleep (&nap, NULL);
     }
-  check (!running, "input stops: the session ends");
+  check (job.done, "input stops: the session ends");
   if (write (pfd[1], "late", 4) < 0)
     return;
   for (i = 0; i < 50; i++)
     {
-      twist_multi_perform (multi, &running);
+      twist_runtime_run_once (runtime, 0);
       nanosleep (&nap, NULL);
     }
-  put_stdin_back ();
   pf.fd = pfd[0];
   pf.events = POLLIN;
   if (poll (&pf, 1, 0) == 1)
@@ -1071,9 +1106,8 @@ test_live_input_stops (void)
          "input stops: what came after the end is still there to be read");
   peer_stop (&p);
   peer_free (&p);
-  twist_multi_remove_handle (multi, easy);
-  twist_easy_cleanup (easy);
-  twist_multi_cleanup (multi);
+  twist_transfer_free (transfer);
+  twist_runtime_free (runtime);
   close (pfd[0]);
   close (pfd[1]);
 }
@@ -1082,7 +1116,7 @@ static void
 test_live_failures (void)
 {
   struct peer p;
-  twist_easy *easy;
+  twist_transfer *transfer;
   struct twist_slist *opts;
   int rc;
 
@@ -1091,17 +1125,17 @@ test_live_failures (void)
   p.linger_ms = 100;
   if (peer_start (&p) != 0)
     return;
-  easy = live_easy (&p);
+  transfer = live_transfer (&p);
   opts = twist_slist_append (NULL, "WS=bad");
-  twist_easy_setopt (easy, TWISTOPT_TELNETOPTIONS, opts);
-  rc = twist_easy_perform (easy);
+  twist_transfer_setopt (transfer, TWISTOPT_TELNETOPTIONS, opts);
+  rc = check_perform (transfer);
   peer_cancel (&p);
   check (rc == TWIST_ERR_OPTION_SYNTAX, "a bad option ends the transfer");
-  check (twist_easy_error (easy) != NULL
-         && strstr (twist_easy_error (easy), "WS=bad") != NULL,
+  check (twist_transfer_error (transfer) != NULL
+         && strstr (twist_transfer_error (transfer), "WS=bad") != NULL,
          "and says which");
   check (p.got_len == 0, "before it connects");
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
   twist_slist_free_all (opts);
 
   /* Nobody is there.  */
@@ -1110,10 +1144,10 @@ test_live_failures (void)
   if (peer_start (&p) != 0)
     return;
   peer_cancel (&p);
-  easy = live_easy (&p);
-  rc = twist_easy_perform (easy);
+  transfer = live_transfer (&p);
+  rc = check_perform (transfer);
   check (rc == TWIST_ERR_CONNECT, "a refused connection");
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
 }
 
 int
@@ -1133,6 +1167,7 @@ main (void)
   test_live_read_callback ();
   test_live_pipe ();
   test_live_unpollable ();
+  test_live_input_descriptor ();
   test_live_backpressure ();
   test_live_input_stops ();
   test_live_failures ();

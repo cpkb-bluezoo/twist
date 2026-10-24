@@ -39,7 +39,7 @@
 
 struct twist_dict
 {
-  struct twist_easy *easy;
+  struct twist_transfer *transfer;
   struct twist_endpoint *ep;
   struct twist_mail_link link;
   int sent;
@@ -55,7 +55,7 @@ dict_complete (struct twist_dict *d, int err)
   if (d == NULL || d->finished)
     return;
   d->finished = 1;
-  twist_easy_finish (d->easy, err);
+  twist_transfer_finish (d->transfer, err);
 }
 
 static int
@@ -233,7 +233,7 @@ add_command (struct twist_dict *d, int match, const char *database,
 static int
 build_request (struct twist_dict *d)
 {
-  struct twist_url *url = d->easy->url;
+  struct twist_url *url = d->transfer->url;
   const char *path = url->path != NULL && url->path[0] != 0 ? url->path : "/";
   char decoded[DICT_PATH_MAX + 1];
   size_t n = 0;
@@ -326,14 +326,14 @@ flush_request (struct twist_dict *d)
 static int
 deliver (struct twist_dict *d, const uint8_t *data, size_t len)
 {
-  struct twist_easy *easy = d->easy;
+  struct twist_transfer *transfer = d->transfer;
   size_t off = 0;
 
   if (len > 0)
     d->saw = 1;
-  if (easy->write_cb == NULL || len == 0)
+  if (transfer->write_cb == NULL || len == 0)
     {
-      twist_easy_downloaded (easy, len);
+      twist_transfer_downloaded (transfer, len);
       return TWIST_OK;
     }
   while (off < len)
@@ -345,12 +345,12 @@ deliver (struct twist_dict *d, const uint8_t *data, size_t len)
       if (chunk > sizeof buf)
         chunk = sizeof buf;
       memcpy (buf, data + off, chunk);
-      n = easy->write_cb (buf, 1, chunk, easy->write_data);
+      n = transfer->write_cb (buf, 1, chunk, transfer->write_data);
       if (n < chunk)
         return TWIST_ERR_ABORTED;
       off += chunk;
     }
-  twist_easy_downloaded (easy, len);
+  twist_transfer_downloaded (transfer, len);
   return TWIST_OK;
 }
 
@@ -456,20 +456,20 @@ twist_dict_free (void *p)
 }
 
 struct twist_dict *
-twist_dict_new (struct twist_easy *easy, int live)
+twist_dict_new (struct twist_transfer *transfer, int live)
 {
   struct twist_dict *d;
   int rc;
 
   (void) live;
-  if (easy == NULL || easy->url == NULL)
+  if (transfer == NULL || transfer->url == NULL)
     return NULL;
   d = calloc (1, sizeof *d);
   if (d == NULL)
     return NULL;
-  d->easy = easy;
-  easy->xfer = d;
-  easy->xfer_free = twist_dict_free;
+  d->transfer = transfer;
+  transfer->state = d;
+  transfer->state_free = twist_dict_free;
   rc = build_request (d);
   if (rc != TWIST_OK)
     dict_complete (d, rc);
@@ -477,18 +477,18 @@ twist_dict_new (struct twist_easy *easy, int live)
 }
 
 int
-twist_dict_attach (struct twist_easy *easy)
+twist_dict_attach (struct twist_transfer *transfer)
 {
   struct twist_dict *d;
   int rc;
 
-  d = twist_dict_new (easy, 1);
+  d = twist_dict_new (transfer, 1);
   if (d == NULL)
     return TWIST_ERR_NOMEM;
   if (d->finished)
-    return easy->result;
-  rc = twist_mail_link_open (&d->link, easy, &dict_handler, d, dict_fail);
+    return transfer->result;
+  rc = twist_mail_link_open (&d->link, transfer, &dict_handler, d, dict_fail);
   if (rc != TWIST_OK)
     dict_complete (d, rc);
-  return easy->done ? easy->result : TWIST_OK;
+  return transfer->done ? transfer->result : TWIST_OK;
 }

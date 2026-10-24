@@ -55,9 +55,13 @@ Documentation License''.
 @node Overview
 @chapter Overview
 
-Twist is a transfer library and a small command-line client.  The
-public interface is @code{twist_easy}, @code{twist_multi} and
-@code{twist_share}.  Names, constants and header files are Twist's own.
+Twist is a transfer library and a small command-line client.  The library
+has two objects.  A @code{twist_transfer} is the job: a URL, the settings for
+it, and then its result.  A @code{twist_runtime} runs transfers, many at once,
+on one event loop, and tells the program when each has ended.  Nothing in the
+library blocks; the only place the command-line program waits is a latch that
+it holds until the transfers it started have ended.  Names, constants and
+header files are Twist's own.
 
 The schemes that are implemented are listed under @ref{Protocols}.
 Schemes that are not yet implemented have a row in the scheme table, so
@@ -79,19 +83,21 @@ once, before any other function, and @code{twist_global_cleanup} when the proces
 is finished with the library.
 
 @menu
-* Easy handles::
+* Transfers::
 * Options::
 * Callbacks::
-* Multi interface::
-* Sharing::
+* Runtime::
+* Stores::
 * URL functions::
 * Error codes::
 @end menu
 
-@node Easy handles
-@section Easy handles
+@node Transfers
+@section Transfers
 
-An easy handle holds the settings of one transfer and then its result.
+A transfer holds the settings of one URL and then its result.  It is run by
+starting it on a runtime (@pxref{Runtime}), and the runtime tells the program
+when it has ended.
 
 @deftypefun int twist_global_init (void)
 @deftypefunx void twist_global_cleanup (void)
@@ -100,17 +106,20 @@ second call to @code{twist_global_init} does nothing.  Do not call it from two
 threads at once.
 @end deftypefun
 
-@deftypefun {twist_easy *} twist_easy_init (void)
+@deftypefun {twist_transfer *} twist_transfer_new (void)
 A new handle with the defaults, or @code{NULL} when out of memory.
 @end deftypefun
 
-@deftypefun void twist_easy_cleanup (twist_easy *@var{easy})
-Free the handle.  A handle that is in a multi handle leaves it first.  From
-inside a callback this does nothing, because the handle is in use by the call
-that made the callback; do it after that call returns.
+@deftypefun void twist_transfer_free (twist_transfer *@var{transfer})
+Free the transfer.  One that is in a runtime leaves it first, and its
+@code{twist_done_callback} is not called.  One that has been reported to its
+@code{twist_done_callback} is in no runtime, and may be freed there.  From a
+callback, freeing a transfer that is still in a runtime does nothing, because
+the call that made the callback may be running on it; cancel it, and free it in
+its @code{twist_done_callback}.
 @end deftypefun
 
-@deftypefun int twist_easy_setopt (twist_easy *@var{easy}, int @var{opt}, @dots{})
+@deftypefun int twist_transfer_setopt (twist_transfer *@var{transfer}, int @var{opt}, @dots{})
 Set one option (@pxref{Options}).  The type of the third argument depends on
 the option, and it matters: the arguments are variable, so a number is a
 @code{long} unless the option says otherwise, and @code{1} must be written
@@ -123,18 +132,10 @@ transfer is over, and frees them.  A string option given @code{NULL} goes back
 to its default.
 @end deftypefun
 
-@deftypefun int twist_easy_perform (twist_easy *@var{easy})
-Run the transfer and wait for it.  It returns @code{TWIST_OK}, or the code that
-ended the transfer.  Each call runs on a multi handle of its own that is
-discarded after it, so a handle that is run again starts with no kept
-connection and no names.  Give it a share (@pxref{Sharing}) to keep those, or
-run it in a multi handle (@pxref{Multi interface}).  A handle that is in a multi
-handle is refused with @code{TWIST_ERR_INVAL}.
-@end deftypefun
-
-@deftypefun int twist_easy_getinfo (twist_easy *@var{easy}, int @var{info}, @dots{})
+@deftypefun int twist_transfer_getinfo (twist_transfer *@var{transfer}, int @var{info}, @dots{})
 Read a fact about the last transfer into the variable that the third argument
-points to.  It returns @code{TWIST_ERR_UNSUPPORTED} for an unknown @var{info}.
+points to.  This is for a transfer that has been reported to its
+@code{twist_done_callback}, or that has not been started.  It returns @code{TWIST_ERR_UNSUPPORTED} for an unknown @var{info}.
 @end deftypefun
 
 @table @code
@@ -145,17 +146,17 @@ A @code{char **}: the URL the transfer ended on, after any redirects, without
 the user name and password.  The string belongs to the handle and is good until
 the next transfer starts or the handle is freed.
 @item TWISTINFO_SIZE_DOWNLOAD
-A @code{size_t *}: the bytes of body delivered to the write callback.  It is
-not curl's @code{double}.
+A @code{size_t *}: the bytes of body delivered to the write callback.
 @item TWISTINFO_CONTENT_TYPE
 A @code{char **}: the @code{Content-Type} of the response, or @code{NULL} when
 it had none.  The string is good as long as the effective URL is.
 @item TWISTINFO_PRIVATE
 A @code{void **}: the pointer set with @code{TWISTOPT_PRIVATE}.  It is how a
-program finds its own record of a handle that @code{twist_multi_info_read} names.
+program finds its own record of the transfer that a @code{twist_done_callback}
+is given.
 @end table
 
-@deftypefun {const char *} twist_easy_error (const twist_easy *@var{easy})
+@deftypefun {const char *} twist_transfer_error (const twist_transfer *@var{transfer})
 Words for the last failure when there are more than the code gives, such as the
 reply of a proxy or the reason a redirect was not followed, and @code{NULL}
 when there are none.  The string is good until the next transfer starts or the
@@ -183,7 +184,7 @@ Free a list and its strings.
 @node Options
 @section Options
 
-These are the options of @code{twist_easy_setopt}.  The type is that of the
+These are the options of @code{twist_transfer_setopt}.  The type is that of the
 third argument.  ``string'' is a @code{const char *}, and ``long'' is a
 @code{long} that is 0 for no and non-zero for yes where it is a switch.
 
@@ -198,7 +199,8 @@ A @code{void *}, passed to the write callback.
 @item TWISTOPT_READFUNCTION
 A @code{twist_read_callback}: supplies the data of an @code{sftp} or @code{scp}
 upload, the message of @code{smtp}, the messages of a WebSocket, and what a
-@code{telnet} session sends (without one that is standard input).  An HTTP
+@code{telnet} session sends (without one that is what is read from
+@code{TWISTOPT_TELNET_INPUT_FD}).  An HTTP
 request body is given with @code{TWISTOPT_POSTFIELDS}.
 @item TWISTOPT_READDATA
 A @code{void *}, passed to the read callback.
@@ -451,22 +453,40 @@ option with no value, or a bad one, with @code{TWIST_ERR_OPTION_SYNTAX}, in
 both cases before there is a connection.  @code{NULL} clears it.  The user name
 (@code{TWISTOPT_USERNAME}, or the URL's) is given to the server as the
 variable @code{USER}.  Other schemes ignore it.
+@item TWISTOPT_TELNET_INPUT_FD
+A long: the descriptor that the input of the session is read from, when there
+is no @code{TWISTOPT_READFUNCTION}.  It is a terminal, a pipe or a file, it is
+the caller's, and the transfer does not close it or make it non-blocking.  One
+that can be polled is read only when it is ready, and what is read waits for the
+connection when the connection is behind.  The end of the input does not end
+the session.  The default is @minus{}1, none, and then nothing is sent: the
+library does not read standard input unless it is told to.  The command-line
+program names descriptor 0.  Other schemes ignore it.
 @end table
 
-@subheading Sharing
+@subheading Cookies, HSTS and Alt-Svc
 
 @table @code
-@item TWISTOPT_SHARE
-A @code{twist_share *}, or @code{NULL} for none.  @xref{Sharing}.  The share must
-outlive the handle's use of it.
+@item TWISTOPT_USE_COOKIES
+A long.  Non-zero has the transfer keep the cookies that responses set in the
+runtime's cookie jar, and send them back (@pxref{Stores}).  A cookie given with
+@code{TWISTOPT_COOKIE} is sent in its place.  Only HTTP uses it.
+@item TWISTOPT_USE_HSTS
+A long.  Non-zero has the transfer upgrade an @code{http} URL to @code{https}
+when its host is in the runtime's HSTS list.  Only HTTP uses it.
+@item TWISTOPT_USE_ALTSVC
+A long.  Non-zero has the transfer keep the alternative services that servers
+offer in the runtime's Alt-Svc list, and use them.  Only HTTP uses it.
 @end table
 
 @node Callbacks
 @section Callbacks
 
-The callbacks are called from inside the call that drives the loop:
-@code{twist_easy_perform}, @code{twist_multi_perform} or
-@code{twist_multi_socket_action}, on the thread that made it.
+The callbacks are called from the loop, on the thread that runs it: from
+@code{twist_runtime_run_once} for a runtime that has a poller of its own, and
+from @code{twist_runtime_on_ready} and @code{twist_runtime_on_timer} for an
+embedded one.  The callback of a transfer that has ended is called from the
+loop as well, never from the call that started the transfer.
 
 @deftp {Callback type} twist_write_callback
 @code{size_t f (char *@var{ptr}, size_t @var{size}, size_t @var{nmemb}, void *@var{userdata})}
@@ -498,106 +518,163 @@ draw its own meter as well.  Anything else stops the transfer with
 @code{TWIST_ERR_ABORTED}.
 @end deftp
 
-@deftp {Callback type} twist_socket_callback
-@code{int f (twist_easy *@var{easy}, int @var{fd}, int @var{what}, void *@var{user}, void *@var{socketp})}
+@deftp {Callback type} twist_done_callback
+@code{void f (twist_transfer *@var{transfer}, int @var{result}, void *@var{user})}
 
-Tells a program that drives a multi handle which descriptors to watch.
+Called once for a transfer that was started with @code{twist_runtime_start},
+when it has ended.  @var{result} is @code{TWIST_OK}, or the code that ended it.
+It is called from the loop, after the protocol handler that ended the transfer
+has returned, and by then the transfer has let go of its connection, which is
+kept for reuse or closed, and is in no runtime.  So the callback can read what
+the transfer learned with @code{twist_transfer_getinfo}, change its options and
+start it again, start another transfer, or free it.  It is not called for a
+transfer that is freed, or whose runtime is freed, before it ends.
+@end deftp
+
+@deftp {Callback type} twist_watch_callback
+@code{void f (int @var{fd}, int @var{what}, void *@var{user})}
+
+Tells a program that has its own poll loop which descriptors to watch.
 @var{what} is @code{TWIST_POLL_IN}, @code{TWIST_POLL_OUT} or both added together,
-and @code{TWIST_POLL_REMOVE} when @var{fd} is no longer wanted.  @var{easy} and
-@var{socketp} are @code{NULL}.  Some of the descriptors are not connections: the
-loop has one of its own, which the program watches like the rest.  The return
-value is not used.
+and @code{TWIST_POLL_REMOVE} when @var{fd} is no longer wanted.  Some of the
+descriptors are not connections: the loop has one of its own, which the program
+watches like the rest.
 @end deftp
 
 @deftp {Callback type} twist_timer_callback
-@code{int f (twist_multi *@var{multi}, long @var{timeout_ms}, void *@var{user})}
+@code{void f (long @var{timeout_ms}, void *@var{user})}
 
-Called when the next deadline of the loop changes, with the time to it in
-milliseconds, or @minus{}1 for none.  It is called from inside
-@code{twist_multi_add_handle}, @code{twist_multi_remove_handle},
-@code{twist_multi_perform} and @code{twist_multi_socket_action}, after the call
-has done its work.  The program arranges to call
-@code{twist_multi_socket_action} with @code{TWIST_SOCKET_TIMEOUT} when the time
-is up.  The return value is not used.
+Tells a program that has its own poll loop how long it may wait for the next
+deadline of the loop, in milliseconds from now: 0 if it is due, and @minus{}1
+if there is none.  It is called when the deadline changes, after a call that
+starts or cancels a transfer or runs the loop has done its work.  A deadline
+that is due is told every time.  The program arranges to call
+@code{twist_runtime_on_timer} when the time is up.
 @end deftp
 
-@strong{Calls from a callback.}  From inside a callback, @code{twist_multi_add_handle},
-@code{twist_multi_remove_handle}, @code{twist_multi_perform} and
-@code{twist_multi_socket_action} return @code{TWIST_ERR_RECURSIVE}, and
-@code{twist_easy_cleanup} and @code{twist_multi_cleanup} do nothing.  The handle
-is in use by the call that made the callback, and freeing its connection there
-would free what that call is still running on.  Do these after the call
-returns.  Setting options, reading information, and @code{twist_multi_timeout}
-are allowed.  curl refuses the same calls.
+@strong{Calls from a callback.}  From inside a callback a program can start a
+transfer, which is how it starts the next one; cancel a transfer; set options;
+read information; and free a transfer that has been reported to its
+@code{twist_done_callback}.  Calls that run or free what the call that made the
+callback is running on are refused.  @code{twist_runtime_run_once},
+@code{twist_runtime_on_ready} and @code{twist_runtime_on_timer} return
+@code{TWIST_ERR_RECURSIVE}, because the loop is running.
+@code{twist_runtime_free} does nothing, and neither does
+@code{twist_transfer_free} of a transfer that is still in a runtime.  Do these
+after the call returns, or, for a transfer, in its @code{twist_done_callback}.
+The two hook callbacks above may not call the runtime at all.
 
-@node Multi interface
-@section Multi interface
+@node Runtime
+@section Runtime
 
-A multi handle runs many transfers on one loop.  It does not start a thread and
-does not block: the program owns the poll loop, and gives the multi handle each
-event.
+A runtime runs many transfers on one event loop, and keeps what they can use
+again: the connections that are kept, the answers of DNS lookups, and the
+cookie jar and the HSTS and Alt-Svc lists (@pxref{Stores}).  It does not start a
+thread, and nothing in it blocks.  A transfer is started, and the loop tells
+the program when it has ended; the program does the waiting, or has its own
+poll loop do it.
 
-@deftypefun {twist_multi *} twist_multi_init (void)
-@deftypefunx void twist_multi_cleanup (twist_multi *@var{multi})
-Create a multi handle, or return @code{NULL} when out of memory, and free it.
-Handles still in it are released first, and stay valid to free.
+A runtime is made in one of two forms.  One has a poller of its own and is
+driven with @code{twist_runtime_run_once}.  The other, an embedded one, has no
+poller: it lives in the poll loop of the program, which watches what the runtime
+says to, and tells the runtime what is ready.
+
+@deftypefun {twist_runtime *} twist_runtime_new (void)
+A runtime with a poller of its own, or @code{NULL} when out of memory.
 @end deftypefun
 
-@deftypefun int twist_multi_setopt (twist_multi *@var{multi}, int @var{opt}, @dots{})
-@table @code
-@item TWISTMOPT_SOCKETFUNCTION
-A @code{twist_socket_callback}.  Set it before adding handles.
-@item TWISTMOPT_SOCKETDATA
-A @code{void *}, passed to it as @var{user}.
-@item TWISTMOPT_TIMERFUNCTION
-A @code{twist_timer_callback}.
-@item TWISTMOPT_TIMERDATA
-A @code{void *}, passed to it as @var{user}.
-@end table
-Any other option is @code{TWIST_ERR_UNSUPPORTED}.
+@deftypefun {twist_runtime *} twist_runtime_new_embedded (twist_watch_callback @var{watch}, twist_timer_callback @var{timer}, void *@var{user})
+An embedded runtime, or @code{NULL} when out of memory, or when either callback is
+missing.  @var{watch} is called at once with the descriptor that wakes the loop,
+and from then on as descriptors come and go.  @var{timer} is called as the
+deadline moves.  @var{user} is passed to both.
 @end deftypefun
 
-@deftypefun int twist_multi_add_handle (twist_multi *@var{multi}, twist_easy *@var{easy})
-Start the transfer of a handle on the loop.  It returns @code{TWIST_ERR_INVAL} for
-a handle that is in a multi handle already.  A failure to start is returned, and
-also shows as the result of the handle in @code{twist_multi_info_read}.
+@deftypefun void twist_runtime_free (twist_runtime *@var{runtime})
+Free the runtime.  A transfer that is still in it is dropped, without a call to
+its @code{twist_done_callback}, and stays valid to free.  From a callback this
+does nothing.
 @end deftypefun
 
-@deftypefun int twist_multi_remove_handle (twist_multi *@var{multi}, twist_easy *@var{easy})
-Take a handle out, finished or not.  A transfer that has not finished is
-abandoned.  Remove a handle before freeing it or adding it to another multi
-handle.
+@deftypefun int twist_runtime_start (twist_runtime *@var{runtime}, twist_transfer *@var{transfer}, twist_done_callback @var{done}, void *@var{user})
+Start the transfer on the loop.  It returns at once.  @var{done} may be
+@code{NULL}; if it is not, it is called when the transfer ends, and that is
+the one way to learn how it ended.  A transfer that cannot begin, such as one with
+no URL or a scheme that is not implemented, is reported that way too, from the
+loop and not from this call.  This returns @code{TWIST_ERR_INVAL} for a transfer
+that is in a runtime already, and @code{TWIST_ERR_NOMEM} when out of memory.  It
+may be called from a callback.  A transfer that has been reported can be
+started again.
 @end deftypefun
 
-@deftypefun int twist_multi_socket_action (twist_multi *@var{multi}, int @var{fd}, int @var{ev}, int *@var{running})
-Tell the loop that @var{fd} is readable, writable or both (@var{ev}, as
-@code{TWIST_POLL_IN} and @code{TWIST_POLL_OUT}).  With @code{TWIST_SOCKET_TIMEOUT}
-as @var{fd} it tells the loop that its deadline has passed.  @var{running}
-is set to the number of transfers that have not finished.  Call it once to
-start, with @code{TWIST_SOCKET_TIMEOUT}.
+@deftypefun int twist_runtime_cancel (twist_runtime *@var{runtime}, twist_transfer *@var{transfer})
+End a transfer early.  Its connection is closed, and its
+@code{twist_done_callback} is called, from the loop, with
+@code{TWIST_ERR_ABORTED}.  It returns @code{TWIST_ERR_INVAL} for a transfer
+that is not in this runtime, or that has ended and been reported.
 @end deftypefun
 
-@deftypefun int twist_multi_perform (twist_multi *@var{multi}, int *@var{running})
-Let the loop run once without waiting, for a program that has no poll loop of
-its own, or one that does not use the socket callback.  @var{running} is as for
-@code{twist_multi_socket_action}.
+@deftypefun int twist_runtime_run_once (twist_runtime *@var{runtime}, int @var{timeout_ms})
+Wait up to @var{timeout_ms} milliseconds for something to be ready or due, and
+do it, once.  A @var{timeout_ms} of @minus{}1 waits for as long as it takes to
+have something to do, and 0 does not wait.  The callbacks of transfers that end
+are called from here.  A call returns when it has called some, so a program
+that is waiting for one gets control back as soon as it has been told.  It
+returns @code{TWIST_ERR_RECURSIVE} from a callback, and @code{TWIST_ERR_INVAL}
+for an embedded runtime.
 @end deftypefun
 
-@deftypefun int twist_multi_timeout (twist_multi *@var{multi}, long *@var{timeout_ms})
-The milliseconds until the next deadline, or @minus{}1 when nothing is
-scheduled.  Wait at most that long, and then call
-@code{twist_multi_socket_action} with @code{TWIST_SOCKET_TIMEOUT}.
+@deftypefun int twist_runtime_on_ready (twist_runtime *@var{runtime}, int @var{fd}, int @var{events})
+@deftypefunx int twist_runtime_on_timer (twist_runtime *@var{runtime})
+For an embedded runtime: @var{fd} is ready for @var{events}, as
+@code{TWIST_POLL_IN} and @code{TWIST_POLL_OUT}; or the deadline that the timer
+callback gave has passed.  The callbacks of transfers that end are called from
+here.  Both return @code{TWIST_ERR_INVAL} for a runtime that has a poller of its
+own.
 @end deftypefun
 
-@deftypefun int twist_multi_info_read (twist_multi *@var{multi}, int *@var{msgs_left}, twist_easy **@var{easy}, int *@var{result})
-Take the next finished transfer.  @var{easy} is that handle and @var{result} its
-code.  @var{msgs_left} is how many are still to read.  When there is none,
-@var{easy} is set to @code{NULL}.  A finished handle stays in the multi handle
-until it is removed.
-@end deftypefun
+This program fetches a URL and writes it to standard output.  It waits for the
+transfer by running the loop until the callback has been called.
 
-This program fetches a URL and writes it to standard output.  The program gives
-the loop the events of the descriptors it was told about.
+@example
+#include <stdio.h>
+#include <twist.h>
+
+static size_t
+to_stdout (char *ptr, size_t size, size_t nmemb, void *user)
+@{
+  return fwrite (ptr, size, nmemb, stdout);
+@}
+
+static void
+done (twist_transfer *transfer, int result, void *user)
+@{
+  *(int *) user = result;
+  twist_transfer_free (transfer);
+@}
+
+int
+main (int argc, char **argv)
+@{
+  twist_runtime *runtime;
+  twist_transfer *transfer;
+  int status = -1;
+
+  twist_global_init ();
+  runtime = twist_runtime_new ();
+  transfer = twist_transfer_new ();
+  twist_transfer_setopt (transfer, TWISTOPT_URL, argv[1]);
+  twist_transfer_setopt (transfer, TWISTOPT_WRITEFUNCTION, to_stdout);
+  twist_runtime_start (runtime, transfer, done, &status);
+  while (status < 0)
+    twist_runtime_run_once (runtime, -1);
+  twist_runtime_free (runtime);
+  return status;
+@}
+@end example
+
+A program that has a poll loop of its own makes an embedded runtime instead,
+and gives the loop what is ready.  The same transfer, in such a program:
 
 @example
 #include <poll.h>
@@ -606,15 +683,10 @@ the loop the events of the descriptors it was told about.
 
 static struct pollfd fds[64];
 static int nfds;
+static long wait_ms = -1;
 
-static size_t
-to_stdout (char *ptr, size_t size, size_t nmemb, void *user)
-@{
-  return fwrite (ptr, size, nmemb, stdout);
-@}
-
-static int
-on_socket (twist_easy *easy, int fd, int what, void *user, void *sp)
+static void
+watch (int fd, int what, void *user)
 @{
   int i;
 
@@ -624,95 +696,72 @@ on_socket (twist_easy *easy, int fd, int what, void *user, void *sp)
     @{
       if (i < nfds)
         fds[i] = fds[--nfds];
-      return 0;
+      return;
     @}
   if (i == nfds && nfds < 64)
     nfds++;
   fds[i].fd = fd;
   fds[i].events = (what & TWIST_POLL_IN ? POLLIN : 0)
                   | (what & TWIST_POLL_OUT ? POLLOUT : 0);
-  return 0;
+@}
+
+static void
+timer (long timeout_ms, void *user)
+@{
+  wait_ms = timeout_ms;
 @}
 
 int
 main (int argc, char **argv)
 @{
-  twist_multi *multi;
-  twist_easy *easy;
-  int running = 0;
+  twist_runtime *runtime;
+  twist_transfer *transfer;
+  int status = -1;
 
   twist_global_init ();
-  multi = twist_multi_init ();
-  twist_multi_setopt (multi, TWISTMOPT_SOCKETFUNCTION, on_socket);
-  easy = twist_easy_init ();
-  twist_easy_setopt (easy, TWISTOPT_URL, argv[1]);
-  twist_easy_setopt (easy, TWISTOPT_WRITEFUNCTION, to_stdout);
-  twist_multi_add_handle (multi, easy);
-  twist_multi_socket_action (multi, TWIST_SOCKET_TIMEOUT, 0, &running);
-  while (running > 0)
+  runtime = twist_runtime_new_embedded (watch, timer, NULL);
+  transfer = twist_transfer_new ();
+  twist_transfer_setopt (transfer, TWISTOPT_URL, argv[1]);
+  twist_transfer_setopt (transfer, TWISTOPT_WRITEFUNCTION, to_stdout);
+  twist_runtime_start (runtime, transfer, done, &status);
+  while (status < 0)
     @{
-      long ms = -1;
-      int i, n;
+      struct pollfd ready[64];
+      int i, n, count;
 
-      twist_multi_timeout (multi, &ms);
-      n = poll (fds, nfds, ms < 0 ? 1000 : (int) ms);
-      if (n == 0)
-        twist_multi_socket_action (multi, TWIST_SOCKET_TIMEOUT, 0, &running);
-      for (i = 0; i < nfds && n > 0; i++)
-        if (fds[i].revents)
-          @{
-            int ev = (fds[i].revents & POLLIN ? TWIST_POLL_IN : 0)
-                     | (fds[i].revents & POLLOUT ? TWIST_POLL_OUT : 0);
-
-            twist_multi_socket_action (multi, fds[i].fd, ev, &running);
-          @}
+      n = poll (fds, nfds, wait_ms < 0 ? 1000 : (int) wait_ms);
+      count = nfds;
+      for (i = 0; i < count; i++)
+        ready[i] = fds[i];
+      for (i = 0; i < count && n > 0; i++)
+        if (ready[i].revents)
+          twist_runtime_on_ready (runtime, ready[i].fd,
+                                  (ready[i].revents & POLLIN
+                                   ? TWIST_POLL_IN : 0)
+                                  | (ready[i].revents & POLLOUT
+                                     ? TWIST_POLL_OUT : 0));
+      if (n == 0 || wait_ms == 0)
+        twist_runtime_on_timer (runtime);
     @}
-  twist_multi_remove_handle (multi, easy);
-  twist_easy_cleanup (easy);
-  twist_multi_cleanup (multi);
-  return 0;
+  twist_runtime_free (runtime);
+  return status;
 @}
 @end example
 
-@node Sharing
-@section Sharing
+@node Stores
+@section Stores
 
-A share holds what several handles can use together: the cookie jar, the answers
-of DNS lookups, the connections that are kept for reuse, the HSTS list and the
-Alt-Svc list.  A handle uses a share when it is given one with
-@code{TWISTOPT_SHARE}, and then keeps these between transfers, which a handle
-run with @code{twist_easy_perform} does not otherwise.
-
-@deftypefun {twist_share *} twist_share_init (void)
-@deftypefunx void twist_share_cleanup (twist_share *@var{share})
-Create a share, or return @code{NULL} when out of memory, and free it.  Free it
-after every handle that uses it has finished with it.
-@end deftypefun
-
-@deftypefun int twist_share_setopt (twist_share *@var{share}, unsigned @var{lock_data})
-Turn on the locks named by the bits of @var{lock_data}.  The bits add to those
-already on, and cannot be turned off.
-@end deftypefun
-
-@table @code
-@item TWIST_LOCK_DATA_COOKIE
-The cookie jar.
-@item TWIST_LOCK_DATA_DNS
-The DNS answers.
-@item TWIST_LOCK_DATA_CONNECT
-The kept connections.
-@item TWIST_LOCK_DATA_HSTS
-The HSTS list.
-@item TWIST_LOCK_DATA_ALT_SVC
-The Alt-Svc list.
-@item TWIST_LOCK_DATA_SSL_SESSION
-Accepted for compatibility with curl.  Nothing is shared under it, because TLS
-sessions are not kept.
-@end table
+A runtime keeps a cookie jar, an HSTS list and an Alt-Svc list for the
+transfers that ask for them with @code{TWISTOPT_USE_COOKIES},
+@code{TWISTOPT_USE_HSTS} and @code{TWISTOPT_USE_ALTSVC}.  A transfer that does
+not ask neither keeps nor uses them.  The connections that are kept for reuse
+and the answers of DNS lookups are the runtime's too, and every transfer in it
+uses them.  Each belongs to one runtime and lives as long as it does, so two
+runtimes share nothing.
 
 @heading The cookie jar
 
-A handle that has a share keeps the cookies that responses set and sends them
+A transfer that uses the jar keeps the cookies that responses set and sends them
 back.  A cookie is sent to the host that set it, or, if it had a @code{Domain},
 to that domain and the hosts under it; to the paths under its @code{Path}; and
 over @code{https} only if it was marked @code{Secure}.  A @code{Secure} cookie
@@ -727,17 +776,15 @@ Public Suffix List, so a name such as @samp{github.io} is believed.
 A cookie with a control character in it, or more than 4096 bytes of name and
 value, is refused.  The jar holds at most 50 cookies for a domain and 3000 in
 all, and the oldest go first.  @code{Expires} and @code{Max-Age} are not read:
-a cookie lives as long as the share does, and @code{Max-Age=0} does not delete
+a cookie lives as long as the runtime does, and @code{Max-Age=0} does not delete
 it.  @code{SameSite} and @code{HttpOnly} are not looked at.  The command-line
 program keeps no jar.
 
 @heading Threads
 
-Handles that are driven from one thread need no lock, and none is taken.  For
-handles of several threads, turn on the lock of each of the five things that is
-to be shared between them, before the first transfer.  What is not turned on is
-not locked, and must not be used by two threads at once.  A handle and a multi
-handle are for one thread at a time, as in curl.
+A runtime and the transfers in it are for one thread at a time, and nothing in
+them is locked.  A program with several threads makes a runtime for each, and
+they share nothing.
 
 @node URL functions
 @section URL functions
@@ -805,7 +852,7 @@ come from the protocol, and not from the code.
 @item @code{TWIST_ERR_RESUME} @tab 20 @tab 36 @tab The transfer cannot be resumed.
 @item @code{TWIST_ERR_QUOTE} @tab 21 @tab 21 @tab A quote command failed.
 @item @code{TWIST_ERR_PROXY} @tab 22 @tab 97 @tab The proxy refused the connection.
-@item @code{TWIST_ERR_RECURSIVE} @tab 23 @tab 93 @tab A multi function was called from inside a callback.
+@item @code{TWIST_ERR_RECURSIVE} @tab 23 @tab 93 @tab The loop was run again from inside a callback.
 @item @code{TWIST_ERR_PARTIAL} @tab 24 @tab 18 @tab The transfer ended before all that was announced had come.
 @item @code{TWIST_ERR_USE_SSL} @tab 25 @tab 64 @tab TLS was required and the server would not upgrade.
 @item @code{TWIST_ERR_UNKNOWN_OPTION} @tab 26 @tab 48 @tab A name in a list of options is not one that exists.
@@ -1325,8 +1372,8 @@ The @code{sftp} or @code{scp} server could not do what was asked.
 @item 81
 The operation could not be started.
 @item 93
-A function of the multi interface was called from inside a callback.  Only
-a program that uses the library can cause this.
+The loop was run again from inside a callback.  Only a program that uses the
+library can cause this.
 @item 97
 A SOCKS5 proxy refused the connection or could not complete it.
 @end table
@@ -1966,9 +2013,8 @@ is never used for a transfer that checks the host key.  A transfer that
 fails closes its connection, and the next URL logs in again.  A connection
 that is idle for two minutes, or that the server closes, is dropped.
 
-With the library, the connections are kept in the multi handle (or the share)
-that the transfers run on.  @code{twist_easy_perform} makes a multi handle of
-its own for each call, so it keeps nothing for the next one.
+With the library, the connections are kept in the runtime that the transfers
+run on, for the next transfer started on it.
 
 @subheading Requirements
 

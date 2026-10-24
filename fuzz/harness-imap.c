@@ -60,21 +60,21 @@ fuzz_seeds (void (*add) (const void *, size_t))
 int
 LLVMFuzzerTestOneInput (const uint8_t *data, size_t size)
 {
-  twist_easy *easy;
+  twist_transfer *transfer;
   void *obj;
 
   if (size == 0)
     return 0;
-  easy = twist_easy_init ();
-  if (easy == NULL)
+  transfer = twist_transfer_new ();
+  if (transfer == NULL)
     abort ();
-  if (twist_url_parse_int ("imap://alice:secret@127.0.0.1/INBOX;UID=1", &easy->url) != TWIST_OK)
+  if (twist_url_parse_int ("imap://alice:secret@127.0.0.1/INBOX;UID=1", &transfer->url) != TWIST_OK)
     abort ();
-  easy->write_cb = fuzz_sink;
+  transfer->write_cb = fuzz_sink;
   /* The top two bits say whether TLS is wanted, and the handshake of an
      upgrade, if there is one, finishes half way through.  */
-  easy->use_ssl = (data[0] >> 6) % 3;
-  obj = twist_imap_new (easy, 0);
+  transfer->use_ssl = (data[0] >> 6) % 3;
+  obj = twist_imap_new (transfer, 0);
   if (obj == NULL)
     abort ();
   fuzz_feed ((fuzz_recv) twist_imap_receive, obj, data + 1, (size - 1) / 2,
@@ -82,6 +82,6 @@ LLVMFuzzerTestOneInput (const uint8_t *data, size_t size)
   twist_imap_tls_done (obj);
   fuzz_feed ((fuzz_recv) twist_imap_receive, obj, data + 1 + (size - 1) / 2,
              size - 1 - (size - 1) / 2, fuzz_piece (data[0], size));
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
   return 0;
 }

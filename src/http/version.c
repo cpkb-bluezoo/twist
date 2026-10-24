@@ -161,13 +161,13 @@ twist_alt_svc_h3 (const char *value, size_t len, int *port, int *clear)
 }
 
 static struct twist_origin_hint *
-find_hint (struct twist_easy *easy, const char *host, int make)
+find_hint (struct twist_transfer *transfer, const char *host, int make)
 {
   struct twist_origin_hint *e;
 
-  if (easy == NULL || host == NULL)
+  if (transfer == NULL || host == NULL)
     return NULL;
-  for (e = easy->origins; e != NULL; e = e->next)
+  for (e = transfer->origins; e != NULL; e = e->next)
     if (strcasecmp (e->host, host) == 0)
       return e;
   if (!make)
@@ -182,19 +182,19 @@ find_hint (struct twist_easy *easy, const char *host, int make)
       free (e);
       return NULL;
     }
-  e->next = easy->origins;
-  easy->origins = e;
+  e->next = transfer->origins;
+  transfer->origins = e;
   return e;
 }
 
 void
-twist_origin_clear (struct twist_easy *easy)
+twist_origin_clear (struct twist_transfer *transfer)
 {
   struct twist_origin_hint *e;
 
-  if (easy == NULL)
+  if (transfer == NULL)
     return;
-  e = easy->origins;
+  e = transfer->origins;
   while (e != NULL)
     {
       struct twist_origin_hint *next = e->next;
@@ -202,15 +202,14 @@ twist_origin_clear (struct twist_easy *easy)
       free (e);
       e = next;
     }
-  easy->origins = NULL;
+  transfer->origins = NULL;
 }
 
 int
-twist_origin_h3 (struct twist_easy *easy, const char *host, int *port)
+twist_origin_h3 (struct twist_transfer *transfer, const char *host, int *port)
 {
-  struct twist_origin_hint *e = find_hint (easy, host, 0);
+  struct twist_origin_hint *e = find_hint (transfer, host, 0);
   const char *alt;
-  char altbuf[64];
 
   if (port != NULL)
     *port = 0;
@@ -220,11 +219,11 @@ twist_origin_h3 (struct twist_easy *easy, const char *host, int *port)
         *port = e->h3_port;
       return e->h3;
     }
-  if (easy == NULL || easy->share == NULL || easy->share->altsvc == NULL)
+  if (twist_transfer_altsvc (transfer) == NULL)
     return 0;
-  if (!twist_share_altsvc_lookup (easy->share, host, altbuf, sizeof altbuf))
+  alt = twist_altsvc_lookup (twist_transfer_altsvc (transfer), host);
+  if (alt == NULL)
     return 0;
-  alt = altbuf;
   if (strcmp (alt, "none") == 0)
     return -1;
   if (strncmp (alt, "h3:", 3) == 0)
@@ -238,38 +237,39 @@ twist_origin_h3 (struct twist_easy *easy, const char *host, int *port)
 }
 
 void
-twist_origin_set_h3 (struct twist_easy *easy, const char *host, int yes,
+twist_origin_set_h3 (struct twist_transfer *transfer, const char *host,
+                     int yes,
                      int port)
 {
-  struct twist_origin_hint *e = find_hint (easy, host, 1);
+  struct twist_origin_hint *e = find_hint (transfer, host, 1);
   char buf[16];
 
   if (e == NULL)
     return;
   e->h3 = yes > 0 ? 1 : -1;
   e->h3_port = yes > 0 ? port : 0;
-  if (easy->share == NULL || easy->share->altsvc == NULL)
+  if (twist_transfer_altsvc (transfer) == NULL)
     return;
   if (yes > 0)
     snprintf (buf, sizeof buf, "h3:%d", port > 0 ? port : 443);
   else
     snprintf (buf, sizeof buf, "none");
-  twist_share_altsvc_note (easy->share, host, buf);
+  twist_altsvc_note (twist_transfer_altsvc (transfer), host, buf);
 }
 
 int
-twist_origin_http_minor (struct twist_easy *easy, const char *host)
+twist_origin_http_minor (struct twist_transfer *transfer, const char *host)
 {
-  struct twist_origin_hint *e = find_hint (easy, host, 0);
+  struct twist_origin_hint *e = find_hint (transfer, host, 0);
 
   return e != NULL ? e->http_minor : -1;
 }
 
 void
-twist_origin_set_http_minor (struct twist_easy *easy, const char *host,
+twist_origin_set_http_minor (struct twist_transfer *transfer, const char *host,
                              int minor)
 {
-  struct twist_origin_hint *e = find_hint (easy, host, 1);
+  struct twist_origin_hint *e = find_hint (transfer, host, 1);
 
   if (e != NULL && (minor == 0 || minor == 1))
     e->http_minor = minor;

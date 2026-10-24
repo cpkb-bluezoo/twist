@@ -19,9 +19,35 @@
 #ifndef TWIST_TEST_CHECK_H
 #define TWIST_TEST_CHECK_H
 
+struct twist_transfer;
+struct twist_runtime;
+
 extern int failed;
 
 void check (int cond, const char *what);
 int tests_finish (void);
+
+/* The end of a transfer that was started with check_job_done as its callback:
+   whether it has ended, how, and how many times the callback was called.  */
+struct check_job
+{
+  int done;
+  int result;
+  int calls;
+};
+
+void check_job_done (struct twist_transfer *transfer, int result, void *user);
+
+/* Run the loop, a little at a time, until JOB is done or MS milliseconds have
+   passed.  Returns whether it is.  */
+int check_pump (struct twist_runtime *runtime, struct check_job *job, int ms);
+
+/* Run one transfer to its end and return its result.  The first makes a
+   runtime of its own and frees it; the second runs on one that is given and
+   leaves it, with its kept connections and names, for the next.  A test that
+   needs to see the transfer while it runs drives the runtime itself.  */
+int check_perform (struct twist_transfer *transfer);
+int check_perform_in (struct twist_runtime *runtime,
+                      struct twist_transfer *transfer);
 
 #endif

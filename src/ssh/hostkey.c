@@ -443,7 +443,7 @@ copy_or_null (const char *s)
 int
 twist_ssh_load_start (struct twist_ssh *s)
 {
-  struct twist_easy *e = s->easy;
+  struct twist_transfer *e = s->transfer;
   struct twist_ssh_load *l = calloc (1, sizeof *l);
   char home[1024];
   int have_home = twist_home_dir (home, sizeof home);
@@ -470,9 +470,10 @@ twist_ssh_load_start (struct twist_ssh *s)
       return TWIST_ERR_NOMEM;
     }
   s->load = l;
-  if (e->multi != NULL && e->multi->storage != NULL && e->loop != NULL)
+  if (e->runtime != NULL && e->runtime->storage != NULL && e->loop != NULL)
     {
-      rc = twist_storage_submit (e->multi->storage, load_work, l, load_done, l,
+      rc = twist_storage_submit (e->runtime->storage, load_work, l, load_done,
+                                 l,
                                  e->loop);
       if (rc != TWIST_OK)
         {
@@ -525,7 +526,7 @@ int
 twist_ssh_host_key (void *user, const gf_key *key)
 {
   struct twist_ssh *s = user;
-  struct twist_easy *e = s->easy;
+  struct twist_transfer *e = s->transfer;
   char fp[64], host[256], msg[512];
   time_t now;
   enum gf_hostcheck r = GF_HOST_UNKNOWN;

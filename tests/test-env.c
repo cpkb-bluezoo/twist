@@ -359,7 +359,7 @@ static void
 test_quic_server_name (void)
 {
   struct twist_loop *loop = twist_loop_new (0);
-  struct twist_easy *easy = twist_easy_init ();
+  struct twist_transfer *transfer = twist_transfer_new ();
   struct twist_connection *conn = NULL;
   struct twist_dns_addr addr;
   struct sockaddr_in sin;
@@ -369,7 +369,7 @@ test_quic_server_name (void)
   const char *name;
   int rc;
 
-  check (loop != NULL && easy != NULL && udp >= 0, "name test set up");
+  check (loop != NULL && transfer != NULL && udp >= 0, "name test set up");
   check (twist_quic_register () == TWIST_OK && twist_quic_connect_fn != NULL,
          "the QUIC dialer is registered");
   memset (&sin, 0, sizeof sin);
@@ -381,18 +381,18 @@ test_quic_server_name (void)
   addr.family = 4;
   inet_pton (AF_INET, "127.0.0.1", addr.addr);
   snprintf (url, sizeof url, "https://example.test:%d/", ntohs (sin.sin_port));
-  check (twist_url_parse_int (url, &easy->url) == TWIST_OK
-         && easy->url != NULL, "a URL");
-  easy->loop = loop;
+  check (twist_url_parse_int (url, &transfer->url) == TWIST_OK
+         && transfer->url != NULL, "a URL");
+  transfer->loop = loop;
 
-  rc = twist_quic_connect_fn (easy, &addr, ntohs (sin.sin_port), &conn);
+  rc = twist_quic_connect_fn (transfer, &addr, ntohs (sin.sin_port), &conn);
   check (rc == TWIST_OK && conn != NULL, "dial");
   name = conn != NULL ? twist_quic_server_name (conn) : NULL;
   check (name != NULL && strcmp (name, "example.test") == 0,
          "the server name is the host of the URL, not the address");
   if (conn != NULL)
     twist_connection_free (conn);
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
   close (udp);
   twist_loop_free (loop);
 }

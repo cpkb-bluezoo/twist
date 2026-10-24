@@ -27,17 +27,19 @@ fills with `TcpEndpoint` plus `QuicEngine`.
 +----------------------------------------------+
 | CLI (twist) / Application                    |
 +----------------------------------------------+
-| libtwist - Public API                       |
-| - twist_global_init()                       |
-| - twist_easy_* / twist_multi_*              |
-| - twist_share_* / twist_url_*               |
-| - scheme table (not only HTTP)              |
+| libtwist - Public API                        |
+| - twist_global_init()                        |
+| - twist_transfer_*  (the job)                |
+| - twist_runtime_*   (runs transfers)         |
+| - twist_url_*                                |
+| - scheme table (not only HTTP)               |
 +----------------------------------------------+
 | Runtime                                      |
-| - N loops on N threads                      |
-| - Accept loop with admission control         |
-| - Dial round-robin                           |
+| - One loop                                   |
+| - Kept connections, names, sessions          |
+| - Cookie jar, HSTS and Alt-Svc lists         |
 | - Storage pool (bounded blocking work)       |
+| - Completion callbacks, from the loop        |
 +----------------------------------------------+
 | Loop (single-threaded, no hidden threads)   |
 | - Owns connections                           |
@@ -134,31 +136,72 @@ The loop exposes:
 - `next_timeout()` - Next timer deadline
 
 **Critical**: The loop does NOT start its own thread. It's a passive component
-that the runtime or external driver pumps.
+that the runtime pumps, or that the application's own poll loop drives.
 
 ### Runtime
 
-The runtime is a policy for how loops are pumped. It contains:
-- N loops on N threads (thread-per-core)
-- An accept loop with admission control
-- A dial round-robin
-- A bounded storage pool for blocking work
+The runtime is what the application holds. It owns one loop, pumped by the
+application or by the runtime's own poller, and what the transfers on it keep
+for each other:
+
+- the pool of connections kept for reuse
+- the cache of DNS answers
+- the HTTP/2 and HTTP/3 sessions
+- the cookie jar, the HSTS list and the Alt-Svc list, which a transfer uses
+  only if it asks (`TWISTOPT_USE_COOKIES`, `_USE_HSTS`, `_USE_ALTSVC`)
+- a bounded storage pool for blocking work
 
 ```c
 struct twist_runtime {
-    size_t num_loops;
-    struct twist_loop **loops;
-    struct twist_accept_loop *accept;
-    struct twist_storage_pool *storage;
+    struct twist_loop *loop;
+    struct twist_transfer **transfers;  /* started, not yet reported */
+    struct twist_pool *pool;
+    struct twist_dns_cache *dns;
+    struct twist_session *sessions;
+    struct twist_jar *jar;
+    struct twist_hsts *hsts;
+    struct twist_altsvc *altsvc;
+    struct twist_storage *storage;
+    /* The hooks of an embedded runtime */
 };
 ```
 
+There is one loop and no locks. Nothing is shared between runtimes, so a
+program that wants several threads makes a runtime for each. The library does
+not arrange that.
+
+A runtime is made in one of two forms. `twist_runtime_new` has a poller of its
+own and is driven with `twist_runtime_run_once`. `twist_runtime_new_embedded`
+has no poller: its loop is the external kind, and the watch and timer hooks it
+was given say what to poll and when the next deadline is
+(see External Driver Support).
+
+#### Completion
+
+A transfer ends by calling `twist_transfer_finish` from whatever handler had it.
+That records the result and schedules one timer on the loop for now. The timer
+is what tells the program: it releases the transfer's state, which returns the
+connection to the pool or closes it, takes the transfer out of the runtime, and
+only then calls the `twist_done_callback`. So the program is told from the
+loop and never from inside a protocol handler, with the connection already
+dealt with, and may do anything to the transfer, including free it or start it
+again. The loop does not wait for events after running a timer, so a program
+that is waiting for the callback gets control back at once.
+
+A transfer that cannot begin (no URL, a scheme that is not implemented) ends
+the same way. There is one place to learn how a transfer ended.
+
+From a callback a program may start and cancel transfers. Running the loop
+again, or freeing a runtime, a transfer that is still in one, is refused: the
+call that made the callback may be running on it.
+
 #### Connection Lifecycle
 
-1. **Accept**: Accept loop applies admission control, round-robins new sockets
-   onto workers
-2. **Dial**: Separate round-robin for outbound connections
-3. **Pin**: Once assigned to a loop, a connection stays there for life
+1. **Dial**: a transfer's handler takes a kept connection from the pool, or
+   dials a new one on the loop
+2. **Pin**: a connection stays on its loop for life
+3. **Park**: when a transfer ends well, a connection that can be used again goes
+   back to the pool under a key that says who it is for; otherwise it is closed
 4. **No migration**: Connections never migrate between loops
 
 #### Cross-Thread Communication
@@ -243,9 +286,12 @@ twist_loop_watch(loop, fd, TWIST_READABLE, on_readable);
 twist_loop_watch(loop, fd, TWIST_WRITABLE, on_writable);
 ```
 
-The multi interface (`twist_multi_socket_action`) is this model: the
-application's poller says which socket is ready, and asks for the next
-deadline.
+The embedded runtime (`twist_runtime_new_embedded`) is this model. The watch
+hook is told which descriptors to poll and for what, and the timer hook is told
+how long the application may wait for the next deadline. The application
+answers with `twist_runtime_on_ready` for a descriptor that is ready and
+`twist_runtime_on_timer` when the deadline has passed. A deadline that is due
+is told every time, since what ran in between may have made another due.
 
 ## Platform Support
 
@@ -276,8 +322,9 @@ completion queue shows up underneath.
 - **SelectorLoop** (Gumdrop) / **Reactor** (Hopf): One thread, one selector/poll,
   a connection pinned to that thread for life
 - **Accept loop** with admission control and round-robin (AcceptSelectorLoop,
-  Hopf AcceptLoop)
-- **Outbound dial round-robin** (Runtime::connect)
+  Hopf AcceptLoop). Twist is a client and has none.
+- **Outbound dial round-robin** (Runtime::connect). Twist has one loop to dial
+  on.
 - **Per-reactor timer queue**: Hopf keeps it on the reactor thread and passes
   the next deadline into poll. Gumdrop's per-loop ScheduledTimer is a second
   thread that hops callbacks back.
@@ -309,19 +356,19 @@ server does.
 
 ## Transfer engine
 
-The loop and the endpoint do not know which protocol they carry. A transfer
-(one easy handle) is the unit of work:
+The loop and the endpoint do not know which protocol they carry. A transfer is
+the unit of work. It is the job and its result, and a runtime runs it:
 
 - It parses a URL and looks the scheme up in a table.
 - It may own several endpoints, all pinned to the same loop (an HTTP
   request is one connection; FTP is a control connection plus a data
   connection; HTTP/2 and HTTP/3 are many streams on one session).
-- `twist_easy_setopt` writes a transfer configuration. Each scheme reads
+- `twist_transfer_setopt` writes a transfer configuration. Each scheme reads
   the fields it understands. An option the scheme does not implement
   fails for that transfer.
-- Redirects, the connection cache, the proxy wrapper, cookies, HSTS and
-  alt-svc live here, so a later scheme reuses them instead of growing a
-  second I/O stack.
+- Redirects and the proxy wrapper live in the engine. The connection cache,
+  cookies, HSTS and alt-svc are the runtime's, so a later scheme reuses them
+  instead of growing a second I/O stack.
 
 The proxy wrapper is a protocol handler that runs before the scheme
 handler. When the tunnel is up it calls the inner handler's `connected`.
@@ -334,7 +381,7 @@ server speaks first, so its banner can arrive in the same read as the reply, and
 offered again by the connection, and goes to the transfer. A refusal is
 reported to the transfer with the proxy's words (`CONNECT tunnel failed,
 response 403`, status 56; the SOCKS5 reasons, status 97) through
-`twist_proxy_set_easy`, and the transfer gets an error. Credentials come from
+`twist_proxy_set_transfer`, and the transfer gets an error. Credentials come from
 the proxy's URL or `TWISTOPT_PROXYUSERPWD`. An SSH session through a proxy is
 kept in the pool like any other, under a key that holds the proxy and its
 credentials; once the tunnel is open the proxy is out of the path.
@@ -348,21 +395,25 @@ loop. QUIC is one UDP registration on the loop; each stream is then an
 endpoint. DoH is the HTTP scheme used as a resolver, not a special case
 in the poll backend.
 
-`telnet` is the one handler that reads a second descriptor, its input. Standard
-input that can be polled (a terminal, a pipe) is watched as a connection of its
-own, on a duplicate of descriptor 0 so that freeing it does not close the
-caller's; it is read only when `poll` says it is ready, because the descriptor
-is not the transfer's to make non-blocking. One that cannot be polled (a
-regular file, the null device) and the read callback are read a chunk at a
-time from a timer on the loop. Either stops when the connection is behind
-(`twist_endpoint_pending`) and goes on from the endpoint's `on_write_ready`, so
-a large input is not held in memory. The end of the input does not end the
-transfer; the server closing does.
+`telnet` is the one handler that reads a second descriptor, its input. The
+handler does not assume it is the process's standard input: the caller names it
+with `TWISTOPT_TELNET_INPUT_FD` (the tool names descriptor 0), and with that
+and no read callback there is no input at all. An input that can be polled (a
+terminal, a pipe) is watched as a connection of its own, on a duplicate of the
+descriptor so that freeing it does not close the caller's; it is read only when
+`poll` says it is ready, because the descriptor is not the transfer's to make
+non-blocking. One that cannot be polled (a regular file, the null device) and
+the read callback are read a chunk at a time from a timer on the loop, and the
+descriptor is looked at with `poll` before each read, with another look 20 ms
+later when it has nothing, so that it cannot hold up the loop. Either stops
+when the connection is behind (`twist_endpoint_pending`) and goes on from the
+endpoint's `on_write_ready`, so a large input is not held in memory. The end of
+the input does not end the transfer; the server closing does.
 
 ## Scheme table
 
 Every URL scheme twist knows has a row. HTTP is the first row with a real
-handler. The others stay in the table so the URL parser, the multi
+handler. The others stay in the table so the URL parser, the runtime
 interface and the CLI accept them and so the implementation that lands
 later is a new `attach` function, not a new reactor.
 
@@ -435,7 +486,7 @@ sent again every 10 ms. The inner connection asks for packets of no more than
 1200 bytes. `http.c` picks it (`masque_plan`) for HTTP/3 when there is an https
 proxy or `--proxy-template-udp`, and then does not look up the target.
 
-The environment is read in three places, and only there. `twist_easy_proxy`
+The environment is read in three places, and only there. `twist_transfer_proxy`
 (`src/engine/noproxy.c`) is the proxy a transfer uses: the one it was given,
 or else the environment's for the scheme (`http_proxy` in lower case only, the
 others in either, then `all_proxy`), unless the host is on the no-proxy list,
@@ -457,7 +508,7 @@ changes) the speed over the last five seconds, then calls the application's
 or there is none, writes the meter line. `TWISTOPT_NOPROGRESS` is 1 until the
 application says otherwise, so a library user sees nothing. A handler says what
 it knows with `twist_progress_dl_size`, `twist_progress_ul_size`,
-`twist_easy_downloaded` and `twist_progress_uploaded`; the engine calls
+`twist_transfer_downloaded` and `twist_progress_uploaded`; the engine calls
 `twist_progress_begin` when a transfer starts and `twist_progress_end` when it
 finishes, and HTTP calls `twist_progress_hop` for a redirect. A timer, which
 does the update after a second with no event, is not set again for each event:
@@ -573,17 +624,16 @@ successful transfer parks, and only with nothing in flight: foxtrot's
 `gf_sftp_client_pending` is the bytes queued for sending, not the requests
 unanswered, so twist counts those itself, and a late answer that reached the
 next transfer would carry a tag for a transfer already freed. Taking the
-handler out of the pool binds it to the new handle (its easy pointer, its
+handler out of the pool binds it to the new handle (its transfer pointer, its
 link, its total-time timer) and starts at the request for the file; the
 channel and client are the old ones. The agent connection is closed when the
 session is parked, since it was only for logging in. The command line keeps
-one multi handle for the URLs of an operation (`twist_easy_perform_in`), so
-that it is there to find; `twist_easy_perform` still makes one for each call.
+one runtime for the URLs of an operation, so that it is there to find.
 
 foxtrot needs libgcrypt 1.12.4 or later (earlier ones abort on some Ed25519
 keys a peer can send), which twist accepts as a dependency.
 
-DNS is not a URL scheme the easy handle dials for its own sake. It is
+DNS is not a URL scheme the transfer dials for its own sake. It is
 the resolver the dialer uses, implemented as a datagram handler, with
 DoH as a later HTTP transfer.
 
@@ -631,28 +681,39 @@ kernel readiness API. Crypto stays in quickstep.
 ### Process Ownership
 
 Hopf owns the process. A library often does not: the application already
-has a poll loop, and the library is a guest in it. The multi interface exists
-for that (twist_multi_socket_action tells the library a socket became
-readable; the library does not call epoll itself).
+has a poll loop, and the library is a guest in it. The embedded runtime exists
+for that (twist_runtime_on_ready tells the library a socket became readable;
+the library does not call epoll itself).
 
 ## Design Decision: Loop vs Runtime
 
 - **Loop**: Holds the connections, the timer heap, and the command queue. It
   exposes on_readable, on_writable, on_timer(now), and next_timeout. It does
   not start a thread.
-- **Runtime**: The Hopf arrangement: N loops on N threads, an accept loop, a
-  dial round-robin, a storage pool. The CLI uses this.
-- **External driver**: Uses the same Loop from the application's poller, the
-  way nginx or a GUI main loop would drive it.
+- **Runtime**: One loop, and what transfers keep for each other: the pool, the
+  names, the sessions, the cookie jar, the HSTS and Alt-Svc lists, and a
+  storage pool. The CLI uses one for the URLs of an operation. Hopf's
+  arrangement of N loops on N threads with an accept loop and a dial
+  round-robin was set aside: Twist is a client, and a program that wants
+  threads makes a runtime for each, which share nothing.
+- **Embedded**: The same Loop, without a poller, driven from the application's
+  own poll loop, the way nginx or a GUI main loop would drive it.
 
 Socket registration is a callback (watch(fd, read, write) / unwatch), not
 a hidden epoll_ctl. Protocol handlers see Endpoint in both modes. They
 cannot tell who called poll. That is what keeps the CLI a thin executable:
-it starts a Runtime, registers transfers, and waits.
+it makes a Runtime, starts transfers, and holds a latch until they have all
+been reported.
+
+The same shape as Gumdrop and Hopf is kept at the top: one model, explicitly
+asynchronous and non-blocking, with the protocol handlers matching the wire
+protocols. There is no blocking call in the library. The latch in the command
+line tool is the one place anything waits: it counts the transfers in flight,
+and runs the loop until the count is zero.
 
 ## Thread Model
 
-- **Thread-per-core** applies inside Runtime
+- **One thread per runtime**; runtimes share nothing
 - A connection is born on one loop and stays there
 - Another thread holds a handle (reactor index plus token) and can only
   enqueue a command and write the waker

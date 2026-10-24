@@ -22,7 +22,6 @@
 
 #include "twist-int.h"
 
-#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
@@ -61,8 +60,6 @@ struct twist_dns_cache
   struct dns_ent *head;
   size_t n;
   struct dns_flight *flights;
-  int locked;
-  pthread_mutex_t mu;
 };
 
 struct msg_box
@@ -72,20 +69,6 @@ struct msg_box
   uint32_t ttl;
   int have_ttl;
 };
-
-static void
-cache_lock (struct twist_dns_cache *c)
-{
-  if (c->locked)
-    pthread_mutex_lock (&c->mu);
-}
-
-static void
-cache_unlock (struct twist_dns_cache *c)
-{
-  if (c->locked)
-    pthread_mutex_unlock (&c->mu);
-}
 
 struct twist_dns_cache *
 twist_dns_cache_new (void)
@@ -131,18 +114,7 @@ twist_dns_cache_free (struct twist_dns_cache *cache)
       free (f);
       f = next;
     }
-  if (cache->locked)
-    pthread_mutex_destroy (&cache->mu);
   free (cache);
-}
-
-void
-twist_dns_cache_set_lock (struct twist_dns_cache *cache, int on)
-{
-  if (cache == NULL || !on || cache->locked)
-    return;
-  pthread_mutex_init (&cache->mu, NULL);
-  cache->locked = 1;
 }
 
 static int
@@ -277,10 +249,8 @@ twist_dns_cache_put_msg (struct twist_dns_cache *cache, const char *name,
   ev.ttl = on_msg_ttl;
   if (twist_dns_datagram_receive (msg, len, &ev) == 0 || box.naddr == 0)
     return TWIST_ERR_RESOLVE;
-  cache_lock (cache);
   store_addrs (cache, name, qtype, box.addr, box.naddr,
                box.have_ttl ? box.ttl : 0, now_ms);
-  cache_unlock (cache);
   return box.have_ttl && box.ttl > 0 ? TWIST_OK : TWIST_ERR_RESOLVE;
 }
 
@@ -293,7 +263,6 @@ twist_dns_cache_get (struct twist_dns_cache *cache, const char *name,
 
   if (cache == NULL || name == NULL || out == NULL)
     return 0;
-  cache_lock (cache);
   e = find_ent (cache, name, qtype);
   if (e != NULL && e->expiry <= now_ms)
     {
@@ -305,7 +274,6 @@ twist_dns_cache_get (struct twist_dns_cache *cache, const char *name,
       *out = e->addr[0];
       hit = 1;
     }
-  cache_unlock (cache);
   return hit;
 }
 
@@ -333,7 +301,6 @@ twist_dns_cache_begin (struct twist_dns_cache *cache, struct twist_loop *loop,
 
   if (cache == NULL || name == NULL)
     return TWIST_ERR_INVAL;
-  cache_lock (cache);
   e = find_ent (cache, name, qtype);
   if (e != NULL && e->expiry <= now_ms)
     {
@@ -344,7 +311,6 @@ twist_dns_cache_begin (struct twist_dns_cache *cache, struct twist_loop *loop,
     {
       if (hit != NULL)
         *hit = e->addr[0];
-      cache_unlock (cache);
       return 2;
     }
   f = find_flight (cache, loop, name, qtype);
@@ -353,34 +319,29 @@ twist_dns_cache_begin (struct twist_dns_cache *cache, struct twist_loop *loop,
       w = calloc (1, sizeof *w);
       if (w == NULL)
         {
-          cache_unlock (cache);
           return TWIST_ERR_NOMEM;
         }
       w->cb = cb;
       w->user = user;
       w->next = f->waiters;
       f->waiters = w;
-      cache_unlock (cache);
       return 1;
     }
   f = calloc (1, sizeof *f);
   if (f == NULL)
     {
-      cache_unlock (cache);
       return TWIST_ERR_NOMEM;
     }
   f->name = twist_strdup (name);
   if (f->name == NULL)
     {
       free (f);
-      cache_unlock (cache);
       return TWIST_ERR_NOMEM;
     }
   f->loop = loop;
   f->type = qtype;
   f->next = cache->flights;
   cache->flights = f;
-  cache_unlock (cache);
   return 0;
 }
 
@@ -396,7 +357,6 @@ twist_dns_cache_end (struct twist_dns_cache *cache, struct twist_loop *loop,
 
   if (cache == NULL || name == NULL)
     return;
-  cache_lock (cache);
   if (err == TWIST_OK && addr != NULL && addr->family != 0 && ttl_sec > 0)
     store_addrs (cache, name, qtype, addr, 1, ttl_sec, now_ms);
   pp = &cache->flights;
@@ -411,7 +371,6 @@ twist_dns_cache_end (struct twist_dns_cache *cache, struct twist_loop *loop,
         }
       pp = &(*pp)->next;
     }
-  cache_unlock (cache);
   if (f == NULL)
     return;
   w = f->waiters;

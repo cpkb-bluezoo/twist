@@ -31,7 +31,7 @@ libtwist_la_LIBADD = $(QUICKSTEP_LIBS) $(FOXTROT_LIBS) $(ZLIB_LIBS) \
 ## directory, not another file in a flat list.
 ##
 ##   reactor/  loop, connection, poll, timers, runtime, storage
-##   engine/   url, easy/multi/share, proxy, scheme table
+##   engine/   url, transfer/runtime, proxy, scheme table
 ##   dns/      DNS client: message parser, transport order, resolver
 ##   auth/     SASL clients, HTTP Basic and Digest, MD5, SHA-256
 ##   http/     HTTP/1, HTTP/2, HTTP/3 and cookies
@@ -59,12 +59,11 @@ libtwist_la_SOURCES = \
   reactor/loop.c \
   reactor/poll.c \
   reactor/poll.h \
-  reactor/runtime.c \
   reactor/storage.c \
   reactor/timer.c \
   reactor/timer.h \
-  engine/easy.c \
-  engine/multi.c \
+  engine/transfer.c \
+  engine/runtime.c \
   engine/glob.c \
   engine/pool.c \
   engine/masque.c \
@@ -74,7 +73,6 @@ libtwist_la_SOURCES = \
   engine/proxy.c \
   engine/vars.c \
   engine/scheme.c \
-  engine/share.c \
   engine/template.c \
   engine/tunnel.c \
   engine/url.c \
@@ -83,6 +81,7 @@ libtwist_la_SOURCES = \
   dns/cache.c \
   dns/resolve.c \
   dns/wire.c \
+  http/altsvc.c \
   http/coding.c \
   http/cookie.c \
   http/h1.c \
@@ -90,6 +89,7 @@ libtwist_la_SOURCES = \
   http/h3.c \
   http/hpack.c \
   http/hpack_tab.h \
+  http/hsts.c \
   http/http.c \
   http/qpack.c \
   http/qpack_tab.h \

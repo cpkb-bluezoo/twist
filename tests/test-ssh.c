@@ -828,11 +828,11 @@ to_server (struct world *w, const uint8_t *data, size_t len)
 
 /* Run the exchange until nothing moves or the transfer ends.  */
 static void
-pump (struct world *w, struct twist_easy *easy, size_t chunk)
+pump (struct world *w, struct twist_transfer *transfer, size_t chunk)
 {
   int i;
 
-  for (i = 0; i < 5000 && !easy->done; i++)
+  for (i = 0; i < 5000 && !transfer->done; i++)
     {
       size_t moved = 0;
 
@@ -845,8 +845,8 @@ pump (struct world *w, struct twist_easy *easy, size_t chunk)
 
 /* As pump, with a loop to run: the files and the agent come back through it.
    Gives up after about three seconds in which nothing moves.  */
-static void pump_with_loop (struct twist_multi *multi, struct world *w,
-                            struct twist_easy *easy, size_t chunk);
+static void pump_with_loop (struct twist_runtime *runtime, struct world *w,
+                            struct twist_transfer *transfer, size_t chunk);
 
 /* What the transfer wrote.  */
 static uint8_t got[2 * FILE_LEN];
@@ -868,13 +868,13 @@ collect (char *ptr, size_t size, size_t nmemb, void *user)
 }
 
 static void
-pump_with_loop (struct twist_multi *multi, struct world *w,
-                struct twist_easy *easy, size_t chunk)
+pump_with_loop (struct twist_runtime *runtime, struct world *w,
+                struct twist_transfer *transfer, size_t chunk)
 {
-  int idle = 0, running = 0;
+  int idle = 0;
   struct timespec nap = { 0, 2000000 };
 
-  while (!easy->done && idle < 1500)
+  while (!transfer->done && idle < 1500)
     {
       size_t moved = drain (&w->c2s, chunk, to_server, w);
 
@@ -883,7 +883,7 @@ pump_with_loop (struct twist_multi *multi, struct world *w,
          client has a session to read them.  */
       if (w->ssh->session != NULL)
         moved += drain (&w->sv->out, chunk, to_client, w);
-      twist_multi_perform (multi, &running);
+      twist_runtime_run_once (runtime, 0);
       if (moved != 0)
         idle = 0;
       else
@@ -943,7 +943,7 @@ struct setup
   long long resume;
   const char *range;
   int list_only;
-  struct twist_multi *multi;	/* Run on a real loop.  */
+  struct twist_runtime *runtime;	/* Run on a real loop.  */
   const char *agent;		/* The agent socket option.  */
   unsigned agent_timeout_ms;
   struct twist_slist *quote, *postquote;
@@ -980,22 +980,23 @@ feed (char *ptr, size_t size, size_t nmemb, void *user)
 
 static size_t header_collect (char *ptr, size_t size, size_t nmemb, void *user);
 
-static struct twist_easy *
+static struct twist_transfer *
 start (struct world *w, struct server *sv, const struct setup *su)
 {
-  struct twist_easy *easy = twist_easy_init ();
+  struct twist_transfer *transfer = twist_transfer_new ();
 
-  check (twist_url_parse_int (su->url, &easy->url) == TWIST_OK, "url");
-  easy->verifypeer = su->verify;
+  check (twist_url_parse_int (su->url, &transfer->url) == TWIST_OK, "url");
+  transfer->verifypeer = su->verify;
   if (su->password != NULL)
-    twist_easy_setopt (easy, TWISTOPT_PASSWORD, su->password);
+    twist_transfer_setopt (transfer, TWISTOPT_PASSWORD, su->password);
   if (su->keyfile != NULL)
-    twist_easy_setopt (easy, TWISTOPT_SSLKEY, su->keyfile);
+    twist_transfer_setopt (transfer, TWISTOPT_SSLKEY, su->keyfile);
   if (su->known_hosts != NULL)
-    twist_easy_setopt (easy, TWISTOPT_SSH_KNOWNHOSTS, su->known_hosts);
+    twist_transfer_setopt (transfer, TWISTOPT_SSH_KNOWNHOSTS, su->known_hosts);
   if (su->pin != NULL)
-    twist_easy_setopt (easy, TWISTOPT_SSH_HOST_PUBLIC_KEY_SHA256, su->pin);
-  easy->write_cb = collect;
+    twist_transfer_setopt (transfer, TWISTOPT_SSH_HOST_PUBLIC_KEY_SHA256,
+                           su->pin);
+  transfer->write_cb = collect;
   got_len = 0;
   if (su->upload != NULL && su->streamed)
     {
@@ -1003,69 +1004,72 @@ start (struct world *w, struct server *sv, const struct setup *su)
       feed_len = su->upload_len;
       feed_pos = 0;
       feed_piece = 7001;
-      easy->read_cb = feed;
+      transfer->read_cb = feed;
     }
   else if (su->upload != NULL)
     {
-      twist_easy_setopt (easy, TWISTOPT_POSTFIELDS, (char *) su->upload);
-      twist_easy_setopt (easy, TWISTOPT_POSTFIELDSIZE, (long) su->upload_len);
+      twist_transfer_setopt (transfer, TWISTOPT_POSTFIELDS,
+                             (char *) su->upload);
+      twist_transfer_setopt (transfer, TWISTOPT_POSTFIELDSIZE,
+                             (long) su->upload_len);
     }
   if (su->resume != 0)
-    twist_easy_setopt (easy, TWISTOPT_RESUME_FROM, su->resume);
+    twist_transfer_setopt (transfer, TWISTOPT_RESUME_FROM, su->resume);
   if (su->range != NULL)
-    twist_easy_setopt (easy, TWISTOPT_RANGE, su->range);
+    twist_transfer_setopt (transfer, TWISTOPT_RANGE, su->range);
   if (su->list_only)
-    twist_easy_setopt (easy, TWISTOPT_DIRLISTONLY, 1L);
+    twist_transfer_setopt (transfer, TWISTOPT_DIRLISTONLY, 1L);
   if (su->quote != NULL)
-    twist_easy_setopt (easy, TWISTOPT_QUOTE, su->quote);
+    twist_transfer_setopt (transfer, TWISTOPT_QUOTE, su->quote);
   if (su->postquote != NULL)
-    twist_easy_setopt (easy, TWISTOPT_POSTQUOTE, su->postquote);
+    twist_transfer_setopt (transfer, TWISTOPT_POSTQUOTE, su->postquote);
   if (su->create_dirs)
-    twist_easy_setopt (easy, TWISTOPT_CREATE_MISSING_DIRS, 1L);
+    twist_transfer_setopt (transfer, TWISTOPT_CREATE_MISSING_DIRS, 1L);
   if (su->nobody)
-    twist_easy_setopt (easy, TWISTOPT_NOBODY, 1L);
+    twist_transfer_setopt (transfer, TWISTOPT_NOBODY, 1L);
   if (su->headers)
-    twist_easy_setopt (easy, TWISTOPT_HEADERFUNCTION, header_collect);
+    twist_transfer_setopt (transfer, TWISTOPT_HEADERFUNCTION, header_collect);
   w->sv = sv;
   w->c2s.len = 0;
   if (su->agent != NULL)
-    twist_easy_setopt (easy, TWISTOPT_SSH_AGENT_SOCKET, su->agent);
-  if (su->multi != NULL)
+    twist_transfer_setopt (transfer, TWISTOPT_SSH_AGENT_SOCKET, su->agent);
+  if (su->runtime != NULL)
     {
-      easy->multi = su->multi;
-      easy->loop = su->multi->loop;
+      transfer->runtime = su->runtime;
+      transfer->loop = su->runtime->loop;
     }
-  w->ssh = twist_ssh_new (easy, 0);
+  w->ssh = twist_ssh_new (transfer, 0);
   if (su->agent_timeout_ms != 0)
     w->ssh->agent_timeout_ms = su->agent_timeout_ms;
   check (w->ssh != NULL, "ssh new");
   twist_ssh_set_sink (w->ssh, client_sink, &w->c2s);
   twist_ssh_set_time (w->ssh, now_us);
-  return easy;
+  return transfer;
 }
 
 /* Run a whole transfer; the caller looks at the result.  */
-static struct twist_easy *
+static struct twist_transfer *
 run (struct world *w, struct server *sv, const struct setup *su)
 {
-  struct twist_easy *easy = start (w, sv, su);
+  struct twist_transfer *transfer = start (w, sv, su);
   int rc = twist_ssh_start (w->ssh);
 
   /* The endpoint callback ends a transfer that cannot start with the code
      start returned.  */
-  if (rc != TWIST_OK && !easy->done)
-    twist_easy_finish (easy, rc);
-  if (rc == TWIST_OK && su->multi != NULL)
-    pump_with_loop (su->multi, w, easy, su->chunk != 0 ? su->chunk : 65536);
+  if (rc != TWIST_OK && !transfer->done)
+    twist_transfer_finish (transfer, rc);
+  if (rc == TWIST_OK && su->runtime != NULL)
+    pump_with_loop (su->runtime, w, transfer,
+                    su->chunk != 0 ? su->chunk : 65536);
   else if (rc == TWIST_OK)
-    pump (w, easy, su->chunk != 0 ? su->chunk : 65536);
-  return easy;
+    pump (w, transfer, su->chunk != 0 ? su->chunk : 65536);
+  return transfer;
 }
 
 static int
-detail_has (struct twist_easy *easy, const char *text)
+detail_has (struct twist_transfer *transfer, const char *text)
 {
-  const char *d = twist_easy_error (easy);
+  const char *d = twist_transfer_error (transfer);
 
   return d != NULL && strstr (d, text) != NULL;
 }
@@ -1079,22 +1083,22 @@ test_download (size_t chunk)
 {
   struct server sv;
   struct world w;
-  struct twist_easy *easy;
+  struct twist_transfer *transfer;
   struct setup su = SETUP ("sftp://alice@127.0.0.1/data.bin", 0, "secret");
 
   check (server_new (&sv) == 0, "server");
   su.chunk = chunk;
-  easy = run (&w, &sv, &su);
+  transfer = run (&w, &sv, &su);
   gf_session_receive (sv.s, now_us, w.c2s.data, w.c2s.len);
-  check (easy->done && easy->result == TWIST_OK, "download ends well");
+  check (transfer->done && transfer->result == TWIST_OK, "download ends well");
   check (got_len == sizeof content && memcmp (got, content, got_len) == 0,
          "the file is whole");
-  check (easy->size_download == sizeof content, "size counted");
+  check (transfer->size_download == sizeof content, "size counted");
   check (strcmp (sv.opened, "/data.bin") == 0, "absolute path");
   check (sv.closed_handle, "handle closed");
   check (sv.closed && sv.reason == GF_DISCONNECT_BY_APPLICATION,
          "server told goodbye");
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
   server_free (&sv);
 }
 
@@ -1104,16 +1108,17 @@ test_short_reads (void)
 {
   struct server sv;
   struct world w;
-  struct twist_easy *easy;
+  struct twist_transfer *transfer;
   struct setup su = SETUP ("sftp://alice@127.0.0.1/data.bin", 0, "secret");
 
   check (server_new (&sv) == 0, "server");
   sv.max_read = 5000;
-  easy = run (&w, &sv, &su);
-  check (easy->done && easy->result == TWIST_OK, "short reads end well");
+  transfer = run (&w, &sv, &su);
+  check (transfer->done && transfer->result == TWIST_OK,
+         "short reads end well");
   check (got_len == sizeof content && memcmp (got, content, got_len) == 0,
          "short reads: the file is whole");
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
   server_free (&sv);
 }
 
@@ -1122,15 +1127,15 @@ test_empty_file (void)
 {
   struct server sv;
   struct world w;
-  struct twist_easy *easy;
+  struct twist_transfer *transfer;
   struct setup su = SETUP ("sftp://alice@127.0.0.1/data.bin", 0, "secret");
 
   check (server_new (&sv) == 0, "server");
   sv.filelen = 0;
-  easy = run (&w, &sv, &su);
-  check (easy->done && easy->result == TWIST_OK && got_len == 0,
+  transfer = run (&w, &sv, &su);
+  check (transfer->done && transfer->result == TWIST_OK && got_len == 0,
          "an empty file");
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
   server_free (&sv);
 }
 
@@ -1140,33 +1145,33 @@ test_paths (void)
 {
   struct server sv;
   struct world w;
-  struct twist_easy *easy;
+  struct twist_transfer *transfer;
   struct setup su = SETUP ("scp://alice@127.0.0.1/~/data.bin", 0, "secret");
 
   check (server_new (&sv) == 0, "server");
-  easy = run (&w, &sv, &su);
-  check (easy->done && easy->result == TWIST_OK, "scp ends well");
+  transfer = run (&w, &sv, &su);
+  check (transfer->done && transfer->result == TWIST_OK, "scp ends well");
   check (strcmp (sv.opened, "data.bin") == 0, "home relative path");
   check (got_len == sizeof content, "scp: the file");
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
   server_free (&sv);
 
   /* Percent escapes are decoded.  */
   check (server_new (&sv) == 0, "server 2");
   su.url = "sftp://alice@127.0.0.1/%64ata.bin";
-  easy = run (&w, &sv, &su);
-  check (easy->done && easy->result == TWIST_OK
+  transfer = run (&w, &sv, &su);
+  check (transfer->done && transfer->result == TWIST_OK
          && strcmp (sv.opened, "/data.bin") == 0, "percent escape");
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
   server_free (&sv);
 
   /* A wildcard in an scp URL is refused up front.  */
   check (server_new (&sv) == 0, "server 3");
   su.url = "scp://alice@127.0.0.1/dir/*.txt";
-  easy = run (&w, &sv, &su);
-  check (easy->done && easy->result == TWIST_ERR_URL
-         && detail_has (easy, "wildcards"), "scp wildcard");
-  twist_easy_cleanup (easy);
+  transfer = run (&w, &sv, &su);
+  check (transfer->done && transfer->result == TWIST_ERR_URL
+         && detail_has (transfer, "wildcards"), "scp wildcard");
+  twist_transfer_free (transfer);
   server_free (&sv);
 }
 
@@ -1176,23 +1181,25 @@ test_file_errors (void)
 {
   struct server sv;
   struct world w;
-  struct twist_easy *easy;
+  struct twist_transfer *transfer;
   struct setup su = SETUP ("sftp://alice@127.0.0.1/nope", 0, "secret");
 
   check (server_new (&sv) == 0, "server");
-  easy = run (&w, &sv, &su);
-  check (easy->done && easy->result == TWIST_ERR_FILE
-         && easy->proto_status == 78 && detail_has (easy, "no such file")
-         && detail_has (easy, "/nope"), "no such file");
-  twist_easy_cleanup (easy);
+  transfer = run (&w, &sv, &su);
+  check (transfer->done && transfer->result == TWIST_ERR_FILE
+         && transfer->proto_status == 78
+         && detail_has (transfer, "no such file")
+         && detail_has (transfer, "/nope"), "no such file");
+  twist_transfer_free (transfer);
   server_free (&sv);
   check (server_new (&sv) == 0, "server 2");
   su.url = "sftp://alice@127.0.0.1/denied";
-  easy = run (&w, &sv, &su);
-  check (easy->done && easy->result == TWIST_ERR_FILE
-         && easy->proto_status == 9 && detail_has (easy, "not for you"),
+  transfer = run (&w, &sv, &su);
+  check (transfer->done && transfer->result == TWIST_ERR_FILE
+         && transfer->proto_status == 9
+         && detail_has (transfer, "not for you"),
          "permission denied");
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
   server_free (&sv);
 }
 
@@ -1202,15 +1209,15 @@ test_no_subsystem (void)
 {
   struct server sv;
   struct world w;
-  struct twist_easy *easy;
+  struct twist_transfer *transfer;
   struct setup su = SETUP ("scp://alice@127.0.0.1/data.bin", 0, "secret");
 
   check (server_new (&sv) == 0, "server");
   sv.refuse_sftp = 1;
-  easy = run (&w, &sv, &su);
-  check (easy->done && easy->result == TWIST_ERR_UNSUPPORTED
-         && detail_has (easy, "no SFTP subsystem"), "no subsystem");
-  twist_easy_cleanup (easy);
+  transfer = run (&w, &sv, &su);
+  check (transfer->done && transfer->result == TWIST_ERR_UNSUPPORTED
+         && detail_has (transfer, "no SFTP subsystem"), "no subsystem");
+  twist_transfer_free (transfer);
   server_free (&sv);
 }
 
@@ -1220,24 +1227,25 @@ test_auth (void)
 {
   struct server sv;
   struct world w;
-  struct twist_easy *easy;
+  struct twist_transfer *transfer;
   struct setup su = SETUP ("sftp://alice@127.0.0.1/data.bin", 0, "wrong");
   char keytext[2048], keyfile[300], ssh_dir[300], usual[320];
   size_t kn = 0;
 
   check (server_new (&sv) == 0, "server");
-  easy = run (&w, &sv, &su);
-  check (easy->done && easy->result == TWIST_ERR_AUTH
-         && detail_has (easy, "permission denied"), "wrong password");
-  twist_easy_cleanup (easy);
+  transfer = run (&w, &sv, &su);
+  check (transfer->done && transfer->result == TWIST_ERR_AUTH
+         && detail_has (transfer, "permission denied"), "wrong password");
+  twist_transfer_free (transfer);
   server_free (&sv);
 
   check (server_new (&sv) == 0, "server 2");
   su.password = NULL;
-  easy = run (&w, &sv, &su);
-  check (easy->done && easy->result == TWIST_ERR_AUTH
-         && detail_has (easy, "no private key or password"), "no credentials");
-  twist_easy_cleanup (easy);
+  transfer = run (&w, &sv, &su);
+  check (transfer->done && transfer->result == TWIST_ERR_AUTH
+         && detail_has (transfer, "no private key or password"),
+         "no credentials");
+  twist_transfer_free (transfer);
   server_free (&sv);
 
   /* A key named with --key: the one the server authorizes.  */
@@ -1247,10 +1255,10 @@ test_auth (void)
   snprintf (keyfile, sizeof keyfile, "%s/mykey", home);
   write_file (keyfile, keytext, kn, 0600);
   su.keyfile = keyfile;
-  easy = run (&w, &sv, &su);
-  check (easy->done && easy->result == TWIST_OK
+  transfer = run (&w, &sv, &su);
+  check (transfer->done && transfer->result == TWIST_OK
          && got_len == sizeof content, "key file");
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
   server_free (&sv);
 
   /* The same key where ssh looks for it, with nothing named.  */
@@ -1262,9 +1270,9 @@ test_auth (void)
   snprintf (usual, sizeof usual, "%s/id_ed25519", ssh_dir);
   write_file (usual, keytext, kn, 0600);
   su.keyfile = NULL;
-  easy = run (&w, &sv, &su);
-  check (easy->done && easy->result == TWIST_OK, "usual key file");
-  twist_easy_cleanup (easy);
+  transfer = run (&w, &sv, &su);
+  check (transfer->done && transfer->result == TWIST_OK, "usual key file");
+  twist_transfer_free (transfer);
   server_free (&sv);
   unlink (usual);
 
@@ -1272,17 +1280,18 @@ test_auth (void)
   check (server_new (&sv) == 0, "server 5");
   write_file (keyfile, "not a key\n", 10, 0600);
   su.keyfile = keyfile;
-  easy = run (&w, &sv, &su);
-  check (easy->done && easy->result == TWIST_ERR_AUTH
-         && detail_has (easy, "cannot use"), "bad key file");
-  twist_easy_cleanup (easy);
+  transfer = run (&w, &sv, &su);
+  check (transfer->done && transfer->result == TWIST_ERR_AUTH
+         && detail_has (transfer, "cannot use"), "bad key file");
+  twist_transfer_free (transfer);
   server_free (&sv);
   check (server_new (&sv) == 0, "server 6");
   su.keyfile = "/nonexistent/key";
-  easy = run (&w, &sv, &su);
-  check (easy->done && easy->result == TWIST_ERR_FILE
-         && detail_has (easy, "cannot read the private key"), "no key file");
-  twist_easy_cleanup (easy);
+  transfer = run (&w, &sv, &su);
+  check (transfer->done && transfer->result == TWIST_ERR_FILE
+         && detail_has (transfer, "cannot read the private key"),
+         "no key file");
+  twist_transfer_free (transfer);
   server_free (&sv);
   unlink (keyfile);
   rmdir (ssh_dir);
@@ -1342,7 +1351,7 @@ cert_case (const char *what, const gf_key *ca, const gf_key *signer,
 {
   struct server sv;
   struct world w;
-  struct twist_easy *easy;
+  struct twist_transfer *transfer;
   struct setup su = SETUP ("sftp://alice@127.0.0.1/data.bin", 0, NULL);
   gf_key *user = NULL;
   char ssh_dir[300], keyfile[400], certfile[420];
@@ -1367,18 +1376,20 @@ cert_case (const char *what, const gf_key *ca, const gf_key *signer,
                 principal, after, before, certfile);
   if (!usual_path)
     su.keyfile = keyfile;
-  easy = run (&w, &sv, &su);
+  transfer = run (&w, &sv, &su);
   if (want_ok)
-    check (easy->done && easy->result == TWIST_OK && got_len == sizeof content,
+    check (transfer->done && transfer->result == TWIST_OK
+           && got_len == sizeof content,
            what);
   else
-    check (easy->done && easy->result == TWIST_ERR_AUTH && got_len == 0,
+    check (transfer->done && transfer->result == TWIST_ERR_AUTH
+           && got_len == 0,
            what);
   if (want_note != NULL)
     {
-      check (detail_has (easy, want_note), what);
-      if (!detail_has (easy, want_note))
-        fprintf (stderr, "  message: %s\n", twist_easy_error (easy));
+      check (detail_has (transfer, want_note), what);
+      if (!detail_has (transfer, want_note))
+        fprintf (stderr, "  message: %s\n", twist_transfer_error (transfer));
     }
   if (want_ok && !known_plain)
     {
@@ -1386,7 +1397,7 @@ cert_case (const char *what, const gf_key *ca, const gf_key *signer,
       check (sv.noffered == 1 && sv.cert_probes == 1,
              "only the certificate was offered, so it comes first");
     }
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
   if (known_plain)
     sv.nalso = 0;
   server_free (&sv);
@@ -1439,25 +1450,26 @@ test_url_credentials (void)
 {
   struct server sv;
   struct world w;
-  struct twist_easy *easy;
+  struct twist_transfer *transfer;
   struct setup su = SETUP ("sftp://%61lice:p%40ss%3Aw%2Frd%25@127.0.0.1/data.bin",
                            0, NULL);
 
   check (server_new (&sv) == 0, "server");
   sv.password = "p@ss:w/rd%";
-  easy = run (&w, &sv, &su);
-  check (easy->done && easy->result == TWIST_OK && got_len == sizeof content,
+  transfer = run (&w, &sv, &su);
+  check (transfer->done && transfer->result == TWIST_OK
+         && got_len == sizeof content,
          "login with an encoded user name and password");
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
   server_free (&sv);
 
   /* Written the other way, it is the encoded text that is wrong.  */
   check (server_new (&sv) == 0, "server");
   sv.password = "p%40ss%3Aw%2Frd%25";
-  easy = run (&w, &sv, &su);
-  check (easy->done && easy->result == TWIST_ERR_AUTH,
+  transfer = run (&w, &sv, &su);
+  check (transfer->done && transfer->result == TWIST_ERR_AUTH,
          "the encoded text is not the password");
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
   server_free (&sv);
 }
 
@@ -1467,7 +1479,7 @@ test_host_key (void)
 {
   struct server sv;
   struct world w;
-  struct twist_easy *easy;
+  struct twist_transfer *transfer;
   struct setup su = SETUP ("sftp://alice@127.0.0.1/data.bin", 1, "secret");
   char kh[300], fp[64];
   gf_key *other = NULL;
@@ -1476,39 +1488,40 @@ test_host_key (void)
   check (server_new (&sv) == 0, "server");
   known_hosts_with (sv.host, kh, sizeof kh);
   su.known_hosts = kh;
-  easy = run (&w, &sv, &su);
-  check (easy->done && easy->result == TWIST_OK, "known host");
-  twist_easy_cleanup (easy);
+  transfer = run (&w, &sv, &su);
+  check (transfer->done && transfer->result == TWIST_OK, "known host");
+  twist_transfer_free (transfer);
   server_free (&sv);
 
   /* Not in the file.  */
   check (server_new (&sv) == 0, "server 2");
   known_hosts_with (NULL, kh, sizeof kh);
-  easy = run (&w, &sv, &su);
-  check (easy->done && easy->result == TWIST_ERR_HOSTKEY
-         && detail_has (easy, "not in known_hosts")
-         && detail_has (easy, "SHA256:"), "unknown host");
+  transfer = run (&w, &sv, &su);
+  check (transfer->done && transfer->result == TWIST_ERR_HOSTKEY
+         && detail_has (transfer, "not in known_hosts")
+         && detail_has (transfer, "SHA256:"), "unknown host");
   check (got_len == 0, "nothing written for an unknown host");
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
   server_free (&sv);
 
   /* A different key for the host.  */
   check (server_new (&sv) == 0, "server 3");
   check (gf_key_generate (&other, GF_KEY_ED25519, 0) == GF_OK, "other key");
   known_hosts_with (other, kh, sizeof kh);
-  easy = run (&w, &sv, &su);
-  check (easy->done && easy->result == TWIST_ERR_HOSTKEY
-         && detail_has (easy, "CHANGED"), "changed host key");
-  twist_easy_cleanup (easy);
+  transfer = run (&w, &sv, &su);
+  check (transfer->done && transfer->result == TWIST_ERR_HOSTKEY
+         && detail_has (transfer, "CHANGED"), "changed host key");
+  twist_transfer_free (transfer);
   gf_key_free (other);
 
   /* -k skips the file.  */
   server_free (&sv);
   check (server_new (&sv) == 0, "server 4");
   su.verify = 0;
-  easy = run (&w, &sv, &su);
-  check (easy->done && easy->result == TWIST_OK, "-k skips known_hosts");
-  twist_easy_cleanup (easy);
+  transfer = run (&w, &sv, &su);
+  check (transfer->done && transfer->result == TWIST_OK,
+         "-k skips known_hosts");
+  twist_transfer_free (transfer);
 
   /* A pin is trusted without the file, with or without "SHA256:" and
      padding; a wrong one fails even with -k.  */
@@ -1518,17 +1531,17 @@ test_host_key (void)
   su.verify = 1;
   su.pin = fp + 7;
   known_hosts_with (NULL, kh, sizeof kh);
-  easy = run (&w, &sv, &su);
-  check (easy->done && easy->result == TWIST_OK, "pinned host");
-  twist_easy_cleanup (easy);
+  transfer = run (&w, &sv, &su);
+  check (transfer->done && transfer->result == TWIST_OK, "pinned host");
+  twist_transfer_free (transfer);
   server_free (&sv);
   check (server_new (&sv) == 0, "server 6");
   su.pin = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
   su.verify = 0;
-  easy = run (&w, &sv, &su);
-  check (easy->done && easy->result == TWIST_ERR_HOSTKEY
-         && detail_has (easy, "pinned"), "wrong pin, even with -k");
-  twist_easy_cleanup (easy);
+  transfer = run (&w, &sv, &su);
+  check (transfer->done && transfer->result == TWIST_ERR_HOSTKEY
+         && detail_has (transfer, "pinned"), "wrong pin, even with -k");
+  twist_transfer_free (transfer);
   server_free (&sv);
 
   /* A known_hosts file that was named and cannot be read.  */
@@ -1536,10 +1549,11 @@ test_host_key (void)
   su.pin = NULL;
   su.verify = 1;
   su.known_hosts = "/nonexistent/known_hosts";
-  easy = run (&w, &sv, &su);
-  check (easy->done && easy->result == TWIST_ERR_FILE
-         && detail_has (easy, "known_hosts"), "named known_hosts unreadable");
-  twist_easy_cleanup (easy);
+  transfer = run (&w, &sv, &su);
+  check (transfer->done && transfer->result == TWIST_ERR_FILE
+         && detail_has (transfer, "known_hosts"),
+         "named known_hosts unreadable");
+  twist_transfer_free (transfer);
   server_free (&sv);
   unlink (kh);
 }
@@ -1577,7 +1591,7 @@ test_upload (size_t chunk, int streamed)
 {
   struct server sv;
   struct world w;
-  struct twist_easy *easy;
+  struct twist_transfer *transfer;
   struct setup su = SETUP ("sftp://alice@127.0.0.1/up.bin", 0, "secret");
 
   check (server_new (&sv) == 0, "server");
@@ -1585,9 +1599,9 @@ test_upload (size_t chunk, int streamed)
   su.upload_len = sizeof big;
   su.streamed = streamed;
   su.chunk = chunk;
-  easy = run (&w, &sv, &su);
+  transfer = run (&w, &sv, &su);
   gf_session_receive (sv.s, now_us, w.c2s.data, w.c2s.len);
-  check (easy->done && easy->result == TWIST_OK, "upload ends well");
+  check (transfer->done && transfer->result == TWIST_OK, "upload ends well");
   check (uploaded_is (&sv, big, sizeof big), "the whole file arrived");
   check ((sv.up_flags & (GF_FXF_WRITE | GF_FXF_CREAT | GF_FXF_TRUNC))
          == (GF_FXF_WRITE | GF_FXF_CREAT | GF_FXF_TRUNC),
@@ -1596,7 +1610,7 @@ test_upload (size_t chunk, int streamed)
   check (sv.first_write == 0, "from the start");
   check (sv.writes >= 40, "in chunks");
   check (sv.closed_handle, "handle closed");
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
   server_free (&sv);
 }
 
@@ -1608,27 +1622,27 @@ test_upload_empty_and_replace (void)
   static uint8_t none[1] = { 0 };
   struct server sv;
   struct world w;
-  struct twist_easy *easy;
+  struct twist_transfer *transfer;
   struct setup su = SETUP ("scp://alice@127.0.0.1/up.bin", 0, "secret");
 
   check (server_new (&sv) == 0, "server");
   su.upload = none;
   su.upload_len = 0;
-  easy = run (&w, &sv, &su);
-  check (easy->done && easy->result == TWIST_OK && sv.up_exists
+  transfer = run (&w, &sv, &su);
+  check (transfer->done && transfer->result == TWIST_OK && sv.up_exists
          && sv.up_len == 0 && sv.writes == 0, "an empty file");
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
   server_free (&sv);
 
   check (server_new (&sv) == 0, "server 2");
   preload (&sv, big, 500000);
   su.upload = content;
   su.upload_len = sizeof content;
-  easy = run (&w, &sv, &su);
-  check (easy->done && easy->result == TWIST_OK
+  transfer = run (&w, &sv, &su);
+  check (transfer->done && transfer->result == TWIST_OK
          && uploaded_is (&sv, content, sizeof content),
          "a longer file is replaced, not overwritten in place");
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
   server_free (&sv);
 }
 
@@ -1640,7 +1654,7 @@ test_upload_resume (void)
 {
   struct server sv;
   struct world w;
-  struct twist_easy *easy;
+  struct twist_transfer *transfer;
   struct setup su = SETUP ("sftp://alice@127.0.0.1/up.bin", 0, "secret");
 
   su.upload = content;
@@ -1649,32 +1663,32 @@ test_upload_resume (void)
   check (server_new (&sv) == 0, "server");
   preload (&sv, content, 40000);
   su.resume = 40000;
-  easy = run (&w, &sv, &su);
-  check (easy->done && easy->result == TWIST_OK
+  transfer = run (&w, &sv, &su);
+  check (transfer->done && transfer->result == TWIST_OK
          && uploaded_is (&sv, content, sizeof content), "resume at an offset");
   check (sv.first_write == 40000, "the first write is at the offset");
   check (!(sv.up_flags & GF_FXF_TRUNC), "not truncated");
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
   server_free (&sv);
 
   /* Ask the server how much it has.  */
   check (server_new (&sv) == 0, "server 2");
   preload (&sv, content, 25000);
   su.resume = -1;
-  easy = run (&w, &sv, &su);
-  check (easy->done && easy->result == TWIST_OK
+  transfer = run (&w, &sv, &su);
+  check (transfer->done && transfer->result == TWIST_OK
          && uploaded_is (&sv, content, sizeof content) && sv.first_write == 25000
          && !(sv.up_flags & GF_FXF_TRUNC), "resume by asking");
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
   server_free (&sv);
 
   /* Asking, and there is no file: it starts from nothing.  */
   check (server_new (&sv) == 0, "server 3");
-  easy = run (&w, &sv, &su);
-  check (easy->done && easy->result == TWIST_OK
+  transfer = run (&w, &sv, &su);
+  check (transfer->done && transfer->result == TWIST_OK
          && uploaded_is (&sv, content, sizeof content) && sv.first_write == 0
          && (sv.up_flags & GF_FXF_CREAT), "asking about a file not there");
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
   server_free (&sv);
 
   /* Through a read callback, which has to throw the start away.  */
@@ -1682,10 +1696,10 @@ test_upload_resume (void)
   preload (&sv, content, 30000);
   su.resume = 30000;
   su.streamed = 1;
-  easy = run (&w, &sv, &su);
-  check (easy->done && easy->result == TWIST_OK
+  transfer = run (&w, &sv, &su);
+  check (transfer->done && transfer->result == TWIST_OK
          && uploaded_is (&sv, content, sizeof content), "resume, streamed");
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
   server_free (&sv);
   su.streamed = 0;
 
@@ -1693,39 +1707,39 @@ test_upload_resume (void)
   check (server_new (&sv) == 0, "server 5");
   preload (&sv, content, 10000);
   su.resume = 40000;
-  easy = run (&w, &sv, &su);
-  check (easy->done && easy->result == TWIST_ERR_RESUME
-         && detail_has (easy, "shorter") && sv.writes == 0,
+  transfer = run (&w, &sv, &su);
+  check (transfer->done && transfer->result == TWIST_ERR_RESUME
+         && detail_has (transfer, "shorter") && sv.writes == 0,
          "the remote file is shorter than the offset");
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
   server_free (&sv);
 
   check (server_new (&sv) == 0, "server 6");
-  easy = run (&w, &sv, &su);
-  check (easy->done && easy->result == TWIST_ERR_RESUME
-         && detail_has (easy, "does not exist"), "no file to resume");
-  twist_easy_cleanup (easy);
+  transfer = run (&w, &sv, &su);
+  check (transfer->done && transfer->result == TWIST_ERR_RESUME
+         && detail_has (transfer, "does not exist"), "no file to resume");
+  twist_transfer_free (transfer);
   server_free (&sv);
 
   check (server_new (&sv) == 0, "server 7");
   preload (&sv, content, 60000);
   su.upload_len = 1000;
   su.resume = 5000;
-  easy = run (&w, &sv, &su);
-  check (easy->done && easy->result == TWIST_ERR_RESUME
-         && detail_has (easy, "data to upload is shorter"),
+  transfer = run (&w, &sv, &su);
+  check (transfer->done && transfer->result == TWIST_ERR_RESUME
+         && detail_has (transfer, "data to upload is shorter"),
          "the data is shorter than the offset");
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
   server_free (&sv);
   su.upload_len = sizeof content;
   su.streamed = 1;
   check (server_new (&sv) == 0, "server 8");
   preload (&sv, content, 60000);
   su.upload_len = 1000;
-  easy = run (&w, &sv, &su);
-  check (easy->done && easy->result == TWIST_ERR_RESUME,
+  transfer = run (&w, &sv, &su);
+  check (transfer->done && transfer->result == TWIST_ERR_RESUME,
          "the data is shorter than the offset, streamed");
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
   server_free (&sv);
 }
 
@@ -1735,62 +1749,63 @@ test_upload_errors (void)
 {
   struct server sv;
   struct world w;
-  struct twist_easy *easy;
+  struct twist_transfer *transfer;
   struct setup su = SETUP ("sftp://alice@127.0.0.1/nodir/x", 0, "secret");
 
   su.upload = content;
   su.upload_len = sizeof content;
 
   check (server_new (&sv) == 0, "server");
-  easy = run (&w, &sv, &su);
-  check (easy->done && easy->result == TWIST_ERR_FILE
-         && easy->proto_status == 25 && detail_has (easy, "/nodir/x"),
+  transfer = run (&w, &sv, &su);
+  check (transfer->done && transfer->result == TWIST_ERR_FILE
+         && transfer->proto_status == 25 && detail_has (transfer, "/nodir/x"),
          "cannot create the file");
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
   server_free (&sv);
 
   check (server_new (&sv) == 0, "server 2");
   su.url = "sftp://alice@127.0.0.1/denied";
-  easy = run (&w, &sv, &su);
-  check (easy->done && easy->result == TWIST_ERR_FILE
-         && easy->proto_status == 9, "an open refused is access denied");
-  twist_easy_cleanup (easy);
+  transfer = run (&w, &sv, &su);
+  check (transfer->done && transfer->result == TWIST_ERR_FILE
+         && transfer->proto_status == 9, "an open refused is access denied");
+  twist_transfer_free (transfer);
   server_free (&sv);
 
   su.url = "sftp://alice@127.0.0.1/up.bin";
   check (server_new (&sv) == 0, "server 3");
   sv.write_status = GF_FX_FAILURE;
-  easy = run (&w, &sv, &su);
-  check (easy->done && easy->result == TWIST_ERR_FILE
-         && easy->proto_status == 25 && detail_has (easy, "no room"),
+  transfer = run (&w, &sv, &su);
+  check (transfer->done && transfer->result == TWIST_ERR_FILE
+         && transfer->proto_status == 25 && detail_has (transfer, "no room"),
          "a write fails");
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
   server_free (&sv);
 
   check (server_new (&sv) == 0, "server 4");
   sv.write_status = GF_FX_PERMISSION_DENIED;
-  easy = run (&w, &sv, &su);
-  check (easy->done && easy->result == TWIST_ERR_FILE
-         && easy->proto_status == 9, "a write is refused");
-  twist_easy_cleanup (easy);
+  transfer = run (&w, &sv, &su);
+  check (transfer->done && transfer->result == TWIST_ERR_FILE
+         && transfer->proto_status == 9, "a write is refused");
+  twist_transfer_free (transfer);
   server_free (&sv);
 
   /* A directory, and what a library caller can get wrong.  */
   check (server_new (&sv) == 0, "server 5");
   su.url = "sftp://alice@127.0.0.1/dir/";
-  easy = run (&w, &sv, &su);
-  check (easy->done && easy->result == TWIST_ERR_URL
-         && detail_has (easy, "names a directory"), "upload to a directory");
-  twist_easy_cleanup (easy);
+  transfer = run (&w, &sv, &su);
+  check (transfer->done && transfer->result == TWIST_ERR_URL
+         && detail_has (transfer, "names a directory"),
+         "upload to a directory");
+  twist_transfer_free (transfer);
   server_free (&sv);
 
   check (server_new (&sv) == 0, "server 6");
   su.url = "sftp://alice@127.0.0.1/up.bin";
   su.range = "0-9";
-  easy = run (&w, &sv, &su);
-  check (easy->done && easy->result == TWIST_ERR_INVAL
-         && detail_has (easy, "range does not apply"), "a range and an upload");
-  twist_easy_cleanup (easy);
+  transfer = run (&w, &sv, &su);
+  check (transfer->done && transfer->result == TWIST_ERR_INVAL
+         && detail_has (transfer, "range does not apply"), "a range and an upload");
+  twist_transfer_free (transfer);
   server_free (&sv);
 }
 
@@ -1848,7 +1863,7 @@ commands (const char *a, const char *b, const char *c)
 }
 
 /* One transfer with quote commands; the caller looks at what became of it.  */
-static struct twist_easy *
+static struct twist_transfer *
 quote_run (struct world *w, struct server *sv, struct setup *su,
            struct twist_slist *pre, struct twist_slist *post)
 {
@@ -1872,31 +1887,33 @@ test_quote_order (void)
 {
   struct server sv;
   struct world w;
-  struct twist_easy *easy;
+  struct twist_transfer *transfer;
   struct setup su = SETUP ("sftp://alice@127.0.0.1/data.bin", 0, "secret");
   struct twist_slist *pre, *post;
 
   /* Before the transfer.  */
   check (server_new (&sv) == 0, "server");
   pre = commands ("mkdir /newdir", NULL, NULL);
-  easy = quote_run (&w, &sv, &su, pre, NULL);
-  check (easy->done && easy->result == TWIST_OK && got_len == sizeof content,
+  transfer = quote_run (&w, &sv, &su, pre, NULL);
+  check (transfer->done && transfer->result == TWIST_OK
+         && got_len == sizeof content,
          "a quote command before the transfer");
   check (strcmp (ops_text (&sv), "mkdir /newdir|open /data.bin|close") == 0,
          "it ran first");
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
   server_free (&sv);
   twist_slist_free_all (pre);
 
   /* After it.  */
   check (server_new (&sv) == 0, "server 2");
   post = commands ("rm /old", NULL, NULL);
-  easy = quote_run (&w, &sv, &su, NULL, post);
-  check (easy->done && easy->result == TWIST_OK && got_len == sizeof content,
+  transfer = quote_run (&w, &sv, &su, NULL, post);
+  check (transfer->done && transfer->result == TWIST_OK
+         && got_len == sizeof content,
          "a quote command after the transfer");
   check (strcmp (ops_text (&sv), "open /data.bin|close|remove /old") == 0,
          "it ran last");
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
   server_free (&sv);
   twist_slist_free_all (post);
 
@@ -1904,11 +1921,11 @@ test_quote_order (void)
   check (server_new (&sv) == 0, "server 3");
   pre = commands ("mkdir /a", "rename /a /b", NULL);
   post = commands ("rmdir /b", NULL, NULL);
-  easy = quote_run (&w, &sv, &su, pre, post);
-  check (easy->done && easy->result == TWIST_OK, "both");
+  transfer = quote_run (&w, &sv, &su, pre, post);
+  check (transfer->done && transfer->result == TWIST_OK, "both");
   check (strcmp (ops_text (&sv), "mkdir /a|rename /a /b|open /data.bin|close"
                  "|rmdir /b") == 0, "in the order given, one at a time");
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
   server_free (&sv);
   twist_slist_free_all (pre);
   twist_slist_free_all (post);
@@ -1919,54 +1936,55 @@ test_quote_failures (void)
 {
   struct server sv;
   struct world w;
-  struct twist_easy *easy;
+  struct twist_transfer *transfer;
   struct setup su = SETUP ("sftp://alice@127.0.0.1/data.bin", 0, "secret");
   struct twist_slist *pre, *post;
 
   /* The server refuses: the transfer is not made.  */
   check (server_new (&sv) == 0, "server");
   pre = commands ("rm /gone", NULL, NULL);
-  easy = quote_run (&w, &sv, &su, pre, NULL);
-  check (easy->done && easy->result == TWIST_ERR_QUOTE && got_len == 0
-         && easy->proto_status == 21, "a quote command that fails");
-  check (detail_has (easy, "rm command failed")
-         && detail_has (easy, "no such file"), "and says which and why");
+  transfer = quote_run (&w, &sv, &su, pre, NULL);
+  check (transfer->done && transfer->result == TWIST_ERR_QUOTE && got_len == 0
+         && transfer->proto_status == 21, "a quote command that fails");
+  check (detail_has (transfer, "rm command failed")
+         && detail_has (transfer, "no such file"), "and says which and why");
   check (strcmp (ops_text (&sv), "remove /gone") == 0,
          "nothing is transferred after it");
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
   server_free (&sv);
   twist_slist_free_all (pre);
 
   /* * goes on.  */
   check (server_new (&sv) == 0, "server 2");
   pre = commands ("*rm /gone", "mkdir /after", NULL);
-  easy = quote_run (&w, &sv, &su, pre, NULL);
-  check (easy->done && easy->result == TWIST_OK && got_len == sizeof content,
+  transfer = quote_run (&w, &sv, &su, pre, NULL);
+  check (transfer->done && transfer->result == TWIST_OK
+         && got_len == sizeof content,
          "* goes on after a failure");
   check (strcmp (ops_text (&sv), "remove /gone|mkdir /after|open /data.bin"
                  "|close") == 0, "with the rest");
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
   server_free (&sv);
   twist_slist_free_all (pre);
 
   /* A permission is told from a missing file.  */
   check (server_new (&sv) == 0, "server 3");
   pre = commands ("rm /denied", NULL, NULL);
-  easy = quote_run (&w, &sv, &su, pre, NULL);
-  check (easy->done && easy->result == TWIST_ERR_QUOTE
-         && detail_has (easy, "permission denied"), "permission denied");
-  twist_easy_cleanup (easy);
+  transfer = quote_run (&w, &sv, &su, pre, NULL);
+  check (transfer->done && transfer->result == TWIST_ERR_QUOTE
+         && detail_has (transfer, "permission denied"), "permission denied");
+  twist_transfer_free (transfer);
   server_free (&sv);
   twist_slist_free_all (pre);
 
   /* After the transfer: it was made, and the command failed.  */
   check (server_new (&sv) == 0, "server 4");
   post = commands ("rm /gone", NULL, NULL);
-  easy = quote_run (&w, &sv, &su, NULL, post);
-  check (easy->done && easy->result == TWIST_ERR_QUOTE
-         && got_len == sizeof content && easy->proto_status == 21,
+  transfer = quote_run (&w, &sv, &su, NULL, post);
+  check (transfer->done && transfer->result == TWIST_ERR_QUOTE
+         && got_len == sizeof content && transfer->proto_status == 21,
          "a quote command after the transfer that fails");
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
   server_free (&sv);
   twist_slist_free_all (post);
 
@@ -1974,12 +1992,12 @@ test_quote_failures (void)
   check (server_new (&sv) == 0, "server 5");
   su.url = "sftp://alice@127.0.0.1/missing";
   post = commands ("rm /old", NULL, NULL);
-  easy = quote_run (&w, &sv, &su, NULL, post);
-  check (easy->done && easy->result == TWIST_ERR_FILE
-         && easy->proto_status == 78, "a transfer that fails");
+  transfer = quote_run (&w, &sv, &su, NULL, post);
+  check (transfer->done && transfer->result == TWIST_ERR_FILE
+         && transfer->proto_status == 78, "a transfer that fails");
   check (strcmp (ops_text (&sv), "open /missing") == 0,
          "does not run the commands after it");
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
   server_free (&sv);
   twist_slist_free_all (post);
   su.url = "sftp://alice@127.0.0.1/data.bin";
@@ -1988,11 +2006,11 @@ test_quote_failures (void)
      well.  */
   check (server_new (&sv) == 0, "server 6");
   pre = commands ("*frob x", NULL, NULL);
-  easy = quote_run (&w, &sv, &su, pre, NULL);
-  check (easy->done && easy->result == TWIST_ERR_QUOTE
-         && detail_has (easy, "Unknown SFTP command") && sv.nops == 0
+  transfer = quote_run (&w, &sv, &su, pre, NULL);
+  check (transfer->done && transfer->result == TWIST_ERR_QUOTE
+         && detail_has (transfer, "Unknown SFTP command") && sv.nops == 0
          && got_len == 0, "a command that cannot be read");
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
   server_free (&sv);
   twist_slist_free_all (pre);
 }
@@ -2002,75 +2020,75 @@ test_quote_commands (void)
 {
   struct server sv;
   struct world w;
-  struct twist_easy *easy;
+  struct twist_transfer *transfer;
   struct setup su = SETUP ("sftp://alice@127.0.0.1/data.bin", 0, "secret");
   struct twist_slist *pre;
 
   check (server_new (&sv) == 0, "server 2");
   pre = commands ("chmod 600 /data.bin", NULL, NULL);
-  easy = quote_run (&w, &sv, &su, pre, NULL);
-  check (easy->done && easy->result == TWIST_OK
+  transfer = quote_run (&w, &sv, &su, pre, NULL);
+  check (transfer->done && transfer->result == TWIST_OK
          && op_is (&sv, 0, "setstat", "/data.bin", "")
          && sv.ops[0].attrs.flags == GF_FILEXFER_ATTR_PERMISSIONS
          && sv.ops[0].attrs.permissions == 0600, "chmod sets the mode only");
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
   server_free (&sv);
   twist_slist_free_all (pre);
 
   /* The owner and group go together on the wire; the one not named is kept.  */
   check (server_new (&sv) == 0, "server 3");
   pre = commands ("chown 5 /data.bin", NULL, NULL);
-  easy = quote_run (&w, &sv, &su, pre, NULL);
-  check (easy->done && easy->result == TWIST_OK
+  transfer = quote_run (&w, &sv, &su, pre, NULL);
+  check (transfer->done && transfer->result == TWIST_OK
          && op_is (&sv, 0, "stat", "/data.bin", "")
          && op_is (&sv, 1, "setstat", "/data.bin", "")
          && sv.ops[1].attrs.flags == GF_FILEXFER_ATTR_UIDGID
          && sv.ops[1].attrs.uid == 5 && sv.ops[1].attrs.gid == 100,
          "chown keeps the group");
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
   server_free (&sv);
   twist_slist_free_all (pre);
 
   check (server_new (&sv) == 0, "server 4");
   pre = commands ("chgrp 7 /data.bin", NULL, NULL);
-  easy = quote_run (&w, &sv, &su, pre, NULL);
-  check (easy->done && easy->result == TWIST_OK
+  transfer = quote_run (&w, &sv, &su, pre, NULL);
+  check (transfer->done && transfer->result == TWIST_OK
          && sv.ops[1].attrs.uid == 1000 && sv.ops[1].attrs.gid == 7,
          "chgrp keeps the owner");
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
   server_free (&sv);
   twist_slist_free_all (pre);
 
   check (server_new (&sv) == 0, "server 5");
   pre = commands ("mtime \"Thu, 02 Jan 2020 10:00:00 GMT\" /data.bin",
                   "atime \"Thu, 02 Jan 2020 11:00:00 GMT\" /data.bin", NULL);
-  easy = quote_run (&w, &sv, &su, pre, NULL);
-  check (easy->done && easy->result == TWIST_OK
+  transfer = quote_run (&w, &sv, &su, pre, NULL);
+  check (transfer->done && transfer->result == TWIST_OK
          && sv.ops[1].attrs.flags == GF_FILEXFER_ATTR_ACMODTIME
          && sv.ops[1].attrs.mtime == 1577959200 && sv.ops[1].attrs.atime == 111
          && sv.ops[3].attrs.atime == 1577962800 && sv.ops[3].attrs.mtime == 222,
          "mtime keeps the access time and atime the modification time");
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
   server_free (&sv);
   twist_slist_free_all (pre);
 
   check (server_new (&sv) == 0, "server 6");
   pre = commands ("ln /target /linkname", NULL, NULL);
-  easy = quote_run (&w, &sv, &su, pre, NULL);
-  check (easy->done && easy->result == TWIST_OK
+  transfer = quote_run (&w, &sv, &su, pre, NULL);
+  check (transfer->done && transfer->result == TWIST_OK
          && op_is (&sv, 0, "symlink", "/linkname", "/target"),
          "ln makes the second a link to the first");
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
   server_free (&sv);
   twist_slist_free_all (pre);
 
   /* A path with a space needs quotes.  */
   check (server_new (&sv) == 0, "server 7");
   pre = commands ("rename \"/a b\" \"/c d\"", NULL, NULL);
-  easy = quote_run (&w, &sv, &su, pre, NULL);
-  check (easy->done && easy->result == TWIST_OK
+  transfer = quote_run (&w, &sv, &su, pre, NULL);
+  check (transfer->done && transfer->result == TWIST_OK
          && op_is (&sv, 0, "rename", "/a b", "/c d"), "quoted paths");
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
   server_free (&sv);
   twist_slist_free_all (pre);
 }
@@ -2081,21 +2099,21 @@ test_quote_pwd (void)
 {
   struct server sv;
   struct world w;
-  struct twist_easy *easy;
+  struct twist_transfer *transfer;
   struct setup su = SETUP ("sftp://alice@127.0.0.1/data.bin", 0, "secret");
   struct twist_slist *pre;
 
   su.headers = 1;
   check (server_new (&sv) == 0, "server");
   pre = commands ("pwd", NULL, NULL);
-  easy = quote_run (&w, &sv, &su, pre, NULL);
-  check (easy->done && easy->result == TWIST_OK
+  transfer = quote_run (&w, &sv, &su, pre, NULL);
+  check (transfer->done && transfer->result == TWIST_OK
          && strcmp (hdr_text, "257 \"/home/alice\" is current directory.\n")
             == 0, "pwd is said as a header");
   check (strcmp (ops_text (&sv), "realpath .|open /data.bin|close") == 0,
          "it asks for the real path of .");
   check (got_len == sizeof content, "and the file is still fetched");
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
   server_free (&sv);
   twist_slist_free_all (pre);
 }
@@ -2106,7 +2124,7 @@ test_quote_only (void)
 {
   struct server sv;
   struct world w;
-  struct twist_easy *easy;
+  struct twist_transfer *transfer;
   struct setup su = SETUP ("sftp://alice@127.0.0.1/data.bin", 0, "secret");
   struct twist_slist *pre, *post;
 
@@ -2114,32 +2132,33 @@ test_quote_only (void)
   check (server_new (&sv) == 0, "server");
   pre = commands ("mkdir /q", NULL, NULL);
   post = commands ("rm /old", NULL, NULL);
-  easy = quote_run (&w, &sv, &su, pre, post);
-  check (easy->done && easy->result == TWIST_OK && got_len == 0,
+  transfer = quote_run (&w, &sv, &su, pre, post);
+  check (transfer->done && transfer->result == TWIST_OK && got_len == 0,
          "no body: only the commands");
   check (strcmp (ops_text (&sv), "mkdir /q|stat /data.bin|remove /old") == 0,
          "the file is looked for, between them");
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
   server_free (&sv);
   twist_slist_free_all (pre);
   twist_slist_free_all (post);
 
   check (server_new (&sv) == 0, "server 2");
   su.url = "sftp://alice@127.0.0.1/missing";
-  easy = quote_run (&w, &sv, &su, NULL, NULL);
-  check (easy->done && easy->result == TWIST_ERR_FILE
-         && easy->proto_status == 78, "no body for a file that is not there");
-  twist_easy_cleanup (easy);
+  transfer = quote_run (&w, &sv, &su, NULL, NULL);
+  check (transfer->done && transfer->result == TWIST_ERR_FILE
+         && transfer->proto_status == 78,
+         "no body for a file that is not there");
+  twist_transfer_free (transfer);
   server_free (&sv);
 
   /* A directory: nothing to look at.  */
   check (server_new (&sv) == 0, "server 3");
   su.url = "sftp://alice@127.0.0.1/dir/";
   pre = commands ("mkdir /q", NULL, NULL);
-  easy = quote_run (&w, &sv, &su, pre, NULL);
-  check (easy->done && easy->result == TWIST_OK && got_len == 0
+  transfer = quote_run (&w, &sv, &su, pre, NULL);
+  check (transfer->done && transfer->result == TWIST_OK && got_len == 0
          && strcmp (ops_text (&sv), "mkdir /q") == 0, "a directory with -I");
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
   server_free (&sv);
   twist_slist_free_all (pre);
 }
@@ -2150,16 +2169,16 @@ test_quote_with_list_and_upload (void)
 {
   struct server sv;
   struct world w;
-  struct twist_easy *easy;
+  struct twist_transfer *transfer;
   struct setup su = SETUP ("sftp://alice@127.0.0.1/dir/", 0, "secret");
   struct twist_slist *pre, *post;
 
   check (server_new (&sv) == 0, "server");
   pre = commands ("mkdir /q", NULL, NULL);
-  easy = quote_run (&w, &sv, &su, pre, NULL);
-  check (easy->done && easy->result == TWIST_OK && got_len > 0
+  transfer = quote_run (&w, &sv, &su, pre, NULL);
+  check (transfer->done && transfer->result == TWIST_OK && got_len > 0
          && op_is (&sv, 0, "mkdir", "/q", ""), "before a listing");
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
   server_free (&sv);
   twist_slist_free_all (pre);
 
@@ -2168,12 +2187,12 @@ test_quote_with_list_and_upload (void)
   su.upload_len = sizeof content;
   check (server_new (&sv) == 0, "server 2");
   post = commands ("rename /up.bin /done.bin", NULL, NULL);
-  easy = quote_run (&w, &sv, &su, NULL, post);
-  check (easy->done && easy->result == TWIST_OK
+  transfer = quote_run (&w, &sv, &su, NULL, post);
+  check (transfer->done && transfer->result == TWIST_OK
          && uploaded_is (&sv, content, sizeof content), "an upload");
   check (op_is (&sv, sv.nops - 1, "rename", "/up.bin", "/done.bin"),
          "and a command after it");
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
   server_free (&sv);
   twist_slist_free_all (post);
 }
@@ -2183,7 +2202,7 @@ test_create_dirs (void)
 {
   struct server sv;
   struct world w;
-  struct twist_easy *easy;
+  struct twist_transfer *transfer;
   struct setup su = SETUP ("sftp://alice@127.0.0.1/newa/newb/up.bin", 0,
                            "secret");
 
@@ -2192,59 +2211,59 @@ test_create_dirs (void)
 
   /* Without the option the upload fails, as before.  */
   check (server_new (&sv) == 0, "server");
-  easy = run (&w, &sv, &su);
-  check (easy->done && easy->result == TWIST_ERR_FILE
-         && easy->proto_status == 25
+  transfer = run (&w, &sv, &su);
+  check (transfer->done && transfer->result == TWIST_ERR_FILE
+         && transfer->proto_status == 25
          && strcmp (ops_text (&sv), "open /newa/newb/up.bin") == 0,
          "a missing directory is an error");
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
   server_free (&sv);
 
   /* With it, the directories are made and the open is tried again.  */
   su.create_dirs = 1;
   check (server_new (&sv) == 0, "server 2");
-  easy = run (&w, &sv, &su);
-  check (easy->done && easy->result == TWIST_OK
+  transfer = run (&w, &sv, &su);
+  check (transfer->done && transfer->result == TWIST_OK
          && uploaded_is (&sv, content, sizeof content), "the directories made");
   check (strcmp (ops_text (&sv), "open /newa/newb/up.bin|mkdir /newa"
                  "|mkdir /newa/newb|open /newa/newb/up.bin|close") == 0,
          "each one, from the top, then the open again");
   check (sv.ops[1].attrs.flags == GF_FILEXFER_ATTR_PERMISSIONS
          && sv.ops[1].attrs.permissions == 0755, "with mode 0755");
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
   server_free (&sv);
 
   /* One that is there already: its mkdir fails and that is not an error.  */
   su.url = "sftp://alice@127.0.0.1/dir/sub/up.bin";
   check (server_new (&sv) == 0, "server 3");
-  easy = run (&w, &sv, &su);
-  check (easy->done && easy->result == TWIST_OK
+  transfer = run (&w, &sv, &su);
+  check (transfer->done && transfer->result == TWIST_OK
          && strcmp (ops_text (&sv), "open /dir/sub/up.bin|mkdir /dir"
                     "|mkdir /dir/sub|open /dir/sub/up.bin|close") == 0,
          "a directory that exists is not made again");
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
   server_free (&sv);
 
   /* Where making them does not help, the error is the open's, once.  */
   su.url = "sftp://alice@127.0.0.1/bad/up.bin";
   check (server_new (&sv) == 0, "server 4");
-  easy = run (&w, &sv, &su);
-  check (easy->done && easy->result == TWIST_ERR_FILE
-         && easy->proto_status == 25
+  transfer = run (&w, &sv, &su);
+  check (transfer->done && transfer->result == TWIST_ERR_FILE
+         && transfer->proto_status == 25
          && strcmp (ops_text (&sv), "open /bad/up.bin|mkdir /bad"
                     "|open /bad/up.bin") == 0, "the open is tried once more");
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
   server_free (&sv);
 
   /* A download is not helped by it.  */
   su.url = "sftp://alice@127.0.0.1/nodir/data.bin";
   su.upload = NULL;
   check (server_new (&sv) == 0, "server 5");
-  easy = run (&w, &sv, &su);
-  check (easy->done && easy->result == TWIST_ERR_FILE
+  transfer = run (&w, &sv, &su);
+  check (transfer->done && transfer->result == TWIST_ERR_FILE
          && strcmp (ops_text (&sv), "open /nodir/data.bin") == 0,
          "a download does not make directories");
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
   server_free (&sv);
 }
 
@@ -2270,7 +2289,7 @@ test_upload_read_error (void)
 {
   struct server sv;
   struct world w;
-  struct twist_easy *easy;
+  struct twist_transfer *transfer;
   struct setup su = SETUP ("sftp://alice@127.0.0.1/up.bin", 0, "secret");
   int calls = 0;
 
@@ -2278,16 +2297,16 @@ test_upload_read_error (void)
   su.upload_len = sizeof content;
   su.streamed = 1;
   check (server_new (&sv) == 0, "server");
-  easy = start (&w, &sv, &su);
-  easy->read_cb = flaky_read;
-  easy->read_data = &calls;
+  transfer = start (&w, &sv, &su);
+  transfer->read_cb = flaky_read;
+  transfer->read_data = &calls;
   check (twist_ssh_start (w.ssh) == TWIST_OK, "start");
-  pump (&w, easy, 65536);
-  check (easy->done && easy->result == TWIST_ERR_ABORTED && calls >= 2,
+  pump (&w, transfer, 65536);
+  check (transfer->done && transfer->result == TWIST_ERR_ABORTED && calls >= 2,
          "a read that fails ends the upload with an error");
   check (!sv.closed_handle || sv.up_len <= 5000,
          "no more than was read was sent");
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
   server_free (&sv);
 }
 
@@ -2297,35 +2316,36 @@ test_download_resume (void)
 {
   struct server sv;
   struct world w;
-  struct twist_easy *easy;
+  struct twist_transfer *transfer;
   struct setup su = SETUP ("sftp://alice@127.0.0.1/data.bin", 0, "secret");
 
   check (server_new (&sv) == 0, "server");
   su.resume = 30000;
-  easy = run (&w, &sv, &su);
-  check (easy->done && easy->result == TWIST_OK
+  transfer = run (&w, &sv, &su);
+  check (transfer->done && transfer->result == TWIST_OK
          && got_is (content + 30000, sizeof content - 30000)
          && sv.first_read == 30000, "resume a download");
-  check (easy->size_download == sizeof content - 30000, "only the rest counted");
-  twist_easy_cleanup (easy);
+  check (transfer->size_download == sizeof content - 30000, "only the rest counted");
+  twist_transfer_free (transfer);
   server_free (&sv);
 
   /* All of it is there already.  */
   check (server_new (&sv) == 0, "server 2");
   su.resume = (long long) sizeof content;
-  easy = run (&w, &sv, &su);
-  check (easy->done && easy->result == TWIST_OK && got_len == 0
+  transfer = run (&w, &sv, &su);
+  check (transfer->done && transfer->result == TWIST_OK && got_len == 0
          && sv.reads == 0, "nothing left to fetch");
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
   server_free (&sv);
 
   /* More than there is.  */
   check (server_new (&sv) == 0, "server 3");
   su.resume = 200000;
-  easy = run (&w, &sv, &su);
-  check (easy->done && easy->result == TWIST_ERR_RESUME && sv.reads == 0
-         && detail_has (easy, "shorter"), "resume beyond the end");
-  twist_easy_cleanup (easy);
+  transfer = run (&w, &sv, &su);
+  check (transfer->done && transfer->result == TWIST_ERR_RESUME
+         && sv.reads == 0
+         && detail_has (transfer, "shorter"), "resume beyond the end");
+  twist_transfer_free (transfer);
   server_free (&sv);
 
   /* A server that does not say how big the file is cannot be checked, and
@@ -2333,28 +2353,30 @@ test_download_resume (void)
   check (server_new (&sv) == 0, "server 4");
   sv.hide_size = 1;
   su.resume = 30000;
-  easy = run (&w, &sv, &su);
-  check (easy->done && easy->result == TWIST_OK
+  transfer = run (&w, &sv, &su);
+  check (transfer->done && transfer->result == TWIST_OK
          && got_is (content + 30000, sizeof content - 30000),
          "resume without a size");
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
   server_free (&sv);
 
   /* A library caller cannot ask a download to find its own offset.  */
   check (server_new (&sv) == 0, "server 5");
   su.resume = -1;
-  easy = run (&w, &sv, &su);
-  check (easy->done && easy->result == TWIST_ERR_INVAL, "no automatic offset");
-  twist_easy_cleanup (easy);
+  transfer = run (&w, &sv, &su);
+  check (transfer->done && transfer->result == TWIST_ERR_INVAL,
+         "no automatic offset");
+  twist_transfer_free (transfer);
   server_free (&sv);
 
   check (server_new (&sv) == 0, "server 6");
   su.resume = 100;
   su.range = "0-9";
-  easy = run (&w, &sv, &su);
-  check (easy->done && easy->result == TWIST_ERR_INVAL
-         && detail_has (easy, "cannot be used together"), "resume and range");
-  twist_easy_cleanup (easy);
+  transfer = run (&w, &sv, &su);
+  check (transfer->done && transfer->result == TWIST_ERR_INVAL
+         && detail_has (transfer, "cannot be used together"),
+         "resume and range");
+  twist_transfer_free (transfer);
   server_free (&sv);
 }
 
@@ -2365,16 +2387,17 @@ range_case (const char *range, size_t from, size_t n, int max_read,
 {
   struct server sv;
   struct world w;
-  struct twist_easy *easy;
+  struct twist_transfer *transfer;
   struct setup su = SETUP ("sftp://alice@127.0.0.1/data.bin", 0, "secret");
 
   check (server_new (&sv) == 0, "server");
   sv.max_read = (size_t) max_read;
   su.range = range;
-  easy = run (&w, &sv, &su);
-  check (easy->done && easy->result == TWIST_OK && got_is (content + from, n),
+  transfer = run (&w, &sv, &su);
+  check (transfer->done && transfer->result == TWIST_OK
+         && got_is (content + from, n),
          what);
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
   server_free (&sv);
 }
 
@@ -2383,15 +2406,15 @@ range_error (const char *range, int hide_size, const char *what)
 {
   struct server sv;
   struct world w;
-  struct twist_easy *easy;
+  struct twist_transfer *transfer;
   struct setup su = SETUP ("sftp://alice@127.0.0.1/data.bin", 0, "secret");
 
   check (server_new (&sv) == 0, "server");
   sv.hide_size = hide_size;
   su.range = range;
-  easy = run (&w, &sv, &su);
-  check (easy->done && easy->result == TWIST_ERR_RANGE, what);
-  twist_easy_cleanup (easy);
+  transfer = run (&w, &sv, &su);
+  check (transfer->done && transfer->result == TWIST_ERR_RANGE, what);
+  twist_transfer_free (transfer);
   server_free (&sv);
 }
 
@@ -2449,16 +2472,17 @@ list_case (const char *url, int list_only, const char *expect,
 {
   struct server sv;
   struct world w;
-  struct twist_easy *easy;
+  struct twist_transfer *transfer;
   struct setup su = SETUP (url, 0, "secret");
 
   check (server_new (&sv) == 0, "server");
   su.list_only = list_only;
-  easy = run (&w, &sv, &su);
-  check (easy->done && easy->result == TWIST_OK && text_is (expect), what);
+  transfer = run (&w, &sv, &su);
+  check (transfer->done && transfer->result == TWIST_OK && text_is (expect),
+         what);
   check (strcmp (sv.opened, path_seen) == 0, "the directory asked for");
   check (sv.closed_handle, "the directory handle was closed");
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
   server_free (&sv);
 }
 
@@ -2469,7 +2493,7 @@ test_listing_more (void)
 {
   struct server sv;
   struct world w;
-  struct twist_easy *easy;
+  struct twist_transfer *transfer;
   struct setup su = SETUP ("sftp://alice@127.0.0.1/big/", 0, "secret");
   char line[96], *want;
   size_t i, off = 0;
@@ -2477,21 +2501,21 @@ test_listing_more (void)
   /* Nothing in it.  */
   check (server_new (&sv) == 0, "server");
   su.url = "sftp://alice@127.0.0.1/empty/";
-  easy = run (&w, &sv, &su);
-  check (easy->done && easy->result == TWIST_OK && got_len == 0,
+  transfer = run (&w, &sv, &su);
+  check (transfer->done && transfer->result == TWIST_OK && got_len == 0,
          "an empty directory");
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
   server_free (&sv);
 
   /* More entries than one answer holds, in the order the server gave.  */
   check (server_new (&sv) == 0, "server");
   sv.batch = 64;
   su.url = "sftp://alice@127.0.0.1/big/";
-  easy = run (&w, &sv, &su);
+  transfer = run (&w, &sv, &su);
   want = malloc (BIG_DIR_N * 96);
   for (i = 0; i < BIG_DIR_N; i++)
     off += (size_t) snprintf (want + off, 96, "%s\n", big_dir[i].longname);
-  check (easy->done && easy->result == TWIST_OK && got_len == off
+  check (transfer->done && transfer->result == TWIST_OK && got_len == off
          && memcmp (got, want, off) == 0, "a big directory, in order");
   check (sv.readdirs >= BIG_DIR_N / 64, "read in many answers");
   snprintf (line, sizeof line, "%s\n", big_dir[BIG_DIR_N - 1].longname);
@@ -2499,71 +2523,74 @@ test_listing_more (void)
          && memcmp (got + got_len - strlen (line), line, strlen (line)) == 0,
          "the last entry");
   free (want);
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
   server_free (&sv);
 
   /* What the server says about a directory that cannot be listed.  */
   check (server_new (&sv) == 0, "server");
   su.url = "sftp://alice@127.0.0.1/nope/";
-  easy = run (&w, &sv, &su);
-  check (easy->done && easy->result == TWIST_ERR_FILE
-         && easy->proto_status == 78 && detail_has (easy, "directory")
-         && detail_has (easy, "/nope"), "no such directory");
-  twist_easy_cleanup (easy);
+  transfer = run (&w, &sv, &su);
+  check (transfer->done && transfer->result == TWIST_ERR_FILE
+         && transfer->proto_status == 78 && detail_has (transfer, "directory")
+         && detail_has (transfer, "/nope"), "no such directory");
+  twist_transfer_free (transfer);
   server_free (&sv);
   check (server_new (&sv) == 0, "server");
   su.url = "sftp://alice@127.0.0.1/denied/";
-  easy = run (&w, &sv, &su);
-  check (easy->done && easy->result == TWIST_ERR_FILE
-         && easy->proto_status == 9 && detail_has (easy, "not for you"),
+  transfer = run (&w, &sv, &su);
+  check (transfer->done && transfer->result == TWIST_ERR_FILE
+         && transfer->proto_status == 9
+         && detail_has (transfer, "not for you"),
          "a directory that may not be listed");
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
   server_free (&sv);
   check (server_new (&sv) == 0, "server");
   su.url = "sftp://alice@127.0.0.1/data.bin/";
-  easy = run (&w, &sv, &su);
-  check (easy->done && easy->result == TWIST_ERR_FILE
-         && easy->proto_status == 78, "a file with a slash after it");
-  twist_easy_cleanup (easy);
+  transfer = run (&w, &sv, &su);
+  check (transfer->done && transfer->result == TWIST_ERR_FILE
+         && transfer->proto_status == 78, "a file with a slash after it");
+  twist_transfer_free (transfer);
   server_free (&sv);
 
   /* The application refuses the text part way.  */
   check (server_new (&sv) == 0, "server");
   su.url = "sftp://alice@127.0.0.1/dir/";
   collect_limit = 60;
-  easy = run (&w, &sv, &su);
+  transfer = run (&w, &sv, &su);
   collect_limit = 0;
-  check (easy->done && easy->result == TWIST_ERR_ABORTED,
+  check (transfer->done && transfer->result == TWIST_ERR_ABORTED,
          "a listing the application refuses");
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
   server_free (&sv);
 
   /* A range or a resume means nothing for a directory.  */
   check (server_new (&sv) == 0, "server");
   su.range = "0-9";
-  easy = run (&w, &sv, &su);
-  check (easy->done && easy->result == TWIST_ERR_INVAL
-         && detail_has (easy, "does not apply"), "a range and a directory");
-  twist_easy_cleanup (easy);
+  transfer = run (&w, &sv, &su);
+  check (transfer->done && transfer->result == TWIST_ERR_INVAL
+         && detail_has (transfer, "does not apply"),
+         "a range and a directory");
+  twist_transfer_free (transfer);
   server_free (&sv);
   check (server_new (&sv) == 0, "server");
   su.range = NULL;
   su.resume = 10;
-  easy = run (&w, &sv, &su);
-  check (easy->done && easy->result == TWIST_ERR_INVAL
-         && detail_has (easy, "does not apply"), "a resume and a directory");
-  twist_easy_cleanup (easy);
+  transfer = run (&w, &sv, &su);
+  check (transfer->done && transfer->result == TWIST_ERR_INVAL
+         && detail_has (transfer, "does not apply"),
+         "a resume and a directory");
+  twist_transfer_free (transfer);
   server_free (&sv);
 
   /* scp does not list: it names one file.  */
   check (server_new (&sv) == 0, "server");
   su.resume = 0;
   su.url = "scp://alice@127.0.0.1/dir/";
-  easy = run (&w, &sv, &su);
-  check (easy->done && easy->result == TWIST_ERR_FILE
-         && easy->proto_status == 78 && detail_has (easy, "sftp://")
+  transfer = run (&w, &sv, &su);
+  check (transfer->done && transfer->result == TWIST_ERR_FILE
+         && transfer->proto_status == 78 && detail_has (transfer, "sftp://")
          && got_len == 0, "scp does not list a directory");
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
   server_free (&sv);
 }
 
@@ -2953,15 +2980,15 @@ run_acase (const struct acase *c, struct aresult *res)
   struct world *w = calloc (1, sizeof *w);
   struct agent ag;
   gf_key *wrong[AG_KEYS];
-  struct twist_multi *multi = twist_multi_init ();
-  struct twist_easy *easy;
+  struct twist_runtime *runtime = twist_runtime_new ();
+  struct twist_transfer *transfer;
   struct setup su = SETUP ("sftp://alice@127.0.0.1/data.bin", 0, NULL);
   char keytext[2048], path[320], ssh_dir[300];
   size_t kn = 0;
   int i, nwrong = c->nwrong;
 
   memset (res, 0, sizeof *res);
-  check (sv != NULL && w != NULL && multi != NULL, "agent case allocation");
+  check (sv != NULL && w != NULL && runtime != NULL, "agent case allocation");
   check (server_new (sv) == 0, "server");
   sv->password = c->password ? "secret" : NULL;
   if (c->rsa)
@@ -3023,34 +3050,35 @@ run_acase (const struct acase *c, struct aresult *res)
     setenv ("SSH_AUTH_SOCK", ag.path, 1);
   else
     unsetenv ("SSH_AUTH_SOCK");
-  su.multi = multi;
+  su.runtime = runtime;
   su.agent = c->option != NULL && strcmp (c->option, "path") == 0
              ? ag.path : c->option;
   su.agent_timeout_ms = c->timeout_ms;
 
-  easy = start (w, sv, &su);
+  transfer = start (w, sv, &su);
   if (c->abandon)
     {
       struct timespec nap = { 0, 20000000 };
 
       check (twist_ssh_start (w->ssh) == TWIST_OK, "start");
       nanosleep (&nap, NULL);
-      twist_easy_cleanup (easy);
-      twist_multi_cleanup (multi);
+      twist_transfer_free (transfer);
+      twist_runtime_free (runtime);
       goto stop;
     }
   {
     int rc = twist_ssh_start (w->ssh);
 
-    if (rc != TWIST_OK && !easy->done)
-      twist_easy_finish (easy, rc);
+    if (rc != TWIST_OK && !transfer->done)
+      twist_transfer_finish (transfer, rc);
     if (rc == TWIST_OK)
-      pump_with_loop (multi, w, easy, 65536);
+      pump_with_loop (runtime, w, transfer, 65536);
   }
-  res->done = easy->done;
-  res->result = easy->result;
+  res->done = transfer->done;
+  res->result = transfer->result;
   snprintf (res->detail, sizeof res->detail, "%s",
-            twist_easy_error (easy) != NULL ? twist_easy_error (easy) : "");
+            twist_transfer_error (transfer) != NULL
+            ? twist_transfer_error (transfer) : "");
   res->got = got_len;
   if (getenv ("ACASE_DEBUG") != NULL)
     fprintf (stderr, "DBG case: done=%d result=%d detail='%s' got=%zu\n",
@@ -3059,8 +3087,8 @@ run_acase (const struct acase *c, struct aresult *res)
   if (sv->noffered > 0)
     snprintf (res->first_offered, sizeof res->first_offered, "%s",
               sv->offered[0]);
-  twist_easy_cleanup (easy);
-  twist_multi_cleanup (multi);
+  twist_transfer_free (transfer);
+  twist_runtime_free (runtime);
 stop:
   if (c->agent_listens)
     {
@@ -3329,7 +3357,7 @@ kbd_case (unsigned methods, int mode, const char *client_password,
 {
   struct server sv;
   struct world w;
-  struct twist_easy *easy;
+  struct twist_transfer *transfer;
   struct setup su = SETUP ("sftp://alice@127.0.0.1/data.bin", 0, NULL);
 
   next_server_methods = methods;
@@ -3337,11 +3365,12 @@ kbd_case (unsigned methods, int mode, const char *client_password,
   sv.kbd_mode = mode;
   sv.password = server_password;
   su.password = client_password;
-  easy = run (&w, &sv, &su);
-  check (easy->done && (expect_ok ? easy->result == TWIST_OK
-                                  : easy->result == TWIST_ERR_AUTH), what);
+  transfer = run (&w, &sv, &su);
+  check (transfer->done && (expect_ok ? transfer->result == TWIST_OK
+                                      : transfer->result == TWIST_ERR_AUTH),
+         what);
   check (sv.kbd_requests == requests, "the method was tried as often as it should be");
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
   server_free (&sv);
 }
 
@@ -3354,7 +3383,7 @@ test_kbdint_more (void)
 {
   struct server sv;
   struct world w;
-  struct twist_easy *easy;
+  struct twist_transfer *transfer;
   struct setup su = SETUP ("sftp://alice@127.0.0.1/data.bin", 0, "secret");
   const unsigned kbd_only = GF_AUTH_PUBLICKEY | GF_AUTH_KBDINT;
   const unsigned both = GF_AUTH_PUBLICKEY | GF_AUTH_KBDINT | GF_AUTH_PASSWORD;
@@ -3364,46 +3393,47 @@ test_kbdint_more (void)
   next_server_methods = both;
   check (server_new (&sv) == 0, "server");
   sv.kbd_mode = KBD_TWO;
-  easy = run (&w, &sv, &su);
-  check (easy->done && easy->result == TWIST_OK, "two questions: the password method works");
+  transfer = run (&w, &sv, &su);
+  check (transfer->done && transfer->result == TWIST_OK, "two questions: the password method works");
   check (sv.kbd_answers == 2 && sv.kbd_first_len == 0,
          "and the questions were answered with nothing");
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
   server_free (&sv);
 
   /* With nothing else, the failure says what was asked.  */
   next_server_methods = kbd_only;
   check (server_new (&sv) == 0, "server");
   sv.kbd_mode = KBD_TWO;
-  easy = run (&w, &sv, &su);
-  check (easy->done && easy->result == TWIST_ERR_AUTH
-         && detail_has (easy, "keyboard-interactive")
-         && detail_has (easy, "more than one"), "two questions, nothing else");
+  transfer = run (&w, &sv, &su);
+  check (transfer->done && transfer->result == TWIST_ERR_AUTH
+         && detail_has (transfer, "keyboard-interactive")
+         && detail_has (transfer, "more than one"),
+         "two questions, nothing else");
   check (sv.kbd_first_len == 0, "the password was not sent");
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
   server_free (&sv);
 
   /* A question that is shown as it is typed is not a password.  */
   next_server_methods = kbd_only;
   check (server_new (&sv) == 0, "server");
   sv.kbd_mode = KBD_ECHOED;
-  easy = run (&w, &sv, &su);
-  check (easy->done && easy->result == TWIST_ERR_AUTH
-         && detail_has (easy, "Username") && sv.kbd_first_len == 0,
+  transfer = run (&w, &sv, &su);
+  check (transfer->done && transfer->result == TWIST_ERR_AUTH
+         && detail_has (transfer, "Username") && sv.kbd_first_len == 0,
          "a question that is not hidden gets no password, and is named");
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
   server_free (&sv);
 
   /* What a server calls a question is not trusted with the terminal.  */
   next_server_methods = kbd_only;
   check (server_new (&sv) == 0, "server");
   sv.kbd_mode = KBD_HOSTILE;
-  easy = run (&w, &sv, &su);
-  check (easy->done && easy->result == TWIST_ERR_AUTH
-         && detail_has (easy, "Code:") && !detail_has (easy, "\033")
-         && !detail_has (easy, "\n") && !detail_has (easy, "\r"),
+  transfer = run (&w, &sv, &su);
+  check (transfer->done && transfer->result == TWIST_ERR_AUTH
+         && detail_has (transfer, "Code:") && !detail_has (transfer, "\033")
+         && !detail_has (transfer, "\n") && !detail_has (transfer, "\r"),
          "the question is shown without its control characters");
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
   server_free (&sv);
 }
 
@@ -3434,17 +3464,18 @@ static void
 test_bad_peer (void)
 {
   static const char old[] = "SSH-1.5-ancient\r\n";
-  struct twist_easy *easy;
+  struct twist_transfer *transfer;
   struct world w;
   struct server sv;
   struct setup su = SETUP ("sftp://alice@127.0.0.1/data.bin", 0, "secret");
 
   memset (&sv, 0, sizeof sv);
-  easy = start (&w, &sv, &su);
+  transfer = start (&w, &sv, &su);
   check (twist_ssh_start (w.ssh) == TWIST_OK, "start");
   twist_ssh_receive (w.ssh, (const uint8_t *) old, sizeof old - 1);
-  check (easy->done && easy->result == TWIST_ERR_PROTOCOL, "SSH-1 refused");
-  twist_easy_cleanup (easy);
+  check (transfer->done && transfer->result == TWIST_ERR_PROTOCOL,
+         "SSH-1 refused");
+  twist_transfer_free (transfer);
 }
 
 /* A server that never answers: the key exchange has a deadline, and the
@@ -3452,64 +3483,65 @@ test_bad_peer (void)
 static void
 test_timeout (void)
 {
-  struct twist_easy *easy;
+  struct twist_transfer *transfer;
   struct world w;
   struct server sv;
   struct setup su = SETUP ("sftp://alice@127.0.0.1/data.bin", 0, "secret");
   uint64_t due;
 
   memset (&sv, 0, sizeof sv);
-  easy = start (&w, &sv, &su);
+  transfer = start (&w, &sv, &su);
   check (twist_ssh_start (w.ssh) == TWIST_OK, "start");
   due = twist_ssh_deadline (w.ssh);
   check (due != UINT64_MAX && due > now_us, "deadline set");
   twist_ssh_set_time (w.ssh, due);
   twist_ssh_timeout (w.ssh);
-  check (easy->done && easy->result == TWIST_ERR_TIMEOUT, "timeout");
-  twist_easy_cleanup (easy);
+  check (transfer->done && transfer->result == TWIST_ERR_TIMEOUT, "timeout");
+  twist_transfer_free (transfer);
 }
 
 /* No user name at all.  */
 static void
 test_no_user (void)
 {
-  struct twist_easy *easy = twist_easy_init ();
+  struct twist_transfer *transfer = twist_transfer_new ();
   struct twist_ssh *ssh;
   struct pipe *sink = calloc (1, sizeof *sink);
 
-  check (twist_url_parse_int ("sftp://127.0.0.1/data.bin", &easy->url)
+  check (twist_url_parse_int ("sftp://127.0.0.1/data.bin", &transfer->url)
          == TWIST_OK, "url");
-  ssh = twist_ssh_new (easy, 0);
+  ssh = twist_ssh_new (transfer, 0);
   twist_ssh_set_sink (ssh, client_sink, sink);
   check (twist_ssh_start (ssh) == TWIST_ERR_AUTH
-         && detail_has (easy, "no user name"), "no user");
-  twist_easy_cleanup (easy);
+         && detail_has (transfer, "no user name"), "no user");
+  twist_transfer_free (transfer);
   free (sink);
 }
 
 /* Wait, driving the loop, until COND holds or about two seconds pass.  */
-#define WAIT_FOR(multi, cond)                                           \
+#define WAIT_FOR(runtime, cond)                                         \
   do                                                                    \
     {                                                                   \
       struct timespec nap_ = { 0, 2000000 };                            \
-      int running_ = 0, spins_;                                         \
+      int spins_;                                                       \
                                                                         \
       for (spins_ = 0; spins_ < 1000 && !(cond); spins_++)              \
         {                                                               \
-          twist_multi_perform ((multi), &running_);                     \
+          twist_runtime_run_once ((runtime), 0);                        \
           nanosleep (&nap_, NULL);                                      \
         }                                                               \
     }                                                                   \
   while (0)
 
-/* Put EASY on MULTI's loop and storage pool without starting a transfer:
-   twist_multi_add_handle would start the real handler, which dials.  The
-   handler under test is driven by hand.  */
+/* Put TRANSFER on RUNTIME's loop and storage pool without starting a transfer:
+   twist_runtime_start would start the real handler, which dials.  The handler
+   under test is driven by hand, and the runtime has nothing to report
+   of it.  */
 static void
-attach_by_hand (struct twist_multi *multi, struct twist_easy *easy)
+attach_by_hand (struct twist_runtime *runtime, struct twist_transfer *transfer)
 {
-  easy->multi = multi;
-  easy->loop = multi->loop;
+  transfer->runtime = runtime;
+  transfer->loop = runtime->loop;
 }
 
 /* With a real loop and storage pool the files are read and parsed on a
@@ -3521,27 +3553,28 @@ test_off_the_loop (void)
 {
   struct server sv;
   struct world w;
-  struct twist_multi *multi = twist_multi_init ();
-  struct twist_easy *easy = twist_easy_init ();
+  struct twist_runtime *runtime = twist_runtime_new ();
+  struct twist_transfer *transfer = twist_transfer_new ();
   char keytext[2048], keyfile[300], kh[300];
   size_t kn = 0;
 
-  check (multi != NULL && server_new (&sv) == 0, "server and multi");
+  check (runtime != NULL && server_new (&sv) == 0, "server and runtime");
   check (gf_key_to_openssh_private (sv.authorized, keytext, sizeof keytext,
                                     &kn) == GF_OK, "key text");
   snprintf (keyfile, sizeof keyfile, "%s/poolkey", home);
   write_file (keyfile, keytext, kn, 0600);
   known_hosts_with (sv.host, kh, sizeof kh);
-  check (twist_url_parse_int ("sftp://alice@127.0.0.1/data.bin", &easy->url)
+  check (twist_url_parse_int ("sftp://alice@127.0.0.1/data.bin",
+                              &transfer->url)
          == TWIST_OK, "url");
-  twist_easy_setopt (easy, TWISTOPT_SSLKEY, keyfile);
-  twist_easy_setopt (easy, TWISTOPT_SSH_KNOWNHOSTS, kh);
-  easy->write_cb = collect;
+  twist_transfer_setopt (transfer, TWISTOPT_SSLKEY, keyfile);
+  twist_transfer_setopt (transfer, TWISTOPT_SSH_KNOWNHOSTS, kh);
+  transfer->write_cb = collect;
   got_len = 0;
-  attach_by_hand (multi, easy);
+  attach_by_hand (runtime, transfer);
   w.sv = &sv;
   w.c2s.len = 0;
-  w.ssh = twist_ssh_new (easy, 0);
+  w.ssh = twist_ssh_new (transfer, 0);
   twist_ssh_set_sink (w.ssh, client_sink, &w.c2s);
   check (twist_ssh_start (w.ssh) == TWIST_OK, "start submits the job");
   /* The server's first bytes can arrive before the files are loaded.  A
@@ -3558,17 +3591,17 @@ test_off_the_loop (void)
         sv.out.len -= took;
       }
   }
-  WAIT_FOR (multi, w.c2s.len > 0 || easy->done);
+  WAIT_FOR (runtime, w.c2s.len > 0 || transfer->done);
   check (w.c2s.len > 0, "the session started when the job was done");
   check (w.ssh->load_thread_set
          && !pthread_equal (w.ssh->load_thread, pthread_self ()),
          "the files were read off the loop thread");
-  pump (&w, easy, 65536);
-  check (easy->done && easy->result == TWIST_OK
+  pump (&w, transfer, 65536);
+  check (transfer->done && transfer->result == TWIST_OK
          && got_len == sizeof content && memcmp (got, content, got_len) == 0,
          "download with a key and known_hosts loaded by the pool");
-  twist_easy_cleanup (easy);
-  twist_multi_cleanup (multi);
+  twist_transfer_free (transfer);
+  twist_runtime_free (runtime);
   server_free (&sv);
   unlink (keyfile);
   unlink (kh);
@@ -3581,26 +3614,27 @@ test_off_the_loop_errors (void)
 {
   struct server sv;
   struct world w;
-  struct twist_multi *multi = twist_multi_init ();
-  struct twist_easy *easy = twist_easy_init ();
+  struct twist_runtime *runtime = twist_runtime_new ();
+  struct twist_transfer *transfer = twist_transfer_new ();
 
-  check (multi != NULL && server_new (&sv) == 0, "server and multi");
-  check (twist_url_parse_int ("sftp://alice@127.0.0.1/data.bin", &easy->url)
+  check (runtime != NULL && server_new (&sv) == 0, "server and runtime");
+  check (twist_url_parse_int ("sftp://alice@127.0.0.1/data.bin",
+                              &transfer->url)
          == TWIST_OK, "url");
-  twist_easy_setopt (easy, TWISTOPT_SSLKEY, "/nonexistent/key");
-  attach_by_hand (multi, easy);
+  twist_transfer_setopt (transfer, TWISTOPT_SSLKEY, "/nonexistent/key");
+  attach_by_hand (runtime, transfer);
   w.sv = &sv;
   w.c2s.len = 0;
-  w.ssh = twist_ssh_new (easy, 0);
+  w.ssh = twist_ssh_new (transfer, 0);
   twist_ssh_set_sink (w.ssh, client_sink, &w.c2s);
   check (twist_ssh_start (w.ssh) == TWIST_OK, "start submits the job");
-  WAIT_FOR (multi, easy->done);
-  check (easy->done && easy->result == TWIST_ERR_FILE
-         && detail_has (easy, "cannot read the private key"),
+  WAIT_FOR (runtime, transfer->done);
+  check (transfer->done && transfer->result == TWIST_ERR_FILE
+         && detail_has (transfer, "cannot read the private key"),
          "the job's error ends the transfer");
   check (w.c2s.len == 0, "nothing was sent");
-  twist_easy_cleanup (easy);
-  twist_multi_cleanup (multi);
+  twist_transfer_free (transfer);
+  twist_runtime_free (runtime);
   server_free (&sv);
 }
 
@@ -3949,34 +3983,34 @@ ts_uploaded (struct tcp_server *ts, size_t *len, unsigned *sum)
 
 /* A handle that logs in as alice with PASSWORD, with the host key checked
    against KNOWN_HOSTS (VERIFY) or not.  */
-static struct twist_easy *
-tcp_easy (int verify, const char *password, const char *known_hosts)
+static struct twist_transfer *
+tcp_transfer (int verify, const char *password, const char *known_hosts)
 {
-  struct twist_easy *easy = twist_easy_init ();
+  struct twist_transfer *transfer = twist_transfer_new ();
 
-  check (easy != NULL, "easy");
-  twist_easy_setopt (easy, TWISTOPT_SSL_VERIFYPEER, verify ? 1L : 0L);
-  twist_easy_setopt (easy, TWISTOPT_PASSWORD, password);
+  check (transfer != NULL, "transfer");
+  twist_transfer_setopt (transfer, TWISTOPT_SSL_VERIFYPEER, verify ? 1L : 0L);
+  twist_transfer_setopt (transfer, TWISTOPT_PASSWORD, password);
   if (known_hosts != NULL)
-    twist_easy_setopt (easy, TWISTOPT_SSH_KNOWNHOSTS, known_hosts);
-  twist_easy_setopt (easy, TWISTOPT_SSH_AGENT_SOCKET, "");
-  twist_easy_setopt (easy, TWISTOPT_WRITEFUNCTION, collect);
-  return easy;
+    twist_transfer_setopt (transfer, TWISTOPT_SSH_KNOWNHOSTS, known_hosts);
+  twist_transfer_setopt (transfer, TWISTOPT_SSH_AGENT_SOCKET, "");
+  twist_transfer_setopt (transfer, TWISTOPT_WRITEFUNCTION, collect);
+  return transfer;
 }
 
-/* Fetch a URL on the server with EASY, in MULTI, as a command line with two
-   URLs would: the same handle and the same loop each time.  */
+/* Fetch a URL on the server with TRANSFER, in RUNTIME, as a command line with
+   two URLs would: the same handle and the same loop each time.  */
 static int
-tcp_get (struct twist_multi *multi, struct twist_easy *easy,
+tcp_get (struct twist_runtime *runtime, struct twist_transfer *transfer,
          const struct tcp_server *ts, const char *scheme, const char *path)
 {
   char url[200];
 
   snprintf (url, sizeof url, "%s://alice@%s:%d%s", scheme, ts->urlhost,
             ts->port, path);
-  twist_easy_setopt (easy, TWISTOPT_URL, url);
+  twist_transfer_setopt (transfer, TWISTOPT_URL, url);
   got_len = 0;
-  return twist_easy_perform_in (multi, easy);
+  return check_perform_in (runtime, transfer);
 }
 
 static int
@@ -3991,8 +4025,8 @@ static void
 test_reuse_basic (void)
 {
   struct tcp_server ts;
-  struct twist_multi *multi;
-  struct twist_easy *easy;
+  struct twist_runtime *runtime;
+  struct twist_transfer *transfer;
   char kh[300], line[300];
   size_t n = 0;
 
@@ -4002,22 +4036,22 @@ test_reuse_basic (void)
                                (unsigned) ts.port, ts.host, 0) == GF_OK,
          "known_hosts line");
   write_file (kh, line, n, 0600);
-  multi = twist_multi_init ();
-  easy = tcp_easy (1, "secret", kh);
-  check (tcp_get (multi, easy, &ts, "sftp", "/data.bin") == TWIST_OK
+  runtime = twist_runtime_new ();
+  transfer = tcp_transfer (1, "secret", kh);
+  check (tcp_get (runtime, transfer, &ts, "sftp", "/data.bin") == TWIST_OK
          && got_data (), "the first file");
   check (ts_accepted (&ts) == 1, "one connection");
-  check (twist_pool_count (multi->pool) == 1, "the session is kept");
-  check (tcp_get (multi, easy, &ts, "sftp", "/data.bin") == TWIST_OK
+  check (twist_pool_count (runtime->pool) == 1, "the session is kept");
+  check (tcp_get (runtime, transfer, &ts, "sftp", "/data.bin") == TWIST_OK
          && got_data (), "the second file");
   check (ts_accepted (&ts) == 1, "the second file used the same connection");
-  check (twist_pool_count (multi->pool) == 1, "and it is kept again");
+  check (twist_pool_count (runtime->pool) == 1, "and it is kept again");
   /* scp:// and sftp:// are the same transfer, so the same session.  */
-  check (tcp_get (multi, easy, &ts, "scp", "/data.bin") == TWIST_OK
+  check (tcp_get (runtime, transfer, &ts, "scp", "/data.bin") == TWIST_OK
          && got_data (), "scp after sftp");
   check (ts_accepted (&ts) == 1, "scp used it too");
-  twist_easy_cleanup (easy);
-  twist_multi_cleanup (multi);
+  twist_transfer_free (transfer);
+  twist_runtime_free (runtime);
   ts_stop (&ts);
   unlink (kh);
 }
@@ -4027,8 +4061,8 @@ static void
 test_reuse_mixed (void)
 {
   struct tcp_server ts;
-  struct twist_multi *multi;
-  struct twist_easy *down, *up;
+  struct twist_runtime *runtime;
+  struct twist_transfer *down, *up;
   static uint8_t body[30000];
   size_t i, len;
   unsigned sum;
@@ -4036,25 +4070,25 @@ test_reuse_mixed (void)
   check (ts_start (&ts) == 0, "server");
   for (i = 0; i < sizeof body; i++)
     body[i] = (uint8_t) (i * 3 + 1);
-  multi = twist_multi_init ();
-  down = tcp_easy (0, "secret", NULL);
-  up = tcp_easy (0, "secret", NULL);
-  twist_easy_setopt (up, TWISTOPT_POSTFIELDS, (char *) body);
-  twist_easy_setopt (up, TWISTOPT_POSTFIELDSIZE, (long) sizeof body);
-  check (tcp_get (multi, down, &ts, "sftp", "/data.bin") == TWIST_OK
+  runtime = twist_runtime_new ();
+  down = tcp_transfer (0, "secret", NULL);
+  up = tcp_transfer (0, "secret", NULL);
+  twist_transfer_setopt (up, TWISTOPT_POSTFIELDS, (char *) body);
+  twist_transfer_setopt (up, TWISTOPT_POSTFIELDSIZE, (long) sizeof body);
+  check (tcp_get (runtime, down, &ts, "sftp", "/data.bin") == TWIST_OK
          && got_data (), "download");
-  check (tcp_get (multi, up, &ts, "sftp", "/up.bin") == TWIST_OK, "upload");
+  check (tcp_get (runtime, up, &ts, "sftp", "/up.bin") == TWIST_OK, "upload");
   ts_uploaded (&ts, &len, &sum);
   check (len == sizeof body && sum == sum_of (body, sizeof body),
          "the upload arrived whole");
-  check (tcp_get (multi, down, &ts, "sftp", "/dir/") == TWIST_OK
+  check (tcp_get (runtime, down, &ts, "sftp", "/dir/") == TWIST_OK
          && got_len > 0, "a listing");
-  check (tcp_get (multi, down, &ts, "sftp", "/data.bin") == TWIST_OK
+  check (tcp_get (runtime, down, &ts, "sftp", "/data.bin") == TWIST_OK
          && got_data (), "a download after all that");
   check (ts_accepted (&ts) == 1, "all of it on one connection");
-  twist_easy_cleanup (down);
-  twist_easy_cleanup (up);
-  twist_multi_cleanup (multi);
+  twist_transfer_free (down);
+  twist_transfer_free (up);
+  twist_runtime_free (runtime);
   ts_stop (&ts);
 }
 
@@ -4065,56 +4099,58 @@ static void
 test_reuse_terms (void)
 {
   struct tcp_server ts;
-  struct twist_multi *multi;
-  struct twist_easy *lax, *wrong, *strict, *pinned;
+  struct twist_runtime *runtime;
+  struct twist_transfer *lax, *wrong, *strict, *pinned;
   char kh[300], fp[64];
   unsigned before;
 
   check (ts_start (&ts) == 0, "server");
   snprintf (kh, sizeof kh, "%s/known_hosts", home);
   write_file (kh, "", 0, 0600);
-  multi = twist_multi_init ();
+  runtime = twist_runtime_new ();
   /* The same file as the strict handle names below, so that whether the
      host key is checked is all that tells them apart.  */
-  lax = tcp_easy (0, "secret", kh);
-  check (tcp_get (multi, lax, &ts, "sftp", "/data.bin") == TWIST_OK
+  lax = tcp_transfer (0, "secret", kh);
+  check (tcp_get (runtime, lax, &ts, "sftp", "/data.bin") == TWIST_OK
          && got_data (), "logged in without checking the host key");
-  check (twist_pool_count (multi->pool) == 1, "kept");
+  check (twist_pool_count (runtime->pool) == 1, "kept");
 
   /* A password that is wrong must be tried, not borrowed from the session.  */
-  wrong = tcp_easy (0, "not-the-password", NULL);
-  check (tcp_get (multi, wrong, &ts, "sftp", "/data.bin") == TWIST_ERR_AUTH
+  wrong = tcp_transfer (0, "not-the-password", NULL);
+  check (tcp_get (runtime, wrong, &ts, "sftp", "/data.bin") == TWIST_ERR_AUTH
          && got_len == 0, "another password is not let in by the first");
   check (ts_accepted (&ts) == 2, "it made its own connection");
 
   /* The host is not in known_hosts: the earlier session must not stand in
      for the check.  */
-  strict = tcp_easy (1, "secret", kh);
-  check (tcp_get (multi, strict, &ts, "sftp", "/data.bin") == TWIST_ERR_HOSTKEY
+  strict = tcp_transfer (1, "secret", kh);
+  check (tcp_get (runtime, strict, &ts, "sftp",
+                  "/data.bin") == TWIST_ERR_HOSTKEY
          && got_len == 0, "checking the host key is not skipped");
   check (ts_accepted (&ts) == 3, "and it made its own connection");
 
   /* A pin that is not the server's, with the check off, still fails.  */
-  pinned = tcp_easy (0, "secret", NULL);
-  twist_easy_setopt (pinned, TWISTOPT_SSH_HOST_PUBLIC_KEY_SHA256,
-                     "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
-  check (tcp_get (multi, pinned, &ts, "sftp", "/data.bin") == TWIST_ERR_HOSTKEY
+  pinned = tcp_transfer (0, "secret", NULL);
+  twist_transfer_setopt (pinned, TWISTOPT_SSH_HOST_PUBLIC_KEY_SHA256,
+                         "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
+  check (tcp_get (runtime, pinned, &ts, "sftp",
+                  "/data.bin") == TWIST_ERR_HOSTKEY
          && got_len == 0, "a wrong pin is not skipped");
   /* The right one is accepted, on a connection of its own.  */
   gf_key_fingerprint (ts.host, fp, sizeof fp);
-  twist_easy_setopt (pinned, TWISTOPT_SSH_HOST_PUBLIC_KEY_SHA256, fp + 7);
-  check (tcp_get (multi, pinned, &ts, "sftp", "/data.bin") == TWIST_OK
+  twist_transfer_setopt (pinned, TWISTOPT_SSH_HOST_PUBLIC_KEY_SHA256, fp + 7);
+  check (tcp_get (runtime, pinned, &ts, "sftp", "/data.bin") == TWIST_OK
          && got_data (), "the right pin");
   /* The first handle still has its session.  */
   before = ts_accepted (&ts);
-  check (tcp_get (multi, lax, &ts, "sftp", "/data.bin") == TWIST_OK
+  check (tcp_get (runtime, lax, &ts, "sftp", "/data.bin") == TWIST_OK
          && got_data (), "the first handle again");
   check (ts_accepted (&ts) == before, "on the connection it had");
-  twist_easy_cleanup (lax);
-  twist_easy_cleanup (wrong);
-  twist_easy_cleanup (strict);
-  twist_easy_cleanup (pinned);
-  twist_multi_cleanup (multi);
+  twist_transfer_free (lax);
+  twist_transfer_free (wrong);
+  twist_transfer_free (strict);
+  twist_transfer_free (pinned);
+  twist_runtime_free (runtime);
   ts_stop (&ts);
   unlink (kh);
 }
@@ -4125,23 +4161,23 @@ static void
 test_reuse_hung_up (void)
 {
   struct tcp_server ts;
-  struct twist_multi *multi;
-  struct twist_easy *easy;
+  struct twist_runtime *runtime;
+  struct twist_transfer *transfer;
   struct timespec nap = { 0, 50000000 };
 
   check (ts_start (&ts) == 0, "server");
-  multi = twist_multi_init ();
-  easy = tcp_easy (0, "secret", NULL);
-  check (tcp_get (multi, easy, &ts, "sftp", "/data.bin") == TWIST_OK
+  runtime = twist_runtime_new ();
+  transfer = tcp_transfer (0, "secret", NULL);
+  check (tcp_get (runtime, transfer, &ts, "sftp", "/data.bin") == TWIST_OK
          && got_data (), "first");
   ts_hang_up (&ts);
   /* Give the close time to reach us.  */
   nanosleep (&nap, NULL);
-  check (tcp_get (multi, easy, &ts, "sftp", "/data.bin") == TWIST_OK
+  check (tcp_get (runtime, transfer, &ts, "sftp", "/data.bin") == TWIST_OK
          && got_data (), "after the server hung up");
   check (ts_accepted (&ts) == 2, "on a new connection");
-  twist_easy_cleanup (easy);
-  twist_multi_cleanup (multi);
+  twist_transfer_free (transfer);
+  twist_runtime_free (runtime);
   ts_stop (&ts);
 }
 
@@ -4152,22 +4188,22 @@ static void
 test_reuse_unanswered (void)
 {
   struct tcp_server ts;
-  struct twist_multi *multi;
-  struct twist_easy *easy;
+  struct twist_runtime *runtime;
+  struct twist_transfer *transfer;
 
   check (ts_start (&ts) == 0, "server");
   ts.late_eof = 1;
-  multi = twist_multi_init ();
-  easy = tcp_easy (0, "secret", NULL);
-  check (tcp_get (multi, easy, &ts, "sftp", "/data.bin") == TWIST_OK
+  runtime = twist_runtime_new ();
+  transfer = tcp_transfer (0, "secret", NULL);
+  check (tcp_get (runtime, transfer, &ts, "sftp", "/data.bin") == TWIST_OK
          && got_data (), "the first");
-  check (twist_pool_count (multi->pool) == 0,
+  check (twist_pool_count (runtime->pool) == 0,
          "a session with requests unanswered is not kept");
-  check (tcp_get (multi, easy, &ts, "sftp", "/data.bin") == TWIST_OK
+  check (tcp_get (runtime, transfer, &ts, "sftp", "/data.bin") == TWIST_OK
          && got_data (), "the second");
   check (ts_accepted (&ts) == 2, "on a connection of its own");
-  twist_easy_cleanup (easy);
-  twist_multi_cleanup (multi);
+  twist_transfer_free (transfer);
+  twist_runtime_free (runtime);
   ts_stop (&ts);
 }
 
@@ -4176,19 +4212,20 @@ static void
 test_reuse_after_error (void)
 {
   struct tcp_server ts;
-  struct twist_multi *multi;
-  struct twist_easy *easy;
+  struct twist_runtime *runtime;
+  struct twist_transfer *transfer;
 
   check (ts_start (&ts) == 0, "server");
-  multi = twist_multi_init ();
-  easy = tcp_easy (0, "secret", NULL);
-  check (tcp_get (multi, easy, &ts, "sftp", "/data.bin") == TWIST_OK, "ok");
-  check (tcp_get (multi, easy, &ts, "sftp", "/missing") != TWIST_OK,
+  runtime = twist_runtime_new ();
+  transfer = tcp_transfer (0, "secret", NULL);
+  check (tcp_get (runtime, transfer, &ts, "sftp", "/data.bin") == TWIST_OK,
+         "ok");
+  check (tcp_get (runtime, transfer, &ts, "sftp", "/missing") != TWIST_OK,
          "a file that is not there");
-  check (tcp_get (multi, easy, &ts, "sftp", "/data.bin") == TWIST_OK
+  check (tcp_get (runtime, transfer, &ts, "sftp", "/data.bin") == TWIST_OK
          && got_data (), "and then one that is");
-  twist_easy_cleanup (easy);
-  twist_multi_cleanup (multi);
+  twist_transfer_free (transfer);
+  twist_runtime_free (runtime);
   ts_stop (&ts);
 }
 
@@ -4198,43 +4235,36 @@ static void
 test_reuse_concurrent (void)
 {
   struct tcp_server ts;
-  struct twist_multi *multi;
-  struct twist_easy *a, *b;
+  struct twist_runtime *runtime;
+  struct twist_transfer *a, *b;
   char url[200];
-  int running = 1, i;
+  struct check_job ja = { 0, 0, 0 }, jb = { 0, 0, 0 };
+  int i;
 
   check (ts_start (&ts) == 0, "server");
-  multi = twist_multi_init ();
-  a = tcp_easy (0, "secret", NULL);
-  b = tcp_easy (0, "secret", NULL);
+  runtime = twist_runtime_new ();
+  a = tcp_transfer (0, "secret", NULL);
+  b = tcp_transfer (0, "secret", NULL);
   snprintf (url, sizeof url, "sftp://alice@127.0.0.1:%d/data.bin", ts.port);
-  twist_easy_setopt (a, TWISTOPT_URL, url);
-  twist_easy_setopt (b, TWISTOPT_URL, url);
+  twist_transfer_setopt (a, TWISTOPT_URL, url);
+  twist_transfer_setopt (b, TWISTOPT_URL, url);
   got_len = 0;
-  check (twist_multi_add_handle (multi, a) == TWIST_OK
-         && twist_multi_add_handle (multi, b) == TWIST_OK, "both added");
-  /* The loop does not wait when nothing is ready, so bound it by time.  */
-  for (i = 0; i < 10000 && running > 0; i++)
-    {
-      struct timespec nap = { 0, 1000000 };
-
-      twist_loop_run_once (multi->loop);
-      twist_multi_perform (multi, &running);
-      if (running > 0)
-        nanosleep (&nap, NULL);
-    }
-  check (a->done && b->done && a->result == TWIST_OK && b->result == TWIST_OK,
+  check (twist_runtime_start (runtime, a, check_job_done, &ja) == TWIST_OK
+         && twist_runtime_start (runtime, b, check_job_done, &jb) == TWIST_OK,
+         "both started");
+  /* Bound it by time.  */
+  for (i = 0; i < 10000 && !(ja.done && jb.done); i++)
+    twist_runtime_run_once (runtime, 5);
+  check (ja.done && jb.done && ja.result == TWIST_OK && jb.result == TWIST_OK,
          "both finished");
   check (ts_accepted (&ts) == 2, "two connections");
-  twist_multi_remove_handle (multi, a);
-  twist_multi_remove_handle (multi, b);
-  check (twist_pool_count (multi->pool) == 2, "both kept");
-  check (tcp_get (multi, a, &ts, "sftp", "/data.bin") == TWIST_OK
+  check (twist_pool_count (runtime->pool) == 2, "both kept");
+  check (tcp_get (runtime, a, &ts, "sftp", "/data.bin") == TWIST_OK
          && got_data (), "a third");
   check (ts_accepted (&ts) == 2, "used one of them");
-  twist_easy_cleanup (a);
-  twist_easy_cleanup (b);
-  twist_multi_cleanup (multi);
+  twist_transfer_free (a);
+  twist_transfer_free (b);
+  twist_runtime_free (runtime);
   ts_stop (&ts);
 }
 
@@ -4256,25 +4286,26 @@ static void
 test_limits (void)
 {
   struct tcp_server ts;
-  struct twist_multi *multi;
-  struct twist_easy *down, *up, *both;
+  struct twist_runtime *runtime;
+  struct twist_transfer *down, *up, *both;
   double t0, took;
   size_t len;
   unsigned sum;
 
   check (ts_start (&ts) == 0, "server");
-  multi = twist_multi_init ();
+  runtime = twist_runtime_new ();
 
-  down = tcp_easy (0, "secret", NULL);
+  down = tcp_transfer (0, "secret", NULL);
   t0 = seconds ();
-  check (tcp_get (multi, down, &ts, "sftp", "/data.bin") == TWIST_OK
+  check (tcp_get (runtime, down, &ts, "sftp", "/data.bin") == TWIST_OK
          && got_data (), "unlimited");
   took = seconds () - t0;
   check (took < 0.6, "an unlimited download is quick");
 
-  twist_easy_setopt (down, TWISTOPT_MAX_RECV_SPEED_LARGE, (uint64_t) 100000);
+  twist_transfer_setopt (down, TWISTOPT_MAX_RECV_SPEED_LARGE,
+                         (uint64_t) 100000);
   t0 = seconds ();
-  check (tcp_get (multi, down, &ts, "sftp", "/data.bin") == TWIST_OK
+  check (tcp_get (runtime, down, &ts, "sftp", "/data.bin") == TWIST_OK
          && got_data (), "limited download");
   took = seconds () - t0;
   check (took >= 0.85 && took < 2.5, "a download keeps to the limit");
@@ -4282,19 +4313,19 @@ test_limits (void)
     fprintf (stderr, "  took %.2f s\n", took);
 
   /* A limit on sending does not slow a download.  */
-  both = tcp_easy (0, "secret", NULL);
-  twist_easy_setopt (both, TWISTOPT_MAX_SEND_SPEED_LARGE, (uint64_t) 1000);
+  both = tcp_transfer (0, "secret", NULL);
+  twist_transfer_setopt (both, TWISTOPT_MAX_SEND_SPEED_LARGE, (uint64_t) 1000);
   t0 = seconds ();
-  check (tcp_get (multi, both, &ts, "sftp", "/data.bin") == TWIST_OK
+  check (tcp_get (runtime, both, &ts, "sftp", "/data.bin") == TWIST_OK
          && got_data (), "a send limit and a download");
   check (seconds () - t0 < 0.6, "is not slowed by the send limit");
 
-  up = tcp_easy (0, "secret", NULL);
-  twist_easy_setopt (up, TWISTOPT_POSTFIELDS, (char *) content);
-  twist_easy_setopt (up, TWISTOPT_POSTFIELDSIZE, (long) sizeof content);
-  twist_easy_setopt (up, TWISTOPT_MAX_SEND_SPEED_LARGE, (uint64_t) 100000);
+  up = tcp_transfer (0, "secret", NULL);
+  twist_transfer_setopt (up, TWISTOPT_POSTFIELDS, (char *) content);
+  twist_transfer_setopt (up, TWISTOPT_POSTFIELDSIZE, (long) sizeof content);
+  twist_transfer_setopt (up, TWISTOPT_MAX_SEND_SPEED_LARGE, (uint64_t) 100000);
   t0 = seconds ();
-  check (tcp_get (multi, up, &ts, "sftp", "/up.bin") == TWIST_OK,
+  check (tcp_get (runtime, up, &ts, "sftp", "/up.bin") == TWIST_OK,
          "limited upload");
   took = seconds () - t0;
   ts_uploaded (&ts, &len, &sum);
@@ -4304,10 +4335,10 @@ test_limits (void)
   if (took < 0.85 || took >= 2.5)
     fprintf (stderr, "  took %.2f s\n", took);
 
-  twist_easy_cleanup (down);
-  twist_easy_cleanup (both);
-  twist_easy_cleanup (up);
-  twist_multi_cleanup (multi);
+  twist_transfer_free (down);
+  twist_transfer_free (both);
+  twist_transfer_free (up);
+  twist_runtime_free (runtime);
   ts_stop (&ts);
 }
 
@@ -4317,17 +4348,18 @@ static void
 test_limit_chunks (void)
 {
   struct tcp_server ts;
-  struct twist_multi *multi;
-  struct twist_easy *easy;
+  struct twist_runtime *runtime;
+  struct twist_transfer *transfer;
   double t0, took;
 
   check (ts_start (&ts) == 0, "server");
-  multi = twist_multi_init ();
-  easy = tcp_easy (0, "secret", NULL);
-  twist_easy_setopt (easy, TWISTOPT_RANGE, "0-3999");
-  twist_easy_setopt (easy, TWISTOPT_MAX_RECV_SPEED_LARGE, (uint64_t) 2000);
+  runtime = twist_runtime_new ();
+  transfer = tcp_transfer (0, "secret", NULL);
+  twist_transfer_setopt (transfer, TWISTOPT_RANGE, "0-3999");
+  twist_transfer_setopt (transfer, TWISTOPT_MAX_RECV_SPEED_LARGE,
+                         (uint64_t) 2000);
   t0 = seconds ();
-  check (tcp_get (multi, easy, &ts, "sftp", "/data.bin") == TWIST_OK
+  check (tcp_get (runtime, transfer, &ts, "sftp", "/data.bin") == TWIST_OK
          && got_len == 4000 && memcmp (got, content, 4000) == 0,
          "four thousand bytes at two thousand a second");
   took = seconds () - t0;
@@ -4337,8 +4369,8 @@ test_limit_chunks (void)
   pthread_mutex_lock (&ts.mu);
   check (ts.max_read > 0 && ts.max_read <= 1000, "in requests of 1000");
   pthread_mutex_unlock (&ts.mu);
-  twist_easy_cleanup (easy);
-  twist_multi_cleanup (multi);
+  twist_transfer_free (transfer);
+  twist_runtime_free (runtime);
   ts_stop (&ts);
 }
 
@@ -4350,8 +4382,8 @@ static void
 test_ipv6_literal (void)
 {
   struct tcp_server ts;
-  struct twist_multi *multi;
-  struct twist_easy *easy;
+  struct twist_runtime *runtime;
+  struct twist_transfer *transfer;
   char kh[300], line[300];
   size_t n = 0;
   int up = ts_start_on (&ts, TS_V6);
@@ -4366,32 +4398,33 @@ test_ipv6_literal (void)
                                (unsigned) ts.port, ts.host, 0) == GF_OK
          && strncmp (line, "[::1]:", 6) == 0, "known_hosts names [::1]:port");
   write_file (kh, line, n, 0600);
-  multi = twist_multi_init ();
-  easy = tcp_easy (1, "secret", kh);
-  check (tcp_get (multi, easy, &ts, "sftp", "/data.bin") == TWIST_OK
+  runtime = twist_runtime_new ();
+  transfer = tcp_transfer (1, "secret", kh);
+  check (tcp_get (runtime, transfer, &ts, "sftp", "/data.bin") == TWIST_OK
          && got_data (), "a download from [::1] with the host key checked");
-  check (tcp_get (multi, easy, &ts, "sftp", "/data.bin") == TWIST_OK
+  check (tcp_get (runtime, transfer, &ts, "sftp", "/data.bin") == TWIST_OK
          && got_data () && ts_accepted (&ts) == 1, "and the next URL reuses it");
   {
     char *eff = NULL;
 
-    twist_easy_getinfo (easy, TWISTINFO_EFFECTIVE_URL, &eff);
+    twist_transfer_getinfo (transfer, TWISTINFO_EFFECTIVE_URL, &eff);
     check (eff != NULL && strstr (eff, "//[::1]:") != NULL,
            "the effective URL keeps the brackets");
   }
 
-  /* With nothing in known_hosts the address is refused.  A new multi handle:
+  /* With nothing in known_hosts the address is refused.  A new runtime:
      the connection already made was trusted when it was made, and a kept one
      is not checked again.  */
   write_file (kh, "", 0, 0600);
-  twist_easy_cleanup (easy);
-  twist_multi_cleanup (multi);
-  multi = twist_multi_init ();
-  easy = tcp_easy (1, "secret", kh);
-  check (tcp_get (multi, easy, &ts, "sftp", "/data.bin") == TWIST_ERR_HOSTKEY
+  twist_transfer_free (transfer);
+  twist_runtime_free (runtime);
+  runtime = twist_runtime_new ();
+  transfer = tcp_transfer (1, "secret", kh);
+  check (tcp_get (runtime, transfer, &ts, "sftp",
+                  "/data.bin") == TWIST_ERR_HOSTKEY
          && got_len == 0, "an address that is not in known_hosts");
-  twist_easy_cleanup (easy);
-  twist_multi_cleanup (multi);
+  twist_transfer_free (transfer);
+  twist_runtime_free (runtime);
   ts_stop (&ts);
   unlink (kh);
 }
@@ -4402,8 +4435,8 @@ static void
 test_ipv6_zone (void)
 {
   struct tcp_server ts;
-  struct twist_multi *multi;
-  struct twist_easy *easy;
+  struct twist_runtime *runtime;
+  struct twist_transfer *transfer;
   char kh[300], line[400];
   size_t n = 0;
   int up = ts_start_on (&ts, TS_ZONE);
@@ -4419,12 +4452,12 @@ test_ipv6_zone (void)
                                (unsigned) ts.port, ts.host, 0) == GF_OK,
          "known_hosts line for a zone");
   write_file (kh, line, n, 0600);
-  multi = twist_multi_init ();
-  easy = tcp_easy (1, "secret", kh);
-  check (tcp_get (multi, easy, &ts, "sftp", "/data.bin") == TWIST_OK
+  runtime = twist_runtime_new ();
+  transfer = tcp_transfer (1, "secret", kh);
+  check (tcp_get (runtime, transfer, &ts, "sftp", "/data.bin") == TWIST_OK
          && got_data (), "a download from a link-local address by its zone");
-  twist_easy_cleanup (easy);
-  twist_multi_cleanup (multi);
+  twist_transfer_free (transfer);
+  twist_runtime_free (runtime);
   ts_stop (&ts);
   unlink (kh);
 }
@@ -4436,7 +4469,7 @@ test_ipv6_known_hosts (void)
 {
   struct server sv;
   struct world w;
-  struct twist_easy *easy;
+  struct twist_transfer *transfer;
   struct setup su = SETUP ("sftp://alice@[::1]/data.bin", 1, "secret");
   char kh[300], line[400];
   size_t n = 0;
@@ -4449,19 +4482,20 @@ test_ipv6_known_hosts (void)
          == GF_OK && strncmp (line, "::1 ", 4) == 0,
          "the default port is written without brackets");
   write_file (kh, line, n, 0600);
-  easy = run (&w, &sv, &su);
-  check (easy->done && easy->result == TWIST_OK, "found on the default port");
-  twist_easy_cleanup (easy);
+  transfer = run (&w, &sv, &su);
+  check (transfer->done && transfer->result == TWIST_OK,
+         "found on the default port");
+  twist_transfer_free (transfer);
   server_free (&sv);
 
   check (server_new (&sv) == 0, "server 2");
   check (gf_knownhosts_format (line, sizeof line, &n, "2001:db8::1", 22,
                                sv.host, 0) == GF_OK, "other line");
   write_file (kh, line, n, 0600);
-  easy = run (&w, &sv, &su);
-  check (easy->done && easy->result == TWIST_ERR_HOSTKEY
-         && detail_has (easy, "::1"), "another address is not this one");
-  twist_easy_cleanup (easy);
+  transfer = run (&w, &sv, &su);
+  check (transfer->done && transfer->result == TWIST_ERR_HOSTKEY
+         && detail_has (transfer, "::1"), "another address is not this one");
+  twist_transfer_free (transfer);
   server_free (&sv);
 
   /* A port that is not the default: [addr]:port.  */
@@ -4470,9 +4504,10 @@ test_ipv6_known_hosts (void)
   check (gf_knownhosts_format (line, sizeof line, &n, "::1", 2222, sv.host, 0)
          == GF_OK && strncmp (line, "[::1]:2222 ", 11) == 0, "bracketed");
   write_file (kh, line, n, 0600);
-  easy = run (&w, &sv, &su);
-  check (easy->done && easy->result == TWIST_OK, "found on another port");
-  twist_easy_cleanup (easy);
+  transfer = run (&w, &sv, &su);
+  check (transfer->done && transfer->result == TWIST_OK,
+         "found on another port");
+  twist_transfer_free (transfer);
   server_free (&sv);
 
   /* A zone is part of the name, as ssh keeps it.  */
@@ -4481,9 +4516,10 @@ test_ipv6_known_hosts (void)
   check (gf_knownhosts_format (line, sizeof line, &n, "fe80::1%eth0", 22,
                                sv.host, 0) == GF_OK, "zone line");
   write_file (kh, line, n, 0600);
-  easy = run (&w, &sv, &su);
-  check (easy->done && easy->result == TWIST_OK, "a zone in known_hosts");
-  twist_easy_cleanup (easy);
+  transfer = run (&w, &sv, &su);
+  check (transfer->done && transfer->result == TWIST_OK,
+         "a zone in known_hosts");
+  twist_transfer_free (transfer);
   server_free (&sv);
   unlink (kh);
 }
@@ -4963,13 +4999,13 @@ px_url (const struct px *px, const char *userinfo, char *out, size_t cap)
             px->port);
 }
 
-static struct twist_easy *
-proxied_easy (const char *proxy_url)
+static struct twist_transfer *
+proxied_transfer (const char *proxy_url)
 {
-  struct twist_easy *easy = tcp_easy (0, "secret", NULL);
+  struct twist_transfer *transfer = tcp_transfer (0, "secret", NULL);
 
-  twist_easy_setopt (easy, TWISTOPT_PROXY, proxy_url);
-  return easy;
+  twist_transfer_setopt (transfer, TWISTOPT_PROXY, proxy_url);
+  return transfer;
 }
 
 static void
@@ -4978,19 +5014,19 @@ test_proxy_kind (int kind)
   const char *name = kind == PX_HTTP_KIND ? "http" : "socks5";
   struct tcp_server ts;
   struct px px;
-  struct twist_multi *multi;
-  struct twist_easy *easy;
+  struct twist_runtime *runtime;
+  struct twist_transfer *transfer;
   char url[200], what[100], target[320], want[160];
   int atyp;
 
   check (ts_start (&ts) == 0 && px_start (&px, kind) == 0, "servers");
-  multi = twist_multi_init ();
+  runtime = twist_runtime_new ();
   px_url (&px, NULL, url, sizeof url);
 
   /* A download through the proxy, and what the proxy was asked for.  */
-  easy = proxied_easy (url);
+  transfer = proxied_transfer (url);
   snprintf (what, sizeof what, "%s: a download through the proxy", name);
-  check (tcp_get (multi, easy, &ts, "sftp", "/data.bin") == TWIST_OK
+  check (tcp_get (runtime, transfer, &ts, "sftp", "/data.bin") == TWIST_OK
          && got_data (), what);
   px_target (&px, target, sizeof target, &atyp);
   snprintf (want, sizeof want, "127.0.0.1:%d", ts.port);
@@ -5001,22 +5037,22 @@ test_proxy_kind (int kind)
 
   /* The next URL uses the tunnel.  */
   snprintf (what, sizeof what, "%s: the next URL uses the same tunnel", name);
-  check (tcp_get (multi, easy, &ts, "sftp", "/data.bin") == TWIST_OK
+  check (tcp_get (runtime, transfer, &ts, "sftp", "/data.bin") == TWIST_OK
          && got_data () && ts_accepted (&ts) == 1 && px_connects (&px) == 1,
          what);
 
   /* Without the proxy it is another connection; a session made through one
      proxy is not another's.  */
   {
-    struct twist_easy *direct = tcp_easy (0, "secret", NULL);
+    struct twist_transfer *direct = tcp_transfer (0, "secret", NULL);
 
-    check (tcp_get (multi, direct, &ts, "sftp", "/data.bin") == TWIST_OK
+    check (tcp_get (runtime, direct, &ts, "sftp", "/data.bin") == TWIST_OK
            && ts_accepted (&ts) == 2 && px_connects (&px) == 1,
            "a transfer without the proxy does not take the tunnel");
-    twist_easy_cleanup (direct);
+    twist_transfer_free (direct);
   }
-  twist_easy_cleanup (easy);
-  twist_multi_cleanup (multi);
+  twist_transfer_free (transfer);
+  twist_runtime_free (runtime);
   px_stop (&px);
   ts_stop (&ts);
 }
@@ -5028,21 +5064,21 @@ test_proxy_banner_with_reply (int kind)
 {
   struct tcp_server ts;
   struct px px;
-  struct twist_multi *multi;
-  struct twist_easy *easy;
+  struct twist_runtime *runtime;
+  struct twist_transfer *transfer;
   char url[200], what[100];
 
   check (ts_start (&ts) == 0 && px_start (&px, kind) == 0, "servers");
   px.coalesce = 1;
-  multi = twist_multi_init ();
+  runtime = twist_runtime_new ();
   px_url (&px, NULL, url, sizeof url);
-  easy = proxied_easy (url);
+  transfer = proxied_transfer (url);
   snprintf (what, sizeof what, "%s: the banner that comes with the reply",
             kind == PX_HTTP_KIND ? "http" : "socks5");
-  check (tcp_get (multi, easy, &ts, "sftp", "/data.bin") == TWIST_OK
+  check (tcp_get (runtime, transfer, &ts, "sftp", "/data.bin") == TWIST_OK
          && got_data (), what);
-  twist_easy_cleanup (easy);
-  twist_multi_cleanup (multi);
+  twist_transfer_free (transfer);
+  twist_runtime_free (runtime);
   px_stop (&px);
   ts_stop (&ts);
 }
@@ -5052,71 +5088,76 @@ test_proxy_refusals (void)
 {
   struct tcp_server ts;
   struct px px;
-  struct twist_multi *multi;
-  struct twist_easy *easy;
+  struct twist_runtime *runtime;
+  struct twist_transfer *transfer;
   char url[200];
 
   /* CONNECT refused: the words of the refusal, and the status.  */
   check (ts_start (&ts) == 0 && px_start (&px, PX_HTTP_KIND) == 0, "servers");
   px.refuse_http = 403;
-  multi = twist_multi_init ();
+  runtime = twist_runtime_new ();
   px_url (&px, NULL, url, sizeof url);
-  easy = proxied_easy (url);
-  check (tcp_get (multi, easy, &ts, "sftp", "/data.bin") == TWIST_ERR_PROXY
-         && easy->proto_status == 56
-         && detail_has (easy, "CONNECT tunnel failed, response 403")
+  transfer = proxied_transfer (url);
+  check (tcp_get (runtime, transfer, &ts, "sftp",
+                  "/data.bin") == TWIST_ERR_PROXY
+         && transfer->proto_status == 56
+         && detail_has (transfer, "CONNECT tunnel failed, response 403")
          && got_len == 0 && ts_accepted (&ts) == 0, "a CONNECT that is refused");
-  twist_easy_cleanup (easy);
-  twist_multi_cleanup (multi);
+  twist_transfer_free (transfer);
+  twist_runtime_free (runtime);
   px_stop (&px);
 
   /* A proxy that cannot reach the server.  */
   check (px_start (&px, PX_HTTP_KIND) == 0, "proxy");
-  multi = twist_multi_init ();
+  runtime = twist_runtime_new ();
   px_url (&px, NULL, url, sizeof url);
-  easy = proxied_easy (url);
-  twist_easy_setopt (easy, TWISTOPT_URL, "sftp://alice@127.0.0.1:1/x");
-  check (twist_easy_perform_in (multi, easy) == TWIST_ERR_PROXY
-         && detail_has (easy, "response 502"), "a server the proxy cannot reach");
-  twist_easy_cleanup (easy);
-  twist_multi_cleanup (multi);
+  transfer = proxied_transfer (url);
+  twist_transfer_setopt (transfer, TWISTOPT_URL, "sftp://alice@127.0.0.1:1/x");
+  check (check_perform_in (runtime, transfer) == TWIST_ERR_PROXY
+         && detail_has (transfer, "response 502"), "a server the proxy cannot reach");
+  twist_transfer_free (transfer);
+  twist_runtime_free (runtime);
   px_stop (&px);
 
   /* SOCKS refused.  */
   check (px_start (&px, PX_SOCKS_KIND) == 0, "socks proxy");
   px.refuse_socks = 5;
-  multi = twist_multi_init ();
+  runtime = twist_runtime_new ();
   px_url (&px, NULL, url, sizeof url);
-  easy = proxied_easy (url);
-  check (tcp_get (multi, easy, &ts, "sftp", "/data.bin") == TWIST_ERR_PROXY
-         && easy->proto_status == 97
-         && detail_has (easy, "Can't complete SOCKS5 connection to 127.0.0.1. (5)")
+  transfer = proxied_transfer (url);
+  check (tcp_get (runtime, transfer, &ts, "sftp",
+                  "/data.bin") == TWIST_ERR_PROXY
+         && transfer->proto_status == 97
+         && detail_has (transfer, "Can't complete SOCKS5 connection to 127.0.0.1. (5)")
          && ts_accepted (&ts) == 0, "a SOCKS request that is refused");
-  twist_easy_cleanup (easy);
-  twist_multi_cleanup (multi);
+  twist_transfer_free (transfer);
+  twist_runtime_free (runtime);
   px_stop (&px);
 
   /* No proxy there at all.  */
-  multi = twist_multi_init ();
-  easy = proxied_easy ("http://127.0.0.1:1");
-  check (tcp_get (multi, easy, &ts, "sftp", "/data.bin") == TWIST_ERR_CONNECT,
+  runtime = twist_runtime_new ();
+  transfer = proxied_transfer ("http://127.0.0.1:1");
+  check (tcp_get (runtime, transfer, &ts, "sftp",
+                  "/data.bin") == TWIST_ERR_CONNECT,
          "no proxy listening");
-  twist_easy_cleanup (easy);
-  twist_multi_cleanup (multi);
+  twist_transfer_free (transfer);
+  twist_runtime_free (runtime);
 
   /* A kind that is not spoken.  */
-  multi = twist_multi_init ();
-  easy = proxied_easy ("socks4://127.0.0.1:1080");
-  check (tcp_get (multi, easy, &ts, "sftp", "/data.bin") == TWIST_ERR_UNSUPPORTED
-         && detail_has (easy, "not supported"), "a SOCKS4 proxy is refused");
-  twist_easy_cleanup (easy);
+  runtime = twist_runtime_new ();
+  transfer = proxied_transfer ("socks4://127.0.0.1:1080");
+  check (tcp_get (runtime, transfer, &ts, "sftp", "/data.bin") == TWIST_ERR_UNSUPPORTED
+         && detail_has (transfer, "not supported"),
+         "a SOCKS4 proxy is refused");
+  twist_transfer_free (transfer);
   /* An https proxy is spoken to, in TLS; with none there it is a refused
      connection and not the clear text of the SSH banner.  */
-  easy = proxied_easy ("https://127.0.0.1:1");
-  check (tcp_get (multi, easy, &ts, "sftp", "/data.bin") == TWIST_ERR_CONNECT,
+  transfer = proxied_transfer ("https://127.0.0.1:1");
+  check (tcp_get (runtime, transfer, &ts, "sftp",
+                  "/data.bin") == TWIST_ERR_CONNECT,
          "no https proxy listening");
-  twist_easy_cleanup (easy);
-  twist_multi_cleanup (multi);
+  twist_transfer_free (transfer);
+  twist_runtime_free (runtime);
   ts_stop (&ts);
 }
 
@@ -5126,8 +5167,8 @@ test_proxy_credentials (int kind)
   const char *name = kind == PX_HTTP_KIND ? "http" : "socks5";
   struct tcp_server ts;
   struct px px;
-  struct twist_multi *multi;
-  struct twist_easy *easy;
+  struct twist_runtime *runtime;
+  struct twist_transfer *transfer;
   char url[200], what[120];
   unsigned before;
   const char *none_msg = kind == PX_HTTP_KIND
@@ -5138,45 +5179,49 @@ test_proxy_credentials (int kind)
   check (ts_start (&ts) == 0 && px_start (&px, kind) == 0, "servers");
   px.user = "pxuser";
   px.pass = "px:pass";
-  multi = twist_multi_init ();
+  runtime = twist_runtime_new ();
 
   px_url (&px, NULL, url, sizeof url);
-  easy = proxied_easy (url);
+  transfer = proxied_transfer (url);
   snprintf (what, sizeof what, "%s: a proxy that wants credentials, none given",
             name);
-  check (tcp_get (multi, easy, &ts, "sftp", "/data.bin") == TWIST_ERR_PROXY
-         && detail_has (easy, none_msg), what);
-  twist_easy_cleanup (easy);
+  check (tcp_get (runtime, transfer, &ts, "sftp",
+                  "/data.bin") == TWIST_ERR_PROXY
+         && detail_has (transfer, none_msg), what);
+  twist_transfer_free (transfer);
 
   px_url (&px, "pxuser:px%3Apass", url, sizeof url);
-  easy = proxied_easy (url);
+  transfer = proxied_transfer (url);
   snprintf (what, sizeof what, "%s: credentials in the proxy's URL", name);
-  check (tcp_get (multi, easy, &ts, "sftp", "/data.bin") == TWIST_OK
+  check (tcp_get (runtime, transfer, &ts, "sftp", "/data.bin") == TWIST_OK
          && got_data (), what);
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
 
   px_url (&px, NULL, url, sizeof url);
-  easy = proxied_easy (url);
-  twist_easy_setopt (easy, TWISTOPT_PROXYUSERPWD, "pxuser:px:pass");
+  transfer = proxied_transfer (url);
+  twist_transfer_setopt (transfer, TWISTOPT_PROXYUSERPWD, "pxuser:px:pass");
   snprintf (what, sizeof what, "%s: credentials from the option", name);
-  check (tcp_get (multi, easy, &ts, "sftp", "/data.bin") == TWIST_OK
+  check (tcp_get (runtime, transfer, &ts, "sftp", "/data.bin") == TWIST_OK
          && got_data (), what);
   /* The tunnel is kept; credentials that are wrong are not let through it.  */
-  twist_easy_setopt (easy, TWISTOPT_PROXYUSERPWD, "pxuser:wrong");
+  twist_transfer_setopt (transfer, TWISTOPT_PROXYUSERPWD, "pxuser:wrong");
   snprintf (what, sizeof what, "%s: other credentials do not take the tunnel",
             name);
   before = ts_accepted (&ts);
-  check (tcp_get (multi, easy, &ts, "sftp", "/data.bin") == TWIST_ERR_PROXY
-         && detail_has (easy, bad_msg) && ts_accepted (&ts) == before, what);
-  twist_easy_cleanup (easy);
+  check (tcp_get (runtime, transfer, &ts, "sftp",
+                  "/data.bin") == TWIST_ERR_PROXY
+         && detail_has (transfer, bad_msg) && ts_accepted (&ts) == before,
+         what);
+  twist_transfer_free (transfer);
 
   px_url (&px, "pxuser:wrong", url, sizeof url);
-  easy = proxied_easy (url);
+  transfer = proxied_transfer (url);
   snprintf (what, sizeof what, "%s: wrong credentials", name);
-  check (tcp_get (multi, easy, &ts, "sftp", "/data.bin") == TWIST_ERR_PROXY
-         && detail_has (easy, bad_msg), what);
-  twist_easy_cleanup (easy);
-  twist_multi_cleanup (multi);
+  check (tcp_get (runtime, transfer, &ts, "sftp",
+                  "/data.bin") == TWIST_ERR_PROXY
+         && detail_has (transfer, bad_msg), what);
+  twist_transfer_free (transfer);
+  twist_runtime_free (runtime);
   px_stop (&px);
   ts_stop (&ts);
   (void) none_msg;
@@ -5188,20 +5233,20 @@ test_proxy_long_reply (void)
 {
   struct tcp_server ts;
   struct px px;
-  struct twist_multi *multi;
-  struct twist_easy *easy;
+  struct twist_runtime *runtime;
+  struct twist_transfer *transfer;
   char url[200];
 
   check (ts_start (&ts) == 0 && px_start (&px, PX_HTTP_KIND) == 0, "servers");
   px.bigheader = 1;
   px.coalesce = 1;
-  multi = twist_multi_init ();
+  runtime = twist_runtime_new ();
   px_url (&px, NULL, url, sizeof url);
-  easy = proxied_easy (url);
-  check (tcp_get (multi, easy, &ts, "sftp", "/data.bin") == TWIST_OK
+  transfer = proxied_transfer (url);
+  check (tcp_get (runtime, transfer, &ts, "sftp", "/data.bin") == TWIST_OK
          && got_data (), "a reply of three thousand bytes, and the banner");
-  twist_easy_cleanup (easy);
-  twist_multi_cleanup (multi);
+  twist_transfer_free (transfer);
+  twist_runtime_free (runtime);
   px_stop (&px);
   ts_stop (&ts);
 }
@@ -5213,18 +5258,18 @@ test_proxy_ipv6 (int kind)
 {
   struct tcp_server ts;
   struct px px;
-  struct twist_multi *multi;
-  struct twist_easy *easy;
+  struct twist_runtime *runtime;
+  struct twist_transfer *transfer;
   char url[200], target[320], want[160];
   int atyp;
 
   if (ts_start_on (&ts, TS_V6) != 0)
     return;
   check (px_start (&px, kind) == 0, "proxy");
-  multi = twist_multi_init ();
+  runtime = twist_runtime_new ();
   px_url (&px, NULL, url, sizeof url);
-  easy = proxied_easy (url);
-  check (tcp_get (multi, easy, &ts, "sftp", "/data.bin") == TWIST_OK
+  transfer = proxied_transfer (url);
+  check (tcp_get (runtime, transfer, &ts, "sftp", "/data.bin") == TWIST_OK
          && got_data (), "an IPv6 server through a proxy");
   px_target (&px, target, sizeof target, &atyp);
   if (kind == PX_HTTP_KIND)
@@ -5234,8 +5279,8 @@ test_proxy_ipv6 (int kind)
   check (strcmp (target, want) == 0 && (kind == PX_HTTP_KIND || atyp == 4),
          kind == PX_HTTP_KIND ? "CONNECT [::1]:port"
                               : "SOCKS asked for an IPv6 address");
-  twist_easy_cleanup (easy);
-  twist_multi_cleanup (multi);
+  twist_transfer_free (transfer);
+  twist_runtime_free (runtime);
   px_stop (&px);
   ts_stop (&ts);
 }
@@ -5330,23 +5375,23 @@ stall_stop (struct stall *st)
 /* Fetch from PORT with a connect timeout of MS, optionally through PROXY;
    how long it took, in seconds, is in *TOOK.  */
 static int
-timed_get (struct twist_multi *multi, int port, const char *proxy, long ms,
+timed_get (struct twist_runtime *runtime, int port, const char *proxy, long ms,
            double *took)
 {
-  struct twist_easy *easy = tcp_easy (0, "secret", NULL);
+  struct twist_transfer *transfer = tcp_transfer (0, "secret", NULL);
   char url[100];
   double t0 = seconds ();
   int rc;
 
   snprintf (url, sizeof url, "sftp://alice@127.0.0.1:%d/data.bin", port);
-  twist_easy_setopt (easy, TWISTOPT_URL, url);
-  twist_easy_setopt (easy, TWISTOPT_CONNECTTIMEOUT_MS, ms);
+  twist_transfer_setopt (transfer, TWISTOPT_URL, url);
+  twist_transfer_setopt (transfer, TWISTOPT_CONNECTTIMEOUT_MS, ms);
   if (proxy != NULL)
-    twist_easy_setopt (easy, TWISTOPT_PROXY, proxy);
+    twist_transfer_setopt (transfer, TWISTOPT_PROXY, proxy);
   got_len = 0;
-  rc = twist_easy_perform_in (multi, easy);
+  rc = check_perform_in (runtime, transfer);
   *took = seconds () - t0;
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
   return rc;
 }
 
@@ -5361,18 +5406,18 @@ test_connect_timeout_kex (void)
 {
   struct server sv;
   struct world w;
-  struct twist_easy *easy;
+  struct twist_transfer *transfer;
   struct setup su = SETUP ("sftp://alice@127.0.0.1/data.bin", 0, "secret");
 
   check (server_new (&sv) == 0, "server");
-  easy = start (&w, &sv, &su);
-  twist_easy_setopt (easy, TWISTOPT_CONNECTTIMEOUT_MS, 120000L);
+  transfer = start (&w, &sv, &su);
+  twist_transfer_setopt (transfer, TWISTOPT_CONNECTTIMEOUT_MS, 120000L);
   check (twist_ssh_start (w.ssh) == TWIST_OK, "start");
-  pump (&w, easy, 65536);
-  check (easy->done && easy->result == TWIST_OK
+  pump (&w, transfer, 65536);
+  check (transfer->done && transfer->result == TWIST_OK
          && w.ssh->config.conn.kex_timeout_us == 120000000u,
          "the key exchange has the connect timeout");
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
   server_free (&sv);
 }
 
@@ -5382,38 +5427,41 @@ test_connect_timeout (void)
   test_connect_timeout_kex ();
   struct stall silent, banner;
   struct tcp_server ts;
-  struct twist_multi *multi;
-  struct twist_easy *easy;
+  struct twist_runtime *runtime;
+  struct twist_transfer *transfer;
   char proxy[80];
   double took;
 
   check (stall_start (&silent, 0) == 0 && stall_start (&banner, 1) == 0
          && ts_start (&ts) == 0, "servers");
-  multi = twist_multi_init ();
+  runtime = twist_runtime_new ();
 
-  check (timed_get (multi, silent.port, NULL, 500, &took) == TWIST_ERR_TIMEOUT
+  check (timed_get (runtime, silent.port, NULL, 500,
+                    &took) == TWIST_ERR_TIMEOUT
          && took >= 0.4 && took < 2.0, "a server that says nothing");
   if (took < 0.4 || took >= 2.0)
     fprintf (stderr, "  took %.2f s\n", took);
-  check (timed_get (multi, banner.port, NULL, 500, &took) == TWIST_ERR_TIMEOUT
+  check (timed_get (runtime, banner.port, NULL, 500,
+                    &took) == TWIST_ERR_TIMEOUT
          && took >= 0.4 && took < 2.0, "a server that sends only its banner");
   snprintf (proxy, sizeof proxy, "http://127.0.0.1:%d", silent.port);
-  check (timed_get (multi, ts.port, proxy, 500, &took) == TWIST_ERR_TIMEOUT
+  check (timed_get (runtime, ts.port, proxy, 500, &took) == TWIST_ERR_TIMEOUT
          && took >= 0.4 && took < 2.0, "an HTTP proxy that says nothing");
   snprintf (proxy, sizeof proxy, "socks5://127.0.0.1:%d", silent.port);
-  check (timed_get (multi, ts.port, proxy, 500, &took) == TWIST_ERR_TIMEOUT
+  check (timed_get (runtime, ts.port, proxy, 500, &took) == TWIST_ERR_TIMEOUT
          && took >= 0.4 && took < 2.0, "a SOCKS proxy that says nothing");
   check (ts_accepted (&ts) == 0, "and the server behind it was not reached");
 
   /* The timeout ends at the login: a transfer that goes on longer is not cut
      off by it.  This one takes about a second at its rate.  */
-  easy = tcp_easy (0, "secret", NULL);
-  twist_easy_setopt (easy, TWISTOPT_CONNECTTIMEOUT_MS, 400L);
-  twist_easy_setopt (easy, TWISTOPT_MAX_RECV_SPEED_LARGE, (uint64_t) 100000);
+  transfer = tcp_transfer (0, "secret", NULL);
+  twist_transfer_setopt (transfer, TWISTOPT_CONNECTTIMEOUT_MS, 400L);
+  twist_transfer_setopt (transfer, TWISTOPT_MAX_RECV_SPEED_LARGE,
+                         (uint64_t) 100000);
   {
     double t0 = seconds ();
 
-    check (tcp_get (multi, easy, &ts, "sftp", "/data.bin") == TWIST_OK
+    check (tcp_get (runtime, transfer, &ts, "sftp", "/data.bin") == TWIST_OK
            && got_data (), "a transfer that outlasts the connect timeout");
     took = seconds () - t0;
     check (took > 0.8, "and did take longer than it");
@@ -5421,27 +5469,28 @@ test_connect_timeout (void)
 
   /* A session that is kept needs no connecting, so a connect timeout that is
      too short for anything does not touch it.  */
-  twist_easy_setopt (easy, TWISTOPT_MAX_RECV_SPEED_LARGE, (uint64_t) 0);
-  twist_easy_setopt (easy, TWISTOPT_CONNECTTIMEOUT_MS, 1L);
-  check (tcp_get (multi, easy, &ts, "sftp", "/data.bin") == TWIST_OK
+  twist_transfer_setopt (transfer, TWISTOPT_MAX_RECV_SPEED_LARGE,
+                         (uint64_t) 0);
+  twist_transfer_setopt (transfer, TWISTOPT_CONNECTTIMEOUT_MS, 1L);
+  check (tcp_get (runtime, transfer, &ts, "sftp", "/data.bin") == TWIST_OK
          && got_data () && ts_accepted (&ts) == 1,
          "a kept session is not subject to it");
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
 
   /* The total timeout still ends a server that stalls.  */
-  easy = tcp_easy (0, "secret", NULL);
+  transfer = tcp_transfer (0, "secret", NULL);
   {
     char url[100];
     double t0 = seconds ();
 
     snprintf (url, sizeof url, "sftp://alice@127.0.0.1:%d/x", banner.port);
-    twist_easy_setopt (easy, TWISTOPT_URL, url);
-    twist_easy_setopt (easy, TWISTOPT_TIMEOUT_MS, 500L);
-    check (twist_easy_perform_in (multi, easy) == TWIST_ERR_TIMEOUT
+    twist_transfer_setopt (transfer, TWISTOPT_URL, url);
+    twist_transfer_setopt (transfer, TWISTOPT_TIMEOUT_MS, 500L);
+    check (check_perform_in (runtime, transfer) == TWIST_ERR_TIMEOUT
            && seconds () - t0 < 2.0, "the total timeout, as before");
   }
-  twist_easy_cleanup (easy);
-  twist_multi_cleanup (multi);
+  twist_transfer_free (transfer);
+  twist_runtime_free (runtime);
   ts_stop (&ts);
   stall_stop (&banner);
   stall_stop (&silent);
@@ -5457,31 +5506,31 @@ test_abandoned_job (void)
 
   for (i = 0; i < 60; i++)
     {
-      struct twist_multi *multi = twist_multi_init ();
-      struct twist_easy *easy = twist_easy_init ();
+      struct twist_runtime *runtime = twist_runtime_new ();
+      struct twist_transfer *transfer = twist_transfer_new ();
       struct twist_ssh *ssh;
       struct pipe *sink = calloc (1, sizeof *sink);
       struct timespec nap = { 0, 300000 * (i % 7) };
 
-      check (multi != NULL && sink != NULL, "multi");
+      check (runtime != NULL && sink != NULL, "runtime");
       check (twist_url_parse_int ("sftp://alice@127.0.0.1/data.bin",
-                                  &easy->url) == TWIST_OK, "url");
-      twist_easy_setopt (easy, TWISTOPT_PASSWORD, "secret");
-      twist_easy_setopt (easy, TWISTOPT_SSL_VERIFYPEER, 0L);
-      attach_by_hand (multi, easy);
-      ssh = twist_ssh_new (easy, 0);
+                                  &transfer->url) == TWIST_OK, "url");
+      twist_transfer_setopt (transfer, TWISTOPT_PASSWORD, "secret");
+      twist_transfer_setopt (transfer, TWISTOPT_SSL_VERIFYPEER, 0L);
+      attach_by_hand (runtime, transfer);
+      ssh = twist_ssh_new (transfer, 0);
       twist_ssh_set_sink (ssh, client_sink, sink);
       check (twist_ssh_start (ssh) == TWIST_OK, "start");
       nanosleep (&nap, NULL);
       /* Drop the transfer, then let the loop see whatever the job posted.  */
-      twist_easy_cleanup (easy);
+      twist_transfer_free (transfer);
       {
-        int running = 0, k;
+        int k;
 
         for (k = 0; k < 20; k++)
-          twist_multi_perform (multi, &running);
+          twist_runtime_run_once (runtime, 0);
       }
-      twist_multi_cleanup (multi);
+      twist_runtime_free (runtime);
       free (sink);
     }
 }
@@ -5506,32 +5555,32 @@ test_server_text_is_clean (void)
 {
   struct server sv;
   struct world w;
-  struct twist_easy *easy;
+  struct twist_transfer *transfer;
   struct setup su = SETUP ("sftp://alice@127.0.0.1/hostile", 0, "secret");
   struct twist_slist *pre;
 
   check (server_new (&sv) == 0, "server");
-  easy = run (&w, &sv, &su);
-  check (easy->done && easy->result == TWIST_ERR_FILE
-         && twist_easy_error (easy) != NULL
-         && detail_has (easy, "permission denied"),
+  transfer = run (&w, &sv, &su);
+  check (transfer->done && transfer->result == TWIST_ERR_FILE
+         && twist_transfer_error (transfer) != NULL
+         && detail_has (transfer, "permission denied"),
          "a hostile status still fails the transfer");
-  check (twist_easy_error (easy) != NULL && !has_control (twist_easy_error (easy)),
+  check (twist_transfer_error (transfer) != NULL && !has_control (twist_transfer_error (transfer)),
          "and its message has no control character in it");
-  check (twist_easy_error (easy) != NULL && strlen (twist_easy_error (easy)) < 300,
+  check (twist_transfer_error (transfer) != NULL && strlen (twist_transfer_error (transfer)) < 300,
          "and it is not longer than fits");
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
   server_free (&sv);
 
   check (server_new (&sv) == 0, "server 2");
   su.url = "sftp://alice@127.0.0.1/";
   pre = commands ("rm /hostile", NULL, NULL);
-  easy = quote_run (&w, &sv, &su, pre, NULL);
-  check (easy->done && easy->result == TWIST_ERR_QUOTE
-         && twist_easy_error (easy) != NULL
-         && !has_control (twist_easy_error (easy)),
+  transfer = quote_run (&w, &sv, &su, pre, NULL);
+  check (transfer->done && transfer->result == TWIST_ERR_QUOTE
+         && twist_transfer_error (transfer) != NULL
+         && !has_control (twist_transfer_error (transfer)),
          "the same for a command that fails");
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
   server_free (&sv);
   twist_slist_free_all (pre);
 }
@@ -5547,7 +5596,7 @@ test_short_read_flood (void)
 {
   struct server sv;
   struct world w;
-  struct twist_easy *easy;
+  struct twist_transfer *transfer;
   struct setup su = SETUP ("sftp://alice@127.0.0.1/data.bin", 0, "secret");
   size_t n = 16 * 32768;
   uint8_t *bigfile = malloc (n);
@@ -5559,11 +5608,11 @@ test_short_read_flood (void)
   sv.filelen = n;
   sv.max_read = 1;
   sv.hold_first = 1;
-  easy = run (&w, &sv, &su);
-  check (easy->done && easy->result == TWIST_ERR_PROTOCOL,
+  transfer = run (&w, &sv, &su);
+  check (transfer->done && transfer->result == TWIST_ERR_PROTOCOL,
          "a server that answers reads a byte at a time and holds one is refused");
   check (sv.reads < 3000, "after a bounded number of reads");
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
   server_free (&sv);
   free (bigfile);
 
@@ -5571,9 +5620,9 @@ test_short_read_flood (void)
      not.  */
   check (server_new (&sv) == 0, "server 2");
   sv.max_read = 600;
-  easy = run (&w, &sv, &su);
-  check (easy->done && easy->result == TWIST_OK, "small pieces in order are fine");
-  twist_easy_cleanup (easy);
+  transfer = run (&w, &sv, &su);
+  check (transfer->done && transfer->result == TWIST_OK, "small pieces in order are fine");
+  twist_transfer_free (transfer);
   server_free (&sv);
 }
 

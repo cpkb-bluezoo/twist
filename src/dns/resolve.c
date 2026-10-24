@@ -1524,20 +1524,18 @@ resolve (struct twist_loop *loop, const char *host, const int *order,
 static struct twist_dns_cache *
 loop_cache (struct twist_loop *loop)
 {
-  struct twist_multi *multi;
+  struct twist_runtime *runtime;
 
   if (loop == NULL)
     return NULL;
-  multi = twist_loop_multi (loop);
-  return multi != NULL ? multi->dns : NULL;
+  runtime = twist_loop_runtime (loop);
+  return runtime != NULL ? runtime->dns : NULL;
 }
 
 static struct twist_dns_cache *
-easy_cache (const struct twist_easy *easy)
+transfer_cache (const struct twist_transfer *transfer)
 {
-  if (easy->share != NULL && easy->share->dns != NULL)
-    return easy->share->dns;
-  return loop_cache (easy->loop);
+  return loop_cache (transfer->loop);
 }
 
 int
@@ -1564,47 +1562,54 @@ twist_dns_resolve_service (struct twist_loop *loop, const char *host,
 /* A name is looked up within the time to connect, and no longer than the
    whole transfer may take.  */
 static long
-easy_timeout (const struct twist_easy *easy)
+transfer_timeout (const struct twist_transfer *transfer)
 {
-  if (easy->connect_timeout_ms > 0
-      && (easy->timeout_ms <= 0 || easy->connect_timeout_ms < easy->timeout_ms))
-    return easy->connect_timeout_ms;
-  return easy->timeout_ms;
+  if (transfer->connect_timeout_ms > 0
+      && (transfer->timeout_ms <= 0 || transfer->connect_timeout_ms < transfer->timeout_ms))
+    return transfer->connect_timeout_ms;
+  return transfer->timeout_ms;
 }
 
 int
-twist_dns_resolve_easy (struct twist_easy *easy, const char *host,
-                        void (*cb) (void *, int, const struct twist_dns_addr *),
-                        void *user)
+twist_dns_resolve_transfer (struct twist_transfer *transfer, const char *host,
+                            void (*cb) (void *, int, const struct twist_dns_addr *),
+                            void *user)
 {
   const int *order;
   size_t norder;
 
-  if (easy == NULL)
+  if (transfer == NULL)
     return TWIST_ERR_INVAL;
-  order = easy->dns_order_n > 0 ? easy->dns_order : NULL;
-  norder = easy->dns_order_n > 0 ? (size_t) easy->dns_order_n : 0;
-  return resolve (easy->loop, host, order, norder, 0, easy->doh_url,
-                  easy->doq_url, easy->dot_url, easy->doh_verifypeer,
-                  easy->cainfo, easy->capath, easy->sslcert, easy->sslkey,
-                  easy_timeout (easy), easy_cache (easy), cb, NULL, user);
+  order = transfer->dns_order_n > 0 ? transfer->dns_order : NULL;
+  norder = transfer->dns_order_n > 0 ? (size_t) transfer->dns_order_n : 0;
+  return resolve (transfer->loop, host, order, norder, 0, transfer->doh_url,
+                  transfer->doq_url, transfer->dot_url,
+                  transfer->doh_verifypeer,
+                  transfer->cainfo, transfer->capath, transfer->sslcert,
+                  transfer->sslkey,
+                  transfer_timeout (transfer), transfer_cache (transfer), cb,
+                  NULL, user);
 }
 
 int
-twist_dns_resolve_service_easy (struct twist_easy *easy, const char *host,
-                                void (*cb) (void *, int,
-                                            const struct twist_dns_service *),
-                                void *user)
+twist_dns_resolve_service_transfer (struct twist_transfer *transfer,
+                                    const char *host,
+                                    void (*cb) (void *, int,
+                                                const struct
+                                                twist_dns_service *),
+                                    void *user)
 {
   const int *order;
   size_t norder;
 
-  if (easy == NULL)
+  if (transfer == NULL)
     return TWIST_ERR_INVAL;
-  order = easy->dns_order_n > 0 ? easy->dns_order : NULL;
-  norder = easy->dns_order_n > 0 ? (size_t) easy->dns_order_n : 0;
-  return resolve (easy->loop, host, order, norder, 1, easy->doh_url,
-                  easy->doq_url, easy->dot_url, easy->doh_verifypeer,
-                  easy->cainfo, easy->capath, easy->sslcert, easy->sslkey,
-                  easy_timeout (easy), NULL, NULL, cb, user);
+  order = transfer->dns_order_n > 0 ? transfer->dns_order : NULL;
+  norder = transfer->dns_order_n > 0 ? (size_t) transfer->dns_order_n : 0;
+  return resolve (transfer->loop, host, order, norder, 1, transfer->doh_url,
+                  transfer->doq_url, transfer->dot_url,
+                  transfer->doh_verifypeer,
+                  transfer->cainfo, transfer->capath, transfer->sslcert,
+                  transfer->sslkey,
+                  transfer_timeout (transfer), NULL, NULL, cb, user);
 }

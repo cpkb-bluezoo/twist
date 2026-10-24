@@ -54,7 +54,7 @@ struct bout
 
 struct twist_ldap
 {
-  struct twist_easy *easy;
+  struct twist_transfer *transfer;
   struct twist_mail_link link;
   struct twist_sasl_client *sasl;
   struct twist_endpoint *ep;
@@ -106,7 +106,7 @@ ldap_complete (struct twist_ldap *l, int err)
   if (l == NULL || l->finished)
     return;
   l->finished = 1;
-  twist_easy_finish (l->easy, err);
+  twist_transfer_finish (l->transfer, err);
 }
 
 static int
@@ -371,8 +371,8 @@ encode_filter (struct bout *o, const char *s, size_t n)
 static int
 take_url (struct twist_ldap *l)
 {
-  const char *path = l->easy->url->path;
-  const char *query = l->easy->url->query;
+  const char *path = l->transfer->url->path;
+  const char *query = l->transfer->url->query;
   char decoded[LDAP_DN];
   const char *parts[4];
   size_t plen[4];
@@ -473,8 +473,8 @@ send_bind (struct twist_ldap *l, const char *mech, const uint8_t *cred,
   size_t msg;
   size_t op;
   size_t sasl;
-  const char *user = twist_mail_user (l->easy);
-  const char *pass = twist_mail_pass (l->easy);
+  const char *user = twist_mail_user (l->transfer);
+  const char *pass = twist_mail_pass (l->transfer);
 
   memset (&o, 0, sizeof o);
   msg = begin (&o, 0x30);
@@ -565,7 +565,7 @@ send_unbind (struct twist_ldap *l)
 static int
 start_auth (struct twist_ldap *l)
 {
-  const char *token = l->easy->bearer;
+  const char *token = l->transfer->bearer;
   uint8_t *raw = NULL;
   size_t n = 0;
   int done = 0;
@@ -574,8 +574,8 @@ start_auth (struct twist_ldap *l)
   if (token != NULL && token[0] != 0)
     {
       l->sasl = twist_sasl_client_new (TWIST_SASL_XOAUTH2,
-                                       twist_mail_user (l->easy),
-                                       twist_mail_pass (l->easy), token);
+                                       twist_mail_user (l->transfer),
+                                       twist_mail_pass (l->transfer), token);
       if (l->sasl == NULL)
         return TWIST_ERR_NOMEM;
       rc = twist_sasl_step (l->sasl, NULL, 0, &raw, &n, &done);
@@ -591,15 +591,15 @@ start_auth (struct twist_ldap *l)
 static int
 emit_bytes (struct twist_ldap *l, const void *data, size_t n)
 {
-  struct twist_easy *easy = l->easy;
+  struct twist_transfer *transfer = l->transfer;
   const uint8_t *p = data;
   size_t off = 0;
 
   if (n == 0)
     return TWIST_OK;
-  if (easy->write_cb == NULL)
+  if (transfer->write_cb == NULL)
     {
-      twist_easy_downloaded (easy, n);
+      twist_transfer_downloaded (transfer, n);
       return TWIST_OK;
     }
   while (off < n)
@@ -611,12 +611,12 @@ emit_bytes (struct twist_ldap *l, const void *data, size_t n)
       if (chunk > sizeof buf)
         chunk = sizeof buf;
       memcpy (buf, p + off, chunk);
-      got = easy->write_cb (buf, 1, chunk, easy->write_data);
+      got = transfer->write_cb (buf, 1, chunk, transfer->write_data);
       if (got < chunk)
         return TWIST_ERR_ABORTED;
       off += chunk;
     }
-  twist_easy_downloaded (easy, n);
+  twist_transfer_downloaded (transfer, n);
   return TWIST_OK;
 }
 
@@ -773,7 +773,7 @@ on_prim (struct twist_ldap *l, uint8_t tag, const uint8_t *p, size_t n)
       if (rc != TWIST_OK)
         return rc;
       l->saw_code = 1;
-      l->easy->http_code = l->result_code;
+      l->transfer->http_code = l->result_code;
       return TWIST_OK;
     }
   if (tag == 0x87 && l->in_bind)
@@ -1007,10 +1007,10 @@ ldap_connected (struct twist_endpoint *ep)
   l->ep = ep;
   if (l->implicit_tls)
     {
-      rc = twist_connection_start_tls (ep->conn, l->easy->url->host,
-                                       l->easy->verifypeer, NULL, 0,
-                                       l->easy->cainfo, l->easy->capath, l->easy->sslcert,
-                                       l->easy->sslkey);
+      rc = twist_connection_start_tls (ep->conn, l->transfer->url->host,
+                                       l->transfer->verifypeer, NULL, 0,
+                                       l->transfer->cainfo, l->transfer->capath, l->transfer->sslcert,
+                                       l->transfer->sslkey);
       if (rc != TWIST_OK)
         ldap_complete (l, rc);
       return;
@@ -1084,23 +1084,23 @@ twist_ldap_free (void *p)
 }
 
 struct twist_ldap *
-twist_ldap_new (struct twist_easy *easy, int live)
+twist_ldap_new (struct twist_transfer *transfer, int live)
 {
   struct twist_ldap *l;
   int rc;
 
   (void) live;
-  if (easy == NULL || easy->url == NULL)
+  if (transfer == NULL || transfer->url == NULL)
     return NULL;
   l = calloc (1, sizeof *l);
   if (l == NULL)
     return NULL;
-  l->easy = easy;
+  l->transfer = transfer;
   l->next_id = 1;
-  l->implicit_tls = easy->url->scheme != NULL
-                    && strcmp (easy->url->scheme, "ldaps") == 0;
-  easy->xfer = l;
-  easy->xfer_free = twist_ldap_free;
+  l->implicit_tls = transfer->url->scheme != NULL
+                    && strcmp (transfer->url->scheme, "ldaps") == 0;
+  transfer->state = l;
+  transfer->state_free = twist_ldap_free;
   rc = take_url (l);
   if (rc == TWIST_OK)
     rc = start_auth (l);
@@ -1110,18 +1110,18 @@ twist_ldap_new (struct twist_easy *easy, int live)
 }
 
 int
-twist_ldap_attach (struct twist_easy *easy)
+twist_ldap_attach (struct twist_transfer *transfer)
 {
   struct twist_ldap *l;
   int rc;
 
-  l = twist_ldap_new (easy, 1);
+  l = twist_ldap_new (transfer, 1);
   if (l == NULL)
     return TWIST_ERR_NOMEM;
   if (l->finished)
-    return easy->result;
-  rc = twist_mail_link_open (&l->link, easy, &ldap_handler, l, ldap_fail);
+    return transfer->result;
+  rc = twist_mail_link_open (&l->link, transfer, &ldap_handler, l, ldap_fail);
   if (rc != TWIST_OK)
     ldap_complete (l, rc);
-  return easy->done ? easy->result : TWIST_OK;
+  return transfer->done ? transfer->result : TWIST_OK;
 }

@@ -44,7 +44,7 @@ enum
 
 struct twist_mqtt
 {
-  struct twist_easy *easy;
+  struct twist_transfer *transfer;
   struct twist_mail_link link;
   struct twist_endpoint *ep;
   int implicit_tls;
@@ -72,7 +72,7 @@ mqtt_complete (struct twist_mqtt *m, int err)
     return;
   m->finished = 1;
   m->in_payload = 0;
-  twist_easy_finish (m->easy, err);
+  twist_transfer_finish (m->transfer, err);
 }
 
 static int
@@ -166,7 +166,7 @@ percent (const char *in, char *out, size_t cap)
 static int
 take_topic (struct twist_mqtt *m)
 {
-  const char *path = m->easy->url->path;
+  const char *path = m->transfer->url->path;
   char buf[MQTT_TOPIC];
   const char *p;
   int rc;
@@ -191,8 +191,8 @@ send_connect (struct twist_mqtt *m)
   uint8_t b[MQTT_CMD];
   size_t n = 0;
   size_t rem;
-  const char *user = twist_mail_user (m->easy);
-  const char *pass = twist_mail_pass (m->easy);
+  const char *user = twist_mail_user (m->transfer);
+  const char *pass = twist_mail_pass (m->transfer);
   int flags = 0x02;
   int rc;
 
@@ -251,14 +251,14 @@ flush_connect (struct twist_mqtt *m)
 static int
 deliver (struct twist_mqtt *m, const uint8_t *data, size_t len)
 {
-  struct twist_easy *easy = m->easy;
+  struct twist_transfer *transfer = m->transfer;
   size_t off = 0;
 
   if (len == 0)
     return TWIST_OK;
-  if (easy->write_cb == NULL)
+  if (transfer->write_cb == NULL)
     {
-      twist_easy_downloaded (easy, len);
+      twist_transfer_downloaded (transfer, len);
       return TWIST_OK;
     }
   while (off < len)
@@ -270,32 +270,33 @@ deliver (struct twist_mqtt *m, const uint8_t *data, size_t len)
       if (chunk > sizeof buf)
         chunk = sizeof buf;
       memcpy (buf, data + off, chunk);
-      n = easy->write_cb (buf, 1, chunk, easy->write_data);
+      n = transfer->write_cb (buf, 1, chunk, transfer->write_data);
       if (n < chunk)
         return TWIST_ERR_ABORTED;
       off += chunk;
     }
-  twist_easy_downloaded (easy, len);
+  twist_transfer_downloaded (transfer, len);
   return TWIST_OK;
 }
 
 static int
-body_len (struct twist_easy *easy, const uint8_t **ptr, uint8_t **owned,
+body_len (struct twist_transfer *transfer, const uint8_t **ptr,
+          uint8_t **owned,
           size_t *len)
 {
   *owned = NULL;
   *ptr = NULL;
   *len = 0;
-  if (easy->postfields != NULL)
+  if (transfer->postfields != NULL)
     {
-      *ptr = (const uint8_t *) easy->postfields;
-      if (easy->postfieldsize_set && easy->postfieldsize >= 0)
-        *len = (size_t) easy->postfieldsize;
+      *ptr = (const uint8_t *) transfer->postfields;
+      if (transfer->postfieldsize_set && transfer->postfieldsize >= 0)
+        *len = (size_t) transfer->postfieldsize;
       else
-        *len = strlen (easy->postfields);
+        *len = strlen (transfer->postfields);
       return TWIST_OK;
     }
-  if (easy->read_cb == NULL)
+  if (transfer->read_cb == NULL)
     return TWIST_OK;
   *owned = malloc (MQTT_BODY);
   if (*owned == NULL)
@@ -303,8 +304,9 @@ body_len (struct twist_easy *easy, const uint8_t **ptr, uint8_t **owned,
   while (*len < MQTT_BODY)
     {
       size_t room = MQTT_BODY - *len;
-      size_t n = easy->read_cb ((char *) (*owned + *len), 1,
-                                room > 512 ? 512 : room, easy->read_data);
+      size_t n = transfer->read_cb ((char *) (*owned + *len), 1,
+                                    room > 512 ? 512 : room,
+                                    transfer->read_data);
 
       if (n == 0)
         break;
@@ -319,7 +321,7 @@ body_len (struct twist_easy *easy, const uint8_t **ptr, uint8_t **owned,
   if (*len == MQTT_BODY)
     {
       char extra;
-      size_t n = easy->read_cb (&extra, 1, 1, easy->read_data);
+      size_t n = transfer->read_cb (&extra, 1, 1, transfer->read_data);
 
       if (n != 0)
         {
@@ -340,7 +342,7 @@ after_connack (struct twist_mqtt *m)
   size_t tlen = strlen (m->topic);
   int rc;
 
-  if (m->easy->postfields != NULL || m->easy->read_cb != NULL)
+  if (m->transfer->postfields != NULL || m->transfer->read_cb != NULL)
     {
       const uint8_t *payload = NULL;
       uint8_t *owned = NULL;
@@ -348,10 +350,10 @@ after_connack (struct twist_mqtt *m)
       size_t off = 0;
       static const uint8_t disc[] = { 0xe0, 0x00 };
 
-      rc = body_len (m->easy, &payload, &owned, &plen);
+      rc = body_len (m->transfer, &payload, &owned, &plen);
       if (rc != TWIST_OK)
         return rc;
-      twist_progress_ul_size (m->easy, (long long) plen);
+      twist_progress_ul_size (m->transfer, (long long) plen);
       hdr[n++] = 0x30;
       rc = put_varint (hdr, sizeof hdr, &n, 2 + tlen + plen);
       if (rc == TWIST_OK)
@@ -370,7 +372,7 @@ after_connack (struct twist_mqtt *m)
       free (owned);
       if (rc != TWIST_OK)
         return rc;
-      twist_progress_uploaded (m->easy, plen);
+      twist_progress_uploaded (m->transfer, plen);
       rc = mqtt_out (m, disc, sizeof disc, 0);
       if (rc != TWIST_OK)
         return rc;
@@ -404,7 +406,7 @@ on_packet (struct twist_mqtt *m, unsigned type, const uint8_t *body,
       if (m->state != MQ_CONNACK || n != 2)
         return TWIST_ERR_PROTOCOL;
       code = body[1];
-      m->easy->http_code = (long) code;
+      m->transfer->http_code = (long) code;
       if (code != 0)
         return code == 4 || code == 5 ? TWIST_ERR_AUTH : TWIST_ERR_PROTOCOL;
       return after_connack (m);
@@ -646,10 +648,10 @@ mqtt_connected (struct twist_endpoint *ep)
   m->ep = ep;
   if (m->implicit_tls)
     {
-      rc = twist_connection_start_tls (ep->conn, m->easy->url->host,
-                                       m->easy->verifypeer, NULL, 0,
-                                       m->easy->cainfo, m->easy->capath, m->easy->sslcert,
-                                       m->easy->sslkey);
+      rc = twist_connection_start_tls (ep->conn, m->transfer->url->host,
+                                       m->transfer->verifypeer, NULL, 0,
+                                       m->transfer->cainfo, m->transfer->capath, m->transfer->sslcert,
+                                       m->transfer->sslkey);
       if (rc != TWIST_OK)
         mqtt_complete (m, rc);
       return;
@@ -722,22 +724,22 @@ twist_mqtt_free (void *p)
 }
 
 struct twist_mqtt *
-twist_mqtt_new (struct twist_easy *easy, int live)
+twist_mqtt_new (struct twist_transfer *transfer, int live)
 {
   struct twist_mqtt *m;
   int rc;
 
   (void) live;
-  if (easy == NULL || easy->url == NULL)
+  if (transfer == NULL || transfer->url == NULL)
     return NULL;
   m = calloc (1, sizeof *m);
   if (m == NULL)
     return NULL;
-  m->easy = easy;
-  m->implicit_tls = easy->url->scheme != NULL
-                    && strcmp (easy->url->scheme, "mqtts") == 0;
-  easy->xfer = m;
-  easy->xfer_free = twist_mqtt_free;
+  m->transfer = transfer;
+  m->implicit_tls = transfer->url->scheme != NULL
+                    && strcmp (transfer->url->scheme, "mqtts") == 0;
+  transfer->state = m;
+  transfer->state_free = twist_mqtt_free;
   rc = take_topic (m);
   if (rc == TWIST_OK && m->ep == NULL)
     rc = send_connect (m);
@@ -747,18 +749,18 @@ twist_mqtt_new (struct twist_easy *easy, int live)
 }
 
 int
-twist_mqtt_attach (struct twist_easy *easy)
+twist_mqtt_attach (struct twist_transfer *transfer)
 {
   struct twist_mqtt *m;
   int rc;
 
-  m = twist_mqtt_new (easy, 1);
+  m = twist_mqtt_new (transfer, 1);
   if (m == NULL)
     return TWIST_ERR_NOMEM;
   if (m->finished)
-    return easy->result;
-  rc = twist_mail_link_open (&m->link, easy, &mqtt_handler, m, mqtt_fail);
+    return transfer->result;
+  rc = twist_mail_link_open (&m->link, transfer, &mqtt_handler, m, mqtt_fail);
   if (rc != TWIST_OK)
     mqtt_complete (m, rc);
-  return easy->done ? easy->result : TWIST_OK;
+  return transfer->done ? transfer->result : TWIST_OK;
 }

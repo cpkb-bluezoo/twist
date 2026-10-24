@@ -57,24 +57,24 @@ fuzz_seeds (void (*add) (const void *, size_t))
 int
 LLVMFuzzerTestOneInput (const uint8_t *data, size_t size)
 {
-  twist_easy *easy;
+  twist_transfer *transfer;
   void *obj;
 
   if (size == 0)
     return 0;
-  easy = twist_easy_init ();
-  if (easy == NULL)
+  transfer = twist_transfer_new ();
+  if (transfer == NULL)
     abort ();
-  if (twist_url_parse_int ("smtp://alice:secret@127.0.0.1", &easy->url) != TWIST_OK)
+  if (twist_url_parse_int ("smtp://alice:secret@127.0.0.1", &transfer->url) != TWIST_OK)
     abort ();
-  easy->write_cb = fuzz_sink;
-  easy->mail_from = twist_strdup ("a@b");
-  easy->mail_rcpt = twist_slist_append (NULL, "c@d");
-  easy->postfields = (char[]) { 'H', 'i', '\r', '\n', '.', 'x', '\r', '\n', 0 };
+  transfer->write_cb = fuzz_sink;
+  transfer->mail_from = twist_strdup ("a@b");
+  transfer->mail_rcpt = twist_slist_append (NULL, "c@d");
+  transfer->postfields = (char[]) { 'H', 'i', '\r', '\n', '.', 'x', '\r', '\n', 0 };
   /* The top two bits say whether TLS is wanted, and the handshake of an
      upgrade, if there is one, finishes half way through.  */
-  easy->use_ssl = (data[0] >> 6) % 3;
-  obj = twist_smtp_new (easy, 0);
+  transfer->use_ssl = (data[0] >> 6) % 3;
+  obj = twist_smtp_new (transfer, 0);
   if (obj == NULL)
     abort ();
   fuzz_feed ((fuzz_recv) twist_smtp_receive, obj, data + 1, (size - 1) / 2,
@@ -82,9 +82,9 @@ LLVMFuzzerTestOneInput (const uint8_t *data, size_t size)
   twist_smtp_tls_done (obj);
   fuzz_feed ((fuzz_recv) twist_smtp_receive, obj, data + 1 + (size - 1) / 2,
              size - 1 - (size - 1) / 2, fuzz_piece (data[0], size));
-  twist_slist_free_all (easy->mail_rcpt);
-  easy->mail_rcpt = NULL;
-  easy->postfields = NULL;
-  twist_easy_cleanup (easy);
+  twist_slist_free_all (transfer->mail_rcpt);
+  transfer->mail_rcpt = NULL;
+  transfer->postfields = NULL;
+  twist_transfer_free (transfer);
   return 0;
 }

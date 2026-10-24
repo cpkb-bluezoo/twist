@@ -96,7 +96,7 @@ test_ws (void)
 {
   char *accept = NULL;
   struct twist_ws *ws;
-  struct twist_easy *easy;
+  struct twist_transfer *transfer;
   static const uint8_t hello[] = {
     0x81, 0x05, 'H', 'e', 'l', 'l', 'o'
   };
@@ -115,16 +115,16 @@ test_ws (void)
   check (twist_ws_validate ("dGhlIHNhbXBsZSBub25jZQ==", "websocket",
                             "Upgrade", "nope") == TWIST_ERR_PROTOCOL,
          "ws bad accept");
-  easy = twist_easy_init ();
-  easy->write_cb = mail_write;
+  transfer = twist_transfer_new ();
+  transfer->write_cb = mail_write;
   mail_body_len = 0;
   ws_out_n = 0;
   ws_done_n = 0;
-  ws = twist_ws_new (easy, ws_sink, NULL, ws_finished, NULL);
+  ws = twist_ws_new (transfer, ws_sink, NULL, ws_finished, NULL);
   feed_bin (ws_recv, ws, hello, sizeof hello, 1);
   check (mail_body_len == 5 && memcmp (mail_body, "Hello", 5) == 0,
          "ws text");
-  check (easy->progress.downloaded == 5, "ws progress");
+  check (transfer->progress.downloaded == 5, "ws progress");
   feed_bin (ws_recv, ws, ping, sizeof ping, 1);
   check (ws_out_n == 7 && (ws_out[0] & 0x0f) == 0x0a
          && (ws_out[1] & 0x80) != 0
@@ -136,7 +136,7 @@ test_ws (void)
   check (ws_out_n == 6 && (ws_out[0] & 0x0f) == 0x08
          && (ws_out[1] & 0x80) != 0, "ws close frame");
   twist_ws_free (ws);
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
   {
     struct twist_slist *extra = NULL;
     struct twist_h1_events ev;

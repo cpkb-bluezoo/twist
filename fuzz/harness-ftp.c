@@ -59,7 +59,7 @@ LLVMFuzzerTestOneInput (const uint8_t *data, size_t size)
   struct twist_ftp_events ev;
   struct twist_ftp_parser *p;
   struct twist_dns_addr peer;
-  twist_easy *easy;
+  twist_transfer *transfer;
   struct twist_ftp *f;
   char host[64], *text;
   int port;
@@ -91,18 +91,18 @@ LLVMFuzzerTestOneInput (const uint8_t *data, size_t size)
       rest = cut + 1;
       restn = size - 1 - n - 1;
     }
-  easy = twist_easy_init ();
-  if (easy == NULL
+  transfer = twist_transfer_new ();
+  if (transfer == NULL
       || twist_url_parse_int ((data[0] & 3) == 0 ? "ftp://127.0.0.1/pub/file.txt"
                               : (data[0] & 3) == 1 ? "ftp://alice:secret@127.0.0.1/pub/"
                               : "ftp://alice:secret@127.0.0.1/pub/f;type=a",
-                              &easy->url) != TWIST_OK)
+                              &transfer->url) != TWIST_OK)
     abort ();
-  easy->write_cb = fuzz_sink;
+  transfer->write_cb = fuzz_sink;
   /* The top two bits say whether TLS is wanted, and the handshake of an
      upgrade, if there is one, finishes half way through the replies.  */
-  easy->use_ssl = (data[0] >> 6) % 3;
-  f = twist_ftp_new (easy, 0);
+  transfer->use_ssl = (data[0] >> 6) % 3;
+  f = twist_ftp_new (transfer, 0);
   if (f == NULL)
     abort ();
   memset (&peer, 0, sizeof peer);
@@ -125,6 +125,6 @@ LLVMFuzzerTestOneInput (const uint8_t *data, size_t size)
                  fuzz_piece (data[0] >> 4, size));
       twist_ftp_data_eof (f);
     }
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
   return 0;
 }

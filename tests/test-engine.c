@@ -33,6 +33,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -275,15 +276,15 @@ test_url_userinfo (void)
 static void
 test_connect_timeout_default (void)
 {
-  twist_easy *easy = twist_easy_init ();
+  twist_transfer *transfer = twist_transfer_new ();
 
-  check (easy != NULL && easy->connect_timeout_ms == 300000,
+  check (transfer != NULL && transfer->connect_timeout_ms == 300000,
          "a connect timeout by default");
-  twist_easy_setopt (easy, TWISTOPT_CONNECTTIMEOUT_MS, 5000L);
-  check (easy->connect_timeout_ms == 5000, "set");
-  twist_easy_setopt (easy, TWISTOPT_CONNECTTIMEOUT_MS, 0L);
-  check (easy->connect_timeout_ms == 300000, "0 is the default");
-  twist_easy_cleanup (easy);
+  twist_transfer_setopt (transfer, TWISTOPT_CONNECTTIMEOUT_MS, 5000L);
+  check (transfer->connect_timeout_ms == 5000, "set");
+  twist_transfer_setopt (transfer, TWISTOPT_CONNECTTIMEOUT_MS, 0L);
+  check (transfer->connect_timeout_ms == 300000, "0 is the default");
+  twist_transfer_free (transfer);
 }
 
 static void
@@ -1030,34 +1031,68 @@ test_conn_pool (void)
   twist_loop_free (loop);
 }
 
-static int
-on_multi_socket (twist_easy *easy, int fd, int what, void *user, void *socketp)
+/* What a runtime made for a program that polls tells it.  */
+struct hooks
 {
-  int *saw = user;
+  twist_runtime *runtime;
+  int watches;
+  int removes;
+  int last_fd;
+  int last_what;
+  int timers;
+  long last_ms;
+  int recursive_rc;
+};
 
-  (void) easy;
-  (void) fd;
-  (void) what;
-  (void) socketp;
-  if (saw != NULL)
-    *saw = 1;
-  return 0;
+static void
+hook_watch (int fd, int what, void *user)
+{
+  struct hooks *h = user;
+
+  h->watches++;
+  h->last_fd = fd;
+  h->last_what = what;
+  if (what == TWIST_POLL_REMOVE)
+    h->removes++;
 }
 
 static void
-test_multi_perform (void)
+hook_timer (long ms, void *user)
 {
-  struct twist_multi *multi = twist_multi_init ();
-  int running = -1;
-  int saw = 0;
+  struct hooks *h = user;
 
-  check (multi != NULL, "multi");
-  check (twist_multi_perform (multi, &running) == TWIST_OK && running == 0,
-         "multi perform");
-  twist_multi_setopt (multi, TWISTMOPT_SOCKETDATA, &saw);
-  twist_multi_setopt (multi, TWISTMOPT_SOCKETFUNCTION, on_multi_socket);
-  check (saw == 1, "multi waker");
-  twist_multi_cleanup (multi);
+  h->timers++;
+  h->last_ms = ms;
+  h->recursive_rc = twist_runtime_on_timer (h->runtime);
+}
+
+static void
+test_runtime_run_once (void)
+{
+  struct twist_runtime *runtime = twist_runtime_new ();
+  struct twist_runtime *emb;
+  struct hooks h;
+
+  check (runtime != NULL, "runtime");
+  check (twist_runtime_run_once (runtime, 0) == TWIST_OK,
+         "run once with nothing to do");
+  check (twist_runtime_on_ready (runtime, 0, TWIST_POLL_IN) == TWIST_ERR_INVAL
+         && twist_runtime_on_timer (runtime) == TWIST_ERR_INVAL,
+         "a handle with a poller is not driven by the program");
+  twist_runtime_free (runtime);
+
+  memset (&h, 0, sizeof h);
+  emb = twist_runtime_new_embedded (hook_watch, hook_timer, &h);
+  h.runtime = emb;
+  check (emb != NULL, "embedded runtime");
+  check (h.watches == 1 && h.last_what == TWIST_POLL_IN && h.last_fd >= 0,
+         "an embedded handle tells the program of the descriptor that wakes it");
+  check (twist_runtime_run_once (emb, 0) == TWIST_ERR_INVAL,
+         "and has no loop of its own to run");
+  check (twist_runtime_new_embedded (NULL, hook_timer, NULL) == NULL
+         && twist_runtime_new_embedded (hook_watch, NULL, NULL) == NULL,
+         "both hooks are required");
+  twist_runtime_free (emb);
 }
 
 /* A TCP listener on the loopback that never answers.  A transfer to it
@@ -1086,35 +1121,37 @@ listen_loopback (int *port)
   return fd;
 }
 
-static twist_easy *
-timeout_easy (int port)
+static twist_transfer *
+timeout_transfer (int port)
 {
-  twist_easy *easy = twist_easy_init ();
+  twist_transfer *transfer = twist_transfer_new ();
   char url[64];
 
   snprintf (url, sizeof url, "mqtt://127.0.0.1:%d/x", port);
-  twist_easy_setopt (easy, TWISTOPT_URL, url);
-  twist_easy_setopt (easy, TWISTOPT_TIMEOUT_MS, 200L);
-  return easy;
+  twist_transfer_setopt (transfer, TWISTOPT_URL, url);
+  twist_transfer_setopt (transfer, TWISTOPT_TIMEOUT_MS, 200L);
+  return transfer;
 }
 
-/* The state of a transfer owns its connection, and the connection is
-   released against the loop.  So the state must be released when the easy
-   handle leaves the loop, not later with the handle: by then the loop is
-   gone and the release reads freed memory.  */
-/* The multi interface called from a callback.  A write callback runs inside
-   the delivery of the transfer's own data, so a handle removed or cleaned up
-   there is freed under the code that called it.  curl forbids this and
-   answers CURLM_RECURSIVE_API_CALL; so does twist, with
-   TWIST_ERR_RECURSIVE, and the transfer goes on and ends as it would have.  */
-static twist_multi *cb_multi;
-static twist_easy *cb_easy;
-static int cb_remove_rc;
+/* The runtime called from a callback.  A write callback runs inside the
+   delivery of the transfer's own data, so a handle freed there, or a loop run
+   again there, is freed or entered under the code that called it.  Those are
+   refused (the first with TWIST_ERR_RECURSIVE), and the transfer goes on and
+   ends as it would have.  Starting another transfer touches only that one,
+   and is allowed: a callback is where the next transfer is started.  */
+static twist_runtime *cb_runtime;
+static twist_transfer *cb_transfer;
+static twist_transfer *cb_second;
+static struct check_job cb_second_job;
+static int cb_run_rc;
+static int cb_start_rc;
+static int cb_attached;
 static int cb_calls;
 static size_t cb_bytes;
+static size_t cb_bytes2;
 
 static size_t
-call_multi_in_callback (char *ptr, size_t size, size_t nmemb, void *user)
+call_runtime_in_callback (char *ptr, size_t size, size_t nmemb, void *user)
 {
   (void) ptr;
   (void) user;
@@ -1122,26 +1159,36 @@ call_multi_in_callback (char *ptr, size_t size, size_t nmemb, void *user)
   cb_bytes += size * nmemb;
   if (cb_calls == 1)
     {
-      cb_remove_rc = twist_multi_remove_handle (cb_multi, cb_easy);
-      /* Not freed either, since it is still in use; this must not crash.  */
-      twist_easy_cleanup (cb_easy);
+      cb_run_rc = twist_runtime_run_once (cb_runtime, 0);
+      /* Neither is done, since the call that is running needs both; this
+         must not crash.  */
+      twist_runtime_free (cb_runtime);
+      twist_transfer_free (cb_transfer);
+      cb_attached = cb_transfer->runtime == cb_runtime;
+      cb_start_rc = twist_runtime_start (cb_runtime, cb_second, check_job_done,
+                                         &cb_second_job);
     }
   return size * nmemb;
 }
 
+static size_t
+second_body (char *ptr, size_t size, size_t nmemb, void *user)
+{
+  (void) ptr;
+  (void) user;
+  cb_bytes2 += size * nmemb;
+  return size * nmemb;
+}
+
 static void
-test_multi_from_callback (void)
+test_runtime_from_callback (void)
 {
   char path[] = "/tmp/twist-recursive-XXXXXX";
   char url[128];
   char block[1024];
-  struct timespec nap = { 0, 5000000 };
   int fd = mkstemp (path);
-  int running = 1;
   int i;
-  int result = -1;
-  twist_easy *seen = NULL;
-  int msgs = 0;
+  struct check_job job = { 0, 0, 0 };
 
   check (fd >= 0, "a file to read");
   if (fd < 0)
@@ -1153,247 +1200,260 @@ test_multi_from_callback (void)
   close (fd);
   snprintf (url, sizeof url, "file://%s", path);
 
-  cb_multi = twist_multi_init ();
-  cb_easy = twist_easy_init ();
-  cb_remove_rc = -99;
+  cb_runtime = twist_runtime_new ();
+  cb_transfer = twist_transfer_new ();
+  cb_second = twist_transfer_new ();
+  memset (&cb_second_job, 0, sizeof cb_second_job);
+  cb_run_rc = cb_start_rc = -99;
+  cb_attached = 0;
   cb_calls = 0;
-  cb_bytes = 0;
-  twist_easy_setopt (cb_easy, TWISTOPT_URL, url);
-  twist_easy_setopt (cb_easy, TWISTOPT_WRITEFUNCTION, call_multi_in_callback);
-  check (twist_multi_add_handle (cb_multi, cb_easy) == TWIST_OK, "add");
-  for (i = 0; i < 400 && running > 0; i++)
-    {
-      twist_multi_perform (cb_multi, &running);
-      nanosleep (&nap, NULL);
-    }
+  cb_bytes = cb_bytes2 = 0;
+  twist_transfer_setopt (cb_transfer, TWISTOPT_URL, url);
+  twist_transfer_setopt (cb_transfer, TWISTOPT_WRITEFUNCTION,
+                         call_runtime_in_callback);
+  twist_transfer_setopt (cb_second, TWISTOPT_URL, url);
+  twist_transfer_setopt (cb_second, TWISTOPT_WRITEFUNCTION, second_body);
+  check (twist_runtime_start (cb_runtime, cb_transfer, check_job_done, &job)
+         == TWIST_OK, "start");
+  for (i = 0; i < 400 && !(job.done && cb_second_job.done); i++)
+    twist_runtime_run_once (cb_runtime, 5);
   check (cb_calls > 0, "the write callback ran");
-  check (cb_remove_rc == TWIST_ERR_RECURSIVE,
-         "removing the handle from a callback is refused");
-  check (cb_easy->multi == cb_multi, "so it is still in its multi");
-  check (running == 0 && cb_easy->done && cb_bytes == 8 * sizeof block,
-         "and the transfer ended with all its data");
-  twist_multi_info_read (cb_multi, &msgs, &seen, &result);
-  check (seen == cb_easy && result == TWIST_OK, "and reported success");
-  check (twist_multi_remove_handle (cb_multi, cb_easy) == TWIST_OK,
-         "it can be removed once the call has returned");
-  twist_multi_cleanup (cb_multi);
-  twist_easy_cleanup (cb_easy);
+  check (cb_run_rc == TWIST_ERR_RECURSIVE,
+         "running the loop from a callback is refused");
+  check (cb_attached, "and so is freeing the handle: it is still in its runtime");
+  check (job.done && job.calls == 1 && job.result == TWIST_OK
+         && cb_bytes == 8 * sizeof block,
+         "and the transfer ended with all its data, once reported");
+  check (cb_start_rc == TWIST_OK, "starting another from a callback is not");
+  check (cb_second_job.done && cb_second_job.result == TWIST_OK
+         && cb_second_job.calls == 1 && cb_bytes2 == 8 * sizeof block,
+         "and the other ran, and was reported");
+  check (cb_transfer->runtime == NULL && cb_second->runtime == NULL,
+         "a handle that has been reported is in no runtime");
+  twist_transfer_free (cb_transfer);
+  twist_transfer_free (cb_second);
+  twist_runtime_free (cb_runtime);
   unlink (path);
 }
 
-/* A handle cleaned up while it is still in a multi leaves it first, as curl's
-   does.  It used to stay in the list as a pointer to freed memory, which
-   twist_multi_cleanup then read.  */
+/* A handle cleaned up while it is still in a runtime leaves it first, and is
+   not reported.  It used to stay in the list as a pointer to freed memory,
+   which twist_runtime_free then read.  */
 static void
-test_cleanup_handle_in_multi (void)
+test_cleanup_handle_in_runtime (void)
 {
-  twist_multi *multi = twist_multi_init ();
-  twist_easy *easy = twist_easy_init ();
+  twist_runtime *runtime = twist_runtime_new ();
+  twist_transfer *transfer = twist_transfer_new ();
+  struct check_job job = { 0, 0, 0 };
 
-  twist_easy_setopt (easy, TWISTOPT_URL, "file:///nonexistent/twist");
-  check (twist_multi_add_handle (multi, easy) == TWIST_OK, "add");
-  twist_easy_cleanup (easy);
-  check (multi->n_easies == 0, "a cleaned up handle left its multi");
-  twist_multi_cleanup (multi);
+  twist_transfer_setopt (transfer, TWISTOPT_URL, "file:///nonexistent/twist");
+  check (twist_runtime_start (runtime, transfer, check_job_done,
+                              &job) == TWIST_OK,
+         "start");
+  check (twist_runtime_start (runtime, transfer, NULL,
+                              NULL) == TWIST_ERR_INVAL,
+         "a handle in a runtime cannot be started again");
+  twist_transfer_free (transfer);
+  check (runtime->n_transfers == 0, "a cleaned up handle left its runtime");
+  twist_runtime_run_once (runtime, 0);
+  check (job.calls == 0, "and is not reported");
+  twist_runtime_free (runtime);
 }
 
-/* A share used from more than one thread: the cookie jar, the HSTS list and
-   the Alt-Svc list were not locked, whatever the share was told, and two
-   threads storing a cookie at once changed one list together.  With the
-   lock's bit set they take one lock; without it they are plain calls.  The
-   test holds the lock in one thread and has another store a cookie: the store
-   must wait for it.  */
-struct lock_rig
+/* A transfer that cannot begin is reported as any other is, from the loop and
+   not from the call that started it, so that there is one place to learn how
+   a transfer ended.  */
+static void
+test_start_failure (void)
 {
-  struct twist_share *share;
-  volatile int released;
-  volatile int after;
+  twist_runtime *runtime = twist_runtime_new ();
+  twist_transfer *transfer = twist_transfer_new ();
+  struct check_job job = { 0, 0, 0 };
+
+  check (twist_runtime_start (runtime, transfer, check_job_done,
+                              &job) == TWIST_OK,
+         "a handle with no URL starts");
+  check (job.calls == 0, "and is not reported by the call");
+  check (check_pump (runtime, &job, 2000) && job.calls == 1
+         && job.result == TWIST_ERR_URL, "but by the loop, once");
+  check (twist_runtime_cancel (runtime, transfer) == TWIST_ERR_INVAL,
+         "a handle that has been reported is not in the runtime");
+  twist_transfer_free (transfer);
+  twist_runtime_free (runtime);
+}
+
+/* The callback of a transfer that ends frees it and starts the next, which is
+   what a program that runs a list of them does.  Each is reported after the
+   one before has returned.  */
+struct chain
+{
+  twist_runtime *runtime;
+  twist_transfer *transfer[3];
+  int next;
+  int calls;
+  int depth;
+  int nested;
+  int failed;
 };
 
-static void *
-lock_store (void *arg)
+static void
+chain_done (twist_transfer *transfer, int result, void *user)
 {
-  struct lock_rig *r = arg;
+  struct chain *c = user;
 
-  twist_share_cookie_store (r->share, "k=v", "example.com", "/", 1);
-  r->after = r->released;
-  return NULL;
-}
-
-static int
-store_waits (unsigned bits)
-{
-  struct lock_rig r;
-  struct timespec nap = { 0, 150000000 };
-  pthread_t t;
-
-  r.share = twist_share_init ();
-  r.released = 0;
-  r.after = -1;
-  if (r.share == NULL)
-    return -1;
-  if (bits != 0)
-    twist_share_setopt (r.share, bits);
-  twist_share_data_lock (r.share, TWIST_LOCK_DATA_COOKIE);
-  if (pthread_create (&t, NULL, lock_store, &r) != 0)
-    return -1;
-  nanosleep (&nap, NULL);
-  r.released = 1;
-  twist_share_data_unlock (r.share, TWIST_LOCK_DATA_COOKIE);
-  pthread_join (t, NULL);
-  twist_share_cleanup (r.share);
-  return r.after;
+  if (c->depth++ > 0)
+    c->nested++;
+  c->calls++;
+  if (result == TWIST_OK)
+    c->failed++;
+  twist_transfer_free (transfer);
+  if (c->next < 3
+      && twist_runtime_start (c->runtime, c->transfer[c->next++], chain_done,
+                              c)
+         != TWIST_OK)
+    c->failed++;
+  c->depth--;
 }
 
 static void
-test_share_data_locks (void)
+test_done_chain (void)
 {
-  char out[32];
-  twist_share *share = twist_share_init ();
-  char *hdr = NULL;
+  struct chain c;
+  int i;
 
-  check (store_waits (TWIST_LOCK_DATA_COOKIE) == 1,
-         "with the cookie lock on, a store waits for it");
-  check (store_waits (0) == 0,
-         "and without it does not, which costs a single thread nothing");
-  check (store_waits (TWIST_LOCK_DATA_DNS) == 0,
-         "another lock's bit is not this one");
-  /* The calls do what they did.  */
-  twist_share_setopt (share, TWIST_LOCK_DATA_COOKIE | TWIST_LOCK_DATA_HSTS
-                             | TWIST_LOCK_DATA_ALT_SVC);
-  check (twist_share_cookie_store (share, "a=b", "h.example", "/", 1) == TWIST_OK
-         && twist_share_cookie_header (share, "h.example", "/", 1, &hdr)
-         == TWIST_OK && hdr != NULL && strstr (hdr, "a=b") != NULL,
-         "a cookie is kept and sent");
-  free (hdr);
-  check (twist_share_altsvc_note (share, "h.example", "h3:443") == TWIST_OK
-         && twist_share_altsvc_lookup (share, "h.example", out, sizeof out) == 1
-         && strcmp (out, "h3:443") == 0
-         && twist_share_altsvc_lookup (share, "other.example", out, sizeof out)
-         == 0, "an Alt-Svc entry is kept and copied out");
-  check (twist_share_hsts_upgrade (share, "h.example", 0) == 0,
-         "HSTS has none to apply");
-  twist_share_cleanup (share);
+  memset (&c, 0, sizeof c);
+  c.runtime = twist_runtime_new ();
+  for (i = 0; i < 3; i++)
+    {
+      c.transfer[i] = twist_transfer_new ();
+      twist_transfer_setopt (c.transfer[i], TWISTOPT_URL,
+                             "file:///nonexistent/twist");
+    }
+  c.next = 1;
+  check (twist_runtime_start (c.runtime, c.transfer[0], chain_done,
+                              &c) == TWIST_OK,
+         "start the first");
+  for (i = 0; i < 100 && c.calls < 3; i++)
+    twist_runtime_run_once (c.runtime, 5);
+  check (c.calls == 3 && c.failed == 0, "all three were reported, as failures");
+  check (c.nested == 0, "each after the one before had returned");
+  check (c.runtime->n_transfers == 0, "and the runtime holds none");
+  twist_runtime_free (c.runtime);
 }
 
+/* The state of a transfer owns its connection, and the connection is
+   released against the loop.  So the state must be released when the transfer
+   handle leaves the loop, not later with the handle: by then the loop is
+   gone and the release reads freed memory.  */
 static void
 test_release_transfer (void)
 {
   int port = 0;
   int fd = listen_loopback (&port);
   int peer;
-  twist_easy *easy;
-  twist_multi *multi;
+  twist_transfer *transfer;
+  twist_runtime *runtime;
+  struct check_job job = { 0, 0, 0 };
   struct timespec nap = { 0, 5000000 };
-  int running = 1;
   int i;
 
   check (fd >= 0, "loopback listener");
   if (fd < 0)
     return;
 
-  /* twist_easy_perform ends the transfer with the connection open.  */
-  easy = timeout_easy (port);
-  check (twist_easy_perform (easy) != TWIST_OK, "perform times out");
+  /* check_perform ends the transfer with the connection open.  */
+  transfer = timeout_transfer (port);
+  check (check_perform (transfer) != TWIST_OK, "perform times out");
   peer = accept (fd, NULL, NULL);
   check (peer >= 0, "the connection was open");
   if (peer >= 0)
     close (peer);
-  check (easy->xfer == NULL, "perform releases the transfer state");
-  twist_easy_cleanup (easy);
+  check (transfer->state == NULL, "perform releases the transfer state");
+  twist_transfer_free (transfer);
 
-  /* The same through a multi handle that is removed.  */
-  multi = twist_multi_init ();
-  easy = timeout_easy (port);
-  check (twist_multi_add_handle (multi, easy) == TWIST_OK, "add handle");
-  for (i = 0; i < 400 && running > 0; i++)
+  /* The same through a runtime: by the time the loop reports the end,
+     the handle has let go of its state and is in no runtime.  */
+  runtime = twist_runtime_new ();
+  transfer = timeout_transfer (port);
+  check (twist_runtime_start (runtime, transfer, check_job_done,
+                              &job) == TWIST_OK,
+         "start");
+  check (check_pump (runtime, &job, 3000) && job.calls == 1
+         && job.result != TWIST_OK, "runtime transfer ended");
+  check (transfer->state == NULL, "the loop releases the transfer state");
+  check (transfer->runtime == NULL, "and the handle is in no runtime");
+  twist_runtime_free (runtime);
+  twist_transfer_free (transfer);
+
+  /* A transfer still in the runtime when it is cleaned up is dropped.  */
+  memset (&job, 0, sizeof job);
+  runtime = twist_runtime_new ();
+  transfer = timeout_transfer (port);
+  check (twist_runtime_start (runtime, transfer, check_job_done,
+                              &job) == TWIST_OK,
+         "start 2");
+  for (i = 0; i < 10; i++)
     {
-      twist_multi_perform (multi, &running);
+      twist_runtime_run_once (runtime, 0);
       nanosleep (&nap, NULL);
     }
-  check (running == 0 && easy->done, "multi transfer ended");
-  check (twist_multi_remove_handle (multi, easy) == TWIST_OK, "remove handle");
-  check (easy->xfer == NULL, "remove releases the transfer state");
-  twist_multi_cleanup (multi);
-  twist_easy_cleanup (easy);
-
-  /* Handles still in the multi when it is cleaned up.  */
-  multi = twist_multi_init ();
-  easy = timeout_easy (port);
-  check (twist_multi_add_handle (multi, easy) == TWIST_OK, "add handle 2");
-  for (i = 0; i < 400 && running > 0; i++)
-    {
-      twist_multi_perform (multi, &running);
-      nanosleep (&nap, NULL);
-    }
-  twist_multi_cleanup (multi);
-  check (easy->xfer == NULL, "multi cleanup releases the transfer state");
-  twist_easy_cleanup (easy);
+  twist_runtime_free (runtime);
+  check (transfer->state == NULL,
+         "runtime cleanup releases the transfer state");
+  check (transfer->runtime == NULL && job.calls == 0,
+         "and lets the handle go without reporting it");
+  twist_transfer_free (transfer);
   close (fd);
 }
 
-/* The timer callback tells a program driving the multi handle with
-   twist_multi_socket_action when to call it next.  It was called only from
-   twist_multi_perform, so such a program never heard from it.  It is called
-   when the deadline changes, after adding a handle and after each
-   twist_multi_socket_action, and not from inside itself.  */
-static int timer_calls;
-static long timer_last;
-static long timer_first;
-static int timer_recursive_rc;
-
-static int
-on_multi_timer (twist_multi *multi, long ms, void *user)
-{
-  (void) user;
-  if (timer_calls++ == 0)
-    timer_first = ms;
-  timer_last = ms;
-  timer_recursive_rc = twist_multi_perform (multi, NULL);
-  return 0;
-}
-
+/* A transfer that is cancelled closes its connection, and is reported, from
+   the loop, with TWIST_ERR_ABORTED.  */
 static void
-test_multi_timer_callback (void)
+test_cancel (void)
 {
-  struct timespec nap = { 0, 5000000 };
   int port = 0;
   int fd = listen_loopback (&port);
-  twist_multi *multi;
-  twist_easy *easy;
-  long ms = -2;
-  int running = 1;
-  int calls;
+  int peer = -1;
+  twist_runtime *runtime = twist_runtime_new ();
+  twist_transfer *transfer = timeout_transfer (port);
+  struct check_job job = { 0, 0, 0 };
+  struct timespec nap = { 0, 5000000 };
+  struct timeval tv = { 2, 0 };
+  char buf[64];
+  ssize_t n;
   int i;
 
-  check (fd >= 0, "timer listener");
-  multi = twist_multi_init ();
-  easy = timeout_easy (port);
-  twist_multi_setopt (multi, TWISTMOPT_TIMERFUNCTION, on_multi_timer);
-  check (twist_multi_add_handle (multi, easy) == TWIST_OK, "timer add");
-  check (timer_calls >= 1 && timer_first > 0,
-         "the timer callback hears of the deadline of a new handle");
-  calls = timer_calls;
-  twist_multi_timeout (multi, &ms);
-  check (ms <= timer_last && timer_last - ms < 100,
-         "and what it was told is what twist_multi_timeout says");
-  check (timer_recursive_rc == TWIST_ERR_RECURSIVE,
-         "a multi call from inside it is refused");
-  for (i = 0; i < 400 && running > 0; i++)
+  check (fd >= 0 && runtime != NULL, "cancel setup");
+  if (fd < 0)
+    return;
+  twist_transfer_setopt (transfer, TWISTOPT_TIMEOUT_MS, 30000L);
+  check (twist_runtime_start (runtime, transfer, check_job_done,
+                              &job) == TWIST_OK,
+         "start");
+  for (i = 0; i < 200 && peer < 0; i++)
     {
-      twist_multi_socket_action (multi, TWIST_SOCKET_TIMEOUT, 0, &running);
-      nanosleep (&nap, NULL);
+      twist_runtime_run_once (runtime, 0);
+      peer = accept (fd, NULL, NULL);
+      if (peer < 0)
+        nanosleep (&nap, NULL);
     }
-  check (running == 0, "the handle ended, with socket_action alone");
-  check (timer_calls > calls, "the callback was told again as the deadline moved");
-  twist_multi_timeout (multi, &ms);
-  check ((ms < 0 && timer_last < 0)
-         || (ms >= 0 && timer_last >= 0 && ms <= timer_last
-             && timer_last - ms < 100),
-         "the last thing it was told is the deadline now");
-  twist_multi_remove_handle (multi, easy);
-  twist_multi_cleanup (multi);
-  twist_easy_cleanup (easy);
+  check (peer >= 0, "the transfer connected");
+  check (twist_runtime_cancel (runtime, transfer) == TWIST_OK, "cancel");
+  check (!job.done, "it is reported by the loop, not by the call");
+  check (check_pump (runtime, &job, 3000) && job.calls == 1
+         && job.result == TWIST_ERR_ABORTED, "and reported once, as aborted");
+  check (twist_runtime_cancel (runtime, transfer) == TWIST_ERR_INVAL,
+         "a transfer that has ended cannot be cancelled");
+  if (peer >= 0)
+    {
+      setsockopt (peer, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+      while ((n = recv (peer, buf, sizeof buf, 0)) > 0)
+        ;
+      check (n == 0, "the connection was closed");
+      close (peer);
+    }
+  twist_transfer_free (transfer);
+  twist_runtime_free (runtime);
   close (fd);
 }
 
@@ -1403,59 +1463,70 @@ test_multi_timer_callback (void)
 static void
 test_unix_socket_options (void)
 {
-  twist_easy *easy = twist_easy_init ();
+  twist_transfer *transfer = twist_transfer_new ();
   char big[200];
 
   memset (big, 'a', sizeof big - 1);
   big[sizeof big - 1] = 0;
-  check (twist_easy_setopt (easy, TWISTOPT_UNIX_SOCKET, "/tmp/twist.sock")
+  check (twist_transfer_setopt (transfer, TWISTOPT_UNIX_SOCKET,
+                                "/tmp/twist.sock")
          == TWIST_OK, "a socket path");
-  check (twist_easy_setopt (easy, TWISTOPT_ABSTRACT_UNIX_SOCKET, "twist")
+  check (twist_transfer_setopt (transfer, TWISTOPT_ABSTRACT_UNIX_SOCKET,
+                                "twist")
          == TWIST_OK, "an abstract name");
-  check (twist_easy_setopt (easy, TWISTOPT_UNIX_SOCKET, big) == TWIST_ERR_INVAL,
+  check (twist_transfer_setopt (transfer, TWISTOPT_UNIX_SOCKET, big) == TWIST_ERR_INVAL,
          "a path too long for the address is refused");
-  check (twist_easy_setopt (easy, TWISTOPT_ABSTRACT_UNIX_SOCKET, big)
+  check (twist_transfer_setopt (transfer, TWISTOPT_ABSTRACT_UNIX_SOCKET, big)
          == TWIST_ERR_INVAL, "and so is a name");
-  check (twist_easy_setopt (easy, TWISTOPT_UNIX_SOCKET, NULL) == TWIST_OK
-         && twist_easy_setopt (easy, TWISTOPT_ABSTRACT_UNIX_SOCKET, "")
+  check (twist_transfer_setopt (transfer, TWISTOPT_UNIX_SOCKET,
+                                NULL) == TWIST_OK
+         && twist_transfer_setopt (transfer, TWISTOPT_ABSTRACT_UNIX_SOCKET, "")
          == TWIST_OK, "NULL and an empty string clear it");
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
 
   /* The URL's host is not looked up: a name that cannot be resolved fails to
      connect to the socket, which is not there.  */
-  easy = twist_easy_init ();
-  twist_easy_setopt (easy, TWISTOPT_URL, "http://no-such-host.invalid/");
-  twist_easy_setopt (easy, TWISTOPT_UNIX_SOCKET, "/nonexistent/twist.sock");
-  check (twist_easy_perform (easy) == TWIST_ERR_CONNECT,
+  transfer = twist_transfer_new ();
+  twist_transfer_setopt (transfer, TWISTOPT_URL,
+                         "http://no-such-host.invalid/");
+  twist_transfer_setopt (transfer, TWISTOPT_UNIX_SOCKET,
+                         "/nonexistent/twist.sock");
+  check (check_perform (transfer) == TWIST_ERR_CONNECT,
          "the host of the URL is not looked up");
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
 
   /* Proxies are not used.  */
-  easy = twist_easy_init ();
-  twist_easy_setopt (easy, TWISTOPT_URL, "http://no-such-host.invalid/");
-  twist_easy_setopt (easy, TWISTOPT_PROXY, "http://no-such-proxy.invalid:3128");
-  twist_easy_setopt (easy, TWISTOPT_UNIX_SOCKET, "/nonexistent/twist.sock");
-  check (twist_easy_perform (easy) == TWIST_ERR_CONNECT,
+  transfer = twist_transfer_new ();
+  twist_transfer_setopt (transfer, TWISTOPT_URL,
+                         "http://no-such-host.invalid/");
+  twist_transfer_setopt (transfer, TWISTOPT_PROXY, "http://no-such-proxy.invalid:3128");
+  twist_transfer_setopt (transfer, TWISTOPT_UNIX_SOCKET,
+                         "/nonexistent/twist.sock");
+  check (check_perform (transfer) == TWIST_ERR_CONNECT,
          "nor is a proxy used or looked up");
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
 
   /* Only the schemes of the HTTP handler.  */
-  easy = twist_easy_init ();
-  twist_easy_setopt (easy, TWISTOPT_URL, "ftp://no-such-host.invalid/x");
-  twist_easy_setopt (easy, TWISTOPT_UNIX_SOCKET, "/nonexistent/twist.sock");
-  check (twist_easy_perform (easy) == TWIST_ERR_UNSUPPORTED,
+  transfer = twist_transfer_new ();
+  twist_transfer_setopt (transfer, TWISTOPT_URL,
+                         "ftp://no-such-host.invalid/x");
+  twist_transfer_setopt (transfer, TWISTOPT_UNIX_SOCKET,
+                         "/nonexistent/twist.sock");
+  check (check_perform (transfer) == TWIST_ERR_UNSUPPORTED,
          "another scheme is refused, not sent over TCP");
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
 
   /* No QUIC over a Unix socket.  */
-  easy = twist_easy_init ();
-  twist_easy_setopt (easy, TWISTOPT_URL, "https://no-such-host.invalid/");
-  twist_easy_setopt (easy, TWISTOPT_HTTP_VERSION,
-                     (long) TWIST_HTTP_VERSION_3ONLY);
-  twist_easy_setopt (easy, TWISTOPT_UNIX_SOCKET, "/nonexistent/twist.sock");
-  check (twist_easy_perform (easy) == TWIST_ERR_UNSUPPORTED,
+  transfer = twist_transfer_new ();
+  twist_transfer_setopt (transfer, TWISTOPT_URL,
+                         "https://no-such-host.invalid/");
+  twist_transfer_setopt (transfer, TWISTOPT_HTTP_VERSION,
+                         (long) TWIST_HTTP_VERSION_3ONLY);
+  twist_transfer_setopt (transfer, TWISTOPT_UNIX_SOCKET,
+                         "/nonexistent/twist.sock");
+  check (check_perform (transfer) == TWIST_ERR_UNSUPPORTED,
          "HTTP/3 is refused");
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
 }
 
 /* A person's home: $HOME if it says, else what the password file says.
@@ -1506,22 +1577,22 @@ pool_done (void *user, int err)
   ++*(int *) user;
 }
 
-/* A job on the multi's storage pool whose completion is posted to its loop.
-   If the multi is cleaned up before the loop has run, the completion must
+/* A job on the runtime's storage pool whose completion is posted to its loop.
+   If the runtime is cleaned up before the loop has run, the completion must
    still be delivered: it owns the job and whatever the job carries, and
    dropping it with the loop leaks both.  The pool's threads are joined
    first, so every job has run and posted by then.  */
 static void
 test_pool_completion_at_cleanup (void)
 {
-  struct twist_multi *multi = twist_multi_init ();
+  struct twist_runtime *runtime = twist_runtime_new ();
   int done = 0, i;
 
-  check (multi != NULL, "multi");
+  check (runtime != NULL, "runtime");
   for (i = 0; i < 5; i++)
-    check (twist_storage_submit (multi->storage, pool_work, NULL, pool_done,
-                                 &done, multi->loop) == TWIST_OK, "submit");
-  twist_multi_cleanup (multi);
+    check (twist_storage_submit (runtime->storage, pool_work, NULL, pool_done,
+                                 &done, runtime->loop) == TWIST_OK, "submit");
+  twist_runtime_free (runtime);
   check (done == 5, "completions posted before cleanup are delivered");
 }
 
@@ -1542,7 +1613,6 @@ test_pool_eviction_stays_on_the_loop (void)
   int i, kept = 0, left_of_b = 0;
 
   check (a != NULL && b != NULL && pool != NULL, "eviction setup");
-  twist_pool_set_lock (pool, 1);
   for (i = 0; i < 20; i++)
     {
       snprintf (key, sizeof key, "a%d", i);
@@ -1596,6 +1666,8 @@ struct ka
   int stop;
   pthread_t thread;
   char host[128];		/* The Host header of the last request.  */
+  char cookie[128];		/* Its Cookie header, or nothing.  */
+  int set_cookie;		/* Answer with a cookie, sid=abc.  */
 };
 
 /* The Host header of a request, for the test to read once the transfer is
@@ -1617,6 +1689,27 @@ ka_note_host (struct ka *k, const char *request)
   __atomic_thread_fence (__ATOMIC_RELEASE);
 }
 
+/* The Cookie header of a request, for the test to read once the transfer is
+   over.  */
+static void
+ka_note_cookie (struct ka *k, const char *request)
+{
+  const char *h = strstr (request, "\r\nCookie: ");
+  size_t n;
+
+  k->cookie[0] = 0;
+  if (h != NULL)
+    {
+      h += 10;
+      n = strcspn (h, "\r");
+      if (n >= sizeof k->cookie)
+        n = sizeof k->cookie - 1;
+      memcpy (k->cookie, h, n);
+      k->cookie[n] = 0;
+    }
+  __atomic_thread_fence (__ATOMIC_RELEASE);
+}
+
 static void *
 ka_serve (void *arg)
 {
@@ -1624,6 +1717,9 @@ ka_serve (void *arg)
   static const char reply[] =
     "HTTP/1.1 200 OK\r\nContent-Length: 6\r\nContent-Type: text/plain\r\n\r\n"
     "hello\n";
+  static const char cookie_reply[] =
+    "HTTP/1.1 200 OK\r\nContent-Length: 6\r\nContent-Type: text/plain\r\n"
+    "Set-Cookie: sid=abc\r\n\r\nhello\n";
   struct pollfd fds[KA_MAX + 1];
   int i, n;
 
@@ -1676,7 +1772,10 @@ ka_serve (void *arg)
             {
               buf[got] = 0;
               ka_note_host (k, buf);
-              if (write (k->conns[i], reply, sizeof reply - 1) < 0)
+              ka_note_cookie (k, buf);
+              if (k->set_cookie
+                  ? write (k->conns[i], cookie_reply, sizeof cookie_reply - 1) < 0
+                  : write (k->conns[i], reply, sizeof reply - 1) < 0)
                 {
                   close (k->conns[i]);
                   k->conns[i] = -1;
@@ -1757,7 +1856,7 @@ static void
 test_http_ipv6_host (void)
 {
   struct ka k;
-  twist_easy *easy;
+  twist_transfer *transfer;
   char url[128], want[64];
   size_t total = 0;
   char *eff = NULL;
@@ -1768,58 +1867,245 @@ test_http_ipv6_host (void)
              stderr);
       return;
     }
-  easy = twist_easy_init ();
+  transfer = twist_transfer_new ();
   snprintf (url, sizeof url, "http://[::1]:%d/x", k.port);
-  twist_easy_setopt (easy, TWISTOPT_URL, url);
-  twist_easy_setopt (easy, TWISTOPT_WRITEFUNCTION, ka_body);
-  twist_easy_setopt (easy, TWISTOPT_WRITEDATA, &total);
-  check (twist_easy_perform (easy) == TWIST_OK && total == 6,
+  twist_transfer_setopt (transfer, TWISTOPT_URL, url);
+  twist_transfer_setopt (transfer, TWISTOPT_WRITEFUNCTION, ka_body);
+  twist_transfer_setopt (transfer, TWISTOPT_WRITEDATA, &total);
+  check (check_perform (transfer) == TWIST_OK && total == 6,
          "a transfer from [::1]");
   __atomic_thread_fence (__ATOMIC_ACQUIRE);
   snprintf (want, sizeof want, "[::1]:%d", k.port);
   check (strcmp (k.host, want) == 0, "the Host header has the brackets");
-  twist_easy_getinfo (easy, TWISTINFO_EFFECTIVE_URL, &eff);
+  twist_transfer_getinfo (transfer, TWISTINFO_EFFECTIVE_URL, &eff);
   snprintf (want, sizeof want, "http://[::1]:%d/x", k.port);
   check (eff != NULL && strcmp (eff, want) == 0,
          "the effective URL has them too");
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
   ka_stop (&k);
 }
 
-/* A share keeps its connection pool for longer than any transfer, and each
-   twist_easy_perform makes its own loop and frees it.  A connection parked
-   by a transfer is bound to that loop; it cannot outlive it.  Left in the
-   share's pool it is used by a later transfer, or freed by the share's
-   cleanup, against memory that is gone.  So nothing may be left parked for a
-   loop that is gone.  (valgrind shows the harm; this shows the cause.)  */
+/* The cookie jar, the HSTS list and the Alt-Svc list are the runtime's,
+   and a transfer uses them only when it asks to.  Two transfers in one runtime
+   handle that ask share the jar: the cookie that the first was given is sent
+   by the second.  A transfer that does not ask neither keeps nor sends one,
+   and a second runtime has a jar of its own.  */
 static void
-test_share_pool_does_not_outlive_loops (void)
+test_runtime_stores (void)
 {
+  struct twist_runtime *runtime = twist_runtime_new ();
+  struct twist_runtime *other = twist_runtime_new ();
   struct ka k;
-  twist_share *share = twist_share_init ();
   char url[64];
+  twist_transfer *transfer;
   int i;
 
-  check (share != NULL && ka_start (&k) == 0, "keep-alive server");
+  check (runtime != NULL && other != NULL && ka_start (&k) == 0,
+         "stores setup");
+  k.set_cookie = 1;
   snprintf (url, sizeof url, "http://127.0.0.1:%d/", k.port);
-  check (twist_share_setopt (share, TWIST_LOCK_DATA_CONNECT) == TWIST_OK,
-         "share lock");
-  for (i = 0; i < 3; i++)
+  for (i = 0; i < 4; i++)
     {
-      twist_easy *easy = twist_easy_init ();
+      struct twist_runtime *m = i == 3 ? other : runtime;
       size_t total = 0;
 
-      twist_easy_setopt (easy, TWISTOPT_URL, url);
-      twist_easy_setopt (easy, TWISTOPT_SHARE, share);
-      twist_easy_setopt (easy, TWISTOPT_WRITEFUNCTION, ka_body);
-      twist_easy_setopt (easy, TWISTOPT_WRITEDATA, &total);
-      check (twist_easy_perform (easy) == TWIST_OK && total == 6,
-             "a transfer on a share");
-      twist_easy_cleanup (easy);
-      check (twist_pool_count (share->pool) == 0,
-             "nothing stays parked for a loop that has been freed");
+      k.cookie[0] = 0;
+      transfer = twist_transfer_new ();
+      twist_transfer_setopt (transfer, TWISTOPT_URL, url);
+      twist_transfer_setopt (transfer, TWISTOPT_WRITEFUNCTION, ka_body);
+      twist_transfer_setopt (transfer, TWISTOPT_WRITEDATA, &total);
+      /* The third transfer does not ask.  */
+      twist_transfer_setopt (transfer, TWISTOPT_USE_COOKIES, i == 2 ? 0L : 1L);
+      check (check_perform_in (m, transfer) == TWIST_OK && total == 6,
+             "a transfer");
+      twist_transfer_free (transfer);
+      __atomic_thread_fence (__ATOMIC_ACQUIRE);
+      if (i == 0)
+        check (k.cookie[0] == 0, "the first has no cookie to send");
+      else if (i == 1)
+        check (strcmp (k.cookie, "sid=abc") == 0,
+               "the second sends what the first was given");
+      else if (i == 2)
+        check (k.cookie[0] == 0, "one that does not ask sends none");
+      else
+        check (k.cookie[0] == 0, "another runtime has a jar of its own");
     }
-  twist_share_cleanup (share);
+  check (twist_jar_count (runtime->jar) == 1, "one cookie in the jar");
+  twist_runtime_free (other);
+  twist_runtime_free (runtime);
+  ka_stop (&k);
+}
+
+/* The lists themselves, as a transfer that asks sees them.  */
+static void
+test_runtime_lists (void)
+{
+  struct twist_runtime *runtime = twist_runtime_new ();
+  twist_transfer *transfer = twist_transfer_new ();
+  char *hdr = NULL;
+
+  check (runtime != NULL && transfer != NULL, "lists setup");
+  check (twist_transfer_jar (transfer) == NULL
+         && twist_transfer_hsts (transfer) == NULL
+         && twist_transfer_altsvc (transfer) == NULL,
+         "a transfer that is in no runtime has none");
+  transfer->runtime = runtime;
+  check (twist_transfer_jar (transfer) == NULL
+         && twist_transfer_hsts (transfer) == NULL
+         && twist_transfer_altsvc (transfer) == NULL,
+         "and one that does not ask");
+  twist_transfer_setopt (transfer, TWISTOPT_USE_COOKIES, 1L);
+  twist_transfer_setopt (transfer, TWISTOPT_USE_HSTS, 1L);
+  twist_transfer_setopt (transfer, TWISTOPT_USE_ALTSVC, 1L);
+  check (twist_transfer_jar (transfer) == runtime->jar
+         && twist_transfer_hsts (transfer) == runtime->hsts
+         && twist_transfer_altsvc (transfer) == runtime->altsvc,
+         "one that asks has the runtime's");
+  check (twist_jar_store (runtime->jar, "a=b", "h.example", "/", 1) == TWIST_OK
+         && twist_jar_header (runtime->jar, "h.example", "/", 1, &hdr)
+         == TWIST_OK && hdr != NULL && strstr (hdr, "a=b") != NULL,
+         "a cookie is kept and sent");
+  free (hdr);
+  check (twist_altsvc_note (runtime->altsvc, "h.example", "h3:443") == TWIST_OK
+         && strcmp (twist_altsvc_lookup (runtime->altsvc, "h.example"),
+                    "h3:443") == 0
+         && twist_altsvc_lookup (runtime->altsvc, "other.example") == NULL,
+         "an Alt-Svc entry is kept");
+  check (!twist_hsts_upgrade (runtime->hsts, "h.example", 0), "HSTS has none");
+  check (twist_hsts_note (runtime->hsts, "h.example", 100) == TWIST_OK
+         && twist_hsts_upgrade (runtime->hsts, "h.example", 50)
+         && !twist_hsts_upgrade (runtime->hsts, "h.example", 100),
+         "an HSTS entry applies until it expires");
+  transfer->runtime = NULL;
+  twist_transfer_free (transfer);
+  twist_runtime_free (runtime);
+}
+
+/* A runtime driven by a program that polls, as a transfer to a server on
+   the loopback goes through.  The program polls what it was told to and
+   hands back what is ready and the deadlines that pass; no loop of the
+   library's is run.  */
+#define EMB_FDS 16
+
+struct emb
+{
+  twist_runtime *runtime;
+  struct
+  {
+    int fd;
+    int what;
+  } w[EMB_FDS];
+  int nw;
+  int watches;
+  int timers;
+  long timer_ms;
+  int recursive_rc;
+};
+
+static void
+emb_watch (int fd, int what, void *user)
+{
+  struct emb *e = user;
+  int i;
+
+  e->watches++;
+  for (i = 0; i < e->nw && e->w[i].fd != fd; i++)
+    ;
+  if (what == TWIST_POLL_REMOVE)
+    {
+      if (i < e->nw)
+        e->w[i] = e->w[--e->nw];
+      return;
+    }
+  if (i == e->nw)
+    {
+      if (e->nw == EMB_FDS)
+        return;
+      e->w[e->nw++].fd = fd;
+    }
+  e->w[i].what = what;
+}
+
+static void
+emb_timer (long ms, void *user)
+{
+  struct emb *e = user;
+
+  e->timers++;
+  e->timer_ms = ms;
+  e->recursive_rc = twist_runtime_on_timer (e->runtime);
+}
+
+static void
+emb_run (struct emb *e, struct check_job *job, int rounds)
+{
+  struct pollfd pf[EMB_FDS];
+  int i, n, nfds;
+
+  while (!job->done && rounds-- > 0)
+    {
+      int wait_ms = e->timer_ms < 0 || e->timer_ms > 20 ? 20
+                    : (int) e->timer_ms;
+
+      nfds = e->nw;
+      for (i = 0; i < nfds; i++)
+        {
+          pf[i].fd = e->w[i].fd;
+          pf[i].events = (short) ((e->w[i].what & TWIST_POLL_IN ? POLLIN : 0)
+                                  | (e->w[i].what & TWIST_POLL_OUT
+                                     ? POLLOUT : 0));
+          pf[i].revents = 0;
+        }
+      n = poll (pf, (nfds_t) nfds, wait_ms);
+      for (i = 0; i < nfds && n > 0; i++)
+        if (pf[i].revents != 0)
+          twist_runtime_on_ready (e->runtime, pf[i].fd,
+                                  (pf[i].revents & (POLLIN | POLLHUP | POLLERR)
+                                   ? TWIST_POLL_IN : 0)
+                                  | (pf[i].revents & POLLOUT
+                                     ? TWIST_POLL_OUT : 0));
+      if (n == 0 || e->timer_ms == 0)
+        twist_runtime_on_timer (e->runtime);
+    }
+}
+
+static void
+test_runtime_embedded (void)
+{
+  struct emb e;
+  struct ka k;
+  struct check_job job = { 0, 0, 0 };
+  char url[64];
+  size_t total = 0;
+  twist_transfer *transfer = twist_transfer_new ();
+  int i;
+
+  memset (&e, 0, sizeof e);
+  e.timer_ms = -1;
+  e.runtime = twist_runtime_new_embedded (emb_watch, emb_timer, &e);
+  check (e.runtime != NULL && e.nw == 1, "told of the waker at once");
+  check (ka_start (&k) == 0, "keep-alive server");
+  snprintf (url, sizeof url, "http://127.0.0.1:%d/", k.port);
+  for (i = 0; i < 2; i++)
+    {
+      total = 0;
+      memset (&job, 0, sizeof job);
+      twist_transfer_setopt (transfer, TWISTOPT_URL, url);
+      twist_transfer_setopt (transfer, TWISTOPT_WRITEFUNCTION, ka_body);
+      twist_transfer_setopt (transfer, TWISTOPT_WRITEDATA, &total);
+      check (twist_runtime_start (e.runtime, transfer, check_job_done, &job)
+             == TWIST_OK, "start");
+      emb_run (&e, &job, 500);
+      check (job.done && job.calls == 1 && job.result == TWIST_OK
+             && total == 6, "a transfer is carried by the program's loop");
+    }
+  check (e.watches > 2 && e.nw >= 2,
+         "it was told of the connection, which is kept");
+  check (e.timers > 0, "and of the deadlines");
+  check (e.recursive_rc == TWIST_ERR_RECURSIVE,
+         "a call into the runtime from the timer hook is refused");
+  twist_transfer_free (transfer);
+  twist_runtime_free (e.runtime);
   ka_stop (&k);
 }
 
@@ -1840,16 +2126,19 @@ main (void)
   test_proxy_socks ();
   test_proxy_parse ();
   test_conn_pool ();
-  test_multi_perform ();
+  test_runtime_run_once ();
   test_release_transfer ();
-  test_multi_from_callback ();
-  test_share_data_locks ();
-  test_cleanup_handle_in_multi ();
-  test_multi_timer_callback ();
+  test_cancel ();
+  test_runtime_from_callback ();
+  test_start_failure ();
+  test_done_chain ();
+  test_runtime_lists ();
+  test_runtime_stores ();
+  test_cleanup_handle_in_runtime ();
+  test_runtime_embedded ();
   test_unix_socket_options ();
   test_home_dir ();
   test_pool_completion_at_cleanup ();
   test_pool_eviction_stays_on_the_loop ();
-  test_share_pool_does_not_outlive_loops ();
   return tests_finish ();
 }

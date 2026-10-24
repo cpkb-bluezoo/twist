@@ -347,7 +347,7 @@ test_doh (void)
   size_t rlen;
   struct doh_saw saw;
   struct twist_doh *doh;
-  twist_easy *easy;
+  twist_transfer *transfer;
   int plan[4];
   int custom[2];
   size_t np = 0;
@@ -417,25 +417,28 @@ test_doh (void)
   custom[0] = TWIST_DNS_DOH;
   check (twist_dns_bootstrap_plan (custom, 1, plan, 4, &np) == TWIST_OK
          && np == 1 && plan[0] == TWIST_DNS_UDP, "doh bootstrap udp");
-  easy = twist_easy_init ();
-  check (easy != NULL && easy->doh_verifypeer == 1, "doh verify default");
-  twist_easy_setopt (easy, TWISTOPT_SSL_VERIFYPEER, 0L);
-  check (easy->doh_verifypeer == 1, "doh ignores insecure");
-  twist_easy_setopt (easy, TWISTOPT_DOH_SSL_VERIFYPEER, 0L);
-  check (easy->doh_verifypeer == 0, "doh insecure");
-  twist_easy_setopt (easy, TWISTOPT_DOH_URL, "https://dns.example/dns-query");
-  check (easy->doh_url != NULL
-         && strcmp (easy->doh_url, "https://dns.example/dns-query") == 0,
+  transfer = twist_transfer_new ();
+  check (transfer != NULL && transfer->doh_verifypeer == 1,
+         "doh verify default");
+  twist_transfer_setopt (transfer, TWISTOPT_SSL_VERIFYPEER, 0L);
+  check (transfer->doh_verifypeer == 1, "doh ignores insecure");
+  twist_transfer_setopt (transfer, TWISTOPT_DOH_SSL_VERIFYPEER, 0L);
+  check (transfer->doh_verifypeer == 0, "doh insecure");
+  twist_transfer_setopt (transfer, TWISTOPT_DOH_URL,
+                         "https://dns.example/dns-query");
+  check (transfer->doh_url != NULL
+         && strcmp (transfer->doh_url, "https://dns.example/dns-query") == 0,
          "doh url");
-  twist_easy_setopt (easy, TWISTOPT_DOH_URL, "");
-  check (easy->doh_url == NULL, "doh url clear");
-  twist_easy_setopt (easy, TWISTOPT_DOH_URL, "https://192.0.2.1/dns-query");
+  twist_transfer_setopt (transfer, TWISTOPT_DOH_URL, "");
+  check (transfer->doh_url == NULL, "doh url clear");
+  twist_transfer_setopt (transfer, TWISTOPT_DOH_URL,
+                         "https://192.0.2.1/dns-query");
   memset (&saw, 0, sizeof saw);
-  check (twist_dns_resolve_easy (easy, "192.0.2.10", on_literal, &saw) == TWIST_OK
+  check (twist_dns_resolve_transfer (transfer, "192.0.2.10", on_literal, &saw) == TWIST_OK
          && saw.calls == 1 && saw.err == TWIST_OK
          && strcmp (saw.text, "192.0.2.10") == 0, "v4 needs no lookup");
   memset (&saw, 0, sizeof saw);
-  check (twist_dns_resolve_easy (easy, "2001:db8::1", on_literal, &saw) == TWIST_OK
+  check (twist_dns_resolve_transfer (transfer, "2001:db8::1", on_literal, &saw) == TWIST_OK
          && saw.calls == 1 && saw.err == TWIST_OK
          && strcmp (saw.text, "2001:db8::1") == 0, "v6 needs no lookup");
   /* A zone is the interface the address is reached by.  It is part of the
@@ -446,33 +449,36 @@ test_doh (void)
 
     memset (&saw, 0, sizeof saw);
     saw.scope = 12345;
-    check (twist_dns_resolve_easy (easy, "fe80::1%lo", on_literal, &saw)
+    check (twist_dns_resolve_transfer (transfer, "fe80::1%lo", on_literal,
+                                       &saw)
            == TWIST_OK && saw.calls == 1 && saw.err == TWIST_OK
            && strcmp (saw.text, "fe80::1%lo") == 0
            && saw.family == 6 && saw.scope == lo && lo != 0,
            "a zone by name gives the index of the interface");
     memset (&saw, 0, sizeof saw);
-    check (twist_dns_resolve_easy (easy, "fe80::1%7", on_literal, &saw)
+    check (twist_dns_resolve_transfer (transfer, "fe80::1%7", on_literal, &saw)
            == TWIST_OK && saw.scope == 7, "a zone by number");
     memset (&saw, 0, sizeof saw);
-    check (twist_dns_resolve_easy (easy, "2001:db8::1", on_literal, &saw)
+    check (twist_dns_resolve_transfer (transfer, "2001:db8::1", on_literal,
+                                       &saw)
            == TWIST_OK && saw.scope == 0, "no zone, no scope");
   }
   /* What cannot be an address is not a name to look up either: it is an error
      at once, not a query that never comes back.  */
   memset (&saw, 0, sizeof saw);
-  check (twist_dns_resolve_easy (easy, "fe80::1%no-such-if0", on_literal, &saw)
+  check (twist_dns_resolve_transfer (transfer, "fe80::1%no-such-if0",
+                                     on_literal, &saw)
          == TWIST_ERR_CONNECT && saw.calls == 0,
          "an interface that is not there cannot be connected through");
-  check (twist_dns_resolve_easy (easy, "::g", on_literal, &saw)
+  check (twist_dns_resolve_transfer (transfer, "::g", on_literal, &saw)
          == TWIST_ERR_RESOLVE && saw.calls == 0, "text that is not an address");
-  check (twist_dns_resolve_easy (easy, "1:2:3", on_literal, &saw)
+  check (twist_dns_resolve_transfer (transfer, "1:2:3", on_literal, &saw)
          == TWIST_ERR_RESOLVE && saw.calls == 0, "colons make no name");
-  check (twist_dns_resolve_easy (easy, "fe80::1%", on_literal, &saw)
+  check (twist_dns_resolve_transfer (transfer, "fe80::1%", on_literal, &saw)
          == TWIST_ERR_RESOLVE && saw.calls == 0, "an empty zone");
-  check (twist_dns_resolve_easy (easy, "1.2.3.4%lo", on_literal, &saw)
+  check (twist_dns_resolve_transfer (transfer, "1.2.3.4%lo", on_literal, &saw)
          != TWIST_OK || saw.calls == 0, "a zone on an IPv4 address");
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
 
   check (twist_dns_encode_query ("example.com", 1, 0x1234, &q, &qlen) == TWIST_OK,
          "doh q");
@@ -596,7 +602,7 @@ test_svcb (void)
   uint8_t window[sizeof msg + 2];
   struct svcb_saw saw;
   struct twist_dns_events ev;
-  struct twist_easy *easy;
+  struct twist_transfer *transfer;
   uint8_t raw[12];
   uint8_t *out = NULL;
   size_t outlen = 0;
@@ -651,18 +657,21 @@ test_svcb (void)
   memset (&saw, 0, sizeof saw);
   check (twist_dns_datagram_receive (alias, sizeof alias, &ev) == sizeof alias
          && saw.n == 0, "svcb alias");
-  easy = twist_easy_init ();
-  check (easy != NULL, "resolver easy");
-  check (twist_easy_setopt (easy, TWISTOPT_DOQ_URL, "quic://dns.example:8853")
-         == TWIST_OK && easy->doq_url != NULL
-         && strcmp (easy->doq_url, "quic://dns.example:8853") == 0, "doq url");
-  check (twist_easy_setopt (easy, TWISTOPT_DOT_URL, "dns.example") == TWIST_OK
-         && strcmp (easy->dot_url, "dns.example") == 0, "dot url");
-  check (twist_easy_setopt (easy, TWISTOPT_DOQ_URL, "") == TWIST_OK
-         && easy->doq_url == NULL, "doq clear");
-  check (twist_easy_setopt (easy, TWISTOPT_DOT_URL, "") == TWIST_OK
-         && easy->dot_url == NULL, "dot clear");
-  twist_easy_cleanup (easy);
+  transfer = twist_transfer_new ();
+  check (transfer != NULL, "resolver transfer");
+  check (twist_transfer_setopt (transfer, TWISTOPT_DOQ_URL,
+                                "quic://dns.example:8853")
+         == TWIST_OK && transfer->doq_url != NULL
+         && strcmp (transfer->doq_url, "quic://dns.example:8853") == 0,
+         "doq url");
+  check (twist_transfer_setopt (transfer, TWISTOPT_DOT_URL,
+                                "dns.example") == TWIST_OK
+         && strcmp (transfer->dot_url, "dns.example") == 0, "dot url");
+  check (twist_transfer_setopt (transfer, TWISTOPT_DOQ_URL, "") == TWIST_OK
+         && transfer->doq_url == NULL, "doq clear");
+  check (twist_transfer_setopt (transfer, TWISTOPT_DOT_URL, "") == TWIST_OK
+         && transfer->dot_url == NULL, "dot clear");
+  twist_transfer_free (transfer);
 }
 
 static int dns_wait_n;

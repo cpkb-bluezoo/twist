@@ -52,22 +52,23 @@ fuzz_seeds (void (*add) (const void *, size_t))
 int
 LLVMFuzzerTestOneInput (const uint8_t *data, size_t size)
 {
-  twist_easy *easy;
+  twist_transfer *transfer;
   void *obj;
 
   if (size == 0)
     return 0;
-  easy = twist_easy_init ();
-  if (easy == NULL)
+  transfer = twist_transfer_new ();
+  if (transfer == NULL)
     abort ();
-  if (twist_url_parse_int ("dict://127.0.0.1/d:word", &easy->url) != TWIST_OK)
+  if (twist_url_parse_int ("dict://127.0.0.1/d:word",
+                           &transfer->url) != TWIST_OK)
     abort ();
-  easy->write_cb = fuzz_sink;
-  obj = twist_dict_new (easy, 0);
+  transfer->write_cb = fuzz_sink;
+  obj = twist_dict_new (transfer, 0);
   if (obj == NULL)
     abort ();
   fuzz_feed ((fuzz_recv) twist_dict_receive, obj, data + 1, size - 1,
              fuzz_piece (data[0], size));
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
   return 0;
 }

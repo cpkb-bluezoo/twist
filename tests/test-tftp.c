@@ -69,7 +69,7 @@ test_tftp_is (struct twist_tftp *t, const uint8_t *expect, size_t n,
 static void
 test_tftp (void)
 {
-  struct twist_easy *easy;
+  struct twist_transfer *transfer;
   struct twist_tftp *t;
   uint8_t block[4 + 512];
   static const uint8_t rrq[] = {
@@ -125,155 +125,162 @@ test_tftp (void)
   static const uint8_t data_hi[] = { 0, 3, 0, 1, 'h', 'i' };
   int i;
 
-  easy = twist_easy_init ();
-  check (twist_url_parse_int ("tftp://127.0.0.1/hello", &easy->url) == TWIST_OK,
+  transfer = twist_transfer_new ();
+  check (twist_url_parse_int ("tftp://127.0.0.1/hello", &transfer->url) == TWIST_OK,
          "tftp url");
-  check (easy->url->port == 69, "tftp port");
-  t = twist_tftp_new (easy, 0);
+  check (transfer->url->port == 69, "tftp port");
+  t = twist_tftp_new (transfer, 0);
   test_tftp_is (t, rrq, sizeof rrq, "tftp rrq");
-  check (!easy->done, "tftp rrq open");
-  twist_easy_cleanup (easy);
+  check (!transfer->done, "tftp rrq open");
+  twist_transfer_free (transfer);
 
-  easy = twist_easy_init ();
-  check (twist_url_parse_int ("tftp://127.0.0.1/hello?x=1", &easy->url)
+  transfer = twist_transfer_new ();
+  check (twist_url_parse_int ("tftp://127.0.0.1/hello?x=1", &transfer->url)
          == TWIST_OK, "tftp query url");
-  t = twist_tftp_new (easy, 0);
+  t = twist_tftp_new (transfer, 0);
   test_tftp_is (t, rrq, sizeof rrq, "tftp query");
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
 
-  easy = twist_easy_init ();
-  check (twist_url_parse_int ("tftp://127.0.0.1/", &easy->url) == TWIST_OK,
+  transfer = twist_transfer_new ();
+  check (twist_url_parse_int ("tftp://127.0.0.1/", &transfer->url) == TWIST_OK,
          "tftp empty url");
-  t = twist_tftp_new (easy, 0);
-  check (t != NULL && easy->done && easy->result == TWIST_ERR_URL,
+  t = twist_tftp_new (transfer, 0);
+  check (t != NULL && transfer->done && transfer->result == TWIST_ERR_URL,
          "tftp empty");
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
 
-  easy = twist_easy_init ();
-  check (twist_url_parse_int ("tftp://127.0.0.1/a%00", &easy->url) == TWIST_OK,
+  transfer = twist_transfer_new ();
+  check (twist_url_parse_int ("tftp://127.0.0.1/a%00",
+                              &transfer->url) == TWIST_OK,
          "tftp nul url");
-  t = twist_tftp_new (easy, 0);
-  check (t != NULL && easy->done && easy->result == TWIST_ERR_URL, "tftp nul");
-  twist_easy_cleanup (easy);
+  t = twist_tftp_new (transfer, 0);
+  check (t != NULL && transfer->done && transfer->result == TWIST_ERR_URL,
+         "tftp nul");
+  twist_transfer_free (transfer);
 
   static char upload[] = "abc";
 
-  easy = twist_easy_init ();
-  check (twist_url_parse_int ("tftp://127.0.0.1/up", &easy->url) == TWIST_OK,
+  transfer = twist_transfer_new ();
+  check (twist_url_parse_int ("tftp://127.0.0.1/up",
+                              &transfer->url) == TWIST_OK,
          "tftp put url");
-  easy->postfields = upload;
-  easy->postfieldsize = 3;
-  easy->postfieldsize_set = 1;
-  t = twist_tftp_new (easy, 0);
+  transfer->postfields = upload;
+  transfer->postfieldsize = 3;
+  transfer->postfieldsize_set = 1;
+  t = twist_tftp_new (transfer, 0);
   test_tftp_is (t, wrq, sizeof wrq, "tftp wrq");
   twist_tftp_receive (t, ack0, sizeof ack0);
   test_tftp_is (t, data_abc, sizeof data_abc, "tftp data");
-  check (!easy->done, "tftp put open");
+  check (!transfer->done, "tftp put open");
   twist_tftp_receive (t, ack1, sizeof ack1);
-  check (easy->done && easy->result == TWIST_OK, "tftp put done");
-  check (easy->progress.ul_known && easy->progress.size_ul == 3
-         && easy->progress.uploaded == 3, "tftp upload progress");
-  easy->postfields = NULL;
-  twist_easy_cleanup (easy);
+  check (transfer->done && transfer->result == TWIST_OK, "tftp put done");
+  check (transfer->progress.ul_known && transfer->progress.size_ul == 3
+         && transfer->progress.uploaded == 3, "tftp upload progress");
+  transfer->postfields = NULL;
+  twist_transfer_free (transfer);
 
-  easy = twist_easy_init ();
-  check (twist_url_parse_int ("tftp://127.0.0.1/cb", &easy->url) == TWIST_OK,
+  transfer = twist_transfer_new ();
+  check (twist_url_parse_int ("tftp://127.0.0.1/cb",
+                              &transfer->url) == TWIST_OK,
          "tftp read url");
   tftp_read (NULL, 0, 0, NULL);
-  easy->read_cb = tftp_read;
-  t = twist_tftp_new (easy, 0);
+  transfer->read_cb = tftp_read;
+  t = twist_tftp_new (transfer, 0);
   test_tftp_is (t, wrq_cb, sizeof wrq_cb, "tftp wrq cb");
   twist_tftp_receive (t, ack0, sizeof ack0);
   test_tftp_is (t, data_xy, sizeof data_xy, "tftp data cb");
   twist_tftp_receive (t, ack1, sizeof ack1);
-  check (easy->done && easy->result == TWIST_OK, "tftp read done");
-  twist_easy_cleanup (easy);
+  check (transfer->done && transfer->result == TWIST_OK, "tftp read done");
+  twist_transfer_free (transfer);
 
-  easy = twist_easy_init ();
-  check (twist_url_parse_int ("tftp://127.0.0.1/hello", &easy->url) == TWIST_OK,
+  transfer = twist_transfer_new ();
+  check (twist_url_parse_int ("tftp://127.0.0.1/hello", &transfer->url) == TWIST_OK,
          "tftp get url");
-  easy->write_cb = mail_write;
+  transfer->write_cb = mail_write;
   mail_body_len = 0;
-  t = twist_tftp_new (easy, 0);
+  t = twist_tftp_new (transfer, 0);
   twist_tftp_receive (t, oack, sizeof oack);
   test_tftp_is (t, ack0, sizeof ack0, "tftp oack");
-  check (!easy->done, "tftp oack open");
+  check (!transfer->done, "tftp oack open");
   twist_tftp_receive (t, data_hi, sizeof data_hi);
   test_tftp_is (t, ack1, sizeof ack1, "tftp ack hi");
   check (mail_body_len == 2 && memcmp (mail_body, "hi", 2) == 0, "tftp body");
-  check (easy->progress.downloaded == 2, "tftp download progress");
-  check (easy->done && easy->result == TWIST_OK, "tftp get done");
-  twist_easy_cleanup (easy);
+  check (transfer->progress.downloaded == 2, "tftp download progress");
+  check (transfer->done && transfer->result == TWIST_OK, "tftp get done");
+  twist_transfer_free (transfer);
 
-  easy = twist_easy_init ();
-  check (twist_url_parse_int ("tftp://127.0.0.1/hello", &easy->url) == TWIST_OK,
+  transfer = twist_transfer_new ();
+  check (twist_url_parse_int ("tftp://127.0.0.1/hello", &transfer->url) == TWIST_OK,
          "tftp blocks url");
-  t = twist_tftp_new (easy, 0);
+  t = twist_tftp_new (transfer, 0);
   memset (block, 'a', sizeof block);
   block[0] = 0;
   block[1] = 3;
   block[2] = 0;
   block[3] = 1;
   twist_tftp_receive (t, block, sizeof block);
-  check (!easy->done && easy->size_download == 512, "tftp full");
+  check (!transfer->done && transfer->size_download == 512, "tftp full");
   test_tftp_is (t, ack1, sizeof ack1, "tftp ack full");
   twist_tftp_receive (t, block, sizeof block);
-  check (!easy->done && easy->size_download == 512, "tftp dup");
+  check (!transfer->done && transfer->size_download == 512, "tftp dup");
   block[3] = 3;
   twist_tftp_receive (t, block, 4 + 8);
-  check (!easy->done && easy->size_download == 512, "tftp skip");
+  check (!transfer->done && transfer->size_download == 512, "tftp skip");
   test_tftp_is (t, ack1, sizeof ack1, "tftp ack held");
   block[3] = 2;
   twist_tftp_receive (t, block, 4);
   test_tftp_is (t, ack2, sizeof ack2, "tftp ack end");
-  check (easy->done && easy->result == TWIST_OK
-         && easy->size_download == 512, "tftp end");
-  twist_easy_cleanup (easy);
+  check (transfer->done && transfer->result == TWIST_OK
+         && transfer->size_download == 512, "tftp end");
+  twist_transfer_free (transfer);
 
-  easy = twist_easy_init ();
-  check (twist_url_parse_int ("tftp://127.0.0.1/hello", &easy->url) == TWIST_OK,
+  transfer = twist_transfer_new ();
+  check (twist_url_parse_int ("tftp://127.0.0.1/hello", &transfer->url) == TWIST_OK,
          "tftp err url");
-  t = twist_tftp_new (easy, 0);
+  t = twist_tftp_new (transfer, 0);
   twist_tftp_receive (t, err_pkt, sizeof err_pkt);
-  check (easy->done && easy->result == TWIST_ERR_FILE, "tftp missing");
-  twist_easy_cleanup (easy);
+  check (transfer->done && transfer->result == TWIST_ERR_FILE, "tftp missing");
+  twist_transfer_free (transfer);
 
-  easy = twist_easy_init ();
-  check (twist_url_parse_int ("tftp://127.0.0.1/hello", &easy->url) == TWIST_OK,
+  transfer = twist_transfer_new ();
+  check (twist_url_parse_int ("tftp://127.0.0.1/hello", &transfer->url) == TWIST_OK,
          "tftp big url");
-  t = twist_tftp_new (easy, 0);
+  t = twist_tftp_new (transfer, 0);
   twist_tftp_receive (t, oack_big, sizeof oack_big);
-  check (easy->done && easy->result == TWIST_ERR_PROTOCOL, "tftp big blk");
+  check (transfer->done && transfer->result == TWIST_ERR_PROTOCOL,
+         "tftp big blk");
   check (t != NULL && twist_tftp_packet (t, NULL)[1] == 5, "tftp error op");
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
 
-  easy = twist_easy_init ();
-  check (twist_url_parse_int ("tftp://127.0.0.1/hello", &easy->url) == TWIST_OK,
+  transfer = twist_transfer_new ();
+  check (twist_url_parse_int ("tftp://127.0.0.1/hello", &transfer->url) == TWIST_OK,
          "tftp bad url");
-  t = twist_tftp_new (easy, 0);
+  t = twist_tftp_new (transfer, 0);
   twist_tftp_receive (t, oack_bad, sizeof oack_bad);
-  check (easy->done && easy->result == TWIST_ERR_PROTOCOL, "tftp bad oack");
-  twist_easy_cleanup (easy);
+  check (transfer->done && transfer->result == TWIST_ERR_PROTOCOL,
+         "tftp bad oack");
+  twist_transfer_free (transfer);
 
-  easy = twist_easy_init ();
-  check (twist_url_parse_int ("tftp://127.0.0.1/hello", &easy->url) == TWIST_OK,
+  transfer = twist_transfer_new ();
+  check (twist_url_parse_int ("tftp://127.0.0.1/hello", &transfer->url) == TWIST_OK,
          "tftp time url");
-  t = twist_tftp_new (easy, 0);
-  for (i = 0; i < 8 && !easy->done; i++)
+  t = twist_tftp_new (transfer, 0);
+  for (i = 0; i < 8 && !transfer->done; i++)
     twist_tftp_timeout (t);
-  check (easy->done && easy->result == TWIST_ERR_CONNECT && i == 6,
+  check (transfer->done && transfer->result == TWIST_ERR_CONNECT && i == 6,
          "tftp timeout");
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
 
-  easy = twist_easy_init ();
-  check (twist_url_parse_int ("tftp://127.0.0.1/hello", &easy->url) == TWIST_OK,
+  transfer = twist_transfer_new ();
+  check (twist_url_parse_int ("tftp://127.0.0.1/hello", &transfer->url) == TWIST_OK,
          "tftp proxy url");
-  check (twist_easy_setopt (easy, TWISTOPT_PROXY, "http://127.0.0.1:9")
+  check (twist_transfer_setopt (transfer, TWISTOPT_PROXY, "http://127.0.0.1:9")
          == TWIST_OK, "tftp proxy set");
-  t = twist_tftp_new (easy, 0);
-  check (t != NULL && easy->done && easy->result == TWIST_ERR_UNSUPPORTED,
+  t = twist_tftp_new (transfer, 0);
+  check (t != NULL && transfer->done
+         && transfer->result == TWIST_ERR_UNSUPPORTED,
          "tftp proxy");
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
 }
 
 static struct sockaddr_in
@@ -323,7 +330,7 @@ accepts6 (struct twist_tftp *t, const char *ip, int port)
 static void
 test_tftp_source (void)
 {
-  struct twist_easy *easy = twist_easy_init ();
+  struct twist_transfer *transfer = twist_transfer_new ();
   struct twist_tftp *t;
   struct twist_dns_addr a4;
   struct twist_dns_addr a6;
@@ -335,9 +342,9 @@ test_tftp_source (void)
   a6.family = 6;
   inet_pton (AF_INET6, "2001:db8::1", a6.addr);
 
-  check (twist_url_parse_int ("tftp://192.0.2.1/hello", &easy->url)
+  check (twist_url_parse_int ("tftp://192.0.2.1/hello", &transfer->url)
          == TWIST_OK, "source url");
-  t = twist_tftp_new (easy, 0);
+  t = twist_tftp_new (transfer, 0);
   twist_tftp_set_dest (t, &a4, 69);
   check (!accepts4 (t, "198.51.100.7", 5000),
          "a stranger before the first reply is not taken");
@@ -352,19 +359,19 @@ test_tftp_source (void)
          "a stranger on the same port is not taken");
   check (!accepts4 (t, "198.51.100.7", 69), "nor from port 69");
   check (accepts4 (t, "192.0.2.1", 5000), "the server is still heard");
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
 
-  easy = twist_easy_init ();
-  check (twist_url_parse_int ("tftp://[2001:db8::1]/hello", &easy->url)
+  transfer = twist_transfer_new ();
+  check (twist_url_parse_int ("tftp://[2001:db8::1]/hello", &transfer->url)
          == TWIST_OK, "v6 source url");
-  t = twist_tftp_new (easy, 0);
+  t = twist_tftp_new (transfer, 0);
   twist_tftp_set_dest (t, &a6, 69);
   check (!accepts6 (t, "2001:db8::2", 5000), "v6: a stranger is not taken");
   check (!accepts4 (t, "192.0.2.1", 5000), "v6: another family is not taken");
   check (accepts6 (t, "2001:db8::1", 5000), "v6: the server's reply is taken");
   check (!accepts6 (t, "2001:db8::1", 5001), "v6: another port is not taken");
   check (!accepts6 (t, "2001:db8::2", 5000), "v6: a stranger is still not");
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
 }
 
 int

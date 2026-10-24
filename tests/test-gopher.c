@@ -39,23 +39,23 @@ static void
 test_gopher_one (const char *url, const void *expect, size_t expect_n,
                  const char *what)
 {
-  struct twist_easy *easy = twist_easy_init ();
+  struct twist_transfer *transfer = twist_transfer_new ();
   struct twist_gopher *g;
   const uint8_t *req;
   size_t n = 0;
 
-  check (twist_url_parse_int (url, &easy->url) == TWIST_OK, what);
-  g = twist_gopher_new (easy, 0);
+  check (twist_url_parse_int (url, &transfer->url) == TWIST_OK, what);
+  g = twist_gopher_new (transfer, 0);
   req = twist_gopher_request (g, &n);
-  check (g != NULL && !easy->done && n == expect_n
+  check (g != NULL && !transfer->done && n == expect_n
          && memcmp (req, expect, expect_n) == 0, what);
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
 }
 
 static void
 test_gopher (void)
 {
-  struct twist_easy *easy;
+  struct twist_transfer *transfer;
   struct twist_gopher *g;
   static const uint8_t menu[] = {
     '1', 'H', 'e', 'l', 'l', 'o', '\t', 's', '\t', 'h', '\t', '7', '0',
@@ -72,28 +72,28 @@ test_gopher (void)
                    "gopher tab");
   test_gopher_one ("gopher://127.0.0.1/7/q?find", "/q?find\r\n", 9,
                    "gopher search");
-  easy = twist_easy_init ();
-  check (twist_url_parse_int ("gopher://127.0.0.1/1/%00", &easy->url)
+  transfer = twist_transfer_new ();
+  check (twist_url_parse_int ("gopher://127.0.0.1/1/%00", &transfer->url)
          == TWIST_OK, "gopher nul url");
-  g = twist_gopher_new (easy, 0);
-  check (g != NULL && easy->done && easy->result == TWIST_ERR_URL,
+  g = twist_gopher_new (transfer, 0);
+  check (g != NULL && transfer->done && transfer->result == TWIST_ERR_URL,
          "gopher nul");
-  twist_easy_cleanup (easy);
-  easy = twist_easy_init ();
-  check (twist_url_parse_int ("gopher://127.0.0.1/1/hello", &easy->url)
+  twist_transfer_free (transfer);
+  transfer = twist_transfer_new ();
+  check (twist_url_parse_int ("gopher://127.0.0.1/1/hello", &transfer->url)
          == TWIST_OK, "gopher body url");
-  easy->write_cb = mail_write;
+  transfer->write_cb = mail_write;
   mail_body_len = 0;
-  g = twist_gopher_new (easy, 0);
+  g = twist_gopher_new (transfer, 0);
   feed_bin (gopher_recv, g, menu, sizeof menu, 1);
   check (mail_body_len == sizeof menu
          && memcmp (mail_body, menu, sizeof menu) == 0, "gopher body");
-  check (easy->progress.downloaded == (long long) sizeof menu,
+  check (transfer->progress.downloaded == (long long) sizeof menu,
          "gopher progress");
-  check (!easy->done, "gopher still open");
+  check (!transfer->done, "gopher still open");
   twist_gopher_closed (g, TWIST_ERR_CLOSED);
-  check (easy->done && easy->result == TWIST_OK, "gopher close");
-  twist_easy_cleanup (easy);
+  check (transfer->done && transfer->result == TWIST_OK, "gopher close");
+  twist_transfer_free (transfer);
 }
 
 int

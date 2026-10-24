@@ -39,8 +39,10 @@ struct twist_timer;
 /* How long making a connection may take, if nothing else is said: five
    minutes.  */
 #define TWIST_DEFAULT_CONNECT_TIMEOUT_MS 300000L
-struct twist_runtime;
 struct twist_storage;
+struct twist_jar;
+struct twist_hsts;
+struct twist_altsvc;
 struct twist_dns_addr;
 
 #define TWIST_INTEREST_READ 1
@@ -119,7 +121,7 @@ struct twist_progress
   uint64_t tick_due;		/* A second after the last update.  */
 };
 
-struct twist_easy
+struct twist_transfer
 {
   char *url_string;
   struct twist_url *url;
@@ -147,6 +149,7 @@ struct twist_easy
   struct twist_slist *quote;	/* Borrowed: the caller's.  */
   struct twist_slist *postquote;
   struct twist_slist *telnet_options;	/* Borrowed too.  */
+  int telnet_input_fd;		/* TWISTOPT_TELNET_INPUT_FD; -1: none.  */
   int create_missing_dirs;
   char *ssh_agent_socket;
   long timeout_ms;
@@ -189,10 +192,22 @@ struct twist_easy
   void *header_data;
   twist_read_callback read_cb;
   void *read_data;
-  struct twist_share *share;
-  struct twist_multi *multi;
+  /* Whether the transfer uses the runtime's cookie jar, HSTS list and Alt-Svc
+     list (TWISTOPT_USE_COOKIES, _USE_HSTS and _USE_ALTSVC).  */
+  int use_cookies;
+  int use_hsts;
+  int use_altsvc;
+  struct twist_runtime *runtime;
   struct twist_loop *loop;
-  int own_loop;
+  /* Told the result when the transfer ends (twist_runtime_start); and the
+     timer that does it, from the loop, once the handler is out of the way.  */
+  twist_done_callback done_cb;
+  void *done_user;
+  struct twist_timer *reap;
+  /* In the list of a runtime because twist_runtime_start put it there.  A
+     handler can be driven with the handle attached by hand, as a test does,
+     and then the runtime has nothing to report.  */
+  int started;
   int done;
   int result;
   int proto_status;
@@ -204,46 +219,44 @@ struct twist_easy
   uint64_t max_recv_speed;
   uint64_t max_send_speed;
   void *private_data;
-  void *xfer;
-  void (*xfer_free) (void *xfer);
+  void *state;
+  void (*state_free) (void *state);
   uint64_t recv_stamp_ms;
   uint64_t recv_bytes_window;
   long long infilesize;		/* TWISTOPT_INFILESIZE; -1: not known.  */
   struct twist_progress progress;
 };
 
-struct twist_multi
+struct twist_runtime
 {
   struct twist_loop *loop;
-  int own_loop;
-  struct twist_easy **easies;
-  size_t n_easies;
-  size_t easies_cap;
-  twist_socket_callback socket_cb;
-  void *socket_user;
+  /* Whether the program polls (twist_runtime_new_embedded): the loop then has
+     no poller, and reports its descriptors and its deadline to these.  */
+  int embedded;
+  twist_watch_callback watch_cb;
   twist_timer_callback timer_cb;
-  void *timer_user;
-  struct twist_easy **done;
-  int *done_result;
-  size_t n_done;
-  size_t done_cap;
-  size_t done_off;
+  void *hook_user;
+  struct twist_transfer **transfers;
+  size_t n_transfers;
+  size_t transfers_cap;
   long long last_deadline;
-  /* How many calls into the application (write, header, progress, socket and
-     timer callbacks) are under way from this handle's loop.  While there is
-     one, a transfer's own state is in use by the code that made it, so the
-     multi interface refuses to be called again (TWIST_ERR_RECURSIVE).  */
+  /* How many calls into the application (write, header, progress, done and
+     hook callbacks) are under way from this handle's loop.  While there is
+     one, the loop is in use by the code that made it, and a transfer's own
+     state may be, so the calls that run or free them are refused
+     (TWIST_ERR_RECURSIVE).  Starting and cancelling transfers is not: it
+     touches only the transfer.  */
   int in_call;
   struct twist_storage *storage;
   struct twist_pool *pool;
   struct twist_dns_cache *dns;
   struct twist_session *sessions;
-  /* Pools other than ours, a share's, that transfers of this handle parked
-     connections in.  They outlive this handle's loop, so what is bound to
-     the loop is taken out when the handle goes.  */
-  struct twist_pool **shared_pools;
-  size_t n_shared_pools;
-  size_t cap_shared_pools;
+  /* What transfers that ask for them share: the cookies that servers set,
+     the hosts that want https only, and the alternative services that
+     servers offer.  */
+  struct twist_jar *jar;
+  struct twist_hsts *hsts;
+  struct twist_altsvc *altsvc;
 };
 
 struct twist_session
@@ -257,16 +270,16 @@ struct twist_session
   struct twist_session *next;
 };
 
-struct twist_session *twist_session_add (struct twist_multi *multi,
+struct twist_session *twist_session_add (struct twist_runtime *runtime,
                                          const char *key,
                                          struct twist_loop *loop,
                                          struct twist_connection *conn,
                                          struct twist_h2 *h2);
-struct twist_session *twist_session_find (struct twist_multi *multi,
+struct twist_session *twist_session_find (struct twist_runtime *runtime,
                                           const char *key,
                                           struct twist_loop *loop);
 void twist_session_release (struct twist_session *session);
-void twist_session_free_all (struct twist_multi *multi);
+void twist_session_free_all (struct twist_runtime *runtime);
 
 /* ---- loop ---- */
 
@@ -305,8 +318,9 @@ void twist_loop_drain (struct twist_loop *loop);
 int twist_loop_watch_fd (struct twist_loop *loop, int fd, int interest,
                           struct twist_connection *conn);
 void twist_loop_unwatch_fd (struct twist_loop *loop, int fd);
-struct twist_multi *twist_loop_multi (struct twist_loop *loop);
-void twist_loop_set_multi (struct twist_loop *loop, struct twist_multi *multi);
+struct twist_runtime *twist_loop_runtime (struct twist_loop *loop);
+void twist_loop_set_runtime (struct twist_loop *loop,
+                             struct twist_runtime *runtime);
 int twist_loop_waker (struct twist_loop *loop);
 uint8_t *twist_loop_take_rbuf (struct twist_loop *loop);
 void twist_loop_give_rbuf (struct twist_loop *loop, uint8_t *buf);
@@ -450,10 +464,10 @@ extern int (*twist_tls_receive_fn) (struct twist_connection *conn,
                                     const uint8_t *data, size_t len);
 extern int (*twist_tls_send_plain_fn) (struct twist_connection *conn,
                                        const uint8_t *data, size_t len);
-/* A QUIC connection for the transfer EASY to the address ADDR and PORT, which
-   a lookup gave.  The certificate is checked against the host of the URL, not
-   against ADDR.  */
-extern int (*twist_quic_connect_fn) (struct twist_easy *easy,
+/* A QUIC connection for the transfer TRANSFER to the address ADDR and PORT,
+   which a lookup gave.  The certificate is checked against the host of the
+   URL, not against ADDR.  */
+extern int (*twist_quic_connect_fn) (struct twist_transfer *transfer,
                                      const struct twist_dns_addr *addr,
                                      int port, struct twist_connection **out);
 /* What a QUIC connection can be asked for besides the usual.  DATAGRAMS: DATAGRAM
@@ -512,13 +526,8 @@ int twist_quic_register (void);
 void twist_quic_hold_stream (struct twist_connection *conn);
 int twist_quic_finish_stream (struct twist_connection *conn);
 
-/* ---- runtime and storage ---- */
+/* ---- storage ---- */
 
-struct twist_runtime *twist_runtime_new (size_t nloops);
-void twist_runtime_free (struct twist_runtime *rt);
-struct twist_loop *twist_runtime_dial_loop (struct twist_runtime *rt);
-size_t twist_runtime_next_worker (struct twist_runtime *rt);
-struct twist_storage *twist_runtime_storage (struct twist_runtime *rt);
 
 struct twist_storage *twist_storage_new (size_t threads, size_t bound);
 void twist_storage_free (struct twist_storage *st);
@@ -555,21 +564,21 @@ struct twist_scheme
   const char *name;
   int default_port;
   unsigned flags;
-  int (*attach) (struct twist_easy *easy);
+  int (*attach) (struct twist_transfer *transfer);
 };
 
 const struct twist_scheme *twist_scheme_by_name (const char *name);
-int twist_scheme_unsupported (struct twist_easy *easy);
-int twist_http_attach (struct twist_easy *easy);
-int twist_file_attach (struct twist_easy *easy);
+int twist_scheme_unsupported (struct twist_transfer *transfer);
+int twist_http_attach (struct twist_transfer *transfer);
+int twist_file_attach (struct twist_transfer *transfer);
 int twist_file_check_url (const char *host, const char *path, int path_set);
-int twist_ftp_attach (struct twist_easy *easy);
-int twist_smtp_attach (struct twist_easy *easy);
-int twist_pop3_attach (struct twist_easy *easy);
-int twist_imap_attach (struct twist_easy *easy);
+int twist_ftp_attach (struct twist_transfer *transfer);
+int twist_smtp_attach (struct twist_transfer *transfer);
+int twist_pop3_attach (struct twist_transfer *transfer);
+int twist_imap_attach (struct twist_transfer *transfer);
 
 struct twist_ftp;
-struct twist_ftp *twist_ftp_new (struct twist_easy *easy, int live);
+struct twist_ftp *twist_ftp_new (struct twist_transfer *transfer, int live);
 void twist_ftp_free (void *ftp);
 size_t twist_ftp_receive (struct twist_ftp *ftp, const uint8_t *data, size_t len);
 size_t twist_ftp_data (struct twist_ftp *ftp, const uint8_t *data, size_t len);
@@ -675,14 +684,16 @@ int twist_dns_resolve_service (struct twist_loop *loop, const char *host,
                                void (*cb) (void *user, int err,
                                            const struct twist_dns_service *svc),
                                void *user);
-int twist_dns_resolve_easy (struct twist_easy *easy, const char *host,
-                            void (*cb) (void *user, int err,
-                                        const struct twist_dns_addr *addr),
-                            void *user);
-int twist_dns_resolve_service_easy (struct twist_easy *easy, const char *host,
-                                    void (*cb) (void *user, int err,
-                                                const struct twist_dns_service *svc),
-                                    void *user);
+int twist_dns_resolve_transfer (struct twist_transfer *transfer,
+                                const char *host,
+                                void (*cb) (void *user, int err,
+                                            const struct twist_dns_addr *addr),
+                                void *user);
+int twist_dns_resolve_service_transfer (struct twist_transfer *transfer,
+                                        const char *host,
+                                        void (*cb) (void *user, int err,
+                                                    const struct twist_dns_service *svc),
+                                        void *user);
 int twist_dns_plan_for (const int *user, size_t nuser, int have_doh,
                         int have_doq, int have_dot,
                         int *out, size_t cap, size_t *n);
@@ -714,12 +725,16 @@ struct twist_origin_hint;
 int twist_http_discover (int pinned, int https, int rr, int rr_h3, int cached,
                          int *how);
 int twist_alt_svc_h3 (const char *value, size_t len, int *port, int *clear);
-void twist_origin_clear (struct twist_easy *easy);
-int twist_origin_h3 (struct twist_easy *easy, const char *host, int *port);
-void twist_origin_set_h3 (struct twist_easy *easy, const char *host, int yes,
+void twist_origin_clear (struct twist_transfer *transfer);
+int twist_origin_h3 (struct twist_transfer *transfer, const char *host,
+                     int *port);
+void twist_origin_set_h3 (struct twist_transfer *transfer, const char *host,
+                          int yes,
                           int port);
-int twist_origin_http_minor (struct twist_easy *easy, const char *host);
-void twist_origin_set_http_minor (struct twist_easy *easy, const char *host,
+int twist_origin_http_minor (struct twist_transfer *transfer,
+                             const char *host);
+void twist_origin_set_http_minor (struct twist_transfer *transfer,
+                                  const char *host,
                                   int minor);
 
 /* Keeping a transfer to a rate on average.  The first question about a
@@ -807,13 +822,15 @@ int twist_pool_put_payload (struct twist_pool *pool, const char *key,
                             struct twist_connection *conn, void *payload,
                             void (*payload_free) (void *));
 /* The pool a transfer parks its connection in and looks for one in: its
-   share's, else its multi handle's.  NULL for a handle on neither.  */
-struct twist_pool *twist_easy_pool (struct twist_easy *easy);
-void twist_pool_set_lock (struct twist_pool *pool, int enabled);
+   runtime's.  NULL for a transfer that is not in one.  */
+struct twist_pool *twist_transfer_pool (struct twist_transfer *transfer);
 size_t twist_pool_count (struct twist_pool *pool);
-void twist_pool_drop_loop (struct twist_pool *pool, struct twist_loop *loop);
-void twist_multi_note_pool (struct twist_multi *multi, struct twist_pool *pool);
-void twist_multi_notify_timer (struct twist_multi *multi);
+void twist_runtime_notify_timer (struct twist_runtime *runtime);
+/* TRANSFER has ended: have the loop report it.  */
+int twist_runtime_finished (struct twist_transfer *transfer);
+/* Take TRANSFER out of its runtime, silently, releasing its connection;
+   TWIST_ERR_RECURSIVE from a callback.  OK for a handle in none.  */
+int twist_runtime_detach (struct twist_transfer *transfer);
 
 enum twist_proxy_kind
 {
@@ -849,11 +866,13 @@ const char *twist_proxy_error (const struct twist_proxy *proxy, int *status);
 void twist_proxy_set_credentials (struct twist_proxy *proxy, const char *user,
                                   const char *pass);
 /* The transfer a refusal is reported to.  */
-void twist_proxy_set_easy (struct twist_proxy *proxy, struct twist_easy *easy);
+void twist_proxy_set_transfer (struct twist_proxy *proxy,
+                               struct twist_transfer *transfer);
 /* Everything a transfer tells a new proxy: where to report, and who to be.
    USER and PASS are from the proxy's URL; without a user, the transfer's
    TWISTOPT_PROXYUSERPWD is used.  */
-void twist_proxy_configure (struct twist_proxy *proxy, struct twist_easy *easy,
+void twist_proxy_configure (struct twist_proxy *proxy,
+                            struct twist_transfer *transfer,
                             const char *user, const char *pass);
 int twist_proxy_is_ready (const struct twist_proxy *proxy);
 const struct twist_protocol_handler *twist_proxy_handler (struct twist_proxy *p);
@@ -935,7 +954,7 @@ int twist_ws_accept (const char *key, char **out);
 int twist_ws_key (char key[25]);
 int twist_ws_validate (const char *key, const char *upgrade,
                        const char *connection, const char *accept);
-struct twist_ws *twist_ws_new (struct twist_easy *easy,
+struct twist_ws *twist_ws_new (struct twist_transfer *transfer,
                                int (*send) (void *user, const uint8_t *data,
                                             size_t len),
                                void *send_user,
@@ -992,7 +1011,7 @@ int twist_http_redirect_sensitive (const char *from_host, int from_https,
                                    const char *to_host, int to_https);
 int twist_http_status_result (int failonerror, int status);
 
-/* ---- cookies, auth, share ---- */
+/* ---- cookies, auth ---- */
 
 struct twist_jar *twist_jar_new (void);
 /* How many cookies the jar holds.  */
@@ -1089,15 +1108,15 @@ struct twist_mail_sasl
 
 void twist_mail_sasl_init (struct twist_mail_sasl *sasl);
 void twist_mail_sasl_close (struct twist_mail_sasl *sasl);
-int twist_mail_sasl_start (struct twist_mail_sasl *sasl, struct twist_easy *easy,
+int twist_mail_sasl_start (struct twist_mail_sasl *sasl, struct twist_transfer *transfer,
                            const char *advertised, char **b64, int *initial);
 int twist_mail_sasl_continue (struct twist_mail_sasl *sasl, char **b64);
-const char *twist_mail_user (const struct twist_easy *easy);
-const char *twist_mail_pass (const struct twist_easy *easy);
+const char *twist_mail_user (const struct twist_transfer *transfer);
+const char *twist_mail_pass (const struct twist_transfer *transfer);
 
 struct twist_mail_link
 {
-  struct twist_easy *easy;
+  struct twist_transfer *transfer;
   struct twist_connection *conn;
   struct twist_proxy *proxy;
   struct twist_timer *timer;
@@ -1114,7 +1133,7 @@ struct twist_mail_link
   void (*fail) (void *user, int err);
 };
 
-int twist_mail_link_open (struct twist_mail_link *link, struct twist_easy *easy,
+int twist_mail_link_open (struct twist_mail_link *link, struct twist_transfer *transfer,
                           const struct twist_protocol_handler *handler,
                           void *user, void (*fail) (void *user, int err));
 void twist_mail_link_close (struct twist_mail_link *link);
@@ -1128,13 +1147,13 @@ void twist_mail_link_phase_end (struct twist_mail_link *link);
 /* Give up the connection without closing it, to keep it for another
    transfer.  The timer for this one is cancelled.  */
 struct twist_connection *twist_mail_link_detach (struct twist_mail_link *link);
-/* Take CONN back for EASY's transfer: the handler and the timer.  */
+/* Take CONN back for TRANSFER's transfer: the handler and the timer.  */
 void twist_mail_link_attach (struct twist_mail_link *link,
-                             struct twist_easy *easy,
+                             struct twist_transfer *transfer,
                              struct twist_connection *conn);
 
 struct twist_smtp;
-struct twist_smtp *twist_smtp_new (struct twist_easy *easy, int live);
+struct twist_smtp *twist_smtp_new (struct twist_transfer *transfer, int live);
 void twist_smtp_free (void *smtp);
 size_t twist_smtp_receive (struct twist_smtp *smtp, const uint8_t *data,
                            size_t len);
@@ -1146,7 +1165,7 @@ const char *twist_smtp_command (const struct twist_smtp *smtp);
 void twist_smtp_tls_done (struct twist_smtp *smtp);
 
 struct twist_pop3;
-struct twist_pop3 *twist_pop3_new (struct twist_easy *easy, int live);
+struct twist_pop3 *twist_pop3_new (struct twist_transfer *transfer, int live);
 void twist_pop3_free (void *pop3);
 size_t twist_pop3_receive (struct twist_pop3 *pop3, const uint8_t *data,
                            size_t len);
@@ -1154,7 +1173,7 @@ const char *twist_pop3_command (const struct twist_pop3 *pop3);
 void twist_pop3_tls_done (struct twist_pop3 *pop3);
 
 struct twist_imap;
-struct twist_imap *twist_imap_new (struct twist_easy *easy, int live);
+struct twist_imap *twist_imap_new (struct twist_transfer *transfer, int live);
 void twist_imap_free (void *imap);
 size_t twist_imap_receive (struct twist_imap *imap, const uint8_t *data,
                            size_t len);
@@ -1163,30 +1182,31 @@ void twist_imap_tls_done (struct twist_imap *imap);
 int twist_imap_mailbox (const char *box, char *out, size_t cap);
 
 struct twist_mqtt;
-struct twist_mqtt *twist_mqtt_new (struct twist_easy *easy, int live);
+struct twist_mqtt *twist_mqtt_new (struct twist_transfer *transfer, int live);
 void twist_mqtt_free (void *mqtt);
 size_t twist_mqtt_receive (struct twist_mqtt *mqtt, const uint8_t *data,
                            size_t len);
 const uint8_t *twist_mqtt_command (const struct twist_mqtt *mqtt, size_t *len);
-int twist_mqtt_attach (struct twist_easy *easy);
+int twist_mqtt_attach (struct twist_transfer *transfer);
 
 struct twist_ldap;
-struct twist_ldap *twist_ldap_new (struct twist_easy *easy, int live);
+struct twist_ldap *twist_ldap_new (struct twist_transfer *transfer, int live);
 void twist_ldap_free (void *ldap);
 size_t twist_ldap_receive (struct twist_ldap *ldap, const uint8_t *data,
                            size_t len);
 const uint8_t *twist_ldap_command (const struct twist_ldap *ldap, size_t *len);
-int twist_ldap_attach (struct twist_easy *easy);
+int twist_ldap_attach (struct twist_transfer *transfer);
 
 struct twist_gopher;
-struct twist_gopher *twist_gopher_new (struct twist_easy *easy, int live);
+struct twist_gopher *twist_gopher_new (struct twist_transfer *transfer,
+                                       int live);
 void twist_gopher_free (void *gopher);
 const uint8_t *twist_gopher_request (const struct twist_gopher *gopher,
                                      size_t *len);
 size_t twist_gopher_receive (struct twist_gopher *gopher, const uint8_t *data,
                              size_t len);
 void twist_gopher_closed (struct twist_gopher *gopher, int err);
-int twist_gopher_attach (struct twist_easy *easy);
+int twist_gopher_attach (struct twist_transfer *transfer);
 
 /* Telnet (RFC 854).  twist_telnet_receive takes what the server sent and
    writes the text in it to the transfer's write callback, answering the
@@ -1195,7 +1215,8 @@ int twist_gopher_attach (struct twist_easy *easy);
    is kept, for twist_telnet_sent; the input is then given by the caller, and
    LIVE nonzero reads it (standard input, or the read callback).  */
 struct twist_telnet;
-struct twist_telnet *twist_telnet_new (struct twist_easy *easy, int live);
+struct twist_telnet *twist_telnet_new (struct twist_transfer *transfer,
+                                       int live);
 void twist_telnet_free (void *telnet);
 size_t twist_telnet_receive (struct twist_telnet *telnet, const uint8_t *data,
                              size_t len);
@@ -1205,24 +1226,24 @@ const uint8_t *twist_telnet_sent (const struct twist_telnet *telnet,
                                   size_t *len);
 void twist_telnet_sent_clear (struct twist_telnet *telnet);
 void twist_telnet_closed (struct twist_telnet *telnet, int err);
-int twist_telnet_attach (struct twist_easy *easy);
+int twist_telnet_attach (struct twist_transfer *transfer);
 
 struct twist_dict;
-struct twist_dict *twist_dict_new (struct twist_easy *easy, int live);
+struct twist_dict *twist_dict_new (struct twist_transfer *transfer, int live);
 void twist_dict_free (void *dict);
 const uint8_t *twist_dict_request (const struct twist_dict *dict, size_t *len);
 size_t twist_dict_receive (struct twist_dict *dict, const uint8_t *data,
                            size_t len);
 void twist_dict_closed (struct twist_dict *dict, int err);
-int twist_dict_attach (struct twist_easy *easy);
+int twist_dict_attach (struct twist_transfer *transfer);
 
 /* scp and sftp: an SSH session (foxtrot) on a TCP endpoint.  The output
-   of a handler built with twist_ssh_new (easy, 0) goes to the sink set
+   of a handler built with twist_ssh_new (transfer, 0) goes to the sink set
    with twist_ssh_set_sink, and its clock is set with twist_ssh_set_time
    (microseconds), so that it can be driven in-process.  twist_ssh_start
    sends our identification and begins the key exchange.  */
 struct twist_ssh;
-struct twist_ssh *twist_ssh_new (struct twist_easy *easy, int live);
+struct twist_ssh *twist_ssh_new (struct twist_transfer *transfer, int live);
 void twist_ssh_free (void *ssh);
 void twist_ssh_set_sink (struct twist_ssh *ssh,
                          int (*sink) (void *user, const uint8_t *data,
@@ -1234,10 +1255,10 @@ size_t twist_ssh_receive (struct twist_ssh *ssh, const uint8_t *data,
                           size_t len);
 void twist_ssh_timeout (struct twist_ssh *ssh);
 uint64_t twist_ssh_deadline (const struct twist_ssh *ssh);
-int twist_ssh_attach (struct twist_easy *easy);
+int twist_ssh_attach (struct twist_transfer *transfer);
 
 struct twist_tftp;
-struct twist_tftp *twist_tftp_new (struct twist_easy *easy, int live);
+struct twist_tftp *twist_tftp_new (struct twist_transfer *transfer, int live);
 void twist_tftp_free (void *tftp);
 const uint8_t *twist_tftp_packet (const struct twist_tftp *tftp, size_t *len);
 size_t twist_tftp_receive (struct twist_tftp *tftp, const uint8_t *data,
@@ -1250,45 +1271,18 @@ void twist_tftp_set_dest (struct twist_tftp *tftp,
                           const struct twist_dns_addr *addr, int port);
 int twist_tftp_accept_source (struct twist_tftp *tftp,
                               const struct sockaddr *from, socklen_t flen);
-int twist_tftp_attach (struct twist_easy *easy);
+int twist_tftp_attach (struct twist_transfer *transfer);
 
-struct twist_share
-{
-  unsigned locks;
-  struct twist_jar *jar;
-  struct twist_pool *pool;
-  struct twist_hsts *hsts;
-  struct twist_altsvc *altsvc;
-  struct twist_dns_cache *dns;
-  /* One mutex for the cookie jar, the HSTS list and the Alt-Svc list, taken
-     by the functions below when the share's locks ask for it.  */
-  void *data_mu;
-};
-
-/* The data of a share that handles of several threads may use, with the lock
-   that TWIST_LOCK_DATA_COOKIE, _HSTS or _ALT_SVC turns on: without the bit
-   they are plain calls, for a share that is used from one thread.  */
-int twist_share_cookie_store (struct twist_share *share, const char *set_cookie,
-                              const char *host, const char *path, int https);
-int twist_share_cookie_header (struct twist_share *share, const char *host,
-                               const char *path, int https, char **out);
-int twist_share_hsts_upgrade (struct twist_share *share, const char *host,
-                              uint64_t now);
-int twist_share_altsvc_note (struct twist_share *share, const char *origin,
-                             const char *alt);
-/* The Alt-Svc entry for ORIGIN, copied to OUT (CAP bytes); 1 if there is one.  */
-int twist_share_altsvc_lookup (struct twist_share *share, const char *origin,
-                               char *out, size_t cap);
-/* Hold, and let go of, the lock of one of the kinds of data above, as a call
-   of them does.  */
-void twist_share_data_lock (struct twist_share *share, unsigned bit);
-void twist_share_data_unlock (struct twist_share *share, unsigned bit);
+/* The stores of the runtime that a transfer has asked to use, or NULL
+   for a transfer that has not, or that is in no runtime.  */
+struct twist_jar *twist_transfer_jar (struct twist_transfer *transfer);
+struct twist_hsts *twist_transfer_hsts (struct twist_transfer *transfer);
+struct twist_altsvc *twist_transfer_altsvc (struct twist_transfer *transfer);
 
 struct twist_dns_cache;
 
 struct twist_dns_cache *twist_dns_cache_new (void);
 void twist_dns_cache_free (struct twist_dns_cache *cache);
-void twist_dns_cache_set_lock (struct twist_dns_cache *cache, int on);
 int twist_dns_cache_put_msg (struct twist_dns_cache *cache, const char *name,
                              int qtype, const uint8_t *msg, size_t len,
                              uint64_t now_ms);
@@ -1348,14 +1342,12 @@ size_t twist_write_bytes (twist_write_callback cb, void *user,
 
 void twist_i18n_init (void);
 
-void twist_easy_set_error (struct twist_easy *easy, char *msg);
-int twist_easy_use_ssl_failed (struct twist_easy *easy, const char *why);
-int twist_easy_finish (struct twist_easy *easy, int result);
-/* As twist_easy_perform, on MULTI, which the caller keeps: what a transfer
-   leaves in it, such as a connection, is there for the next.  */
-int twist_easy_perform_in (struct twist_multi *multi, struct twist_easy *easy);
-void twist_easy_release_transfer (struct twist_easy *easy);
-int twist_transfer_start (struct twist_easy *easy);
+void twist_transfer_set_error (struct twist_transfer *transfer, char *msg);
+int twist_transfer_use_ssl_failed (struct twist_transfer *transfer,
+                                   const char *why);
+int twist_transfer_finish (struct twist_transfer *transfer, int result);
+void twist_transfer_release (struct twist_transfer *transfer);
+int twist_transfer_start (struct twist_transfer *transfer);
 
 /* ---- the URI Template of a UDP proxy (engine/template.c) ---- */
 
@@ -1396,7 +1388,7 @@ size_t twist_masque_wrap (uint64_t qsid, const uint8_t *payload, size_t len,
                           uint8_t *out, size_t cap);
 int twist_masque_unwrap (uint64_t qsid, const uint8_t *data, size_t len,
                          const uint8_t **payload, size_t *plen);
-int twist_masque_connect (struct twist_easy *easy,
+int twist_masque_connect (struct twist_transfer *transfer,
                           const struct twist_masque_spec *spec,
                           const struct twist_dns_addr *proxy_addr,
                           const struct twist_protocol_handler *handler,
@@ -1420,7 +1412,7 @@ struct twist_tunnel_spec
    its; HANDLER->connected is called when the proxy has said yes, and an error
    when it has not.  The connection is the caller's to free, which ends the
    tunnel.  If this fails OUT is still set, and is to be freed.  */
-int twist_tunnel_connect (struct twist_easy *easy,
+int twist_tunnel_connect (struct twist_transfer *transfer,
                           const struct twist_tunnel_spec *spec,
                           const struct twist_dns_addr *proxy_addr,
                           const struct twist_protocol_handler *handler,
@@ -1433,13 +1425,13 @@ int twist_tunnel_connect (struct twist_easy *easy,
    scheme (http_proxy, https_proxy, ftp_proxy... in lower case or upper, then
    all_proxy), unless the host is on the TWISTOPT_NOPROXY list or the
    environment's no_proxy.  It is worked out each time it is asked, so a
-   redirect to another host is looked at again.  The string is the easy
+   redirect to another host is looked at again.  The string is the transfer
    handle's or the environment's: it is not to be freed.  */
-const char *twist_easy_proxy (const struct twist_easy *easy);
+const char *twist_transfer_proxy (const struct twist_transfer *transfer);
 /* Whether HOST is on a no_proxy LIST.  */
 int twist_noproxy_match (const char *host, const char *list);
 /* Whether the URL's host is on the list of those that go direct.  */
-int twist_easy_noproxy (const struct twist_easy *easy);
+int twist_transfer_noproxy (const struct twist_transfer *transfer);
 
 /* ---- progress ---- */
 
@@ -1448,21 +1440,21 @@ int twist_easy_noproxy (const struct twist_easy *easy);
    download or upload, and the bytes as they go.  Each of those draws the meter
    or calls the callback if the second has changed.  A redirect is a hop: the
    line is finished, the sizes are forgotten and the counters start again.  */
-void twist_progress_begin (struct twist_easy *easy);
-void twist_progress_end (struct twist_easy *easy, int result);
-void twist_progress_hop (struct twist_easy *easy);
-void twist_progress_dl_size (struct twist_easy *easy, long long size);
-void twist_progress_ul_size (struct twist_easy *easy, long long size);
-void twist_progress_downloaded (struct twist_easy *easy, size_t n);
+void twist_progress_begin (struct twist_transfer *transfer);
+void twist_progress_end (struct twist_transfer *transfer, int result);
+void twist_progress_hop (struct twist_transfer *transfer);
+void twist_progress_dl_size (struct twist_transfer *transfer, long long size);
+void twist_progress_ul_size (struct twist_transfer *transfer, long long size);
+void twist_progress_downloaded (struct twist_transfer *transfer, size_t n);
 /* N bytes of the body have been given to the application: counted for
    TWISTINFO_SIZE_DOWNLOAD, and for the progress.  */
-void twist_easy_downloaded (struct twist_easy *easy, size_t n);
+void twist_transfer_downloaded (struct twist_transfer *transfer, size_t n);
 /* How much the transfer will upload, from the postfields or the application
    (TWISTOPT_INFILESIZE); -1 if that is not known.  */
-long long twist_easy_upload_size (const struct twist_easy *easy);
-void twist_progress_uploaded (struct twist_easy *easy, size_t n);
-int twist_progress_update (struct twist_easy *easy);
-void twist_progress_release (struct twist_easy *easy);
+long long twist_transfer_upload_size (const struct twist_transfer *transfer);
+void twist_progress_uploaded (struct twist_transfer *transfer, size_t n);
+int twist_progress_update (struct twist_transfer *transfer);
+void twist_progress_release (struct twist_transfer *transfer);
 /* The pieces, for the tests.  BUF takes 6 bytes, and 10.  */
 char *twist_progress_max5 (long long bytes, char *buf);
 char *twist_progress_time2str (long long seconds, char *buf);

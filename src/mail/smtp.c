@@ -48,7 +48,7 @@ enum
 
 struct twist_smtp
 {
-  struct twist_easy *easy;
+  struct twist_transfer *transfer;
   struct twist_mail_link link;
   struct twist_mail_sasl sasl;
   struct twist_endpoint *ep;
@@ -83,7 +83,7 @@ smtp_complete (struct twist_smtp *s, int err)
   if (s == NULL || s->finished)
     return;
   s->finished = 1;
-  twist_easy_finish (s->easy, err);
+  twist_transfer_finish (s->transfer, err);
 }
 
 static int
@@ -135,19 +135,19 @@ static int
 send_body (struct twist_smtp *s)
 {
   struct twist_dotout dot;
-  struct twist_easy *easy = s->easy;
+  struct twist_transfer *transfer = s->transfer;
   int rc;
 
   twist_dotout_init (&dot);
   s->cmdlen = 0;
   s->cmd[0] = 0;
-  if (twist_easy_upload_size (easy) >= 0)
-    twist_progress_ul_size (easy, twist_easy_upload_size (easy));
-  if (easy->postfields != NULL)
+  if (twist_transfer_upload_size (transfer) >= 0)
+    twist_progress_ul_size (transfer, twist_transfer_upload_size (transfer));
+  if (transfer->postfields != NULL)
     {
-      const char *p = easy->postfields;
-      size_t left = easy->postfieldsize_set && easy->postfieldsize >= 0
-                    ? (size_t) easy->postfieldsize : strlen (p);
+      const char *p = transfer->postfields;
+      size_t left = transfer->postfieldsize_set && transfer->postfieldsize >= 0
+                    ? (size_t) transfer->postfieldsize : strlen (p);
 
       while (left > 0)
         {
@@ -156,18 +156,19 @@ send_body (struct twist_smtp *s)
           rc = twist_dotout_write (&dot, (const uint8_t *) p, n, body_sink, s);
           if (rc != TWIST_OK)
             return rc;
-          twist_progress_uploaded (easy, n);
+          twist_progress_uploaded (transfer, n);
           p += n;
           left -= n;
         }
     }
-  else if (easy->read_cb != NULL)
+  else if (transfer->read_cb != NULL)
     {
       char buf[512];
 
       for (;;)
         {
-          size_t n = easy->read_cb (buf, 1, sizeof buf, easy->read_data);
+          size_t n = transfer->read_cb (buf, 1, sizeof buf,
+                                        transfer->read_data);
 
           if (n == 0)
             break;
@@ -176,7 +177,7 @@ send_body (struct twist_smtp *s)
           rc = twist_dotout_write (&dot, (const uint8_t *) buf, n, body_sink, s);
           if (rc != TWIST_OK)
             return rc;
-          twist_progress_uploaded (easy, n);
+          twist_progress_uploaded (transfer, n);
         }
     }
   return twist_dotout_finish (&dot, body_sink, s);
@@ -185,11 +186,11 @@ send_body (struct twist_smtp *s)
 static int
 start_mail (struct twist_smtp *s)
 {
-  const char *from = s->easy->mail_from;
+  const char *from = s->transfer->mail_from;
 
   if (bad_token (from))
     return TWIST_ERR_PROTOCOL;
-  s->rcpt = s->easy->mail_rcpt;
+  s->rcpt = s->transfer->mail_rcpt;
   if (s->rcpt == NULL || s->rcpt->data == NULL)
     return TWIST_ERR_URL;
   s->state = S_MAIL;
@@ -204,15 +205,15 @@ start_auth (struct twist_smtp *s)
   char *b64 = NULL;
   int initial = 0;
   int rc;
-  const char *user = twist_mail_user (s->easy);
-  const char *bearer = s->easy->bearer;
+  const char *user = twist_mail_user (s->transfer);
+  const char *bearer = s->transfer->bearer;
 
   if ((user == NULL || user[0] == 0)
       && (bearer == NULL || bearer[0] == 0))
     return start_mail (s);
-  if (bad_token (user) || bad_token (twist_mail_pass (s->easy)))
+  if (bad_token (user) || bad_token (twist_mail_pass (s->transfer)))
     return TWIST_ERR_PROTOCOL;
-  rc = twist_mail_sasl_start (&s->sasl, s->easy,
+  rc = twist_mail_sasl_start (&s->sasl, s->transfer,
                               s->auth_adv[0] != 0 ? s->auth_adv : NULL,
                               &b64, &initial);
   if (rc != TWIST_OK)
@@ -240,9 +241,9 @@ after_ehlo (struct twist_smtp *s)
           return smtp_printf (s, "STARTTLS\r\n");
         }
       if (s->use_ssl == TWIST_USE_SSL_ALL)
-        return twist_easy_use_ssl_failed (s->easy,
-                                          _("the server does not offer "
-                                            "STARTTLS"));
+        return twist_transfer_use_ssl_failed (s->transfer,
+                                              _("the server does not offer "
+                                                "STARTTLS"));
     }
   return start_auth (s);
 }
@@ -255,10 +256,11 @@ begin_tls (struct twist_smtp *s)
   s->state = S_TLSWAIT;
   if (s->ep == NULL)
     return TWIST_OK;
-  return twist_connection_start_tls (s->ep->conn, s->easy->url->host,
-                                     s->easy->verifypeer, NULL, 0,
-                                     s->easy->cainfo, s->easy->capath,
-                                     s->easy->sslcert, s->easy->sslkey);
+  return twist_connection_start_tls (s->ep->conn, s->transfer->url->host,
+                                     s->transfer->verifypeer, NULL, 0,
+                                     s->transfer->cainfo, s->transfer->capath,
+                                     s->transfer->sslcert,
+                                     s->transfer->sslkey);
 }
 
 static void
@@ -305,7 +307,7 @@ on_final (struct twist_smtp *s, int code)
 {
   int rc = TWIST_OK;
 
-  s->easy->http_code = code;
+  s->transfer->http_code = code;
   switch (s->state)
     {
     case S_GREET:
@@ -335,9 +337,8 @@ on_final (struct twist_smtp *s, int code)
         }
       if (s->use_ssl == TWIST_USE_SSL_ALL)
         {
-          smtp_complete (s, twist_easy_use_ssl_failed (s->easy,
-                                                       _("the server refused "
-                                                         "STARTTLS")));
+          smtp_complete (s, twist_transfer_use_ssl_failed
+                         (s->transfer, _("the server refused STARTTLS")));
           return;
         }
       rc = start_auth (s);
@@ -511,10 +512,10 @@ smtp_connected (struct twist_endpoint *ep)
   s->ep = ep;
   if (!s->implicit_tls)
     return;
-  rc = twist_connection_start_tls (ep->conn, s->easy->url->host,
-                                   s->easy->verifypeer, NULL, 0,
-                                   s->easy->cainfo, s->easy->capath, s->easy->sslcert,
-                                   s->easy->sslkey);
+  rc = twist_connection_start_tls (ep->conn, s->transfer->url->host,
+                                   s->transfer->verifypeer, NULL, 0,
+                                   s->transfer->cainfo, s->transfer->capath, s->transfer->sslcert,
+                                   s->transfer->sslkey);
   if (rc != TWIST_OK)
     smtp_complete (s, rc);
 }
@@ -582,41 +583,41 @@ twist_smtp_free (void *p)
 }
 
 struct twist_smtp *
-twist_smtp_new (struct twist_easy *easy, int live)
+twist_smtp_new (struct twist_transfer *transfer, int live)
 {
   struct twist_smtp *s;
 
-  if (easy == NULL || easy->url == NULL)
+  if (transfer == NULL || transfer->url == NULL)
     return NULL;
   s = calloc (1, sizeof *s);
   if (s == NULL)
     return NULL;
   (void) live;
-  s->easy = easy;
-  s->implicit_tls = easy->url->scheme != NULL
-                    && strcmp (easy->url->scheme, "smtps") == 0;
-  s->use_ssl = s->implicit_tls ? TWIST_USE_SSL_NONE : easy->use_ssl;
+  s->transfer = transfer;
+  s->implicit_tls = transfer->url->scheme != NULL
+                    && strcmp (transfer->url->scheme, "smtps") == 0;
+  s->use_ssl = s->implicit_tls ? TWIST_USE_SSL_NONE : transfer->use_ssl;
   twist_mail_sasl_init (&s->sasl);
-  easy->xfer = s;
-  easy->xfer_free = twist_smtp_free;
+  transfer->state = s;
+  transfer->state_free = twist_smtp_free;
   return s;
 }
 
 int
-twist_smtp_attach (struct twist_easy *easy)
+twist_smtp_attach (struct twist_transfer *transfer)
 {
   struct twist_smtp *s;
   int rc;
 
-  if (easy == NULL || easy->url == NULL || easy->loop == NULL)
+  if (transfer == NULL || transfer->url == NULL || transfer->loop == NULL)
     return TWIST_ERR_INVAL;
-  s = twist_smtp_new (easy, 1);
+  s = twist_smtp_new (transfer, 1);
   if (s == NULL)
     return TWIST_ERR_NOMEM;
-  rc = twist_mail_link_open (&s->link, easy, &smtp_handler, s, smtp_fail);
+  rc = twist_mail_link_open (&s->link, transfer, &smtp_handler, s, smtp_fail);
   if (rc != TWIST_OK)
     smtp_complete (s, rc);
-  return easy->done ? easy->result : TWIST_OK;
+  return transfer->done ? transfer->result : TWIST_OK;
 }
 
 /* The handshake that followed STARTTLS is done.  What the server said before

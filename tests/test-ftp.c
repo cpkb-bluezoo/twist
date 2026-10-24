@@ -207,16 +207,17 @@ test_ftp_session (void)
 
   for (split = 1; split <= n; split++)
     {
-      twist_easy *easy = twist_easy_init ();
+      twist_transfer *transfer = twist_transfer_new ();
       struct twist_ftp *f;
       size_t i;
 
       ftp_body_len = 0;
-      check (easy != NULL, "easy");
-      check (twist_url_parse_int ("ftp://127.0.0.1/pub/file.txt", &easy->url)
+      check (transfer != NULL, "transfer");
+      check (twist_url_parse_int ("ftp://127.0.0.1/pub/file.txt",
+                                  &transfer->url)
              == TWIST_OK, "ftp url");
-      easy->write_cb = ftp_write;
-      f = twist_ftp_new (easy, 0);
+      transfer->write_cb = ftp_write;
+      f = twist_ftp_new (transfer, 0);
       check (f != NULL, "ftp");
       feed_session (f, talk, split);
       check (strcmp (twist_ftp_command (f), "RETR pub/file.txt\r\n") == 0,
@@ -224,26 +225,26 @@ test_ftp_session (void)
       check (twist_ftp_data_port (f) == 40000, "data port");
       for (i = 0; i < 5; i++)
         twist_ftp_data (f, (const uint8_t *) "hello" + i, 1);
-      check (!easy->done, "waiting for 226");
+      check (!transfer->done, "waiting for 226");
       feed_session (f, "226 Transfer complete.\r\n", split > 24 ? 24 : split);
-      check (!easy->done, "waiting for data eof");
+      check (!transfer->done, "waiting for data eof");
       twist_ftp_data_eof (f);
-      check (easy->done && easy->result == TWIST_OK, "ftp done");
-      check (easy->http_code == 226, "ftp code");
-      check (easy->size_download == 5 && ftp_body_len == 5, "ftp body");
+      check (transfer->done && transfer->result == TWIST_OK, "ftp done");
+      check (transfer->http_code == 226, "ftp code");
+      check (transfer->size_download == 5 && ftp_body_len == 5, "ftp body");
       /* The progress: the size from the reply, and the bytes.  */
-      check (easy->progress.dl_known && easy->progress.size_dl == 5
-             && easy->progress.downloaded == 5, "ftp progress");
+      check (transfer->progress.dl_known && transfer->progress.size_dl == 5
+             && transfer->progress.downloaded == 5, "ftp progress");
       check (memcmp (ftp_body, "hello", 5) == 0, "ftp bytes");
-      twist_easy_cleanup (easy);
+      twist_transfer_free (transfer);
     }
   {
-    twist_easy *easy = twist_easy_init ();
+    twist_transfer *transfer = twist_transfer_new ();
     struct twist_ftp *f;
 
-    check (twist_url_parse_int ("ftp://alice:secret@127.0.0.1/pub/", &easy->url)
+    check (twist_url_parse_int ("ftp://alice:secret@127.0.0.1/pub/", &transfer->url)
            == TWIST_OK, "auth url");
-    f = twist_ftp_new (easy, 0);
+    f = twist_ftp_new (transfer, 0);
     {
       struct twist_dns_addr peer;
 
@@ -266,23 +267,23 @@ test_ftp_session (void)
     check (twist_ftp_data_port (f) == 1930, "pasv port");
     /* A listing has no size, even when the server puts a number in its text.  */
     feed_session (f, "150 Here comes the directory listing (99 bytes).\r\n", 1);
-    check (!easy->progress.dl_known, "a listing has no size");
-    twist_easy_cleanup (easy);
+    check (!transfer->progress.dl_known, "a listing has no size");
+    twist_transfer_free (transfer);
   }
 }
 
 /* A feed of replies, ending at the first command the client then sends.  */
 static struct twist_ftp *
-ftps_start (const char *url, twist_easy **easy_out)
+ftps_start (const char *url, twist_transfer **transfer_out)
 {
-  twist_easy *easy = twist_easy_init ();
+  twist_transfer *transfer = twist_transfer_new ();
   struct twist_ftp *f;
 
-  check (easy != NULL, "ftps easy");
-  check (twist_url_parse_int (url, &easy->url) == TWIST_OK, "ftps url");
-  f = twist_ftp_new (easy, 0);
+  check (transfer != NULL, "ftps transfer");
+  check (twist_url_parse_int (url, &transfer->url) == TWIST_OK, "ftps url");
+  f = twist_ftp_new (transfer, 0);
   check (f != NULL, "ftps handle");
-  *easy_out = easy;
+  *transfer_out = transfer;
   return f;
 }
 
@@ -299,9 +300,9 @@ test_ftps_session (void)
 
   for (split = 1; split <= 40; split += 39)
     {
-      twist_easy *easy;
+      twist_transfer *transfer;
       struct twist_ftp *f = ftps_start ("ftps://alice:secret@127.0.0.1/f.txt",
-                                        &easy);
+                                        &transfer);
 
       feed_session (f, "220 ready\r\n", split);
       check (strcmp (twist_ftp_command (f), "USER alice\r\n") == 0, "ftps user");
@@ -321,73 +322,74 @@ test_ftps_session (void)
              "the transfer goes on after PROT P");
       feed_session (f, "200 Type set.\r\n", split);
       check (strcmp (twist_ftp_command (f), "EPSV\r\n") == 0, "ftps epsv");
-      check (!easy->done, "ftps still going");
-      twist_easy_cleanup (easy);
+      check (!transfer->done, "ftps still going");
+      twist_transfer_free (transfer);
     }
 
   /* No password asked for: still protected before anything else.  */
   {
-    twist_easy *easy;
-    struct twist_ftp *f = ftps_start ("ftps://127.0.0.1/f.txt", &easy);
+    twist_transfer *transfer;
+    struct twist_ftp *f = ftps_start ("ftps://127.0.0.1/f.txt", &transfer);
 
     feed_session (f, "220 ready\r\n230 in\r\n", 1);
     check (strcmp (twist_ftp_command (f), "PBSZ 0\r\n") == 0,
            "PBSZ 0 after a login with no password");
-    twist_easy_cleanup (easy);
+    twist_transfer_free (transfer);
   }
 
   /* The server will not set the buffer size, or will not protect the data.  */
   {
-    twist_easy *easy;
-    struct twist_ftp *f = ftps_start ("ftps://127.0.0.1/f.txt", &easy);
+    twist_transfer *transfer;
+    struct twist_ftp *f = ftps_start ("ftps://127.0.0.1/f.txt", &transfer);
 
     feed_session (f, "220 ready\r\n230 in\r\n", 1);
     feed_session (f, "534 no\r\n", 1);
-    check (easy->done && easy->result == TWIST_ERR_TLS, "PBSZ refused fails");
+    check (transfer->done && transfer->result == TWIST_ERR_TLS,
+           "PBSZ refused fails");
     check (strcmp (twist_ftp_command (f), "PBSZ 0\r\n") == 0,
            "and nothing more is sent");
     check (!twist_ftp_data_protected (f), "and nothing is protected");
-    twist_easy_cleanup (easy);
+    twist_transfer_free (transfer);
   }
   {
-    twist_easy *easy;
-    struct twist_ftp *f = ftps_start ("ftps://127.0.0.1/f.txt", &easy);
+    twist_transfer *transfer;
+    struct twist_ftp *f = ftps_start ("ftps://127.0.0.1/f.txt", &transfer);
 
     feed_session (f, "220 ready\r\n230 in\r\n200 ok\r\n", 1);
     check (strcmp (twist_ftp_command (f), "PROT P\r\n") == 0, "PROT P sent");
     feed_session (f, "534 Request denied for policy reasons.\r\n", 1);
-    check (easy->done && easy->result == TWIST_ERR_TLS,
+    check (transfer->done && transfer->result == TWIST_ERR_TLS,
            "PROT P refused fails the transfer");
     check (strcmp (twist_ftp_command (f), "PROT P\r\n") == 0,
            "no TYPE, EPSV or RETR follows");
     check (!twist_ftp_data_protected (f), "the data is not left unprotected");
-    twist_easy_cleanup (easy);
+    twist_transfer_free (transfer);
   }
   /* Only a 2xx agrees.  */
   {
-    twist_easy *easy;
-    struct twist_ftp *f = ftps_start ("ftps://127.0.0.1/f.txt", &easy);
+    twist_transfer *transfer;
+    struct twist_ftp *f = ftps_start ("ftps://127.0.0.1/f.txt", &transfer);
 
     feed_session (f, "220 ready\r\n230 in\r\n200 ok\r\n", 1);
     feed_session (f, "336 more\r\n", 1);
-    check (easy->done && easy->result == TWIST_ERR_TLS,
+    check (transfer->done && transfer->result == TWIST_ERR_TLS,
            "a reply that is not 2xx to PROT P fails");
-    twist_easy_cleanup (easy);
+    twist_transfer_free (transfer);
   }
 
   /* Plain ftp sends neither.  */
   {
-    twist_easy *easy = twist_easy_init ();
+    twist_transfer *transfer = twist_transfer_new ();
     struct twist_ftp *f;
 
-    check (twist_url_parse_int ("ftp://127.0.0.1/f.txt", &easy->url)
+    check (twist_url_parse_int ("ftp://127.0.0.1/f.txt", &transfer->url)
            == TWIST_OK, "ftp url");
-    f = twist_ftp_new (easy, 0);
+    f = twist_ftp_new (transfer, 0);
     feed_session (f, "220 ready\r\n230 in\r\n", 1);
     check (strcmp (twist_ftp_command (f), "TYPE I\r\n") == 0,
            "ftp goes straight to TYPE after login");
     check (!twist_ftp_data_protected (f), "ftp does not protect the data");
-    twist_easy_cleanup (easy);
+    twist_transfer_free (transfer);
   }
 }
 
@@ -408,57 +410,62 @@ test_ftp_partial (void)
 
   for (i = 0; i < 4; i++)
     {
-      twist_easy *easy = twist_easy_init ();
+      twist_transfer *transfer = twist_transfer_new ();
       struct twist_ftp *f;
 
       ftp_body_len = 0;
-      check (twist_url_parse_int ("ftp://127.0.0.1/f", &easy->url) == TWIST_OK,
+      check (twist_url_parse_int ("ftp://127.0.0.1/f",
+                                  &transfer->url) == TWIST_OK,
              "url");
-      easy->write_cb = ftp_write;
-      f = twist_ftp_new (easy, 0);
+      transfer->write_cb = ftp_write;
+      f = twist_ftp_new (transfer, 0);
       feed_session (f, talk, 1);
       /* i bytes of 5 come, and then the end, and 226.  */
       if (i > 0)
         twist_ftp_data (f, (const uint8_t *) "hello", i);
       feed_session (f, "226 done\r\n", 1);
       twist_ftp_data_eof (f);
-      check (easy->done && easy->result == TWIST_ERR_PARTIAL,
+      check (transfer->done && transfer->result == TWIST_ERR_PARTIAL,
              "fewer bytes than announced is a partial file");
-      twist_easy_cleanup (easy);
+      twist_transfer_free (transfer);
     }
   {
-    twist_easy *easy = twist_easy_init ();
+    twist_transfer *transfer = twist_transfer_new ();
     struct twist_ftp *f;
 
     ftp_body_len = 0;
-    check (twist_url_parse_int ("ftp://127.0.0.1/f", &easy->url) == TWIST_OK,
+    check (twist_url_parse_int ("ftp://127.0.0.1/f",
+                                &transfer->url) == TWIST_OK,
            "url");
-    easy->write_cb = ftp_write;
-    f = twist_ftp_new (easy, 0);
+    transfer->write_cb = ftp_write;
+    f = twist_ftp_new (transfer, 0);
     feed_session (f, talk, 1);
     twist_ftp_data (f, (const uint8_t *) "hello", 5);
     feed_session (f, "226 done\r\n", 1);
     twist_ftp_data_eof (f);
-    check (easy->done && easy->result == TWIST_OK, "all of it is a success");
-    twist_easy_cleanup (easy);
+    check (transfer->done && transfer->result == TWIST_OK,
+           "all of it is a success");
+    twist_transfer_free (transfer);
   }
   /* No size given, nothing to hold it to.  */
   {
-    twist_easy *easy = twist_easy_init ();
+    twist_transfer *transfer = twist_transfer_new ();
     struct twist_ftp *f;
 
-    check (twist_url_parse_int ("ftp://127.0.0.1/f", &easy->url) == TWIST_OK,
+    check (twist_url_parse_int ("ftp://127.0.0.1/f",
+                                &transfer->url) == TWIST_OK,
            "url");
-    easy->write_cb = ftp_write;
-    f = twist_ftp_new (easy, 0);
+    transfer->write_cb = ftp_write;
+    f = twist_ftp_new (transfer, 0);
     feed_session (f, "220 ready\r\n230 in\r\n200 type\r\n"
                      "229 Entering Extended Passive Mode (|||40000|)\r\n"
                      "150 Opening data connection.\r\n", 1);
     twist_ftp_data (f, (const uint8_t *) "hi", 2);
     feed_session (f, "226 done\r\n", 1);
     twist_ftp_data_eof (f);
-    check (easy->done && easy->result == TWIST_OK, "no size, no complaint");
-    twist_easy_cleanup (easy);
+    check (transfer->done && transfer->result == TWIST_OK,
+           "no size, no complaint");
+    twist_transfer_free (transfer);
   }
 }
 
@@ -468,19 +475,20 @@ test_ftp_partial (void)
    A server that will not, or cannot, is an error when TLS is required and is
    gone on without when it was only wanted.  Bytes in the clear behind the 234
    reply are not part of the encrypted session, and end the transfer.  */
-static twist_easy *
-auth_tls_easy (int use_ssl, struct twist_ftp **f)
+static twist_transfer *
+auth_tls_transfer (int use_ssl, struct twist_ftp **f)
 {
-  twist_easy *easy = twist_easy_init ();
+  twist_transfer *transfer = twist_transfer_new ();
 
-  check (twist_url_parse_int ("ftp://alice:secret@127.0.0.1/f.txt", &easy->url)
+  check (twist_url_parse_int ("ftp://alice:secret@127.0.0.1/f.txt",
+                              &transfer->url)
          == TWIST_OK, "auth tls url");
   /* Before the handler is made: it takes the option when it starts.  */
-  check (twist_easy_setopt (easy, TWISTOPT_USE_SSL, (long) use_ssl) == TWIST_OK,
+  check (twist_transfer_setopt (transfer, TWISTOPT_USE_SSL, (long) use_ssl) == TWIST_OK,
          "use ssl");
-  *f = twist_ftp_new (easy, 0);
+  *f = twist_ftp_new (transfer, 0);
   check (*f != NULL, "auth tls handle");
-  return easy;
+  return transfer;
 }
 
 static void
@@ -493,13 +501,13 @@ test_ftp_auth_tls (void)
     {
       size_t split = splits[k];
       struct twist_ftp *f;
-      twist_easy *easy = auth_tls_easy (TWIST_USE_SSL_ALL, &f);
+      twist_transfer *transfer = auth_tls_transfer (TWIST_USE_SSL_ALL, &f);
 
       feed_session (f, "220 ready\r\n", split);
       check (strcmp (twist_ftp_command (f), "AUTH TLS\r\n") == 0,
              "AUTH TLS before USER");
       feed_session (f, "234 Proceed with negotiation.\r\n", split);
-      check (strcmp (twist_ftp_command (f), "AUTH TLS\r\n") == 0 && !easy->done,
+      check (strcmp (twist_ftp_command (f), "AUTH TLS\r\n") == 0 && !transfer->done,
              "nothing is sent until the handshake is done");
       twist_ftp_tls_done (f);
       check (strcmp (twist_ftp_command (f), "USER alice\r\n") == 0,
@@ -513,43 +521,43 @@ test_ftp_auth_tls (void)
       check (strcmp (twist_ftp_command (f), "PROT P\r\n") == 0, "PROT P");
       feed_session (f, "200 PROT now Private\r\n", split);
       check (twist_ftp_data_protected (f), "protected once agreed");
-      twist_easy_cleanup (easy);
+      twist_transfer_free (transfer);
 
-      easy = auth_tls_easy (TWIST_USE_SSL_ALL, &f);
+      transfer = auth_tls_transfer (TWIST_USE_SSL_ALL, &f);
       feed_session (f, "220 ready\r\n", split);
       feed_session (f, "534 Unavailable\r\n", split);
-      check (easy->done && easy->result == TWIST_ERR_USE_SSL
+      check (transfer->done && transfer->result == TWIST_ERR_USE_SSL
              && strcmp (twist_ftp_command (f), "AUTH TLS\r\n") == 0,
              "required and refused is an error, and no USER is sent");
-      twist_easy_cleanup (easy);
+      twist_transfer_free (transfer);
 
-      easy = auth_tls_easy (TWIST_USE_SSL_TRY, &f);
+      transfer = auth_tls_transfer (TWIST_USE_SSL_TRY, &f);
       feed_session (f, "220 ready\r\n", split);
       feed_session (f, "534 Unavailable\r\n", split);
-      check (strcmp (twist_ftp_command (f), "USER alice\r\n") == 0 && !easy->done,
+      check (strcmp (twist_ftp_command (f), "USER alice\r\n") == 0 && !transfer->done,
              "wanted and refused goes on in the clear");
       feed_session (f, "331 need pass\r\n", split);
       feed_session (f, "230 ok\r\n", split);
       check (strcmp (twist_ftp_command (f), "TYPE I\r\n") == 0,
              "and the data is not protected there");
-      twist_easy_cleanup (easy);
+      twist_transfer_free (transfer);
 
-      easy = auth_tls_easy (TWIST_USE_SSL_NONE, &f);
+      transfer = auth_tls_transfer (TWIST_USE_SSL_NONE, &f);
       feed_session (f, "220 ready\r\n", split);
       check (strcmp (twist_ftp_command (f), "USER alice\r\n") == 0,
              "AUTH TLS is not sent unless it is asked for");
-      twist_easy_cleanup (easy);
+      twist_transfer_free (transfer);
     }
   {
     struct twist_ftp *f;
-    twist_easy *easy = auth_tls_easy (TWIST_USE_SSL_ALL, &f);
+    twist_transfer *transfer = auth_tls_transfer (TWIST_USE_SSL_ALL, &f);
 
     feed_session (f, "220 ready\r\n", 200);
     feed_session (f, "234 go\r\n331 need pass\r\n", 200);
-    check (easy->done && easy->result == TWIST_ERR_PROTOCOL
+    check (transfer->done && transfer->result == TWIST_ERR_PROTOCOL
            && strcmp (twist_ftp_command (f), "AUTH TLS\r\n") == 0,
            "bytes in the clear behind the reply to AUTH TLS end the transfer");
-    twist_easy_cleanup (easy);
+    twist_transfer_free (transfer);
   }
 }
 

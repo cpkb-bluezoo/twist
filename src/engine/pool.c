@@ -22,7 +22,6 @@
 
 #include "twist-int.h"
 
-#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -51,25 +50,9 @@ struct twist_pool
 {
   struct twist_pool_slot *head;
   size_t n;
-  int locked;
-  pthread_mutex_t mu;
 };
 
 static void slot_discard (struct twist_pool *pool, struct twist_pool_slot *s);
-
-static void
-pool_lock (struct twist_pool *pool)
-{
-  if (pool->locked)
-    pthread_mutex_lock (&pool->mu);
-}
-
-static void
-pool_unlock (struct twist_pool *pool)
-{
-  if (pool->locked)
-    pthread_mutex_unlock (&pool->mu);
-}
 
 static void
 unlink_slot (struct twist_pool *pool, struct twist_pool_slot *s)
@@ -142,9 +125,7 @@ slot_discard (struct twist_pool *pool, struct twist_pool_slot *s)
   s->discarded = 1;
   if (pool != NULL)
     {
-      pool_lock (pool);
       unlink_slot (pool, s);
-      pool_unlock (pool);
     }
   if (s->timer != NULL)
     {
@@ -219,7 +200,6 @@ twist_pool_new (void)
 
   if (pool == NULL)
     return NULL;
-  pthread_mutex_init (&pool->mu, NULL);
   return pool;
 }
 
@@ -230,7 +210,6 @@ twist_pool_free (struct twist_pool *pool)
     return;
   while (pool->head != NULL)
     slot_discard (pool, pool->head);
-  pthread_mutex_destroy (&pool->mu);
   free (pool);
 }
 
@@ -242,17 +221,8 @@ twist_pool_count (struct twist_pool *pool)
 
   if (pool == NULL)
     return 0;
-  pool_lock (pool);
   n = pool->n;
-  pool_unlock (pool);
   return n;
-}
-
-void
-twist_pool_set_lock (struct twist_pool *pool, int enabled)
-{
-  if (pool != NULL)
-    pool->locked = enabled ? 1 : 0;
 }
 
 int
@@ -276,7 +246,6 @@ twist_pool_take_payload (struct twist_pool *pool, const char *key,
     *payload = NULL;
   if (pool == NULL || key == NULL)
     return TWIST_ERR_INVAL;
-  pool_lock (pool);
   for (pp = &pool->head; *pp != NULL; pp = &(*pp)->next)
     if (!(*pp)->queued && !(*pp)->discarded && strcmp ((*pp)->key, key) == 0)
       {
@@ -285,7 +254,6 @@ twist_pool_take_payload (struct twist_pool *pool, const char *key,
         *pp = s->next;
         if (pool->n > 0)
           pool->n--;
-        pool_unlock (pool);
         if (s->timer != NULL)
           {
             twist_timer_cancel (s->timer);
@@ -302,7 +270,6 @@ twist_pool_take_payload (struct twist_pool *pool, const char *key,
         free (s);
         return TWIST_OK;
       }
-  pool_unlock (pool);
   return TWIST_ERR_AGAIN;
 }
 
@@ -342,7 +309,6 @@ twist_pool_put_idle_payload (struct twist_pool *pool, const char *key,
   s->loop = loop;
   s->idle_at = now_ms;
   s->pool = pool;
-  pool_lock (pool);
   while (count_key (pool, key) >= TWIST_POOL_PER_KEY
          || pool->n >= TWIST_POOL_TOTAL)
     {
@@ -350,22 +316,18 @@ twist_pool_put_idle_payload (struct twist_pool *pool, const char *key,
                      ? key : NULL, loop);
       if (drop == NULL)
         break;
-      pool_unlock (pool);
       slot_discard (pool, drop);
-      pool_lock (pool);
     }
   if (count_key (pool, key) >= TWIST_POOL_PER_KEY
       || pool->n >= TWIST_POOL_TOTAL)
     {
       /* Full of other loops' connections, which are not ours to free.  The
          connection stays with the caller.  */
-      pool_unlock (pool);
       free (s->key);
       free (s);
       return TWIST_ERR_AGAIN;
     }
-  /* There is room: the pool takes the connection.  This is done with the
-     lock held so the slot is whole when anyone can see it.  */
+  /* There is room: the pool takes the connection.  */
   ep->user_data = s;
   twist_connection_set_handler (conn, &idle_handler);
   if (loop != NULL)
@@ -374,32 +336,7 @@ twist_pool_put_idle_payload (struct twist_pool *pool, const char *key,
   s->next = pool->head;
   pool->head = s;
   pool->n++;
-  pool_unlock (pool);
   return TWIST_OK;
-}
-
-/* Discard every connection parked for LOOP.  A loop is freed with the
-   multi handle that owns it, and a pool that outlives it, a share's, must
-   not keep what is bound to it.  Called on the loop's thread, while it is
-   still there.  */
-void
-twist_pool_drop_loop (struct twist_pool *pool, struct twist_loop *loop)
-{
-  struct twist_pool_slot *s;
-
-  if (pool == NULL || loop == NULL)
-    return;
-  for (;;)
-    {
-      pool_lock (pool);
-      for (s = pool->head; s != NULL; s = s->next)
-        if (s->loop == loop && !s->discarded)
-          break;
-      pool_unlock (pool);
-      if (s == NULL)
-        return;
-      slot_discard (pool, s);
-    }
 }
 
 int

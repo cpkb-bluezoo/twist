@@ -189,9 +189,9 @@ sat_add (long long a, long long b)
 }
 
 static void
-meter (struct twist_easy *easy)
+meter (struct twist_transfer *transfer)
 {
-  struct twist_progress *p = &easy->progress;
+  struct twist_progress *p = &transfer->progress;
   FILE *out = p->err != NULL ? p->err : stderr;
   char max5[6][10];
   char time_left[10];
@@ -209,9 +209,9 @@ meter (struct twist_easy *easy)
 
   if (!p->headers_out)
     {
-      if (easy->resume_from > 0)
+      if (transfer->resume_from > 0)
         fprintf (out, "** Resuming transfer from byte position %lld\n",
-                 easy->resume_from);
+                 transfer->resume_from);
       fputs ("  % Total    % Received % Xferd  Average Speed   "
              "Time    Time     Time  Current\n"
              "                                 Dload  Upload   "
@@ -262,42 +262,42 @@ meter (struct twist_easy *easy)
 }
 
 static void
-arm (struct twist_easy *easy);
+arm (struct twist_transfer *transfer);
 
 static void
 tick (void *user)
 {
-  struct twist_easy *easy = user;
+  struct twist_transfer *transfer = user;
 
-  easy->progress.tick = NULL;
-  if (!easy->progress.begun)
+  transfer->progress.tick = NULL;
+  if (!transfer->progress.begun)
     return;
   /* Something has happened since the timer was set: not yet.  */
-  if (easy->loop != NULL && twist_loop_now (easy->loop) < easy->progress.tick_due)
+  if (transfer->loop != NULL && twist_loop_now (transfer->loop) < transfer->progress.tick_due)
     {
-      arm (easy);
+      arm (transfer);
       return;
     }
-  twist_progress_update (easy);
+  twist_progress_update (transfer);
   /* The update may have ended the transfer.  */
-  if (easy->progress.begun)
-    arm (easy);
+  if (transfer->progress.begun)
+    arm (transfer);
 }
 
 static void
-arm (struct twist_easy *easy)
+arm (struct twist_transfer *transfer)
 {
-  struct twist_progress *p = &easy->progress;
+  struct twist_progress *p = &transfer->progress;
 
-  if (easy->loop == NULL || p->tick != NULL)
+  if (transfer->loop == NULL || p->tick != NULL)
     return;
-  twist_loop_schedule (easy->loop, p->tick_due, tick, easy, &p->tick);
+  twist_loop_schedule (transfer->loop, p->tick_due, tick, transfer, &p->tick);
 }
 
 void
-twist_progress_release (struct twist_easy *easy)
+twist_progress_release (struct twist_transfer *transfer)
 {
-  struct twist_progress *p = &easy->progress;
+  struct twist_progress *p = &transfer->progress;
 
   if (p->tick != NULL)
     {
@@ -310,15 +310,15 @@ twist_progress_release (struct twist_easy *easy)
 /* What the transfer has learned changes what is drawn, if the second has
    changed.  Returns what the callback returned: not 0 means stop.  */
 int
-twist_progress_update (struct twist_easy *easy)
+twist_progress_update (struct twist_transfer *transfer)
 {
-  struct twist_progress *p = &easy->progress;
+  struct twist_progress *p = &transfer->progress;
   int show;
 
-  if (!p->begun || p->hide || easy->loop == NULL)
+  if (!p->begun || p->hide || transfer->loop == NULL)
     return 0;
-  show = calculate (p, twist_loop_now (easy->loop));
-  p->tick_due = twist_loop_now (easy->loop) + TICK_MS;
+  show = calculate (p, twist_loop_now (transfer->loop));
+  p->tick_due = twist_loop_now (transfer->loop) + TICK_MS;
   if (p->xferinfo != NULL)
     {
       int r = p->xferinfo (p->xferinfo_data, p->dl_known ? p->size_dl : 0,
@@ -331,29 +331,29 @@ twist_progress_update (struct twist_easy *easy)
           if (r != 0 && !p->aborted)
             {
               p->aborted = 1;
-              if (!easy->done)
+              if (!transfer->done)
                 {
-                  twist_easy_set_error (easy, twist_strdup (_("callback aborted")));
-                  twist_easy_finish (easy, TWIST_ERR_ABORTED);
+                  twist_transfer_set_error (transfer, twist_strdup (_("callback aborted")));
+                  twist_transfer_finish (transfer, TWIST_ERR_ABORTED);
                 }
             }
           return r;
         }
     }
   if (show)
-    meter (easy);
+    meter (transfer);
   return 0;
 }
 
 /* The forced last update of a transfer or of one hop of it, and the end of
    its line.  A callback is left to end its own.  */
 static void
-finish_line (struct twist_easy *easy)
+finish_line (struct twist_transfer *transfer)
 {
-  struct twist_progress *p = &easy->progress;
+  struct twist_progress *p = &transfer->progress;
 
   p->lastshow = -1;
-  if (twist_progress_update (easy) != 0)
+  if (twist_progress_update (transfer) != 0)
     return;
   if (!p->hide && p->xferinfo == NULL)
     fputc ('\n', p->err != NULL ? p->err : stderr);
@@ -377,18 +377,18 @@ reset_counters (struct twist_progress *p)
 /* A file that is not there draws nothing: the heading would
    be all there was.  */
 static int
-quiet_scheme (const struct twist_easy *easy)
+quiet_scheme (const struct twist_transfer *transfer)
 {
-  return easy->url != NULL && easy->url->scheme != NULL
-    && strcmp (easy->url->scheme, "file") == 0;
+  return transfer->url != NULL && transfer->url->scheme != NULL
+    && strcmp (transfer->url->scheme, "file") == 0;
 }
 
 void
-twist_progress_begin (struct twist_easy *easy)
+twist_progress_begin (struct twist_transfer *transfer)
 {
-  struct twist_progress *p = &easy->progress;
+  struct twist_progress *p = &transfer->progress;
 
-  twist_progress_release (easy);
+  twist_progress_release (transfer);
   reset_counters (p);
   p->aborted = 0;
   p->shown = 0;
@@ -396,44 +396,44 @@ twist_progress_begin (struct twist_easy *easy)
   p->lastshow = -1;
   p->speeder_n = 0;
   p->begun = 1;
-  if (easy->loop != NULL)
-    p->start_ms = twist_loop_now (easy->loop);
+  if (transfer->loop != NULL)
+    p->start_ms = twist_loop_now (transfer->loop);
   if (p->hide)
     return;
-  p->tick_due = (easy->loop != NULL ? twist_loop_now (easy->loop) : 0) + TICK_MS;
-  arm (easy);
-  if (!quiet_scheme (easy))
-    twist_progress_update (easy);
+  p->tick_due = (transfer->loop != NULL ? twist_loop_now (transfer->loop) : 0) + TICK_MS;
+  arm (transfer);
+  if (!quiet_scheme (transfer))
+    twist_progress_update (transfer);
 }
 
 void
-twist_progress_end (struct twist_easy *easy, int result)
+twist_progress_end (struct twist_transfer *transfer, int result)
 {
-  struct twist_progress *p = &easy->progress;
+  struct twist_progress *p = &transfer->progress;
 
   if (!p->begun)
     return;
-  if (!(result != TWIST_OK && !p->shown && quiet_scheme (easy)))
-    finish_line (easy);
-  twist_progress_release (easy);
+  if (!(result != TWIST_OK && !p->shown && quiet_scheme (transfer)))
+    finish_line (transfer);
+  twist_progress_release (transfer);
 }
 
 /* A redirect: this response is done and the next request is another.  */
 void
-twist_progress_hop (struct twist_easy *easy)
+twist_progress_hop (struct twist_transfer *transfer)
 {
-  struct twist_progress *p = &easy->progress;
+  struct twist_progress *p = &transfer->progress;
 
   if (!p->begun)
     return;
-  finish_line (easy);
+  finish_line (transfer);
   reset_counters (p);
 }
 
 void
-twist_progress_dl_size (struct twist_easy *easy, long long size)
+twist_progress_dl_size (struct twist_transfer *transfer, long long size)
 {
-  struct twist_progress *p = &easy->progress;
+  struct twist_progress *p = &transfer->progress;
 
   if (size >= 0)
     {
@@ -445,13 +445,13 @@ twist_progress_dl_size (struct twist_easy *easy, long long size)
       p->size_dl = 0;
       p->dl_known = 0;
     }
-  twist_progress_update (easy);
+  twist_progress_update (transfer);
 }
 
 void
-twist_progress_ul_size (struct twist_easy *easy, long long size)
+twist_progress_ul_size (struct twist_transfer *transfer, long long size)
 {
-  struct twist_progress *p = &easy->progress;
+  struct twist_progress *p = &transfer->progress;
 
   if (size >= 0)
     {
@@ -463,35 +463,35 @@ twist_progress_ul_size (struct twist_easy *easy, long long size)
       p->size_ul = 0;
       p->ul_known = 0;
     }
-  twist_progress_update (easy);
+  twist_progress_update (transfer);
 }
 
 void
-twist_progress_downloaded (struct twist_easy *easy, size_t n)
+twist_progress_downloaded (struct twist_transfer *transfer, size_t n)
 {
-  easy->progress.downloaded += (long long) n;
-  twist_progress_update (easy);
+  transfer->progress.downloaded += (long long) n;
+  twist_progress_update (transfer);
 }
 
 void
-twist_easy_downloaded (struct twist_easy *easy, size_t n)
+twist_transfer_downloaded (struct twist_transfer *transfer, size_t n)
 {
-  easy->size_download += n;
-  twist_progress_downloaded (easy, n);
+  transfer->size_download += n;
+  twist_progress_downloaded (transfer, n);
 }
 
 long long
-twist_easy_upload_size (const struct twist_easy *easy)
+twist_transfer_upload_size (const struct twist_transfer *transfer)
 {
-  if (easy->postfields != NULL)
-    return easy->postfieldsize_set && easy->postfieldsize >= 0
-      ? (long long) easy->postfieldsize : (long long) strlen (easy->postfields);
-  return easy->infilesize >= 0 ? easy->infilesize : -1;
+  if (transfer->postfields != NULL)
+    return transfer->postfieldsize_set && transfer->postfieldsize >= 0
+      ? (long long) transfer->postfieldsize : (long long) strlen (transfer->postfields);
+  return transfer->infilesize >= 0 ? transfer->infilesize : -1;
 }
 
 void
-twist_progress_uploaded (struct twist_easy *easy, size_t n)
+twist_progress_uploaded (struct twist_transfer *transfer, size_t n)
 {
-  easy->progress.uploaded += (long long) n;
-  twist_progress_update (easy);
+  transfer->progress.uploaded += (long long) n;
+  twist_progress_update (transfer);
 }

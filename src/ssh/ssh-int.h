@@ -43,7 +43,7 @@ struct ssh_agent;
 
 struct twist_ssh
 {
-  struct twist_easy *easy;
+  struct twist_transfer *transfer;
   struct twist_mail_link link;
   struct twist_endpoint *ep;
   struct twist_timer *timer;
@@ -202,11 +202,11 @@ int twist_sftp_channel_failed (void *user, uint32_t id, uint32_t reason,
                                gf_slice text);
 int twist_sftp_request_reply (void *user, uint32_t id, int success);
 int twist_sftp_channel_closed (void *user, uint32_t id);
-void twist_sftp_free (struct twist_sftp_xfer *xfer);
+void twist_sftp_free (struct twist_sftp_xfer *state);
 /* Keeping the session for the next URL: forget the transfer and keep the
    channel; ask whether nothing is in it; start the next transfer on it.  */
-void twist_sftp_recycle (struct twist_sftp_xfer *xfer);
-int twist_sftp_idle (const struct twist_sftp_xfer *xfer);
+void twist_sftp_recycle (struct twist_sftp_xfer *state);
+int twist_sftp_idle (const struct twist_sftp_xfer *state);
 int twist_sftp_next (struct twist_ssh *s);
 
 #endif /* TWIST_SSH_INT_H */

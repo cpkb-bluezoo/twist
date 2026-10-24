@@ -58,16 +58,16 @@ test_ldap (void)
   };
   static const char ldif[] = "dn: dc=example,dc=com\ncn: bob\n\n";
 
-  twist_easy *easy;
+  twist_transfer *transfer;
   struct twist_ldap *ldap;
   const uint8_t *cmd;
   size_t n = 0;
 
-  easy = twist_easy_init ();
+  transfer = twist_transfer_new ();
   check (twist_url_parse_int
          ("ldap://cn=alice:secret@127.0.0.1/dc=example,dc=com?cn?sub?(uid=alice)",
-          &easy->url) == TWIST_OK, "ldap url");
-  ldap = twist_ldap_new (easy, 0);
+          &transfer->url) == TWIST_OK, "ldap url");
+  ldap = twist_ldap_new (transfer, 0);
   cmd = twist_ldap_command (ldap, &n);
   check (has_bytes (cmd, n, "cn=alice", 8) && has_bytes (cmd, n, "secret", 6),
          "simple bind");
@@ -77,25 +77,26 @@ test_ldap (void)
          && has_bytes (cmd, n, "uid", 3) && has_bytes (cmd, n, "alice", 5)
          && has_bytes (cmd, n, "cn", 2), "search");
   mail_body_len = 0;
-  easy->write_cb = mail_write;
+  transfer->write_cb = mail_write;
   feed_bin (ldap_recv, ldap, entry, sizeof entry, 1);
   feed_bin (ldap_recv, ldap, search_done, sizeof search_done, 1);
-  check (easy->done && easy->result == TWIST_OK, "ldap done");
+  check (transfer->done && transfer->result == TWIST_OK, "ldap done");
   check (mail_body_len == sizeof ldif - 1
          && memcmp (mail_body, ldif, mail_body_len) == 0, "ldif");
-  check (easy->progress.downloaded == (long long) mail_body_len,
+  check (transfer->progress.downloaded == (long long) mail_body_len,
          "ldap progress");
   cmd = twist_ldap_command (ldap, &n);
   check (has_bytes (cmd, n, "\x42", 1), "unbind");
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
 
-  easy = twist_easy_init ();
-  check (twist_url_parse_int ("ldap://cn=alice:no@127.0.0.1/dc=x", &easy->url)
+  transfer = twist_transfer_new ();
+  check (twist_url_parse_int ("ldap://cn=alice:no@127.0.0.1/dc=x",
+                              &transfer->url)
          == TWIST_OK, "ldap bad url");
-  ldap = twist_ldap_new (easy, 0);
+  ldap = twist_ldap_new (transfer, 0);
   feed_bin (ldap_recv, ldap, bind_no, sizeof bind_no, 1);
-  check (easy->done && easy->result == TWIST_ERR_AUTH, "bind refused");
-  twist_easy_cleanup (easy);
+  check (transfer->done && transfer->result == TWIST_ERR_AUTH, "bind refused");
+  twist_transfer_free (transfer);
 
   {
     static const uint8_t bind_long[] = {
@@ -103,27 +104,27 @@ test_ldap (void)
       0x0a, 0x01, 0x00, 0x04, 0x00, 0x04, 0x00
     };
 
-    easy = twist_easy_init ();
+    transfer = twist_transfer_new ();
     check (twist_url_parse_int ("ldap://127.0.0.1/dc=example,dc=com",
-                                &easy->url) == TWIST_OK, "long url");
-    ldap = twist_ldap_new (easy, 0);
+                                &transfer->url) == TWIST_OK, "long url");
+    ldap = twist_ldap_new (transfer, 0);
     feed_bin (ldap_recv, ldap, bind_long, sizeof bind_long, 1);
     cmd = twist_ldap_command (ldap, &n);
     check (has_bytes (cmd, n, "dc=example,dc=com", 17)
            && has_bytes (cmd, n, "objectClass", 11), "long bind");
-    twist_easy_cleanup (easy);
+    twist_transfer_free (transfer);
   }
 
-  easy = twist_easy_init ();
+  transfer = twist_transfer_new ();
   check (twist_url_parse_int ("ldap://alice:x@127.0.0.1/dc=example,dc=com",
-                              &easy->url) == TWIST_OK, "sasl url");
-  easy->bearer = twist_strdup ("tok");
-  ldap = twist_ldap_new (easy, 0);
+                              &transfer->url) == TWIST_OK, "sasl url");
+  transfer->bearer = twist_strdup ("tok");
+  ldap = twist_ldap_new (transfer, 0);
   cmd = twist_ldap_command (ldap, &n);
   check (has_bytes (cmd, n, "XOAUTH2", 7)
          && has_bytes (cmd, n, "auth=Bearer tok", 15), "sasl bind");
-  twist_easy_cleanup (easy);
-  easy = NULL;
+  twist_transfer_free (transfer);
+  transfer = NULL;
 }
 
 /* A SearchResultEntry for dc=x with one attribute, ATTR, of the one value
@@ -186,65 +187,65 @@ test_ldap_names (void)
 
   for (i = 0; i < sizeof bad / sizeof bad[0]; i++)
     {
-      twist_easy *easy = twist_easy_init ();
+      twist_transfer *transfer = twist_transfer_new ();
       struct twist_ldap *ldap;
       size_t n;
 
-      check (twist_url_parse_int ("ldap://127.0.0.1/dc=x", &easy->url)
+      check (twist_url_parse_int ("ldap://127.0.0.1/dc=x", &transfer->url)
              == TWIST_OK, "url");
-      ldap = twist_ldap_new (easy, 0);
+      ldap = twist_ldap_new (transfer, 0);
       feed_bin (ldap_recv, ldap, bind_ok, sizeof bind_ok, 1);
       mail_body_len = 0;
-      easy->write_cb = mail_write;
+      transfer->write_cb = mail_write;
       n = build_entry (buf, bad[i], "bob");
       feed_bin (ldap_recv, ldap, buf, n, 1);
-      check (easy->done && easy->result == TWIST_ERR_PROTOCOL,
+      check (transfer->done && transfer->result == TWIST_ERR_PROTOCOL,
              "a hostile attribute name ends the transfer");
       check (mail_body_len == 0
              || (mail_body_len == 9 && memcmp (mail_body, "dn: dc=x\n", 9) == 0),
              "and writes no line of the server's making");
       check (!has_bytes ((const uint8_t *) mail_body, mail_body_len, "userPassword", 12),
              "nor the forged one");
-      twist_easy_cleanup (easy);
+      twist_transfer_free (transfer);
     }
   for (i = 0; i < sizeof good / sizeof good[0]; i++)
     {
-      twist_easy *easy = twist_easy_init ();
+      twist_transfer *transfer = twist_transfer_new ();
       struct twist_ldap *ldap;
       size_t n;
       char want[64];
 
-      check (twist_url_parse_int ("ldap://127.0.0.1/dc=x", &easy->url)
+      check (twist_url_parse_int ("ldap://127.0.0.1/dc=x", &transfer->url)
              == TWIST_OK, "url");
-      ldap = twist_ldap_new (easy, 0);
+      ldap = twist_ldap_new (transfer, 0);
       feed_bin (ldap_recv, ldap, bind_ok, sizeof bind_ok, 1);
       mail_body_len = 0;
-      easy->write_cb = mail_write;
+      transfer->write_cb = mail_write;
       n = build_entry (buf, good[i], "bob");
       feed_bin (ldap_recv, ldap, buf, n, 1);
       snprintf (want, sizeof want, "%s: bob\n", good[i]);
-      check (!easy->done
+      check (!transfer->done
              && has_bytes ((const uint8_t *) mail_body, mail_body_len, want, strlen (want)),
              "an ordinary attribute name is written");
-      twist_easy_cleanup (easy);
+      twist_transfer_free (transfer);
     }
   /* A value with trailing space is base64, as LDIF readers expect.  */
   {
-    twist_easy *easy = twist_easy_init ();
+    twist_transfer *transfer = twist_transfer_new ();
     struct twist_ldap *ldap;
     size_t n;
 
-    check (twist_url_parse_int ("ldap://127.0.0.1/dc=x", &easy->url)
+    check (twist_url_parse_int ("ldap://127.0.0.1/dc=x", &transfer->url)
            == TWIST_OK, "url");
-    ldap = twist_ldap_new (easy, 0);
+    ldap = twist_ldap_new (transfer, 0);
     feed_bin (ldap_recv, ldap, bind_ok, sizeof bind_ok, 1);
     mail_body_len = 0;
-    easy->write_cb = mail_write;
+    transfer->write_cb = mail_write;
     n = build_entry (buf, "cn", "bob ");
     feed_bin (ldap_recv, ldap, buf, n, 1);
     check (has_bytes ((const uint8_t *) mail_body, mail_body_len, "cn:: Ym9iIA==\n", 14),
            "a value with a trailing space is base64");
-    twist_easy_cleanup (easy);
+    twist_transfer_free (transfer);
   }
 }
 

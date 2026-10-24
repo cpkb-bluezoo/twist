@@ -61,7 +61,7 @@
 
 struct twist_tftp
 {
-  struct twist_easy *easy;
+  struct twist_transfer *transfer;
   struct twist_connection *conn;
   struct twist_timer *timer;
   struct twist_timer *deadline;
@@ -115,7 +115,7 @@ tftp_finish (struct twist_tftp *t, int err)
       twist_timer_cancel (t->deadline);
       t->deadline = NULL;
     }
-  twist_easy_finish (t->easy, err);
+  twist_transfer_finish (t->transfer, err);
 }
 
 static int
@@ -163,13 +163,13 @@ on_retry (void *user)
 static void
 arm_timer (struct twist_tftp *t)
 {
-  if (t->finished || t->easy == NULL || t->easy->loop == NULL)
+  if (t->finished || t->transfer == NULL || t->transfer->loop == NULL)
     return;
   if (t->timer != NULL)
     twist_timer_cancel (t->timer);
   t->timer = NULL;
-  if (twist_loop_schedule (t->easy->loop,
-                           twist_loop_now (t->easy->loop) + t->retry_ms,
+  if (twist_loop_schedule (t->transfer->loop,
+                           twist_loop_now (t->transfer->loop) + t->retry_ms,
                            on_retry, t, &t->timer) != TWIST_OK)
     tftp_finish (t, TWIST_ERR_NOMEM);
 }
@@ -248,7 +248,7 @@ decode_name (const char *in, char *out, size_t cap, size_t *out_n)
 static int
 build_request (struct twist_tftp *t)
 {
-  struct twist_url *url = t->easy->url;
+  struct twist_url *url = t->transfer->url;
   const char *path = url->path != NULL ? url->path : "/";
   char name[TFTP_REQ_MAX];
   size_t name_n = 0;
@@ -264,16 +264,18 @@ build_request (struct twist_tftp *t)
     return rc;
   if (name_n == 0)
     return TWIST_ERR_URL;
-  t->upload = t->easy->postfields != NULL || t->easy->read_cb != NULL;
-  if (t->easy->postfields != NULL)
+  t->upload = t->transfer->postfields != NULL || t->transfer->read_cb != NULL;
+  if (t->transfer->postfields != NULL)
     {
-      t->upload_data = t->easy->postfields;
-      t->upload_len = t->easy->postfieldsize_set && t->easy->postfieldsize >= 0
-                      ? (size_t) t->easy->postfieldsize
-                      : strlen (t->easy->postfields);
+      t->upload_data = t->transfer->postfields;
+      t->upload_len = t->transfer->postfieldsize_set
+                      && t->transfer->postfieldsize >= 0
+                      ? (size_t) t->transfer->postfieldsize
+                      : strlen (t->transfer->postfields);
     }
-  if (t->upload && twist_easy_upload_size (t->easy) >= 0)
-    twist_progress_ul_size (t->easy, twist_easy_upload_size (t->easy));
+  if (t->upload && twist_transfer_upload_size (t->transfer) >= 0)
+    twist_progress_ul_size (t->transfer,
+                            twist_transfer_upload_size (t->transfer));
   t->kind = t->upload ? OP_WRQ : OP_RRQ;
   t->pkt[0] = 0;
   t->pkt[1] = (uint8_t) t->kind;
@@ -309,12 +311,12 @@ build_request (struct twist_tftp *t)
 static int
 deliver (struct twist_tftp *t, const uint8_t *data, size_t len)
 {
-  struct twist_easy *easy = t->easy;
+  struct twist_transfer *transfer = t->transfer;
   size_t off = 0;
 
-  if (easy->write_cb == NULL || len == 0)
+  if (transfer->write_cb == NULL || len == 0)
     {
-      twist_easy_downloaded (easy, len);
+      twist_transfer_downloaded (transfer, len);
       return TWIST_OK;
     }
   while (off < len)
@@ -326,12 +328,12 @@ deliver (struct twist_tftp *t, const uint8_t *data, size_t len)
       if (chunk > sizeof buf)
         chunk = sizeof buf;
       memcpy (buf, data + off, chunk);
-      n = easy->write_cb (buf, 1, chunk, easy->write_data);
+      n = transfer->write_cb (buf, 1, chunk, transfer->write_data);
       if (n < chunk)
         return TWIST_ERR_ABORTED;
       off += chunk;
     }
-  twist_easy_downloaded (easy, len);
+  twist_transfer_downloaded (transfer, len);
   return TWIST_OK;
 }
 
@@ -354,7 +356,7 @@ fill_data (struct twist_tftp *t)
       t->upload_off += left;
       n = left;
     }
-  else if (t->easy->read_cb != NULL)
+  else if (t->transfer->read_cb != NULL)
     {
       while (n < (size_t) t->blksize)
         {
@@ -364,7 +366,7 @@ fill_data (struct twist_tftp *t)
 
           if (want > sizeof buf)
             want = sizeof buf;
-          got = t->easy->read_cb (buf, 1, want, t->easy->read_data);
+          got = t->transfer->read_cb (buf, 1, want, t->transfer->read_data);
           if (got == 0)
             break;
           if (got > want)
@@ -376,7 +378,7 @@ fill_data (struct twist_tftp *t)
   t->payload = n;
   t->pkt_len = 4 + n;
   t->kind = OP_DATA;
-  twist_progress_uploaded (t->easy, n);
+  twist_progress_uploaded (t->transfer, n);
   return TWIST_OK;
 }
 
@@ -599,8 +601,8 @@ twist_tftp_receive (struct twist_tftp *t, const uint8_t *data, size_t len)
   block = len >= 4 ? (((unsigned) data[2] << 8) | data[3]) : 0;
   if (opcode == OP_ERROR)
     {
-      if (t->easy != NULL && block >= 1 && block <= 7)
-        t->easy->proto_status = 67 + (int) block;
+      if (t->transfer != NULL && block >= 1 && block <= 7)
+        t->transfer->proto_status = 67 + (int) block;
       tftp_finish (t, map_error (block));
       return len;
     }
@@ -805,7 +807,7 @@ dial_udp (struct twist_tftp *t, const struct twist_dns_addr *addr)
   struct twist_connection *c;
   struct twist_endpoint *ep;
   int fd;
-  int port = t->easy->url->port > 0 ? t->easy->url->port : 69;
+  int port = t->transfer->url->port > 0 ? t->transfer->url->port : 69;
 
   fd = socket (addr->family == 6 ? AF_INET6 : AF_INET, SOCK_DGRAM, 0);
   if (fd < 0 || fcntl (fd, F_SETFL, O_NONBLOCK) < 0
@@ -842,7 +844,7 @@ dial_udp (struct twist_tftp *t, const struct twist_dns_addr *addr)
         }
     }
   twist_tftp_set_dest (t, addr, port);
-  c = twist_connection_new (t->easy->loop);
+  c = twist_connection_new (t->transfer->loop);
   if (c == NULL)
     {
       close (fd);
@@ -896,25 +898,25 @@ twist_tftp_free (void *p)
 }
 
 struct twist_tftp *
-twist_tftp_new (struct twist_easy *easy, int live)
+twist_tftp_new (struct twist_transfer *transfer, int live)
 {
   struct twist_tftp *t;
   int rc;
 
   (void) live;
-  if (easy == NULL || easy->url == NULL)
+  if (transfer == NULL || transfer->url == NULL)
     return NULL;
   t = calloc (1, sizeof *t);
   if (t == NULL)
     return NULL;
-  t->easy = easy;
+  t->transfer = transfer;
   t->fd = -1;
   t->blksize = TFTP_BLKSIZE;
   t->payload = TFTP_BLKSIZE;
   t->retry_ms = TFTP_RETRY_MS;
-  easy->xfer = t;
-  easy->xfer_free = twist_tftp_free;
-  if (easy->proxy != NULL && easy->proxy[0] != 0)
+  transfer->state = t;
+  transfer->state_free = twist_tftp_free;
+  if (transfer->proxy != NULL && transfer->proxy[0] != 0)
     {
       tftp_finish (t, TWIST_ERR_UNSUPPORTED);
       return t;
@@ -926,25 +928,26 @@ twist_tftp_new (struct twist_easy *easy, int live)
 }
 
 int
-twist_tftp_attach (struct twist_easy *easy)
+twist_tftp_attach (struct twist_transfer *transfer)
 {
   struct twist_tftp *t;
   int rc;
 
-  if (easy == NULL || easy->loop == NULL)
+  if (transfer == NULL || transfer->loop == NULL)
     return TWIST_ERR_INVAL;
-  t = twist_tftp_new (easy, 1);
+  t = twist_tftp_new (transfer, 1);
   if (t == NULL)
     return TWIST_ERR_NOMEM;
   if (t->finished)
-    return easy->result;
-  if (easy->timeout_ms > 0)
-    twist_loop_schedule (easy->loop,
-                         twist_loop_now (easy->loop)
-                         + (uint64_t) easy->timeout_ms,
+    return transfer->result;
+  if (transfer->timeout_ms > 0)
+    twist_loop_schedule (transfer->loop,
+                         twist_loop_now (transfer->loop)
+                         + (uint64_t) transfer->timeout_ms,
                          on_deadline, t, &t->deadline);
-  rc = twist_dns_resolve_easy (easy, easy->url->host, on_resolved, t);
+  rc = twist_dns_resolve_transfer (transfer, transfer->url->host, on_resolved,
+                                   t);
   if (rc != TWIST_OK)
     tftp_finish (t, rc);
-  return easy->done ? easy->result : TWIST_OK;
+  return transfer->done ? transfer->result : TWIST_OK;
 }

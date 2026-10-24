@@ -64,7 +64,7 @@ struct twist_loop
   void *aux_user;
   void (*watch_cb) (void *, int fd, int interest);
   void *watch_user;
-  struct twist_multi *multi;
+  struct twist_runtime *runtime;
   struct twist_rbuf *rbufs;
 };
 
@@ -219,16 +219,16 @@ twist_loop_set_aux_fire (struct twist_loop *loop,
   loop->aux_fire = fire;
 }
 
-struct twist_multi *
-twist_loop_multi (struct twist_loop *loop)
+struct twist_runtime *
+twist_loop_runtime (struct twist_loop *loop)
 {
-  return loop->multi;
+  return loop->runtime;
 }
 
 void
-twist_loop_set_multi (struct twist_loop *loop, struct twist_multi *multi)
+twist_loop_set_runtime (struct twist_loop *loop, struct twist_runtime *runtime)
 {
-  loop->multi = multi;
+  loop->runtime = runtime;
 }
 
 uint8_t *
@@ -453,19 +453,19 @@ dispatch_fd (struct twist_loop *loop, int fd, int readable, int writable)
 }
 
 /* Everything the loop runs may call the application, so the handle of a
-   multi is marked as in a call for as long as it does.  */
+   runtime is marked as in a call for as long as it does.  */
 static void
 calls_begin (struct twist_loop *loop)
 {
-  if (loop->multi != NULL)
-    loop->multi->in_call++;
+  if (loop->runtime != NULL)
+    loop->runtime->in_call++;
 }
 
 static void
 calls_end (struct twist_loop *loop)
 {
-  if (loop->multi != NULL)
-    loop->multi->in_call--;
+  if (loop->runtime != NULL)
+    loop->runtime->in_call--;
 }
 
 void
@@ -527,19 +527,25 @@ run_once_ms (struct twist_loop *loop, int wait_ms)
   uint64_t now;
   long timeout;
   int drain_cmds = 0;
+  int fired;
   int n;
   int i;
 
   twist_cmdq_drain (loop->cmds);
   now = twist_loop_now (loop);
-  twist_timer_heap_fire (loop->timers, now);
+  fired = twist_timer_heap_fire (loop->timers, now);
   if (loop->external || loop->poll == NULL)
     return TWIST_OK;
   now = twist_loop_now (loop);
   timeout = twist_loop_next_timeout (loop, now);
-  twist_multi_notify_timer (loop->multi);
+  twist_runtime_notify_timer (loop->runtime);
   if (wait_ms >= 0)
     timeout = wait_ms;
+  /* A timer that ran may have ended a transfer and called the application,
+     which has things to do with what it was told; it gets the loop back as
+     soon as what is ready has been seen to, not after a wait for more.  */
+  if (fired > 0)
+    timeout = 0;
   n = twist_poll_wait (loop->poll, ev, TWIST_POLL_BATCH, (int) timeout);
   if (n < 0)
     return TWIST_ERR_CONNECT;

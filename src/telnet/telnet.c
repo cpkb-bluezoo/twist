@@ -36,8 +36,8 @@
    taken out: the server's offers to do and not to do an option are answered
    (RFC 1143), a few of the sub-negotiations (terminal type, X display,
    environment, window size) are given what they ask for, and the rest are
-   ignored.  What is sent is the transfer's input, standard input or the read
-   callback, with each byte 255 doubled.
+   ignored.  What is sent is the transfer's input, the read callback or the
+   input descriptor, with each byte 255 doubled.
 
    A server that does not negotiate is not negotiated with: the options we
    want are asked for after the first command the server sends, and not
@@ -48,10 +48,12 @@
    options we want that it has not asked for are asked for after the chunk of
    input that held its first command.
 
-   The input is watched as the transfer goes on.  Where the descriptor can be
-   polled (a terminal, a pipe) the loop is woken when it has something, and a
-   regular file or a read callback is read a chunk at a time between the
-   loop's other work.  What is read waits for the connection when it has too
+   The input is the read callback, or the descriptor that
+   TWISTOPT_TELNET_INPUT_FD names, and the process's standard input is not
+   assumed: the caller says.  It is watched as the transfer goes on.  Where
+   the descriptor can be polled (a terminal, a pipe) the loop is woken when it
+   has something, and a regular file or a read callback is read a chunk at a
+   time between the loop's other work.  What is read waits for the connection when it has too
    much to write.  The end of the input does not end the transfer: that is for
    the server, which closes.  */
 
@@ -110,7 +112,7 @@ enum opt_state
 
 struct twist_telnet
 {
-  struct twist_easy *easy;
+  struct twist_transfer *transfer;
   struct twist_endpoint *ep;
   struct twist_mail_link link;
   int live;
@@ -138,7 +140,7 @@ struct twist_telnet
   uint8_t *sent;
   size_t sent_len;
   size_t sent_cap;
-  /* The input.  IN watches a copy of standard input; PUMP reads in steps,
+  /* The input.  IN watches a copy of the input descriptor; PUMP reads in steps,
      the read callback or what cannot be watched.  */
   struct twist_connection *in;
   int in_fd;
@@ -150,7 +152,7 @@ struct twist_telnet
 };
 
 /* Nothing more is read from the input once the session is over: what is
-   read now would be lost, and is wanted by whoever reads standard input next.
+   read now would be lost, and is wanted by whoever reads the descriptor next.
    The watcher is paused, and not freed, as this may be called from inside it.  */
 static void
 input_stop (struct twist_telnet *t)
@@ -172,7 +174,7 @@ telnet_complete (struct twist_telnet *t, int err)
     return;
   t->finished = 1;
   input_stop (t);
-  twist_easy_finish (t->easy, err);
+  twist_transfer_finish (t->transfer, err);
 }
 
 /* ---- sending ---- */
@@ -275,7 +277,7 @@ twist_telnet_input (struct twist_telnet *t, const uint8_t *data, size_t len)
   if (t == NULL || t->finished || len == 0)
     return;
   emit_escaped (t, data, len);
-  twist_progress_uploaded (t->easy, len);
+  twist_progress_uploaded (t->transfer, len);
 }
 
 /* ---- options ---- */
@@ -558,15 +560,16 @@ command (struct twist_telnet *t, int c)
 static int
 write_text (struct twist_telnet *t, uint8_t *data, size_t len)
 {
-  struct twist_easy *easy = t->easy;
+  struct twist_transfer *transfer = t->transfer;
 
   if (len == 0)
     return TWIST_OK;
-  if (easy->write_cb != NULL
-      && easy->write_cb ((char *) data, 1, len, easy->write_data) < len)
+  if (transfer->write_cb != NULL
+      && transfer->write_cb ((char *) data, 1, len,
+                             transfer->write_data) < len)
     return TWIST_ERR_ABORTED;
   /* The text, not the commands in what came.  */
-  twist_easy_downloaded (easy, len);
+  twist_transfer_downloaded (transfer, len);
   return TWIST_OK;
 }
 
@@ -721,7 +724,7 @@ bad_syntax (struct twist_telnet *t, const char *opt)
   char msg[512];
 
   snprintf (msg, sizeof msg, _("syntax error in telnet option: %s"), opt);
-  twist_easy_set_error (t->easy, twist_strdup (msg));
+  twist_transfer_set_error (t->transfer, twist_strdup (msg));
   return TWIST_ERR_OPTION_SYNTAX;
 }
 
@@ -731,7 +734,7 @@ unknown_option (struct twist_telnet *t, const char *opt)
   char msg[512];
 
   snprintf (msg, sizeof msg, _("unknown telnet option %s"), opt);
-  twist_easy_set_error (t->easy, twist_strdup (msg));
+  twist_transfer_set_error (t->transfer, twist_strdup (msg));
   return TWIST_ERR_UNKNOWN_OPTION;
 }
 
@@ -793,9 +796,9 @@ one_option (struct twist_telnet *t, const char *opt)
 static int
 setup_options (struct twist_telnet *t)
 {
-  struct twist_easy *easy = t->easy;
-  const char *user = easy->username != NULL ? easy->username
-                     : easy->url->user;
+  struct twist_transfer *transfer = t->transfer;
+  const char *user = transfer->username != NULL ? transfer->username
+                     : transfer->url->user;
   const struct twist_slist *o;
   int rc;
 
@@ -817,7 +820,7 @@ setup_options (struct twist_telnet *t)
       if (rc != TWIST_OK)
         return rc;
     }
-  for (o = easy->telnet_options; o != NULL; o = o->next)
+  for (o = transfer->telnet_options; o != NULL; o = o->next)
     {
       rc = one_option (t, o->data);
       if (rc != TWIST_OK)
@@ -846,35 +849,46 @@ congested (const struct twist_telnet *t)
 static void
 pump_step (void *user);
 
+/* Read again in DELAY_MS, 0 being as soon as the loop has done what else it
+   has to.  */
 static void
-pump_schedule (struct twist_telnet *t)
+pump_schedule_after (struct twist_telnet *t, unsigned delay_ms)
 {
-  struct twist_loop *loop = t->easy->loop;
+  struct twist_loop *loop = t->transfer->loop;
 
   if (t->pump != NULL || t->finished || t->in_done || t->stalled)
     return;
-  if (twist_loop_schedule (loop, twist_loop_now (loop), pump_step, t,
+  if (twist_loop_schedule (loop, twist_loop_now (loop) + delay_ms, pump_step, t,
                            &t->pump) != TWIST_OK)
     telnet_complete (t, TWIST_ERR_NOMEM);
 }
 
-/* One chunk of the read callback, or of standard input where it cannot be
-   watched.  */
+static void
+pump_schedule (struct twist_telnet *t)
+{
+  pump_schedule_after (t, 0);
+}
+
+/* How long to wait before looking again at a descriptor that had nothing.  */
+#define POLL_RETRY_MS 20
+
+/* One chunk of the read callback, or of the input descriptor where it cannot
+   be watched.  */
 static void
 pump_step (void *user)
 {
   struct twist_telnet *t = user;
-  struct twist_easy *easy = t->easy;
+  struct twist_transfer *transfer = t->transfer;
   uint8_t buf[IN_CHUNK];
   ssize_t n;
 
   t->pump = NULL;
   if (t->finished || t->in_done)
     return;
-  if (easy->read_cb != NULL)
+  if (transfer->read_cb != NULL)
     {
-      size_t got = easy->read_cb ((char *) buf, 1, sizeof buf,
-                                  easy->read_data);
+      size_t got = transfer->read_cb ((char *) buf, 1, sizeof buf,
+                                      transfer->read_data);
 
       /* The callback says it cannot read (TWIST_READFUNC_ABORT), or
          it has given more than there was room for.  */
@@ -887,8 +901,25 @@ pump_step (void *user)
     }
   else
     {
+      struct pollfd p;
+      int r;
+
+      /* A descriptor that could not be watched is a file, which is always
+         ready, unless watching failed for another reason; one that is not
+         ready is not read, since the read would wait for the whole loop.  */
+      p.fd = transfer->telnet_input_fd;
+      p.events = POLLIN;
+      p.revents = 0;
       do
-        n = read (STDIN_FILENO, buf, sizeof buf);
+        r = poll (&p, 1, 0);
+      while (r < 0 && errno == EINTR);
+      if (r == 0)
+        {
+          pump_schedule_after (t, POLL_RETRY_MS);
+          return;
+        }
+      do
+        n = read (transfer->telnet_input_fd, buf, sizeof buf);
       while (n < 0 && errno == EINTR);
       if (n < 0)
         {
@@ -994,17 +1025,18 @@ static const struct twist_protocol_handler input_handler = {
   NULL
 };
 
-/* Watch a copy of standard input.  Not every descriptor can be: a regular
-   file and the null device cannot, and are read in steps instead.  */
+/* Watch a copy of the input descriptor, so that the caller's is not closed
+   with it.  Not every descriptor can be: a regular file and the null device
+   cannot, and are read in steps instead.  */
 static int
 watch_input (struct twist_telnet *t)
 {
   struct twist_connection *conn;
-  int fd = dup (STDIN_FILENO);
+  int fd = dup (t->transfer->telnet_input_fd);
 
   if (fd < 0)
     return TWIST_ERR_INVAL;
-  conn = twist_connection_new (t->easy->loop);
+  conn = twist_connection_new (t->transfer->loop);
   if (conn == NULL)
     {
       close (fd);
@@ -1031,7 +1063,14 @@ watch_input (struct twist_telnet *t)
 static void
 input_start (struct twist_telnet *t)
 {
-  if (t->easy->read_cb == NULL && watch_input (t) == TWIST_OK)
+  /* With neither a read callback nor a descriptor there is nothing to send;
+     the session is the server's.  */
+  if (t->transfer->read_cb == NULL && t->transfer->telnet_input_fd < 0)
+    {
+      input_ended (t);
+      return;
+    }
+  if (t->transfer->read_cb == NULL && watch_input (t) == TWIST_OK)
     return;
   pump_schedule (t);
 }
@@ -1102,21 +1141,21 @@ twist_telnet_free (void *p)
 }
 
 struct twist_telnet *
-twist_telnet_new (struct twist_easy *easy, int live)
+twist_telnet_new (struct twist_transfer *transfer, int live)
 {
   struct twist_telnet *t;
   int rc;
 
-  if (easy == NULL || easy->url == NULL)
+  if (transfer == NULL || transfer->url == NULL)
     return NULL;
   t = calloc (1, sizeof *t);
   if (t == NULL)
     return NULL;
-  t->easy = easy;
+  t->transfer = transfer;
   t->live = live;
   t->rx = RX_DATA;
-  easy->xfer = t;
-  easy->xfer_free = twist_telnet_free;
+  transfer->state = t;
+  transfer->state_free = twist_telnet_free;
   rc = setup_options (t);
   if (rc != TWIST_OK)
     telnet_complete (t, rc);
@@ -1124,18 +1163,19 @@ twist_telnet_new (struct twist_easy *easy, int live)
 }
 
 int
-twist_telnet_attach (struct twist_easy *easy)
+twist_telnet_attach (struct twist_transfer *transfer)
 {
   struct twist_telnet *t;
   int rc;
 
-  t = twist_telnet_new (easy, 1);
+  t = twist_telnet_new (transfer, 1);
   if (t == NULL)
     return TWIST_ERR_NOMEM;
   if (t->finished)
-    return easy->result;
-  rc = twist_mail_link_open (&t->link, easy, &telnet_handler, t, telnet_fail);
+    return transfer->result;
+  rc = twist_mail_link_open (&t->link, transfer, &telnet_handler, t,
+                             telnet_fail);
   if (rc != TWIST_OK)
     telnet_complete (t, rc);
-  return easy->done ? easy->result : TWIST_OK;
+  return transfer->done ? transfer->result : TWIST_OK;
 }

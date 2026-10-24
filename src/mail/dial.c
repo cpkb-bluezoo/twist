@@ -50,11 +50,11 @@ on_phase_timeout (void *user)
   char msg[128];
 
   link->phase_timer = NULL;
-  if (twist_easy_error (link->easy) == NULL)
+  if (twist_transfer_error (link->transfer) == NULL)
     {
       snprintf (msg, sizeof msg, _("timed out after %ld ms making the "
-                                   "connection"), link->easy->connect_timeout_ms);
-      twist_easy_set_error (link->easy, twist_strdup (msg));
+                                   "connection"), link->transfer->connect_timeout_ms);
+      twist_transfer_set_error (link->transfer, twist_strdup (msg));
     }
   if (link->fail != NULL)
     link->fail (link->user, TWIST_ERR_TIMEOUT);
@@ -63,11 +63,11 @@ on_phase_timeout (void *user)
 void
 twist_mail_link_phase_begin (struct twist_mail_link *link)
 {
-  if (link->phase_timer == NULL && link->easy->connect_timeout_ms > 0
-      && link->easy->loop != NULL)
-    twist_loop_schedule (link->easy->loop,
-                         twist_loop_now (link->easy->loop)
-                         + (uint64_t) link->easy->connect_timeout_ms,
+  if (link->phase_timer == NULL && link->transfer->connect_timeout_ms > 0
+      && link->transfer->loop != NULL)
+    twist_loop_schedule (link->transfer->loop,
+                         twist_loop_now (link->transfer->loop)
+                         + (uint64_t) link->transfer->connect_timeout_ms,
                          on_phase_timeout, link, &link->phase_timer);
 }
 
@@ -84,10 +84,10 @@ twist_mail_link_phase_end (struct twist_mail_link *link)
 static void
 arm_timeout (struct twist_mail_link *link)
 {
-  if (link->easy->timeout_ms > 0)
-    twist_loop_schedule (link->easy->loop,
-                         twist_loop_now (link->easy->loop)
-                         + (uint64_t) link->easy->timeout_ms,
+  if (link->transfer->timeout_ms > 0)
+    twist_loop_schedule (link->transfer->loop,
+                         twist_loop_now (link->transfer->loop)
+                         + (uint64_t) link->transfer->timeout_ms,
                          on_timeout, link, &link->timer);
 }
 
@@ -112,16 +112,16 @@ dial_tcp (struct twist_mail_link *link, const struct twist_dns_addr *addr)
       spec.proxy_port = link->dial_port;
       spec.user = link->tun_user;
       spec.pass = link->tun_pass;
-      spec.host = link->easy->url->host;
-      spec.port = link->easy->url->port > 0
-        ? link->easy->url->port
-        : twist_url_default_port (link->easy->url->scheme);
-      rc = twist_tunnel_connect (link->easy, &spec, addr, handler, user,
+      spec.host = link->transfer->url->host;
+      spec.port = link->transfer->url->port > 0
+        ? link->transfer->url->port
+        : twist_url_default_port (link->transfer->url->scheme);
+      rc = twist_tunnel_connect (link->transfer, &spec, addr, handler, user,
                                  &c);
       link->conn = c;
       return rc;
     }
-  c = twist_connection_new (link->easy->loop);
+  c = twist_connection_new (link->transfer->loop);
   if (c == NULL)
     return TWIST_ERR_NOMEM;
   link->conn = c;
@@ -152,8 +152,8 @@ dial_tcp (struct twist_mail_link *link, const struct twist_dns_addr *addr)
       sa = &sin;
       salen = sizeof sin;
     }
-  return twist_connection_connect (c, sa, salen,
-                                   (uint64_t) link->easy->connect_timeout_ms);
+  return twist_connection_connect
+    (c, sa, salen, (uint64_t) link->transfer->connect_timeout_ms);
 }
 
 static void
@@ -174,7 +174,8 @@ on_resolved (void *user, int err, const struct twist_dns_addr *addr)
 }
 
 int
-twist_mail_link_open (struct twist_mail_link *link, struct twist_easy *easy,
+twist_mail_link_open (struct twist_mail_link *link,
+                      struct twist_transfer *transfer,
                       const struct twist_protocol_handler *handler,
                       void *user, void (*fail) (void *user, int err))
 {
@@ -184,28 +185,30 @@ twist_mail_link_open (struct twist_mail_link *link, struct twist_easy *easy,
   char *phost = NULL, *puser = NULL, *ppass = NULL;
   int pport = 0;
 
-  if (link == NULL || easy == NULL || easy->url == NULL || easy->loop == NULL
+  if (link == NULL || transfer == NULL || transfer->url == NULL
+      || transfer->loop == NULL
       || handler == NULL)
     return TWIST_ERR_INVAL;
   memset (link, 0, sizeof *link);
-  link->easy = easy;
+  link->transfer = transfer;
   link->handler = handler;
   link->user = user;
   link->fail = fail;
-  url = easy->url;
+  url = transfer->url;
   link->dial_port = url->port;
   dial = url->host;
-  if (twist_easy_proxy (easy) != NULL)
+  if (twist_transfer_proxy (transfer) != NULL)
     {
-      int rc = twist_proxy_parse (twist_easy_proxy (easy), &kind, &phost, &pport, &puser,
+      int rc = twist_proxy_parse (twist_transfer_proxy (transfer), &kind, &phost, &pport, &puser,
                                   &ppass);
 
       if (rc == TWIST_ERR_UNSUPPORTED)
         {
-          twist_easy_set_error (easy, twist_strdup (_("this kind of proxy is "
-                                                      "not supported; use "
-                                                      "http://, https:// or "
-                                                      "socks5://")));
+          twist_transfer_set_error (transfer,
+                                    twist_strdup (_("this kind of proxy is "
+                                                    "not supported; use "
+                                                    "http://, https:// or "
+                                                    "socks5://")));
           return rc;
         }
       if (rc != TWIST_OK)
@@ -231,7 +234,7 @@ twist_mail_link_open (struct twist_mail_link *link, struct twist_easy *easy,
               return TWIST_ERR_NOMEM;
             }
           twist_proxy_set_target (link->proxy, url->host, url->port);
-          twist_proxy_configure (link->proxy, easy, puser, ppass);
+          twist_proxy_configure (link->proxy, transfer, puser, ppass);
           dial = phost;
           link->dial_port = pport;
         }
@@ -248,7 +251,8 @@ twist_mail_link_open (struct twist_mail_link *link, struct twist_easy *easy,
     return TWIST_ERR_NOMEM;
   arm_timeout (link);
   {
-    int rc = twist_dns_resolve_easy (easy, link->dial_host, on_resolved, link);
+    int rc = twist_dns_resolve_transfer (transfer, link->dial_host,
+                                         on_resolved, link);
 
     if (rc != TWIST_OK)
       return rc;
@@ -272,10 +276,11 @@ twist_mail_link_detach (struct twist_mail_link *link)
 }
 
 void
-twist_mail_link_attach (struct twist_mail_link *link, struct twist_easy *easy,
+twist_mail_link_attach (struct twist_mail_link *link,
+                        struct twist_transfer *transfer,
                         struct twist_connection *conn)
 {
-  link->easy = easy;
+  link->transfer = transfer;
   link->conn = conn;
   twist_connection_endpoint (conn)->user_data = link->user;
   twist_connection_set_handler (conn, link->handler);

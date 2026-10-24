@@ -6,8 +6,8 @@ Copyright (C) 2026 Chris Burdess
 Twist is a transfer client for the GNU system: a library, libtwist, and a
 command-line program, twist.  The command line is mostly compatible with
 curl's: the options, standard streams and exit status are the same, so that
-twist can replace it in scripts.  The library has handles in the style of
-curl's easy, multi and share interfaces.
+twist can replace it in scripts.  The library has two objects, a transfer and
+a runtime that runs transfers, and nothing in it blocks.
 
 Schemes
 -------

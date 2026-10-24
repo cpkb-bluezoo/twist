@@ -30,26 +30,27 @@
    mechanism itself stays in src/auth.  */
 
 const char *
-twist_mail_user (const struct twist_easy *easy)
+twist_mail_user (const struct twist_transfer *transfer)
 {
-  if (easy == NULL)
+  if (transfer == NULL)
     return NULL;
-  if (easy->username != NULL && easy->username[0] != 0)
-    return easy->username;
-  if (easy->url != NULL && easy->url->user != NULL && easy->url->user[0] != 0)
-    return easy->url->user;
+  if (transfer->username != NULL && transfer->username[0] != 0)
+    return transfer->username;
+  if (transfer->url != NULL && transfer->url->user != NULL
+      && transfer->url->user[0] != 0)
+    return transfer->url->user;
   return NULL;
 }
 
 const char *
-twist_mail_pass (const struct twist_easy *easy)
+twist_mail_pass (const struct twist_transfer *transfer)
 {
-  if (easy == NULL)
+  if (transfer == NULL)
     return NULL;
-  if (easy->password != NULL)
-    return easy->password;
-  if (easy->url != NULL && easy->url->password != NULL)
-    return easy->url->password;
+  if (transfer->password != NULL)
+    return transfer->password;
+  if (transfer->url != NULL && transfer->url->password != NULL)
+    return transfer->url->password;
   return "";
 }
 
@@ -111,7 +112,8 @@ encode_step (struct twist_mail_sasl *sasl, char **b64)
 }
 
 int
-twist_mail_sasl_start (struct twist_mail_sasl *sasl, struct twist_easy *easy,
+twist_mail_sasl_start (struct twist_mail_sasl *sasl,
+                       struct twist_transfer *transfer,
                        const char *advertised, char **b64, int *initial)
 {
   const char *user;
@@ -119,14 +121,14 @@ twist_mail_sasl_start (struct twist_mail_sasl *sasl, struct twist_easy *easy,
   const char *token;
   int mech = 0;
 
-  if (sasl == NULL || easy == NULL || b64 == NULL || initial == NULL)
+  if (sasl == NULL || transfer == NULL || b64 == NULL || initial == NULL)
     return TWIST_ERR_INVAL;
   *b64 = NULL;
   *initial = 0;
   twist_mail_sasl_close (sasl);
-  user = twist_mail_user (easy);
-  pass = twist_mail_pass (easy);
-  token = easy->bearer != NULL ? easy->bearer : "";
+  user = twist_mail_user (transfer);
+  pass = twist_mail_pass (transfer);
+  token = transfer->bearer != NULL ? transfer->bearer : "";
   if (token[0] != 0 && has_mech (advertised, "XOAUTH2"))
     mech = TWIST_SASL_XOAUTH2;
   else if (user != NULL && has_mech (advertised, "PLAIN"))

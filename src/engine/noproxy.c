@@ -232,51 +232,53 @@ env_proxy (const char *scheme)
 /* Whether the host of the URL is one that goes direct: on the list given, or
    else the environment's.  */
 int
-twist_easy_noproxy (const struct twist_easy *easy)
+twist_transfer_noproxy (const struct twist_transfer *transfer)
 {
-  const char *noproxy = easy->noproxy_set ? easy->noproxy : NULL;
+  const char *noproxy = transfer->noproxy_set ? transfer->noproxy : NULL;
 
-  if (!easy->noproxy_set)
+  if (!transfer->noproxy_set)
     {
       noproxy = twist_getenv_secure ("no_proxy");
       if (noproxy == NULL)
         noproxy = twist_getenv_secure ("NO_PROXY");
     }
-  return easy->url != NULL && twist_noproxy_match (easy->url->host, noproxy);
+  return transfer->url != NULL && twist_noproxy_match (transfer->url->host,
+                                                       noproxy);
 }
 
 const char *
-twist_easy_proxy (const struct twist_easy *easy)
+twist_transfer_proxy (const struct twist_transfer *transfer)
 {
   const struct twist_scheme *scheme;
   const char *proxy;
   const char *noproxy;
 
-  if (easy == NULL)
+  if (transfer == NULL)
     return NULL;
-  if (easy->proxy != NULL)
+  if (transfer->proxy != NULL)
     {
       /* Given: "" is none, and is not overridden by the environment.  */
-      proxy = easy->proxy;
+      proxy = transfer->proxy;
     }
   else
     {
-      scheme = easy->url != NULL && easy->url->scheme != NULL
-        ? twist_scheme_by_name (easy->url->scheme) : NULL;
+      scheme = transfer->url != NULL && transfer->url->scheme != NULL
+        ? twist_scheme_by_name (transfer->url->scheme) : NULL;
       if (scheme == NULL || (scheme->flags & TWIST_SCHEME_PROXY_OK) == 0)
         return NULL;
-      proxy = env_proxy (easy->url->scheme);
+      proxy = env_proxy (transfer->url->scheme);
     }
   if (proxy == NULL || proxy[0] == 0)
     return NULL;
-  noproxy = easy->noproxy_set ? easy->noproxy : NULL;
-  if (!easy->noproxy_set)
+  noproxy = transfer->noproxy_set ? transfer->noproxy : NULL;
+  if (!transfer->noproxy_set)
     {
       noproxy = twist_getenv_secure ("no_proxy");
       if (noproxy == NULL)
         noproxy = twist_getenv_secure ("NO_PROXY");
     }
-  if (easy->url != NULL && twist_noproxy_match (easy->url->host, noproxy))
+  if (transfer->url != NULL
+      && twist_noproxy_match (transfer->url->host, noproxy))
     return NULL;
   return proxy;
 }

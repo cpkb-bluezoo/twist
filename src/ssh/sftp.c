@@ -260,7 +260,7 @@ hexval (int c)
 static int
 file_path (struct twist_ssh *s, int put, char **out, int *dir)
 {
-  struct twist_easy *e = s->easy;
+  struct twist_transfer *e = s->transfer;
   const char *raw = e->url->path != NULL && e->url->path[0] != 0
                     ? e->url->path : "/";
   size_t n = strlen (raw), i, o = 0;
@@ -400,18 +400,18 @@ parse_range (struct twist_sftp_xfer *g, const char *r)
 
 /* The size of the data to upload, from postfields.  */
 static size_t
-source_size (const struct twist_easy *e)
+source_size (const struct twist_transfer *e)
 {
   if (e->postfieldsize_set && e->postfieldsize >= 0)
     return (size_t) e->postfieldsize;
   return strlen (e->postfields);
 }
 
-/* Work out from the easy handle what this transfer is.  */
+/* Work out from the transfer what this transfer is.  */
 static int
 plan (struct twist_sftp_xfer *g)
 {
-  struct twist_easy *e = g->ssh->easy;
+  struct twist_transfer *e = g->ssh->transfer;
   long long resume = e->resume_from;
 
   if (e->nobody && g->put && !g->list)
@@ -545,7 +545,7 @@ fail_status (struct twist_sftp_xfer *g, const gf_sftp_response *r)
   clean_text (said, sizeof said, r->message.data, r->message.len);
   snprintf (msg, sizeof msg, "%s: %s%s%s%s", g->path, what,
             said[0] != 0 ? " (" : "", said, said[0] != 0 ? ")" : "");
-  g->ssh->easy->proto_status = status;
+  g->ssh->transfer->proto_status = status;
   fail (g, TWIST_ERR_FILE, msg);
 }
 
@@ -614,7 +614,7 @@ pace_fire (void *user)
 static int
 pace (struct twist_sftp_xfer *g, void (*pump) (struct twist_sftp_xfer *))
 {
-  struct twist_easy *e = g->ssh->easy;
+  struct twist_transfer *e = g->ssh->transfer;
   uint64_t now, wait;
 
   if (g->rate.limit == 0 || e->loop == NULL)
@@ -713,7 +713,7 @@ slot_at (struct twist_sftp_xfer *g, uint64_t offset)
 static int
 deliver (struct twist_sftp_xfer *g)
 {
-  struct twist_easy *e = g->ssh->easy;
+  struct twist_transfer *e = g->ssh->transfer;
   struct slot *sl;
 
   while (!g->eof && (sl = slot_at (g, g->next_out)) != NULL)
@@ -743,7 +743,7 @@ deliver (struct twist_sftp_xfer *g)
               return 0;
             }
         }
-      twist_easy_downloaded (e, sl->got);
+      twist_transfer_downloaded (e, sl->got);
       g->next_out += sl->got;
       drop_slot (g, sl);
       if (g->has_end && g->next_out >= g->end)
@@ -872,7 +872,7 @@ got_size (struct twist_sftp_xfer *g, const gf_sftp_response *r)
     {
       uint64_t last = g->has_end && g->end < size ? g->end : size;
 
-      twist_progress_dl_size (g->ssh->easy,
+      twist_progress_dl_size (g->ssh->transfer,
                               last > g->start ? (long long) (last - g->start)
                               : 0);
     }
@@ -892,7 +892,7 @@ got_size (struct twist_sftp_xfer *g, const gf_sftp_response *r)
 static int
 fill_chunk (struct twist_sftp_xfer *g)
 {
-  struct twist_easy *e = g->ssh->easy;
+  struct twist_transfer *e = g->ssh->transfer;
   size_t n;
 
   if (g->chunk_len > 0)
@@ -933,7 +933,7 @@ fill_chunk (struct twist_sftp_xfer *g)
 static int
 discard_source (struct twist_sftp_xfer *g)
 {
-  struct twist_easy *e = g->ssh->easy;
+  struct twist_transfer *e = g->ssh->transfer;
   uint64_t left = g->skip;
 
   if (left == 0)
@@ -1010,10 +1010,10 @@ pump_writes (struct twist_sftp_xfer *g)
 static void
 begin_writes (struct twist_sftp_xfer *g)
 {
-  long long total = twist_easy_upload_size (g->ssh->easy);
+  long long total = twist_transfer_upload_size (g->ssh->transfer);
 
   if (total >= 0)
-    twist_progress_ul_size (g->ssh->easy,
+    twist_progress_ul_size (g->ssh->transfer,
                             total > (long long) g->skip
                             ? total - (long long) g->skip : 0);
   if (discard_source (g) != 0)
@@ -1041,7 +1041,7 @@ write_response (struct twist_sftp_xfer *g, const gf_sftp_response *r)
   if (g->outstanding > 0)
     g->outstanding--;
   /* An upload counts as sent when the server has it.  */
-  twist_progress_uploaded (g->ssh->easy, (size_t) ((uintptr_t) r->tag - TAG_WRITE));
+  twist_progress_uploaded (g->ssh->transfer, (size_t) ((uintptr_t) r->tag - TAG_WRITE));
   pump_writes (g);
 }
 
@@ -1060,7 +1060,7 @@ ask_more_names (struct twist_sftp_xfer *g)
 static int
 write_entry (struct twist_sftp_xfer *g, const gf_sftp_name *name)
 {
-  struct twist_easy *e = g->ssh->easy;
+  struct twist_transfer *e = g->ssh->transfer;
   gf_slice text = name->filename;
   uint8_t *line;
   size_t n;
@@ -1082,7 +1082,7 @@ write_entry (struct twist_sftp_xfer *g, const gf_sftp_name *name)
       fail (g, TWIST_ERR_ABORTED, NULL);
       return 0;
     }
-  twist_easy_downloaded (e, n);
+  twist_transfer_downloaded (e, n);
   free (line);
   return 1;
 }
@@ -1213,7 +1213,7 @@ static void quote_start (struct twist_sftp_xfer *g, int post);
 static void
 transfer_done (struct twist_sftp_xfer *g)
 {
-  if (!g->qpost && g->ssh->easy->postquote != NULL)
+  if (!g->qpost && g->ssh->transfer->postquote != NULL)
     quote_start (g, 1);
   else
     twist_ssh_finish (g->ssh, TWIST_OK);
@@ -1270,7 +1270,7 @@ static void quote_next (struct twist_sftp_xfer *g);
 static void
 quote_fail (struct twist_sftp_xfer *g, const char *msg)
 {
-  g->ssh->easy->proto_status = 21;
+  g->ssh->transfer->proto_status = 21;
   fail (g, TWIST_ERR_QUOTE, msg);
 }
 
@@ -1421,7 +1421,7 @@ quote_set (struct twist_sftp_xfer *g, const gf_sftp_response *r)
 static void
 quote_pwd (struct twist_sftp_xfer *g, const gf_sftp_response *r)
 {
-  struct twist_easy *e = g->ssh->easy;
+  struct twist_transfer *e = g->ssh->transfer;
   gf_sftp_response copy = *r;
   gf_sftp_name name;
 
@@ -1521,7 +1521,7 @@ quote_next (struct twist_sftp_xfer *g)
 static void
 quote_start (struct twist_sftp_xfer *g, int post)
 {
-  struct twist_easy *e = g->ssh->easy;
+  struct twist_transfer *e = g->ssh->transfer;
 
   g->qpost = post;
   g->qnext = post ? e->postquote : e->quote;
@@ -1543,7 +1543,7 @@ sftp_response (void *user, const gf_sftp_response *r)
         {
           if (r->type == GF_FXP_STATUS && r->status == GF_FX_NO_SUCH_FILE
               && g->put && !g->dirs_tried
-              && g->ssh->easy->create_missing_dirs)
+              && g->ssh->transfer->create_missing_dirs)
             {
               g->dirs_tried = 1;
               make_next_dir (g);
@@ -1566,7 +1566,8 @@ sftp_response (void *user, const gf_sftp_response *r)
         ask_more_names (g);
       else if (g->put)
         begin_writes (g);
-      else if (g->check_resume || g->suffix || !g->ssh->easy->progress.hide)
+      else if (g->check_resume || g->suffix
+               || !g->ssh->transfer->progress.hide)
         {
           if (sent (g, gf_sftp_client_fstat (g->client, g->handle, g->hlen, TAG_FSTAT,
                                     NULL)) != GF_OK)
@@ -1629,7 +1630,7 @@ sftp_response (void *user, const gf_sftp_response *r)
 static void
 start_transfer (struct twist_sftp_xfer *g)
 {
-  struct twist_easy *e = g->ssh->easy;
+  struct twist_transfer *e = g->ssh->transfer;
 
   if (e->nobody)
     {
@@ -1676,9 +1677,9 @@ begin (struct twist_sftp_xfer *g)
   struct twist_ssh *s = g->ssh;
   int rc;
 
-  g->put = s->easy->postfields != NULL || s->easy->read_cb != NULL;
-  twist_rate_init (&g->rate, g->put ? s->easy->max_send_speed
-                                    : s->easy->max_recv_speed);
+  g->put = s->transfer->postfields != NULL || s->transfer->read_cb != NULL;
+  twist_rate_init (&g->rate, g->put ? s->transfer->max_send_speed
+                                    : s->transfer->max_recv_speed);
   g->chunk_max = twist_rate_chunk (&g->rate, SFTP_CHUNK);
   rc = file_path (s, g->put, &g->path, &g->list);
   if (rc == TWIST_OK)

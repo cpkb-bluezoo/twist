@@ -174,7 +174,7 @@ test_mail (void)
                         's', 'e', 'c', 'r', 'e', 't' };
     char *b64 = NULL;
     char authcmd[128];
-    twist_easy *easy = twist_easy_init ();
+    twist_transfer *transfer = twist_transfer_new ();
     struct twist_slist *rcpt = twist_slist_append (NULL, "c@d");
     struct twist_smtp *smtp;
     size_t split;
@@ -185,11 +185,11 @@ test_mail (void)
     for (split = 1; split <= 12; split++)
       {
         check (twist_url_parse_int ("smtp://alice:secret@127.0.0.1",
-                                    &easy->url) == TWIST_OK, "smtp url");
-        easy->mail_from = twist_strdup ("a@b");
-        easy->mail_rcpt = rcpt;
-        easy->postfields = (char[]) { 'H', 'i', '\r', '\n', '.', 'x', '\r', '\n', 0 };
-        smtp = twist_smtp_new (easy, 0);
+                                    &transfer->url) == TWIST_OK, "smtp url");
+        transfer->mail_from = twist_strdup ("a@b");
+        transfer->mail_rcpt = rcpt;
+        transfer->postfields = (char[]) { 'H', 'i', '\r', '\n', '.', 'x', '\r', '\n', 0 };
+        smtp = twist_smtp_new (transfer, 0);
         feed_n (smtp_recv, smtp, "220 ready\r\n", split);
         check (strcmp (twist_smtp_command (smtp), "EHLO twist\r\n") == 0,
                "ehlo");
@@ -206,25 +206,26 @@ test_mail (void)
         feed_n (smtp_recv, smtp, "354 go\r\n", split);
         check (strcmp (twist_smtp_command (smtp), stuffed) == 0, "smtp body");
         feed_n (smtp_recv, smtp, "250 queued\r\n", split);
-        check (easy->done && easy->result == TWIST_OK, "smtp done");
-        check (easy->progress.ul_known && easy->progress.size_ul == 8
-               && easy->progress.uploaded == 8, "smtp progress");
+        check (transfer->done && transfer->result == TWIST_OK, "smtp done");
+        check (transfer->progress.ul_known && transfer->progress.size_ul == 8
+               && transfer->progress.uploaded == 8, "smtp progress");
         check (strcmp (twist_smtp_command (smtp), "QUIT\r\n") == 0, "quit");
-        twist_easy_cleanup (easy);
-        easy = twist_easy_init ();
+        twist_transfer_free (transfer);
+        transfer = twist_transfer_new ();
       }
     twist_slist_free_all (rcpt);
-    twist_easy_cleanup (easy);
+    twist_transfer_free (transfer);
   }
   {
-    twist_easy *easy = twist_easy_init ();
+    twist_transfer *transfer = twist_transfer_new ();
     struct twist_pop3 *pop;
 
     mail_body_len = 0;
-    check (twist_url_parse_int ("pop3://alice:secret@127.0.0.1/1", &easy->url)
+    check (twist_url_parse_int ("pop3://alice:secret@127.0.0.1/1",
+                                &transfer->url)
            == TWIST_OK, "pop url");
-    easy->write_cb = mail_write;
-    pop = twist_pop3_new (easy, 0);
+    transfer->write_cb = mail_write;
+    pop = twist_pop3_new (transfer, 0);
     feed_n (pop3_recv, pop, "+OK pop\r\n", 1);
     check (strcmp (twist_pop3_command (pop), "CAPA\r\n") == 0, "capa");
     feed_n (pop3_recv, pop, "+OK\r\nUSER\r\n.\r\n", 1);
@@ -232,18 +233,18 @@ test_mail (void)
     feed_n (pop3_recv, pop, "+OK\r\n", 1);
     check (strcmp (twist_pop3_command (pop), "PASS secret\r\n") == 0, "pass");
     feed_n (pop3_recv, pop, "+OK\r\n+OK 5\r\nhello\r\n.\r\n+OK bye\r\n", 1);
-    check (easy->done && easy->result == TWIST_OK, "pop done");
+    check (transfer->done && transfer->result == TWIST_OK, "pop done");
     check (mail_body_len == 7 && memcmp (mail_body, "hello\r\n", 7) == 0,
            "pop body");
-    check (easy->progress.downloaded == 7, "pop progress");
-    twist_easy_cleanup (easy);
+    check (transfer->progress.downloaded == 7, "pop progress");
+    twist_transfer_free (transfer);
   }
   {
     uint8_t raw[13] = { 0, 'a', 'l', 'i', 'c', 'e', 0,
                         's', 'e', 'c', 'r', 'e', 't' };
     char *b64 = NULL;
     char authcmd[160];
-    twist_easy *easy = twist_easy_init ();
+    twist_transfer *transfer = twist_transfer_new ();
     struct twist_imap *imap;
 
     check (twist_b64_encode (raw, sizeof raw, &b64) == TWIST_OK, "imap b64");
@@ -251,9 +252,9 @@ test_mail (void)
     free (b64);
     mail_body_len = 0;
     check (twist_url_parse_int ("imap://alice:secret@127.0.0.1/INBOX;UID=1",
-                                &easy->url) == TWIST_OK, "imap url");
-    easy->write_cb = mail_write;
-    imap = twist_imap_new (easy, 0);
+                                &transfer->url) == TWIST_OK, "imap url");
+    transfer->write_cb = mail_write;
+    imap = twist_imap_new (transfer, 0);
     feed_n (imap_recv, imap, "* OK ready\r\n", 1);
     check (strcmp (twist_imap_command (imap), "A1 CAPABILITY\r\n") == 0,
            "capability");
@@ -267,13 +268,13 @@ test_mail (void)
     check (strcmp (twist_imap_command (imap), "A4 UID FETCH 1 BODY[]\r\n") == 0,
            "fetch");
     feed_n (imap_recv, imap, "* 1 FETCH (BODY[] {5}\r\nhello)\r\nA4 OK\r\n", 1);
-    check (easy->done && easy->result == TWIST_OK, "imap done");
+    check (transfer->done && transfer->result == TWIST_OK, "imap done");
     check (mail_body_len == 5 && memcmp (mail_body, "hello", 5) == 0,
            "imap body");
     /* The size is the literal's.  */
-    check (easy->progress.dl_known && easy->progress.size_dl == 5
-           && easy->progress.downloaded == 5, "imap progress");
-    twist_easy_cleanup (easy);
+    check (transfer->progress.dl_known && transfer->progress.size_dl == 5
+           && transfer->progress.downloaded == 5, "imap progress");
+    twist_transfer_free (transfer);
   }
 }
 
@@ -291,16 +292,17 @@ starts_with (const char *s, const char *prefix)
   return strncmp (s, prefix, strlen (prefix)) == 0;
 }
 
-static twist_easy *
-tls_easy (const char *url, int use_ssl)
+static twist_transfer *
+tls_transfer (const char *url, int use_ssl)
 {
-  twist_easy *easy = twist_easy_init ();
+  twist_transfer *transfer = twist_transfer_new ();
 
-  check (twist_url_parse_int (url, &easy->url) == TWIST_OK, "starttls url");
-  check (twist_easy_setopt (easy, TWISTOPT_USE_SSL, (long) use_ssl) == TWIST_OK,
+  check (twist_url_parse_int (url, &transfer->url) == TWIST_OK,
+         "starttls url");
+  check (twist_transfer_setopt (transfer, TWISTOPT_USE_SSL, (long) use_ssl) == TWIST_OK,
          "use ssl");
-  easy->write_cb = mail_write;
-  return easy;
+  transfer->write_cb = mail_write;
+  return transfer;
 }
 
 static void
@@ -313,86 +315,86 @@ test_smtp_starttls (void)
   for (k = 0; k < 2; k++)
     {
       size_t split = splits[k];
-      twist_easy *easy;
+      twist_transfer *transfer;
       struct twist_smtp *s;
 
       /* Wanted and required, offered: upgraded before anything is sent.  */
-      easy = tls_easy (url, TWIST_USE_SSL_ALL);
-      s = twist_smtp_new (easy, 0);
+      transfer = tls_transfer (url, TWIST_USE_SSL_ALL);
+      s = twist_smtp_new (transfer, 0);
       feed_n (smtp_recv, s, "220 ready\r\n", split);
       check (strcmp (twist_smtp_command (s), "EHLO twist\r\n") == 0, "ehlo");
       feed_n (smtp_recv, s, "250-mx\r\n250-STARTTLS\r\n250 AUTH PLAIN\r\n", split);
       check (strcmp (twist_smtp_command (s), "STARTTLS\r\n") == 0,
              "STARTTLS, not AUTH, when offered");
       feed_n (smtp_recv, s, "220 Ready to start TLS\r\n", split);
-      check (strcmp (twist_smtp_command (s), "STARTTLS\r\n") == 0 && !easy->done,
+      check (strcmp (twist_smtp_command (s), "STARTTLS\r\n") == 0 && !transfer->done,
              "nothing is sent until the handshake is done");
       twist_smtp_tls_done (s);
       check (strcmp (twist_smtp_command (s), "EHLO twist\r\n") == 0,
              "EHLO again, encrypted");
       /* STARTTLS in the new answer does not start another upgrade.  */
       feed_n (smtp_recv, s, "250-mx\r\n250-STARTTLS\r\n250 AUTH PLAIN\r\n", split);
-      check (starts_with (twist_smtp_command (s), "AUTH PLAIN ") && !easy->done,
+      check (starts_with (twist_smtp_command (s), "AUTH PLAIN ") && !transfer->done,
              "then the login");
-      twist_easy_cleanup (easy);
+      twist_transfer_free (transfer);
 
       /* Required, and not offered.  */
-      easy = tls_easy (url, TWIST_USE_SSL_ALL);
-      s = twist_smtp_new (easy, 0);
+      transfer = tls_transfer (url, TWIST_USE_SSL_ALL);
+      s = twist_smtp_new (transfer, 0);
       feed_n (smtp_recv, s, "220 ready\r\n250 AUTH PLAIN\r\n", split);
-      check (easy->done && easy->result == TWIST_ERR_USE_SSL
+      check (transfer->done && transfer->result == TWIST_ERR_USE_SSL
              && !starts_with (twist_smtp_command (s), "AUTH"),
              "required and not offered is an error, and nothing is sent");
-      twist_easy_cleanup (easy);
+      twist_transfer_free (transfer);
 
       /* Wanted, and not offered: on in the clear.  */
-      easy = tls_easy (url, TWIST_USE_SSL_TRY);
-      s = twist_smtp_new (easy, 0);
+      transfer = tls_transfer (url, TWIST_USE_SSL_TRY);
+      s = twist_smtp_new (transfer, 0);
       feed_n (smtp_recv, s, "220 ready\r\n250 AUTH PLAIN\r\n", split);
-      check (starts_with (twist_smtp_command (s), "AUTH PLAIN ") && !easy->done,
+      check (starts_with (twist_smtp_command (s), "AUTH PLAIN ") && !transfer->done,
              "wanted and not offered goes on");
-      twist_easy_cleanup (easy);
+      twist_transfer_free (transfer);
 
       /* Refused after it was asked.  */
-      easy = tls_easy (url, TWIST_USE_SSL_ALL);
-      s = twist_smtp_new (easy, 0);
+      transfer = tls_transfer (url, TWIST_USE_SSL_ALL);
+      s = twist_smtp_new (transfer, 0);
       feed_n (smtp_recv, s, "220 ready\r\n250-STARTTLS\r\n250 AUTH PLAIN\r\n",
               split);
       feed_n (smtp_recv, s, "454 TLS not available\r\n", split);
-      check (easy->done && easy->result == TWIST_ERR_USE_SSL,
+      check (transfer->done && transfer->result == TWIST_ERR_USE_SSL,
              "required and refused is an error");
-      twist_easy_cleanup (easy);
-      easy = tls_easy (url, TWIST_USE_SSL_TRY);
-      s = twist_smtp_new (easy, 0);
+      twist_transfer_free (transfer);
+      transfer = tls_transfer (url, TWIST_USE_SSL_TRY);
+      s = twist_smtp_new (transfer, 0);
       feed_n (smtp_recv, s, "220 ready\r\n250-STARTTLS\r\n250 AUTH PLAIN\r\n",
               split);
       feed_n (smtp_recv, s, "454 TLS not available\r\n", split);
-      check (starts_with (twist_smtp_command (s), "AUTH PLAIN ") && !easy->done,
+      check (starts_with (twist_smtp_command (s), "AUTH PLAIN ") && !transfer->done,
              "wanted and refused goes on");
-      twist_easy_cleanup (easy);
+      twist_transfer_free (transfer);
 
       /* Not asked for: never upgraded, even if it is offered.  */
-      easy = tls_easy (url, TWIST_USE_SSL_NONE);
-      s = twist_smtp_new (easy, 0);
+      transfer = tls_transfer (url, TWIST_USE_SSL_NONE);
+      s = twist_smtp_new (transfer, 0);
       feed_n (smtp_recv, s, "220 ready\r\n250-STARTTLS\r\n250 AUTH PLAIN\r\n",
               split);
       check (starts_with (twist_smtp_command (s), "AUTH PLAIN "),
              "STARTTLS is not sent unless it is asked for");
-      twist_easy_cleanup (easy);
+      twist_transfer_free (transfer);
     }
 
   /* Bytes behind the 220 that are not encrypted.  */
   {
-    twist_easy *easy = tls_easy (url, TWIST_USE_SSL_ALL);
-    struct twist_smtp *s = twist_smtp_new (easy, 0);
+    twist_transfer *transfer = tls_transfer (url, TWIST_USE_SSL_ALL);
+    struct twist_smtp *s = twist_smtp_new (transfer, 0);
 
     feed_n (smtp_recv, s, "220 ready\r\n250-STARTTLS\r\n250 AUTH PLAIN\r\n", 200);
     feed_n (smtp_recv, s, "220 go\r\n250 AUTH PLAIN\r\n", 200);
-    check (easy->done && easy->result == TWIST_ERR_PROTOCOL,
+    check (transfer->done && transfer->result == TWIST_ERR_PROTOCOL,
            "bytes in the clear behind the reply to STARTTLS end the transfer");
     check (strcmp (twist_smtp_command (s), "STARTTLS\r\n") == 0,
            "and nothing is sent for them");
-    twist_easy_cleanup (easy);
+    twist_transfer_free (transfer);
   }
 }
 
@@ -406,11 +408,11 @@ test_imap_starttls (void)
   for (k = 0; k < 2; k++)
     {
       size_t split = splits[k];
-      twist_easy *easy;
+      twist_transfer *transfer;
       struct twist_imap *m;
 
-      easy = tls_easy (url, TWIST_USE_SSL_ALL);
-      m = twist_imap_new (easy, 0);
+      transfer = tls_transfer (url, TWIST_USE_SSL_ALL);
+      m = twist_imap_new (transfer, 0);
       feed_n (imap_recv, m, "* OK ready\r\n", split);
       check (strcmp (twist_imap_command (m), "A1 CAPABILITY\r\n") == 0, "cap");
       feed_n (imap_recv, m,
@@ -420,73 +422,74 @@ test_imap_starttls (void)
              "STARTTLS, not AUTHENTICATE, when offered");
       feed_n (imap_recv, m, "A2 OK Begin TLS negotiation now\r\n", split);
       check (strcmp (twist_imap_command (m), "A2 STARTTLS\r\n") == 0
-             && !easy->done, "nothing is sent until the handshake is done");
+             && !transfer->done,
+             "nothing is sent until the handshake is done");
       twist_imap_tls_done (m);
       check (strcmp (twist_imap_command (m), "A3 CAPABILITY\r\n") == 0,
              "CAPABILITY again, encrypted");
       feed_n (imap_recv, m, "* CAPABILITY IMAP4rev1 AUTH=PLAIN\r\nA3 OK\r\n",
               split);
       check (starts_with (twist_imap_command (m), "A4 AUTHENTICATE PLAIN ")
-             && !easy->done, "then the login");
-      twist_easy_cleanup (easy);
+             && !transfer->done, "then the login");
+      twist_transfer_free (transfer);
 
-      easy = tls_easy (url, TWIST_USE_SSL_ALL);
-      m = twist_imap_new (easy, 0);
+      transfer = tls_transfer (url, TWIST_USE_SSL_ALL);
+      m = twist_imap_new (transfer, 0);
       feed_n (imap_recv, m, "* OK ready\r\n", split);
       feed_n (imap_recv, m, "* CAPABILITY IMAP4rev1 AUTH=PLAIN\r\nA1 OK\r\n",
               split);
-      check (easy->done && easy->result == TWIST_ERR_USE_SSL
+      check (transfer->done && transfer->result == TWIST_ERR_USE_SSL
              && !starts_with (twist_imap_command (m), "A2 AUTH"),
              "required and not offered is an error, and nothing is sent");
-      twist_easy_cleanup (easy);
+      twist_transfer_free (transfer);
 
-      easy = tls_easy (url, TWIST_USE_SSL_TRY);
-      m = twist_imap_new (easy, 0);
+      transfer = tls_transfer (url, TWIST_USE_SSL_TRY);
+      m = twist_imap_new (transfer, 0);
       feed_n (imap_recv, m, "* OK ready\r\n", split);
       feed_n (imap_recv, m, "* CAPABILITY IMAP4rev1 AUTH=PLAIN\r\nA1 OK\r\n",
               split);
       check (starts_with (twist_imap_command (m), "A2 AUTHENTICATE PLAIN ")
-             && !easy->done, "wanted and not offered goes on");
-      twist_easy_cleanup (easy);
+             && !transfer->done, "wanted and not offered goes on");
+      twist_transfer_free (transfer);
 
-      easy = tls_easy (url, TWIST_USE_SSL_ALL);
-      m = twist_imap_new (easy, 0);
+      transfer = tls_transfer (url, TWIST_USE_SSL_ALL);
+      m = twist_imap_new (transfer, 0);
       feed_n (imap_recv, m, "* OK ready\r\n", split);
       feed_n (imap_recv, m, "* CAPABILITY IMAP4rev1 STARTTLS AUTH=PLAIN\r\nA1 OK\r\n",
               split);
       feed_n (imap_recv, m, "A2 NO TLS not available\r\n", split);
-      check (easy->done && easy->result == TWIST_ERR_USE_SSL,
+      check (transfer->done && transfer->result == TWIST_ERR_USE_SSL,
              "required and refused is an error");
-      twist_easy_cleanup (easy);
-      easy = tls_easy (url, TWIST_USE_SSL_TRY);
-      m = twist_imap_new (easy, 0);
+      twist_transfer_free (transfer);
+      transfer = tls_transfer (url, TWIST_USE_SSL_TRY);
+      m = twist_imap_new (transfer, 0);
       feed_n (imap_recv, m, "* OK ready\r\n", split);
       feed_n (imap_recv, m, "* CAPABILITY IMAP4rev1 STARTTLS AUTH=PLAIN\r\nA1 OK\r\n",
               split);
       feed_n (imap_recv, m, "A2 NO TLS not available\r\n", split);
       check (starts_with (twist_imap_command (m), "A3 AUTHENTICATE PLAIN ")
-             && !easy->done, "wanted and refused goes on");
-      twist_easy_cleanup (easy);
+             && !transfer->done, "wanted and refused goes on");
+      twist_transfer_free (transfer);
 
-      easy = tls_easy (url, TWIST_USE_SSL_NONE);
-      m = twist_imap_new (easy, 0);
+      transfer = tls_transfer (url, TWIST_USE_SSL_NONE);
+      m = twist_imap_new (transfer, 0);
       feed_n (imap_recv, m, "* OK ready\r\n", split);
       feed_n (imap_recv, m, "* CAPABILITY IMAP4rev1 STARTTLS AUTH=PLAIN\r\nA1 OK\r\n",
               split);
       check (starts_with (twist_imap_command (m), "A2 AUTHENTICATE PLAIN "),
              "STARTTLS is not sent unless it is asked for");
-      twist_easy_cleanup (easy);
+      twist_transfer_free (transfer);
     }
   {
-    twist_easy *easy = tls_easy (url, TWIST_USE_SSL_ALL);
-    struct twist_imap *m = twist_imap_new (easy, 0);
+    twist_transfer *transfer = tls_transfer (url, TWIST_USE_SSL_ALL);
+    struct twist_imap *m = twist_imap_new (transfer, 0);
 
     feed_n (imap_recv, m, "* OK ready\r\n", 200);
     feed_n (imap_recv, m, "* CAPABILITY IMAP4rev1 STARTTLS\r\nA1 OK\r\n", 200);
     feed_n (imap_recv, m, "A2 OK go\r\n* CAPABILITY IMAP4rev1 AUTH=PLAIN\r\n", 200);
-    check (easy->done && easy->result == TWIST_ERR_PROTOCOL,
+    check (transfer->done && transfer->result == TWIST_ERR_PROTOCOL,
            "bytes in the clear behind the reply to STARTTLS end the transfer");
-    twist_easy_cleanup (easy);
+    twist_transfer_free (transfer);
   }
 }
 
@@ -500,86 +503,87 @@ test_pop3_stls (void)
   for (k = 0; k < 2; k++)
     {
       size_t split = splits[k];
-      twist_easy *easy;
+      twist_transfer *transfer;
       struct twist_pop3 *p;
 
-      easy = tls_easy (url, TWIST_USE_SSL_ALL);
-      p = twist_pop3_new (easy, 0);
+      transfer = tls_transfer (url, TWIST_USE_SSL_ALL);
+      p = twist_pop3_new (transfer, 0);
       feed_n (pop3_recv, p, "+OK pop\r\n", split);
       check (strcmp (twist_pop3_command (p), "CAPA\r\n") == 0, "capa");
       feed_n (pop3_recv, p, "+OK\r\nSTLS\r\nUSER\r\n.\r\n", split);
       check (strcmp (twist_pop3_command (p), "STLS\r\n") == 0,
              "STLS, not USER, when offered");
       feed_n (pop3_recv, p, "+OK Begin TLS negotiation\r\n", split);
-      check (strcmp (twist_pop3_command (p), "STLS\r\n") == 0 && !easy->done,
+      check (strcmp (twist_pop3_command (p), "STLS\r\n") == 0
+             && !transfer->done,
              "nothing is sent until the handshake is done");
       twist_pop3_tls_done (p);
       check (strcmp (twist_pop3_command (p), "CAPA\r\n") == 0,
              "CAPA again, encrypted");
       feed_n (pop3_recv, p, "+OK\r\nSTLS\r\nUSER\r\n.\r\n", split);
       check (strcmp (twist_pop3_command (p), "USER alice\r\n") == 0
-             && !easy->done, "then the login");
-      twist_easy_cleanup (easy);
+             && !transfer->done, "then the login");
+      twist_transfer_free (transfer);
 
-      easy = tls_easy (url, TWIST_USE_SSL_ALL);
-      p = twist_pop3_new (easy, 0);
+      transfer = tls_transfer (url, TWIST_USE_SSL_ALL);
+      p = twist_pop3_new (transfer, 0);
       feed_n (pop3_recv, p, "+OK pop\r\n", split);
       feed_n (pop3_recv, p, "+OK\r\nUSER\r\n.\r\n", split);
-      check (easy->done && easy->result == TWIST_ERR_USE_SSL
+      check (transfer->done && transfer->result == TWIST_ERR_USE_SSL
              && !starts_with (twist_pop3_command (p), "USER"),
              "required and not offered is an error, and nothing is sent");
-      twist_easy_cleanup (easy);
+      twist_transfer_free (transfer);
 
-      easy = tls_easy (url, TWIST_USE_SSL_ALL);
-      p = twist_pop3_new (easy, 0);
+      transfer = tls_transfer (url, TWIST_USE_SSL_ALL);
+      p = twist_pop3_new (transfer, 0);
       feed_n (pop3_recv, p, "+OK pop\r\n-ERR no CAPA\r\n", split);
-      check (easy->done && easy->result == TWIST_ERR_USE_SSL,
+      check (transfer->done && transfer->result == TWIST_ERR_USE_SSL,
              "required, and no way to ask what is offered, is an error");
-      twist_easy_cleanup (easy);
+      twist_transfer_free (transfer);
 
-      easy = tls_easy (url, TWIST_USE_SSL_TRY);
-      p = twist_pop3_new (easy, 0);
+      transfer = tls_transfer (url, TWIST_USE_SSL_TRY);
+      p = twist_pop3_new (transfer, 0);
       feed_n (pop3_recv, p, "+OK pop\r\n", split);
       feed_n (pop3_recv, p, "+OK\r\nUSER\r\n.\r\n", split);
       check (strcmp (twist_pop3_command (p), "USER alice\r\n") == 0
-             && !easy->done, "wanted and not offered goes on");
-      twist_easy_cleanup (easy);
+             && !transfer->done, "wanted and not offered goes on");
+      twist_transfer_free (transfer);
 
-      easy = tls_easy (url, TWIST_USE_SSL_ALL);
-      p = twist_pop3_new (easy, 0);
+      transfer = tls_transfer (url, TWIST_USE_SSL_ALL);
+      p = twist_pop3_new (transfer, 0);
       feed_n (pop3_recv, p, "+OK pop\r\n", split);
       feed_n (pop3_recv, p, "+OK\r\nSTLS\r\n.\r\n", split);
       feed_n (pop3_recv, p, "-ERR not now\r\n", split);
-      check (easy->done && easy->result == TWIST_ERR_USE_SSL,
+      check (transfer->done && transfer->result == TWIST_ERR_USE_SSL,
              "required and refused is an error");
-      twist_easy_cleanup (easy);
-      easy = tls_easy (url, TWIST_USE_SSL_TRY);
-      p = twist_pop3_new (easy, 0);
+      twist_transfer_free (transfer);
+      transfer = tls_transfer (url, TWIST_USE_SSL_TRY);
+      p = twist_pop3_new (transfer, 0);
       feed_n (pop3_recv, p, "+OK pop\r\n", split);
       feed_n (pop3_recv, p, "+OK\r\nSTLS\r\n.\r\n", split);
       feed_n (pop3_recv, p, "-ERR not now\r\n", split);
       check (strcmp (twist_pop3_command (p), "USER alice\r\n") == 0
-             && !easy->done, "wanted and refused goes on");
-      twist_easy_cleanup (easy);
+             && !transfer->done, "wanted and refused goes on");
+      twist_transfer_free (transfer);
 
-      easy = tls_easy (url, TWIST_USE_SSL_NONE);
-      p = twist_pop3_new (easy, 0);
+      transfer = tls_transfer (url, TWIST_USE_SSL_NONE);
+      p = twist_pop3_new (transfer, 0);
       feed_n (pop3_recv, p, "+OK pop\r\n", split);
       feed_n (pop3_recv, p, "+OK\r\nSTLS\r\n.\r\n", split);
       check (strcmp (twist_pop3_command (p), "USER alice\r\n") == 0,
              "STLS is not sent unless it is asked for");
-      twist_easy_cleanup (easy);
+      twist_transfer_free (transfer);
     }
   {
-    twist_easy *easy = tls_easy (url, TWIST_USE_SSL_ALL);
-    struct twist_pop3 *p = twist_pop3_new (easy, 0);
+    twist_transfer *transfer = tls_transfer (url, TWIST_USE_SSL_ALL);
+    struct twist_pop3 *p = twist_pop3_new (transfer, 0);
 
     feed_n (pop3_recv, p, "+OK pop\r\n", 200);
     feed_n (pop3_recv, p, "+OK\r\nSTLS\r\n.\r\n", 200);
     feed_n (pop3_recv, p, "+OK go\r\nUSER\r\n.\r\n", 200);
-    check (easy->done && easy->result == TWIST_ERR_PROTOCOL,
+    check (transfer->done && transfer->result == TWIST_ERR_PROTOCOL,
            "bytes in the clear behind the reply to STLS end the transfer");
-    twist_easy_cleanup (easy);
+    twist_transfer_free (transfer);
   }
 }
 
@@ -587,13 +591,15 @@ test_pop3_stls (void)
 static void
 test_use_ssl_option (void)
 {
-  twist_easy *easy = twist_easy_init ();
+  twist_transfer *transfer = twist_transfer_new ();
 
-  check (twist_easy_setopt (easy, TWISTOPT_USE_SSL, 3L) == TWIST_ERR_INVAL
-         && twist_easy_setopt (easy, TWISTOPT_USE_SSL, -1L) == TWIST_ERR_INVAL,
+  check (twist_transfer_setopt (transfer, TWISTOPT_USE_SSL,
+                                3L) == TWIST_ERR_INVAL
+         && twist_transfer_setopt (transfer, TWISTOPT_USE_SSL,
+                                   -1L) == TWIST_ERR_INVAL,
          "a value that is not one of the three is refused");
   check (twist_strerror (TWIST_ERR_USE_SSL)[0] != 0, "a sentence for the error");
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
 }
 
 int

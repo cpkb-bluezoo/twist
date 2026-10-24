@@ -62,30 +62,33 @@ file_hop_work (void *arg)
 static void
 test_file_pool (void)
 {
-  struct twist_easy *easy;
-  struct twist_multi *multi;
+  struct twist_transfer *transfer;
+  struct twist_runtime *runtime;
+  struct check_job job = { 0, 0, 0 };
 
-  easy = twist_easy_init ();
-  check (easy != NULL, "file easy");
-  check (twist_easy_setopt (easy, TWISTOPT_URL, "file://example.com/a")
+  transfer = twist_transfer_new ();
+  check (transfer != NULL, "file transfer");
+  check (twist_transfer_setopt (transfer, TWISTOPT_URL, "file://example.com/a")
          == TWIST_OK, "file url");
-  easy->write_cb = file_body;
-  multi = twist_multi_init ();
-  check (multi != NULL && multi->storage != NULL, "file pool");
-  check (twist_multi_add_handle (multi, easy) == TWIST_ERR_URL, "file remote");
-  check (easy->done && easy->result == TWIST_ERR_URL && file_body_calls == 0,
-         "file remote done");
-  twist_multi_cleanup (multi);
-  twist_easy_cleanup (easy);
+  transfer->write_cb = file_body;
+  runtime = twist_runtime_new ();
+  check (runtime != NULL && runtime->storage != NULL, "file pool");
+  check (twist_runtime_start (runtime, transfer, check_job_done,
+                              &job) == TWIST_OK,
+         "file remote");
+  check (check_pump (runtime, &job, 2000) && job.result == TWIST_ERR_URL
+         && job.calls == 1 && file_body_calls == 0, "file remote done");
+  twist_runtime_free (runtime);
+  twist_transfer_free (transfer);
 
   file_hopped = 0;
-  multi = twist_multi_init ();
-  check (multi != NULL, "file hop multi");
-  check (twist_storage_submit (multi->storage, file_hop_work, multi->loop,
+  runtime = twist_runtime_new ();
+  check (runtime != NULL, "file hop runtime");
+  check (twist_storage_submit (runtime->storage, file_hop_work, runtime->loop,
                                NULL, NULL, NULL) == TWIST_OK, "file hop submit");
-  check (twist_loop_run_once (multi->loop) == TWIST_OK && file_hopped == 1,
+  check (twist_loop_run_once (runtime->loop) == TWIST_OK && file_hopped == 1,
          "file hop");
-  twist_multi_cleanup (multi);
+  twist_runtime_free (runtime);
 }
 
 static void
@@ -174,32 +177,32 @@ big_body (char *ptr, size_t size, size_t nmemb, void *userdata)
   return n;
 }
 
-static twist_easy *
-big_easy (void)
+static twist_transfer *
+big_transfer (void)
 {
-  twist_easy *easy = twist_easy_init ();
+  twist_transfer *transfer = twist_transfer_new ();
   char url[96];
 
   snprintf (url, sizeof url, "file://%s", big_path);
-  twist_easy_setopt (easy, TWISTOPT_URL, url);
-  twist_easy_setopt (easy, TWISTOPT_WRITEFUNCTION, big_body);
+  twist_transfer_setopt (transfer, TWISTOPT_URL, url);
+  twist_transfer_setopt (transfer, TWISTOPT_WRITEFUNCTION, big_body);
   big_seen = 0;
   big_wrong = 0;
   big_calls = 0;
-  return easy;
+  return transfer;
 }
 
 /* A file is delivered whole and in order through the pipeline of chunks.  */
 static void
 test_file_large (void)
 {
-  twist_easy *easy = big_easy ();
+  twist_transfer *transfer = big_transfer ();
 
   alarm (30);
-  check (twist_easy_perform (easy) == TWIST_OK, "a large file");
+  check (check_perform (transfer) == TWIST_OK, "a large file");
   alarm (0);
   check (big_seen == BIG_FILE && !big_wrong, "the whole file, in order");
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
 }
 
 /* The application refuses the data part way: the transfer ends with an
@@ -207,15 +210,15 @@ test_file_large (void)
 static void
 test_file_refused (void)
 {
-  twist_easy *easy = big_easy ();
+  twist_transfer *transfer = big_transfer ();
 
   big_abort_after = 3;
   alarm (30);
-  check (twist_easy_perform (easy) == TWIST_ERR_ABORTED, "data refused");
+  check (check_perform (transfer) == TWIST_ERR_ABORTED, "data refused");
   alarm (0);
   check (big_calls == 4, "no data after it was refused");
   big_abort_after = 0;
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
 }
 
 /* A transfer that is let go of while the worker is part way through the
@@ -228,25 +231,28 @@ test_file_refused (void)
 static void
 file_abandon (int remove_first, long nap_ns, int pumps)
 {
-  twist_multi *multi = twist_multi_init ();
-  twist_easy *easy = big_easy ();
+  twist_runtime *runtime = twist_runtime_new ();
+  twist_transfer *transfer = big_transfer ();
   struct timespec nap = { 0, nap_ns };
-  int calls_at_release, running = 0, i;
+  int calls_at_release, i;
 
   alarm (30);
-  check (twist_multi_add_handle (multi, easy) == TWIST_OK, "add the file");
+  check (twist_runtime_start (runtime, transfer, NULL, NULL) == TWIST_OK,
+         "start the file");
   if (nap_ns > 0)
     nanosleep (&nap, NULL);
   for (i = 0; i < pumps; i++)
-    twist_multi_perform (multi, &running);
+    twist_runtime_run_once (runtime, 0);
   if (remove_first)
-    check (twist_multi_remove_handle (multi, easy) == TWIST_OK, "remove it");
+    check (twist_runtime_cancel (runtime, transfer) == TWIST_OK
+           || transfer->runtime == NULL,
+           "cancel it");
   calls_at_release = big_calls;
-  twist_multi_cleanup (multi);
+  twist_runtime_free (runtime);
   alarm (0);
   check (big_calls == calls_at_release,
          "nothing is delivered to the application after it is released");
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
 }
 
 static void
@@ -274,26 +280,27 @@ test_file_abandoned (void)
 static void
 test_file_without_threads (void)
 {
-  struct twist_multi *multi = twist_multi_init ();
-  struct twist_easy *easy = twist_easy_init ();
+  struct twist_runtime *runtime = twist_runtime_new ();
+  struct twist_transfer *transfer = twist_transfer_new ();
   char url[128];
+  struct check_job job = { 0, 0, 0 };
   int rc;
 
-  check (multi != NULL && easy != NULL, "a multi and a handle");
-  twist_storage_free (multi->storage);
-  multi->storage = twist_storage_new (0, 32);
-  check (multi->storage != NULL, "a pool with no threads");
+  check (runtime != NULL && transfer != NULL, "a runtime and a handle");
+  twist_storage_free (runtime->storage);
+  runtime->storage = twist_storage_new (0, 32);
+  check (runtime->storage != NULL, "a pool with no threads");
   snprintf (url, sizeof url, "file://%s", big_path);
-  twist_easy_setopt (easy, TWISTOPT_URL, url);
-  easy->write_cb = file_body;
+  twist_transfer_setopt (transfer, TWISTOPT_URL, url);
+  transfer->write_cb = file_body;
   alarm (20);
-  rc = twist_multi_add_handle (multi, easy);
+  rc = twist_runtime_start (runtime, transfer, check_job_done, &job);
+  check (rc == TWIST_OK && check_pump (runtime, &job, 2000), "started and ended");
   alarm (0);
-  check (rc == TWIST_ERR_UNSUPPORTED,
+  check (job.result == TWIST_ERR_UNSUPPORTED,
          "a file transfer is refused where there is no thread to read it");
-  twist_multi_remove_handle (multi, easy);
-  twist_multi_cleanup (multi);
-  twist_easy_cleanup (easy);
+  twist_runtime_free (runtime);
+  twist_transfer_free (transfer);
 }
 
 int

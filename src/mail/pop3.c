@@ -48,7 +48,7 @@ enum
 
 struct twist_pop3
 {
-  struct twist_easy *easy;
+  struct twist_transfer *transfer;
   struct twist_mail_link link;
   struct twist_mail_sasl sasl;
   struct twist_dotin dot;
@@ -82,7 +82,7 @@ pop3_complete (struct twist_pop3 *p, int err)
   if (p == NULL || p->finished)
     return;
   p->finished = 1;
-  twist_easy_finish (p->easy, err);
+  twist_transfer_finish (p->transfer, err);
 }
 
 static int
@@ -127,9 +127,9 @@ message_number (const struct twist_pop3 *p)
   char *end = NULL;
   long v;
 
-  if (p->easy->url == NULL || p->easy->url->path == NULL)
+  if (p->transfer->url == NULL || p->transfer->url->path == NULL)
     return 0;
-  path = p->easy->url->path;
+  path = p->transfer->url->path;
   if (path[0] == '/')
     path++;
   if (path[0] == 0)
@@ -144,12 +144,12 @@ static int
 body_sink (void *user, const uint8_t *data, size_t len)
 {
   struct twist_pop3 *p = user;
-  struct twist_easy *easy = p->easy;
+  struct twist_transfer *transfer = p->transfer;
   size_t n;
 
-  if (easy->write_cb == NULL || len == 0)
+  if (transfer->write_cb == NULL || len == 0)
     {
-      twist_easy_downloaded (easy, len);
+      twist_transfer_downloaded (transfer, len);
       return 0;
     }
   {
@@ -163,13 +163,13 @@ body_sink (void *user, const uint8_t *data, size_t len)
         if (chunk > sizeof buf)
           chunk = sizeof buf;
         memcpy (buf, data + off, chunk);
-        n = easy->write_cb (buf, 1, chunk, easy->write_data);
+        n = transfer->write_cb (buf, 1, chunk, transfer->write_data);
         if (n < chunk)
           return 1;
         off += chunk;
       }
   }
-  twist_easy_downloaded (easy, len);
+  twist_transfer_downloaded (transfer, len);
   return 0;
 }
 
@@ -192,8 +192,8 @@ start_transfer (struct twist_pop3 *p)
 static int
 start_auth (struct twist_pop3 *p)
 {
-  const char *user = twist_mail_user (p->easy);
-  const char *bearer = p->easy->bearer;
+  const char *user = twist_mail_user (p->transfer);
+  const char *bearer = p->transfer->bearer;
   char *b64 = NULL;
   int initial = 0;
   int rc;
@@ -201,14 +201,14 @@ start_auth (struct twist_pop3 *p)
   if ((user == NULL || user[0] == 0)
       && (bearer == NULL || bearer[0] == 0))
     return start_transfer (p);
-  if (bad_token (user) || bad_token (twist_mail_pass (p->easy)))
+  if (bad_token (user) || bad_token (twist_mail_pass (p->transfer)))
     return TWIST_ERR_PROTOCOL;
   if (p->auth_adv[0] == 0 && bearer == NULL)
     {
       p->state = P_USER;
       return pop3_send (p, "USER %s\r\n", user);
     }
-  rc = twist_mail_sasl_start (&p->sasl, p->easy,
+  rc = twist_mail_sasl_start (&p->sasl, p->transfer,
                               p->auth_adv[0] != 0 ? p->auth_adv : NULL,
                               &b64, &initial);
   if (rc != TWIST_OK)
@@ -238,9 +238,9 @@ after_capa (struct twist_pop3 *p)
           return pop3_send (p, "STLS\r\n");
         }
       if (p->use_ssl == TWIST_USE_SSL_ALL)
-        return twist_easy_use_ssl_failed (p->easy,
-                                          _("the server does not offer "
-                                            "STLS"));
+        return twist_transfer_use_ssl_failed (p->transfer,
+                                              _("the server does not offer "
+                                                "STLS"));
     }
   return start_auth (p);
 }
@@ -253,10 +253,11 @@ begin_tls (struct twist_pop3 *p)
   p->state = P_TLSWAIT;
   if (p->ep == NULL)
     return TWIST_OK;
-  return twist_connection_start_tls (p->ep->conn, p->easy->url->host,
-                                     p->easy->verifypeer, NULL, 0,
-                                     p->easy->cainfo, p->easy->capath,
-                                     p->easy->sslcert, p->easy->sslkey);
+  return twist_connection_start_tls (p->ep->conn, p->transfer->url->host,
+                                     p->transfer->verifypeer, NULL, 0,
+                                     p->transfer->cainfo, p->transfer->capath,
+                                     p->transfer->sslcert,
+                                     p->transfer->sslkey);
 }
 
 static void
@@ -295,9 +296,8 @@ on_status (struct twist_pop3 *p, const uint8_t *line, size_t n)
       /* Refused: required, that is the end; wanted, go on as it is.  */
       if (p->use_ssl == TWIST_USE_SSL_ALL)
         {
-          pop3_complete (p, twist_easy_use_ssl_failed (p->easy,
-                                                       _("the server refused "
-                                                         "STLS")));
+          pop3_complete (p, twist_transfer_use_ssl_failed
+                         (p->transfer, _("the server refused STLS")));
           return;
         }
       rc = start_auth (p);
@@ -367,7 +367,7 @@ on_status (struct twist_pop3 *p, const uint8_t *line, size_t n)
           return;
         }
       p->state = P_PASS;
-      rc = pop3_send (p, "PASS %s\r\n", twist_mail_pass (p->easy));
+      rc = pop3_send (p, "PASS %s\r\n", twist_mail_pass (p->transfer));
       break;
     case P_PASS:
       if (!ok_line (line, n))
@@ -479,10 +479,10 @@ pop3_connected (struct twist_endpoint *ep)
   p->ep = ep;
   if (!p->implicit_tls)
     return;
-  rc = twist_connection_start_tls (ep->conn, p->easy->url->host,
-                                   p->easy->verifypeer, NULL, 0,
-                                   p->easy->cainfo, p->easy->capath, p->easy->sslcert,
-                                   p->easy->sslkey);
+  rc = twist_connection_start_tls (ep->conn, p->transfer->url->host,
+                                   p->transfer->verifypeer, NULL, 0,
+                                   p->transfer->cainfo, p->transfer->capath, p->transfer->sslcert,
+                                   p->transfer->sslkey);
   if (rc != TWIST_OK)
     pop3_complete (p, rc);
 }
@@ -550,41 +550,41 @@ twist_pop3_free (void *pop)
 }
 
 struct twist_pop3 *
-twist_pop3_new (struct twist_easy *easy, int live)
+twist_pop3_new (struct twist_transfer *transfer, int live)
 {
   struct twist_pop3 *p;
 
   (void) live;
-  if (easy == NULL || easy->url == NULL)
+  if (transfer == NULL || transfer->url == NULL)
     return NULL;
   p = calloc (1, sizeof *p);
   if (p == NULL)
     return NULL;
-  p->easy = easy;
-  p->implicit_tls = easy->url->scheme != NULL
-                    && strcmp (easy->url->scheme, "pop3s") == 0;
-  p->use_ssl = p->implicit_tls ? TWIST_USE_SSL_NONE : easy->use_ssl;
+  p->transfer = transfer;
+  p->implicit_tls = transfer->url->scheme != NULL
+                    && strcmp (transfer->url->scheme, "pop3s") == 0;
+  p->use_ssl = p->implicit_tls ? TWIST_USE_SSL_NONE : transfer->use_ssl;
   twist_mail_sasl_init (&p->sasl);
-  easy->xfer = p;
-  easy->xfer_free = twist_pop3_free;
+  transfer->state = p;
+  transfer->state_free = twist_pop3_free;
   return p;
 }
 
 int
-twist_pop3_attach (struct twist_easy *easy)
+twist_pop3_attach (struct twist_transfer *transfer)
 {
   struct twist_pop3 *p;
   int rc;
 
-  if (easy == NULL || easy->url == NULL || easy->loop == NULL)
+  if (transfer == NULL || transfer->url == NULL || transfer->loop == NULL)
     return TWIST_ERR_INVAL;
-  p = twist_pop3_new (easy, 1);
+  p = twist_pop3_new (transfer, 1);
   if (p == NULL)
     return TWIST_ERR_NOMEM;
-  rc = twist_mail_link_open (&p->link, easy, &pop3_handler, p, pop3_fail);
+  rc = twist_mail_link_open (&p->link, transfer, &pop3_handler, p, pop3_fail);
   if (rc != TWIST_OK)
     pop3_complete (p, rc);
-  return easy->done ? easy->result : TWIST_OK;
+  return transfer->done ? transfer->result : TWIST_OK;
 }
 
 /* The handshake that followed STLS is done.  What the server said before is

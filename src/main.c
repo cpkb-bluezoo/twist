@@ -90,10 +90,10 @@ struct cli_op
   int resume_set;
   int resume_auto;
   long long resume_off;
-  twist_easy *easy;
+  twist_transfer *transfer;
   /* The loop the URLs of the operation share, so that a connection one
      leaves is there for the next.  */
-  struct twist_multi *multi;
+  struct twist_runtime *runtime;
   struct cli_op *next;
 };
 
@@ -898,7 +898,7 @@ read_password (const char *user)
 }
 
 static void
-emit_writeout (const char *fmt, twist_easy *easy, int code)
+emit_writeout (const char *fmt, twist_transfer *transfer, int code)
 {
   const char *p;
 
@@ -942,10 +942,11 @@ emit_writeout (const char *fmt, twist_easy *easy, int code)
               continue;
             }
           n = (size_t) (end - (p + 2));
-          twist_easy_getinfo (easy, TWISTINFO_RESPONSE_CODE, &http);
-          twist_easy_getinfo (easy, TWISTINFO_SIZE_DOWNLOAD, &size);
-          twist_easy_getinfo (easy, TWISTINFO_EFFECTIVE_URL, &effective);
-          twist_easy_getinfo (easy, TWISTINFO_CONTENT_TYPE, &ctype);
+          twist_transfer_getinfo (transfer, TWISTINFO_RESPONSE_CODE, &http);
+          twist_transfer_getinfo (transfer, TWISTINFO_SIZE_DOWNLOAD, &size);
+          twist_transfer_getinfo (transfer, TWISTINFO_EFFECTIVE_URL,
+                                  &effective);
+          twist_transfer_getinfo (transfer, TWISTINFO_CONTENT_TYPE, &ctype);
           if ((n == 9 && memcmp (p + 2, "http_code", 9) == 0)
               || (n == 13 && memcmp (p + 2, "response_code", 13) == 0))
             printf ("%ld", http);
@@ -959,11 +960,11 @@ emit_writeout (const char *fmt, twist_easy *easy, int code)
             printf ("%d", code);
           else if (n == 8 && memcmp (p + 2, "errormsg", 8) == 0)
             {
-              const char *detail = twist_easy_error (easy);
+              const char *detail = twist_transfer_error (transfer);
 
               if (code != 0)
-                fputs (detail != NULL ? detail : twist_strerror (easy->result),
-                       stdout);
+                fputs (detail != NULL ? detail
+                       : twist_strerror (transfer->result), stdout);
             }
           p = end;
         }
@@ -1135,8 +1136,61 @@ output_expected (const char *url, const char *upload)
          || is_telnet_url (url);
 }
 
+/* The one place the tool waits.  A transfer is started on the operation's
+   runtime and runs on its loop, and the latch is held while any is in
+   flight: the transfer's callback lowers the count, and the loop is run
+   until it is zero.  Nothing below this blocks.  The tool starts one
+   transfer at a time, so the count is 0 or 1; it is a count so that the
+   place that waits is already the place that would wait for several.  The
+   result is the transfer's own.  */
+struct latch
+{
+  int inflight;
+  int result;
+};
+
+static void
+latch_done (twist_transfer *transfer, int result, void *user)
+{
+  struct latch *latch = user;
+
+  (void) transfer;
+  latch->result = result;
+  latch->inflight--;
+}
+
 static int
-run_one (twist_easy *easy, struct cli_op *op, const char *url,
+latch_run (struct twist_runtime *runtime, twist_transfer *transfer)
+{
+  struct latch latch;
+  int rc;
+
+  latch.inflight = 1;
+  latch.result = TWIST_OK;
+  /* Let the loop see what happened to the connections kept since the last
+     transfer, so that one the server has closed is not taken.  */
+  twist_runtime_run_once (runtime, 0);
+  rc = twist_runtime_start (runtime, transfer, latch_done, &latch);
+  if (rc != TWIST_OK)
+    return rc;
+  while (latch.inflight > 0)
+    {
+      rc = twist_runtime_run_once (runtime, -1);
+      if (rc != TWIST_OK)
+        {
+          /* The loop itself has failed.  End the transfer, and let the loop
+             report it if it can.  */
+          twist_runtime_cancel (runtime, transfer);
+          twist_runtime_run_once (runtime, 0);
+          if (latch.inflight > 0)
+            return rc;
+        }
+    }
+  return latch.result;
+}
+
+static int
+run_one (twist_transfer *transfer, struct cli_op *op, const char *url,
          const char *output, int remote, const char *upload)
 {
   char *out_name = NULL;
@@ -1167,7 +1221,7 @@ run_one (twist_easy *easy, struct cli_op *op, const char *url,
   memset (&up, 0, sizeof up);
   memset (&hdrs, 0, sizeof hdrs);
   body_short = 0;
-  easy->proto_status = 0;
+  transfer->proto_status = 0;
   if (remote)
     {
       out_name = remote_file (url);
@@ -1360,11 +1414,11 @@ run_one (twist_easy *easy, struct cli_op *op, const char *url,
       if (named_url != NULL)
         use_url = named_url;
     }
-  twist_easy_setopt (easy, TWISTOPT_URL, use_url);
-  twist_easy_setopt (easy, TWISTOPT_RESUME_FROM, resume);
-  twist_easy_setopt (easy, TWISTOPT_CUSTOMREQUEST, method);
-  twist_easy_setopt (easy, TWISTOPT_NOBODY, op->head ? 1L : 0L);
-  twist_easy_setopt (easy, TWISTOPT_POSTFIELDS, payload);
+  twist_transfer_setopt (transfer, TWISTOPT_URL, use_url);
+  twist_transfer_setopt (transfer, TWISTOPT_RESUME_FROM, resume);
+  twist_transfer_setopt (transfer, TWISTOPT_CUSTOMREQUEST, method);
+  twist_transfer_setopt (transfer, TWISTOPT_NOBODY, op->head ? 1L : 0L);
+  twist_transfer_setopt (transfer, TWISTOPT_POSTFIELDS, payload);
   {
     /* What an upload from a file comes to, for the progress.  */
     struct stat ust;
@@ -1372,62 +1426,72 @@ run_one (twist_easy *easy, struct cli_op *op, const char *url,
 
     if (streaming && fstat (ustream.fd, &ust) == 0 && S_ISREG (ust.st_mode))
       usize = (long long) ust.st_size;
-    twist_easy_setopt (easy, TWISTOPT_INFILESIZE, usize);
+    twist_transfer_setopt (transfer, TWISTOPT_INFILESIZE, usize);
   }
   /* The meter is drawn unless -s or --no-progress-meter says not, or the
      body is going to the terminal.  -# draws a bar instead.  */
   hide_progress = silent || no_progress
                   || (body == stdout && output_expected (use_url, upload)
                       && isatty (fileno (stdout)));
-  twist_easy_setopt (easy, TWISTOPT_STDERR, err_fp);
-  twist_easy_setopt (easy, TWISTOPT_NOPROGRESS, hide_progress ? 1L : 0L);
+  twist_transfer_setopt (transfer, TWISTOPT_STDERR, err_fp);
+  twist_transfer_setopt (transfer, TWISTOPT_NOPROGRESS,
+                         hide_progress ? 1L : 0L);
   if (progress_bar && !hide_progress)
     {
       twist_bar_init (&bar, err_fp, op->resume_set ? resume : 0);
       bar_used = 1;
-      twist_easy_setopt (easy, TWISTOPT_XFERINFOFUNCTION, twist_bar_callback);
-      twist_easy_setopt (easy, TWISTOPT_XFERINFODATA, &bar);
+      twist_transfer_setopt (transfer, TWISTOPT_XFERINFOFUNCTION,
+                             twist_bar_callback);
+      twist_transfer_setopt (transfer, TWISTOPT_XFERINFODATA, &bar);
     }
   else
     {
-      twist_easy_setopt (easy, TWISTOPT_XFERINFOFUNCTION, NULL);
-      twist_easy_setopt (easy, TWISTOPT_XFERINFODATA, NULL);
+      twist_transfer_setopt (transfer, TWISTOPT_XFERINFOFUNCTION, NULL);
+      twist_transfer_setopt (transfer, TWISTOPT_XFERINFODATA, NULL);
     }
-  twist_easy_setopt (easy, TWISTOPT_READFUNCTION,
-                     streaming ? read_upload : NULL);
-  twist_easy_setopt (easy, TWISTOPT_READDATA, streaming ? &ustream : NULL);
+  twist_transfer_setopt (transfer, TWISTOPT_READFUNCTION,
+                         streaming ? read_upload : NULL);
+  twist_transfer_setopt (transfer, TWISTOPT_READDATA,
+                         streaming ? &ustream : NULL);
   if (payload != NULL)
-    twist_easy_setopt (easy, TWISTOPT_POSTFIELDSIZE, (long) payload_n);
-  twist_easy_setopt (easy, TWISTOPT_HTTPHEADER,
-                     op->headers != NULL ? op->headers : NULL);
-  twist_easy_setopt (easy, TWISTOPT_TELNETOPTIONS, op->telnet);
-  twist_easy_setopt (easy, TWISTOPT_MAIL_FROM, op->mail_from);
-  twist_easy_setopt (easy, TWISTOPT_MAIL_RCPT, op->rcpts);
-  twist_easy_setopt (easy, TWISTOPT_MAX_RECV_SPEED_LARGE, op->limit_rate);
-  twist_easy_setopt (easy, TWISTOPT_MAX_SEND_SPEED_LARGE, op->limit_rate);
+    twist_transfer_setopt (transfer, TWISTOPT_POSTFIELDSIZE, (long) payload_n);
+  twist_transfer_setopt (transfer, TWISTOPT_HTTPHEADER,
+                         op->headers != NULL ? op->headers : NULL);
+  twist_transfer_setopt (transfer, TWISTOPT_TELNETOPTIONS, op->telnet);
+  /* A telnet session sends what is read from standard input, unless it is
+     given a file to send.  The library takes no descriptor for granted.  */
+  twist_transfer_setopt (transfer, TWISTOPT_TELNET_INPUT_FD,
+                         is_telnet_url (use_url) && !streaming
+                         ? (long) STDIN_FILENO : -1L);
+  twist_transfer_setopt (transfer, TWISTOPT_MAIL_FROM, op->mail_from);
+  twist_transfer_setopt (transfer, TWISTOPT_MAIL_RCPT, op->rcpts);
+  twist_transfer_setopt (transfer, TWISTOPT_MAX_RECV_SPEED_LARGE,
+                         op->limit_rate);
+  twist_transfer_setopt (transfer, TWISTOPT_MAX_SEND_SPEED_LARGE,
+                         op->limit_rate);
   /* Only an sftp URL takes them; to any other they mean nothing, so a command line of several kinds of URL works.  */
-  twist_easy_setopt (easy, TWISTOPT_QUOTE,
-                     strncmp (use_url, "sftp://", 7) == 0 ? op->quote : NULL);
-  twist_easy_setopt (easy, TWISTOPT_POSTQUOTE,
-                     strncmp (use_url, "sftp://", 7) == 0 ? op->postquote
-                     : NULL);
-  twist_easy_setopt (easy, TWISTOPT_CREATE_MISSING_DIRS,
-                     op->ftp_create_dirs && strncmp (use_url, "sftp://", 7) == 0
-                     ? 1L : 0L);
-  twist_easy_setopt (easy, TWISTOPT_WRITEFUNCTION, write_body);
-  twist_easy_setopt (easy, TWISTOPT_WRITEDATA, body);
+  twist_transfer_setopt (transfer, TWISTOPT_QUOTE,
+                         strncmp (use_url, "sftp://",
+                                  7) == 0 ? op->quote : NULL);
+  twist_transfer_setopt (transfer, TWISTOPT_POSTQUOTE,
+                         strncmp (use_url, "sftp://", 7) == 0 ? op->postquote
+                         : NULL);
+  twist_transfer_setopt (transfer, TWISTOPT_CREATE_MISSING_DIRS,
+                         op->ftp_create_dirs && strncmp (use_url, "sftp://", 7) == 0
+                         ? 1L : 0L);
+  twist_transfer_setopt (transfer, TWISTOPT_WRITEFUNCTION, write_body);
+  twist_transfer_setopt (transfer, TWISTOPT_WRITEDATA, body);
   if (op->include || dump != NULL)
     {
-      twist_easy_setopt (easy, TWISTOPT_HEADERFUNCTION, write_header);
-      twist_easy_setopt (easy, TWISTOPT_HEADERDATA, &hdrs);
+      twist_transfer_setopt (transfer, TWISTOPT_HEADERFUNCTION, write_header);
+      twist_transfer_setopt (transfer, TWISTOPT_HEADERDATA, &hdrs);
     }
   else
     {
-      twist_easy_setopt (easy, TWISTOPT_HEADERFUNCTION, NULL);
-      twist_easy_setopt (easy, TWISTOPT_HEADERDATA, NULL);
+      twist_transfer_setopt (transfer, TWISTOPT_HEADERFUNCTION, NULL);
+      twist_transfer_setopt (transfer, TWISTOPT_HEADERDATA, NULL);
     }
-  rc = op->multi != NULL ? twist_easy_perform_in (op->multi, easy)
-                         : twist_easy_perform (easy);
+  rc = latch_run (op->runtime, transfer);
   finish_headers (&hdrs);
   if (body != stdout)
     {
@@ -1441,15 +1505,15 @@ run_one (twist_easy *easy, struct cli_op *op, const char *url,
   if (streaming && ustream.fd != STDIN_FILENO)
     close (ustream.fd);
   code = cli_status (rc, use_url);
-  if (easy->proto_status != 0)
-    code = easy->proto_status;
+  if (transfer->proto_status != 0)
+    code = transfer->proto_status;
   if (ustream.failed)
     {
       char msg[256];
 
       snprintf (msg, sizeof msg, _("could not read %s"), upload);
       diag_code (26, msg);
-      emit_writeout (op->writeout, easy, 26);
+      emit_writeout (op->writeout, transfer, 26);
       if (bar_used)
         twist_bar_finish (&bar);
       free (up.p);
@@ -1462,12 +1526,12 @@ run_one (twist_easy *easy, struct cli_op *op, const char *url,
     code = 23;
   if (code != 0)
     {
-      detail = twist_easy_error (easy);
+      detail = twist_transfer_error (transfer);
       if (write_failed && detail == NULL)
         detail = _("failure writing output to destination");
       diag_code (code, detail != NULL ? detail : twist_strerror (rc));
     }
-  emit_writeout (op->writeout, easy, code);
+  emit_writeout (op->writeout, transfer, code);
   /* After the message: the bar's line ends last.  */
   if (bar_used)
     twist_bar_finish (&bar);
@@ -1516,7 +1580,7 @@ run_glob (struct cli_op *op, const char *pattern, const char *output,
               break;
             }
         }
-      status = run_one (op->easy, op, url, name != NULL ? name : output,
+      status = run_one (op->transfer, op, url, name != NULL ? name : output,
                         remote, upload);
       free (name);
       free (url);
@@ -1549,7 +1613,12 @@ run_op (struct cli_op *op)
   out = op->outputs;
   up = op->uploads;
   /* If there is none, each URL has a loop of its own.  */
-  op->multi = twist_multi_init ();
+  op->runtime = twist_runtime_new ();
+  if (op->runtime == NULL)
+    {
+      diag_code (27, twist_strerror (TWIST_ERR_NOMEM));
+      return 27;
+    }
   for (url = op->urls; url != NULL; url = url->next)
     {
       const char *output = NULL;
@@ -1568,14 +1637,14 @@ run_op (struct cli_op *op)
           up = up->next;
         }
       if (op->globoff)
-        status = run_one (op->easy, op, url->text, output, remote, upload);
+        status = run_one (op->transfer, op, url->text, output, remote, upload);
       else
         status = run_glob (op, url->text, output, remote, upload);
       if (status != 0 && fail_early)
         break;
     }
-  twist_multi_cleanup (op->multi);
-  op->multi = NULL;
+  twist_runtime_free (op->runtime);
+  op->runtime = NULL;
   return status;
 }
 
@@ -1609,7 +1678,7 @@ free_op (struct cli_op *op)
   twist_slist_free_all (op->quote);
   twist_slist_free_all (op->postquote);
   twist_slist_free_all (op->telnet);
-  twist_easy_cleanup (op->easy);
+  twist_transfer_free (op->transfer);
   free (op);
 }
 
@@ -1620,8 +1689,8 @@ new_op (void)
 
   if (op == NULL)
     return NULL;
-  op->easy = twist_easy_init ();
-  if (op->easy == NULL)
+  op->transfer = twist_transfer_new ();
+  if (op->transfer == NULL)
     {
       free (op);
       return NULL;
@@ -1942,7 +2011,7 @@ main (int argc, char **argv)
             status = 27;
           break;
         case 'L':
-          twist_easy_setopt (op->easy, TWISTOPT_FOLLOWLOCATION, 1L);
+          twist_transfer_setopt (op->transfer, TWISTOPT_FOLLOWLOCATION, 1L);
           break;
         case 1:
           {
@@ -1956,20 +2025,21 @@ main (int argc, char **argv)
                 status = 2;
               }
             else
-              twist_easy_setopt (op->easy, TWISTOPT_MAXREDIRS, n);
+              twist_transfer_setopt (op->transfer, TWISTOPT_MAXREDIRS, n);
           }
           break;
         case 'f':
-          twist_easy_setopt (op->easy, TWISTOPT_FAILONERROR, 1L);
+          twist_transfer_setopt (op->transfer, TWISTOPT_FAILONERROR, 1L);
           break;
         case 27:
           fail_early = 1;
           break;
         case 30:
-          twist_easy_setopt (op->easy, TWISTOPT_ACCEPT_ENCODING, "");
+          twist_transfer_setopt (op->transfer, TWISTOPT_ACCEPT_ENCODING, "");
           break;
         case 31:
-          if (twist_easy_setopt (op->easy, TWISTOPT_CONTENT_ENCODING, optarg)
+          if (twist_transfer_setopt (op->transfer, TWISTOPT_CONTENT_ENCODING,
+                                     optarg)
               != TWIST_OK)
             {
               diag (_("unsupported content encoding"));
@@ -1978,36 +2048,36 @@ main (int argc, char **argv)
             }
           break;
         case 'k':
-          twist_easy_setopt (op->easy, TWISTOPT_SSL_VERIFYPEER, 0L);
+          twist_transfer_setopt (op->transfer, TWISTOPT_SSL_VERIFYPEER, 0L);
           break;
         case 'E':
-          twist_easy_setopt (op->easy, TWISTOPT_SSLCERT, optarg);
+          twist_transfer_setopt (op->transfer, TWISTOPT_SSLCERT, optarg);
           break;
         case 15:
-          twist_easy_setopt (op->easy, TWISTOPT_SSLKEY, optarg);
+          twist_transfer_setopt (op->transfer, TWISTOPT_SSLKEY, optarg);
           break;
         case 16:
-          twist_easy_setopt (op->easy, TWISTOPT_CAINFO, optarg);
+          twist_transfer_setopt (op->transfer, TWISTOPT_CAINFO, optarg);
           break;
         case 44:
-          twist_easy_setopt (op->easy, TWISTOPT_CAPATH, optarg);
+          twist_transfer_setopt (op->transfer, TWISTOPT_CAPATH, optarg);
           break;
         case 45:
-          twist_easy_setopt (op->easy, TWISTOPT_NOPROXY, optarg);
+          twist_transfer_setopt (op->transfer, TWISTOPT_NOPROXY, optarg);
           break;
         case 51:
-          twist_easy_setopt (op->easy, TWISTOPT_USE_SSL,
-                             (long) TWIST_USE_SSL_TRY);
+          twist_transfer_setopt (op->transfer, TWISTOPT_USE_SSL,
+                                 (long) TWIST_USE_SSL_TRY);
           break;
         case 52:
-          twist_easy_setopt (op->easy, TWISTOPT_USE_SSL,
-                             (long) TWIST_USE_SSL_ALL);
+          twist_transfer_setopt (op->transfer, TWISTOPT_USE_SSL,
+                                 (long) TWIST_USE_SSL_ALL);
           break;
         case 49:
         case 50:
-          if (twist_easy_setopt (op->easy, c == 49
-                                 ? TWISTOPT_UNIX_SOCKET
-                                 : TWISTOPT_ABSTRACT_UNIX_SOCKET, optarg)
+          if (twist_transfer_setopt (op->transfer, c == 49
+                                     ? TWISTOPT_UNIX_SOCKET
+                                     : TWISTOPT_ABSTRACT_UNIX_SOCKET, optarg)
               != TWIST_OK)
             {
               diag (_("the Unix socket name is too long"));
@@ -2016,10 +2086,11 @@ main (int argc, char **argv)
             }
           break;
         case 46:
-          twist_easy_setopt (op->easy, TWISTOPT_PROXY_CAINFO, optarg);
+          twist_transfer_setopt (op->transfer, TWISTOPT_PROXY_CAINFO, optarg);
           break;
         case 47:
-          twist_easy_setopt (op->easy, TWISTOPT_PROXY_SSL_VERIFYPEER, 0L);
+          twist_transfer_setopt (op->transfer, TWISTOPT_PROXY_SSL_VERIFYPEER,
+                                 0L);
           break;
         case 48:
           {
@@ -2037,16 +2108,17 @@ main (int argc, char **argv)
                 status = 2;
               }
             else
-              twist_easy_setopt (op->easy, TWISTOPT_PROXY_TEMPLATE_UDP, optarg);
+              twist_transfer_setopt (op->transfer, TWISTOPT_PROXY_TEMPLATE_UDP, optarg);
           }
           break;
         case 32:
-          twist_easy_setopt (op->easy, TWISTOPT_KEYPASSWD, optarg);
+          twist_transfer_setopt (op->transfer, TWISTOPT_KEYPASSWD, optarg);
           scrub_arg (optarg);
           break;
         case 33:
-          twist_easy_setopt (op->easy, TWISTOPT_SSH_HOST_PUBLIC_KEY_SHA256,
-                             optarg);
+          twist_transfer_setopt (op->transfer,
+                                 TWISTOPT_SSH_HOST_PUBLIC_KEY_SHA256,
+                                 optarg);
           break;
         case 34:
           op->ftp_create_dirs = 1;
@@ -2082,14 +2154,14 @@ main (int argc, char **argv)
             }
           break;
         case 'x':
-          twist_easy_setopt (op->easy, TWISTOPT_PROXY, optarg);
+          twist_transfer_setopt (op->transfer, TWISTOPT_PROXY, optarg);
           break;
         case 'U':
-          twist_easy_setopt (op->easy, TWISTOPT_PROXYUSERPWD, optarg);
+          twist_transfer_setopt (op->transfer, TWISTOPT_PROXYUSERPWD, optarg);
           scrub_arg (optarg);
           break;
         case 'A':
-          twist_easy_setopt (op->easy, TWISTOPT_USERAGENT, optarg);
+          twist_transfer_setopt (op->transfer, TWISTOPT_USERAGENT, optarg);
           break;
         case 'u':
           {
@@ -2106,9 +2178,9 @@ main (int argc, char **argv)
               *colon++ = 0;
             else
               pass = read_password (copy);
-            twist_easy_setopt (op->easy, TWISTOPT_USERNAME, copy);
-            twist_easy_setopt (op->easy, TWISTOPT_PASSWORD,
-                               colon != NULL ? colon : (pass != NULL ? pass : ""));
+            twist_transfer_setopt (op->transfer, TWISTOPT_USERNAME, copy);
+            twist_transfer_setopt (op->transfer, TWISTOPT_PASSWORD,
+                                   colon != NULL ? colon : (pass != NULL ? pass : ""));
             if (pass != NULL)
               {
                 memset (pass, 0, strlen (pass));
@@ -2122,13 +2194,13 @@ main (int argc, char **argv)
           }
           break;
         case 'e':
-          twist_easy_setopt (op->easy, TWISTOPT_REFERER, optarg);
+          twist_transfer_setopt (op->transfer, TWISTOPT_REFERER, optarg);
           break;
         case 'r':
-          twist_easy_setopt (op->easy, TWISTOPT_RANGE, optarg);
+          twist_transfer_setopt (op->transfer, TWISTOPT_RANGE, optarg);
           break;
         case 'l':
-          twist_easy_setopt (op->easy, TWISTOPT_DIRLISTONLY, 1L);
+          twist_transfer_setopt (op->transfer, TWISTOPT_DIRLISTONLY, 1L);
           break;
         case 'C':
           if (strcmp (optarg, "-") == 0)
@@ -2159,10 +2231,11 @@ main (int argc, char **argv)
             }
           break;
         case 'b':
-          twist_easy_setopt (op->easy, TWISTOPT_COOKIE, optarg);
+          twist_transfer_setopt (op->transfer, TWISTOPT_COOKIE, optarg);
           break;
         case 29:
-          twist_easy_setopt (op->easy, TWISTOPT_XOAUTH2_BEARER, optarg);
+          twist_transfer_setopt (op->transfer, TWISTOPT_XOAUTH2_BEARER,
+                                 optarg);
           scrub_arg (optarg);
           break;
         case 'm':
@@ -2176,7 +2249,7 @@ main (int argc, char **argv)
                 status = 2;
               }
             else
-              twist_easy_setopt (op->easy, TWISTOPT_TIMEOUT_MS, ms);
+              twist_transfer_setopt (op->transfer, TWISTOPT_TIMEOUT_MS, ms);
           }
           break;
         case 19:
@@ -2190,7 +2263,8 @@ main (int argc, char **argv)
                 status = 2;
               }
             else
-              twist_easy_setopt (op->easy, TWISTOPT_CONNECTTIMEOUT_MS, ms);
+              twist_transfer_setopt (op->transfer, TWISTOPT_CONNECTTIMEOUT_MS,
+                                     ms);
           }
           break;
         case 's':
@@ -2271,28 +2345,28 @@ main (int argc, char **argv)
           }
           break;
         case 2:
-          twist_easy_setopt (op->easy, TWISTOPT_HTTP_VERSION,
-                             (long) TWIST_HTTP_VERSION_1_0);
+          twist_transfer_setopt (op->transfer, TWISTOPT_HTTP_VERSION,
+                                 (long) TWIST_HTTP_VERSION_1_0);
           break;
         case 3:
-          twist_easy_setopt (op->easy, TWISTOPT_HTTP_VERSION,
-                             (long) TWIST_HTTP_VERSION_1_1);
+          twist_transfer_setopt (op->transfer, TWISTOPT_HTTP_VERSION,
+                                 (long) TWIST_HTTP_VERSION_1_1);
           break;
         case 4:
-          twist_easy_setopt (op->easy, TWISTOPT_HTTP_VERSION,
-                             (long) TWIST_HTTP_VERSION_2_0);
+          twist_transfer_setopt (op->transfer, TWISTOPT_HTTP_VERSION,
+                                 (long) TWIST_HTTP_VERSION_2_0);
           break;
         case 5:
-          twist_easy_setopt (op->easy, TWISTOPT_HTTP_VERSION,
-                             (long) TWIST_HTTP_VERSION_3);
+          twist_transfer_setopt (op->transfer, TWISTOPT_HTTP_VERSION,
+                                 (long) TWIST_HTTP_VERSION_3);
           break;
         case 9:
-          twist_easy_setopt (op->easy, TWISTOPT_HTTP_VERSION,
-                             (long) TWIST_HTTP_VERSION_2_PRIOR_KNOWLEDGE);
+          twist_transfer_setopt (op->transfer, TWISTOPT_HTTP_VERSION,
+                                 (long) TWIST_HTTP_VERSION_2_PRIOR_KNOWLEDGE);
           break;
         case 10:
-          twist_easy_setopt (op->easy, TWISTOPT_HTTP_VERSION,
-                             (long) TWIST_HTTP_VERSION_3ONLY);
+          twist_transfer_setopt (op->transfer, TWISTOPT_HTTP_VERSION,
+                                 (long) TWIST_HTTP_VERSION_3ONLY);
           break;
         case 11:
           free (op->mail_from);
@@ -2306,7 +2380,7 @@ main (int argc, char **argv)
             status = 27;
           break;
         case 13:
-          if (twist_easy_setopt (op->easy, TWISTOPT_DOH_URL, optarg) != TWIST_OK)
+          if (twist_transfer_setopt (op->transfer, TWISTOPT_DOH_URL, optarg) != TWIST_OK)
             {
               diag (_("could not set the DoH server"));
               suggest ();
@@ -2314,10 +2388,11 @@ main (int argc, char **argv)
             }
           break;
         case 14:
-          twist_easy_setopt (op->easy, TWISTOPT_DOH_SSL_VERIFYPEER, 0L);
+          twist_transfer_setopt (op->transfer, TWISTOPT_DOH_SSL_VERIFYPEER,
+                                 0L);
           break;
         case 17:
-          if (twist_easy_setopt (op->easy, TWISTOPT_DOQ_URL, optarg) != TWIST_OK)
+          if (twist_transfer_setopt (op->transfer, TWISTOPT_DOQ_URL, optarg) != TWIST_OK)
             {
               diag (_("could not set the DoQ server"));
               suggest ();
@@ -2325,7 +2400,7 @@ main (int argc, char **argv)
             }
           break;
         case 18:
-          if (twist_easy_setopt (op->easy, TWISTOPT_DOT_URL, optarg) != TWIST_OK)
+          if (twist_transfer_setopt (op->transfer, TWISTOPT_DOT_URL, optarg) != TWIST_OK)
             {
               diag (_("could not set the DoT server"));
               suggest ();
@@ -2333,7 +2408,7 @@ main (int argc, char **argv)
             }
           break;
         case 8:
-          if (twist_easy_setopt (op->easy, TWISTOPT_DNS_ORDER, optarg) != TWIST_OK)
+          if (twist_transfer_setopt (op->transfer, TWISTOPT_DNS_ORDER, optarg) != TWIST_OK)
             {
               diag (_("unrecognised DNS transport order"));
               suggest ();

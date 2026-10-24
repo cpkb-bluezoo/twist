@@ -1253,7 +1253,7 @@ test_h2_share (void)
 {
   struct twist_h1_events ev;
   struct twist_h2 *h2;
-  struct twist_multi *multi;
+  struct twist_runtime *runtime;
   struct twist_session *sess;
   uint8_t *a = NULL;
   uint8_t *b = NULL;
@@ -1267,10 +1267,11 @@ test_h2_share (void)
 
   memset (&ev, 0, sizeof ev);
   h2 = twist_h2_new (&ev);
-  multi = twist_multi_init ();
-  check (h2 != NULL && multi != NULL && twist_h2_can_open (h2), "h2 room");
-  sess = twist_session_add (multi, "k", multi->loop, NULL, h2);
-  check (sess != NULL && twist_session_find (multi, "k", multi->loop) == sess,
+  runtime = twist_runtime_new ();
+  check (h2 != NULL && runtime != NULL && twist_h2_can_open (h2), "h2 room");
+  sess = twist_session_add (runtime, "k", runtime->loop, NULL, h2);
+  check (sess != NULL
+         && twist_session_find (runtime, "k", runtime->loop) == sess,
          "h2 find");
   check (twist_h2_request (h2, "GET", "https", "ex", "/", NULL, NULL, 0, 1,
                            &a, &an) == TWIST_OK
@@ -1287,10 +1288,11 @@ test_h2_share (void)
   check (twist_h2_request (h2, "GET", "https", "ex", "/", NULL, NULL, 0, 1,
                            &b, &bn) == TWIST_OK
          && bn >= 9 && b[8] == 3, "h2 stream 3");
-  check (twist_session_find (multi, "k", multi->loop) == NULL, "h2 no room");
+  check (twist_session_find (runtime, "k", runtime->loop) == NULL,
+         "h2 no room");
   free (a);
   free (b);
-  twist_multi_cleanup (multi);
+  twist_runtime_free (runtime);
 }
 
 /* The request writer sized its buffer from the extra headers alone, so a

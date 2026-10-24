@@ -68,7 +68,7 @@ struct twist_proxy
   void *inner_user;
   const struct twist_protocol_handler *inner;
   struct twist_endpoint *ep;
-  struct twist_easy *easy;
+  struct twist_transfer *transfer;
   uint8_t *acc;
   size_t acc_len, acc_cap;
   char error[200];
@@ -146,10 +146,10 @@ proxy_connected (struct twist_endpoint *ep)
 static void
 proxy_refused (struct twist_proxy *p, struct twist_endpoint *ep)
 {
-  if (p->easy != NULL && twist_easy_error (p->easy) == NULL)
+  if (p->transfer != NULL && twist_transfer_error (p->transfer) == NULL)
     {
-      twist_easy_set_error (p->easy, twist_strdup (p->error));
-      p->easy->proto_status = p->status;
+      twist_transfer_set_error (p->transfer, twist_strdup (p->error));
+      p->transfer->proto_status = p->status;
     }
   if (p->inner != NULL && p->inner->error != NULL)
     {
@@ -478,10 +478,11 @@ twist_proxy_set_user (struct twist_proxy *proxy, void *user)
 }
 
 void
-twist_proxy_set_easy (struct twist_proxy *proxy, struct twist_easy *easy)
+twist_proxy_set_transfer (struct twist_proxy *proxy,
+                          struct twist_transfer *transfer)
 {
   if (proxy != NULL)
-    proxy->easy = easy;
+    proxy->transfer = transfer;
 }
 
 void
@@ -501,29 +502,31 @@ twist_proxy_set_credentials (struct twist_proxy *proxy, const char *user,
 }
 
 void
-twist_proxy_configure (struct twist_proxy *proxy, struct twist_easy *easy,
+twist_proxy_configure (struct twist_proxy *proxy,
+                       struct twist_transfer *transfer,
                        const char *user, const char *pass)
 {
   if (proxy == NULL)
     return;
-  proxy->easy = easy;
+  proxy->transfer = transfer;
   if (user != NULL)
     twist_proxy_set_credentials (proxy, user, pass);
-  else if (easy != NULL && easy->proxy_userpwd != NULL)
+  else if (transfer != NULL && transfer->proxy_userpwd != NULL)
     {
       /* As given: -U is not percent-encoded.  */
-      const char *c = strchr (easy->proxy_userpwd, ':');
+      const char *c = strchr (transfer->proxy_userpwd, ':');
 
       if (c == NULL)
-        twist_proxy_set_credentials (proxy, easy->proxy_userpwd, "");
+        twist_proxy_set_credentials (proxy, transfer->proxy_userpwd, "");
       else
         {
-          char *u = twist_xmalloc ((size_t) (c - easy->proxy_userpwd) + 1);
+          char *u = twist_xmalloc ((size_t) (c - transfer->proxy_userpwd) + 1);
 
           if (u == NULL)
             return;
-          memcpy (u, easy->proxy_userpwd, (size_t) (c - easy->proxy_userpwd));
-          u[c - easy->proxy_userpwd] = 0;
+          memcpy (u, transfer->proxy_userpwd,
+                  (size_t) (c - transfer->proxy_userpwd));
+          u[c - transfer->proxy_userpwd] = 0;
           twist_proxy_set_credentials (proxy, u, c + 1);
           free (u);
         }

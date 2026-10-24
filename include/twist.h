@@ -19,10 +19,11 @@
 /* libtwist, a transfer library.
 
    Transfers are scheme-neutral.  HTTP is the first scheme; the same
-   easy/multi/share API carries every later protocol.  The multi
-   interface is a guest in the application's poll loop:
-   twist_multi_socket_action is "this fd is readable or writable",
-   and twist_multi_timeout is the next deadline.  */
+   transfer and runtime carry every later protocol.  A transfer is the job; a
+   runtime runs many of them on one event loop and tells the program, from the
+   loop, when each has ended.  Nothing blocks.  A runtime can also be a guest
+   in the application's poll loop: twist_runtime_on_ready is "this fd is
+   readable or writable", and the timer callback is the next deadline.  */
 
 #ifndef TWIST_H
 #define TWIST_H
@@ -63,16 +64,15 @@ enum twist_error
   TWIST_ERR_RESUME = 20,
   TWIST_ERR_QUOTE = 21,
   TWIST_ERR_PROXY = 22,
-  /* A multi interface function was called from inside a callback: the
-     handle is in use by the call that made the callback, so it cannot be
-     removed or freed there.  Do it after the call returns.  */
+  /* The loop was run again from inside a callback (twist_runtime_run_once,
+     twist_runtime_on_ready or twist_runtime_on_timer): it is in use by the
+     call that made the callback.  Do it after that call returns.  */
   TWIST_ERR_RECURSIVE = 23,
   /* The transfer ended before all of what the server said it would send
-     had come (curl's CURLE_PARTIAL_FILE).  */
+     had come.  */
   TWIST_ERR_PARTIAL = 24,
   /* TLS was asked for with TWISTOPT_USE_SSL and could not be had: the
-     server does not offer to upgrade the connection, or refused to
-     (curl's CURLE_USE_SSL_FAILED).  */
+     server does not offer to upgrade the connection, or refused to.  */
   TWIST_ERR_USE_SSL = 25,
   /* A name in a list of options, such as TWISTOPT_TELNETOPTIONS, that the
      transfer does not have.  */
@@ -116,9 +116,8 @@ typedef int (*twist_xferinfo_callback) (void *clientp, long long dltotal,
                                         long long ulnow);
 #define TWIST_PROGRESSFUNC_CONTINUE 0x10000001
 
-typedef struct twist_easy twist_easy;
-typedef struct twist_multi twist_multi;
-typedef struct twist_share twist_share;
+typedef struct twist_transfer twist_transfer;
+typedef struct twist_runtime twist_runtime;
 typedef struct twist_url twist_url;
 
 enum twist_http_version
@@ -175,7 +174,6 @@ enum twist_opt
   TWISTOPT_NOBODY = 26,
   TWISTOPT_FAILONERROR = 27,
   TWISTOPT_CONNECTTIMEOUT_MS = 28,
-  TWISTOPT_SHARE = 29,
   TWISTOPT_PRIVATE = 30,
   TWISTOPT_MAX_RECV_SPEED_LARGE = 31,
   TWISTOPT_MAX_SEND_SPEED_LARGE = 32,
@@ -315,9 +313,34 @@ enum twist_opt
      USER variable.  NULL clears it.  Other schemes ignore it.
 
      What is sent to a telnet server is what TWISTOPT_READFUNCTION gives, and
-     without one it is standard input, which is watched for as long as the
-     server keeps the connection.  TWISTOPT_POSTFIELDS is not sent.  */
-  TWISTOPT_TELNETOPTIONS = 68
+     without one it is what is read from TWISTOPT_TELNET_INPUT_FD, which is
+     watched for as long as the server keeps the connection.  With neither,
+     nothing is sent.  TWISTOPT_POSTFIELDS is not sent.  */
+  TWISTOPT_TELNETOPTIONS = 68,
+  /* A long.  Non-zero has the transfer keep the cookies that responses set in
+     the runtime's cookie jar and send them back.  A cookie is sent to the
+     host that set it, or, if it had a Domain, to that domain and the hosts
+     under it; to the paths under its Path; and over https only if it was marked
+     Secure.  The jar lives as long as the runtime does and is shared by
+     every transfer in it that asks for it.  A cookie given with
+     TWISTOPT_COOKIE is sent in its place.  Only HTTP uses it.  */
+  TWISTOPT_USE_COOKIES = 69,
+  /* A long.  Non-zero has the transfer upgrade an http URL to https when the
+     host is in the runtime's HSTS list, which is shared by every
+     transfer in it that asks for it.  Only HTTP uses it.  */
+  TWISTOPT_USE_HSTS = 70,
+  /* A long.  Non-zero has the transfer keep the alternative services that
+     servers offer, and use them, in the runtime's Alt-Svc list, which is
+     shared by every transfer in it that asks for it.  Only HTTP uses it.  */
+  TWISTOPT_USE_ALTSVC = 71,
+  /* A long: for telnet, the descriptor that the session's input is read from
+     when there is no TWISTOPT_READFUNCTION.  It is a terminal, a pipe or a
+     file, it is the caller's, and the transfer does not close it or make it
+     non-blocking: a descriptor that can be polled is read only when it is
+     ready, and what is read from it waits for the connection when the
+     connection is behind.  The end of the input does not end the session.
+     -1, the default, is none.  Other schemes ignore it.  */
+  TWISTOPT_TELNET_INPUT_FD = 72
 };
 
 enum twist_use_ssl
@@ -344,64 +367,70 @@ enum twist_info
   TWISTINFO_PRIVATE = 5
 };
 
-twist_easy *twist_easy_init (void);
-void twist_easy_cleanup (twist_easy *easy);
-int twist_easy_setopt (twist_easy *easy, int opt, ...);
-int twist_easy_perform (twist_easy *easy);
-int twist_easy_getinfo (twist_easy *easy, int info, ...);
+twist_transfer *twist_transfer_new (void);
+void twist_transfer_free (twist_transfer *transfer);
+int twist_transfer_setopt (twist_transfer *transfer, int opt, ...);
+int twist_transfer_getinfo (twist_transfer *transfer, int info, ...);
 /* Detail for the last transfer, or NULL when only twist_strerror applies.  */
-const char *twist_easy_error (const twist_easy *easy);
+const char *twist_transfer_error (const twist_transfer *transfer);
 
-#define TWIST_SOCKET_TIMEOUT (-1)
 #define TWIST_POLL_NONE 0
 #define TWIST_POLL_IN 1
 #define TWIST_POLL_OUT 2
 #define TWIST_POLL_REMOVE 4
 
-typedef int (*twist_socket_callback) (twist_easy *easy, int fd, int what,
-                                      void *user, void *socketp);
-typedef int (*twist_timer_callback) (twist_multi *multi, long timeout_ms,
+/* Called once, from the loop, when a transfer that was started has ended.
+   RESULT is TWIST_OK or the code that ended it.  The transfer has let go of
+   its connection and is in no runtime by then, so the callback may read
+   what it learned with twist_transfer_getinfo, start it again, or free it.  */
+typedef void (*twist_done_callback) (twist_transfer *transfer, int result,
                                      void *user);
 
-enum twist_multi_opt
-{
-  TWISTMOPT_SOCKETFUNCTION = 1,
-  TWISTMOPT_SOCKETDATA = 2,
-  TWISTMOPT_TIMERFUNCTION = 3,
-  TWISTMOPT_TIMERDATA = 4
-};
+/* What a runtime made with twist_runtime_new_embedded tells the program
+   that owns the poll loop.  The first says that FD is to be polled for WHAT,
+   TWIST_POLL_IN and TWIST_POLL_OUT or'd together, or is no longer wanted
+   (TWIST_POLL_REMOVE).  The second says how long the loop may wait for the
+   next deadline of the runtime, in milliseconds from now, 0 if it is
+   due, or -1 for none.  Neither may call the runtime.  */
+typedef void (*twist_watch_callback) (int fd, int what, void *user);
+typedef void (*twist_timer_callback) (long timeout_ms, void *user);
 
-twist_multi *twist_multi_init (void);
-void twist_multi_cleanup (twist_multi *multi);
-int twist_multi_add_handle (twist_multi *multi, twist_easy *easy);
-int twist_multi_remove_handle (twist_multi *multi, twist_easy *easy);
-int twist_multi_perform (twist_multi *multi, int *running);
-int twist_multi_socket_action (twist_multi *multi, int fd, int ev,
-                               int *running);
-int twist_multi_timeout (twist_multi *multi, long *timeout_ms);
-int twist_multi_setopt (twist_multi *multi, int opt, ...);
-int twist_multi_info_read (twist_multi *multi, int *msgs_left,
-                           twist_easy **easy, int *result);
+/* A runtime runs transfers on one event loop and keeps what they can
+   use again: connections, names, and the cookies, HSTS and Alt-Svc lists of
+   the transfers that ask for them.  Nothing in it blocks.  This one has a
+   poller of its own, and is driven with twist_runtime_run_once.  */
+twist_runtime *twist_runtime_new (void);
+/* One inside the program's own poll loop, which has no poller.  The program
+   polls what WATCH says to, and calls twist_runtime_on_ready for what is
+   ready and twist_runtime_on_timer when the deadline TIMER gave has
+   passed.  */
+twist_runtime *twist_runtime_new_embedded (twist_watch_callback watch,
+                                           twist_timer_callback timer,
+                                           void *user);
+/* Free the handle.  A transfer in it is dropped without a call to its
+   twist_done_callback.  From a callback this does nothing.  */
+void twist_runtime_free (twist_runtime *runtime);
 
-/* What a share holds, and what its locks do.  A share may be given to
-   handles that are driven from one thread, and then no lock is needed or
-   taken.  For handles of several threads, twist_share_setopt turns on a lock
-   for each of these that is to be shared between them: the cookie jar, the
-   DNS answers, the kept connections, the HSTS list and the Alt-Svc list.  The
-   one that is not turned on is not locked, and must not be used by two
-   threads at once.  TWIST_LOCK_DATA_SSL_SESSION is accepted and nothing is
-   shared under it: TLS sessions are not kept.  A handle itself, and a multi
-   handle, are for one thread at a time, as in curl.  */
-#define TWIST_LOCK_DATA_COOKIE (1u << 0)
-#define TWIST_LOCK_DATA_DNS (1u << 1)
-#define TWIST_LOCK_DATA_CONNECT (1u << 2)
-#define TWIST_LOCK_DATA_SSL_SESSION (1u << 3)
-#define TWIST_LOCK_DATA_HSTS (1u << 4)
-#define TWIST_LOCK_DATA_ALT_SVC (1u << 5)
+/* Wait up to TIMEOUT_MS (-1: for as long as it takes to have something to
+   do, 0: not at all) for what is ready and for the timers that are due, and
+   do it, once.  A transfer that ends has its callback called from here.
+   TWIST_ERR_RECURSIVE from a callback, and TWIST_ERR_INVAL for an embedded
+   handle.  */
+int twist_runtime_run_once (twist_runtime *runtime, int timeout_ms);
+/* For an embedded handle: FD is ready for EVENTS (TWIST_POLL_IN and
+   TWIST_POLL_OUT), or the deadline has passed.  */
+int twist_runtime_on_ready (twist_runtime *runtime, int fd, int events);
+int twist_runtime_on_timer (twist_runtime *runtime);
 
-twist_share *twist_share_init (void);
-void twist_share_cleanup (twist_share *share);
-int twist_share_setopt (twist_share *share, unsigned lock_data);
+/* Begin TRANSFER on RUNTIME.  It returns at once, and DONE (which may be
+   NULL) is called when the transfer ends, whether it ran or could not begin,
+   so there is one way to learn the result.  The transfer is the runtime's
+   until then.  This may be called from a callback, to start the next
+   transfer.  */
+int twist_runtime_start (twist_runtime *runtime, twist_transfer *transfer,
+                         twist_done_callback done, void *user);
+/* End TRANSFER early.  Its callback is called with TWIST_ERR_ABORTED.  */
+int twist_runtime_cancel (twist_runtime *runtime, twist_transfer *transfer);
 
 int twist_url_parse (const char *input, twist_url **out);
 void twist_url_free (twist_url *url);

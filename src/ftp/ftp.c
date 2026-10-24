@@ -71,7 +71,7 @@ enum
 
 struct twist_ftp
 {
-  struct twist_easy *easy;
+  struct twist_transfer *transfer;
   struct twist_ftp_parser *parser;
   struct twist_connection *ctrl;
   struct twist_connection *data;
@@ -424,7 +424,7 @@ ftp_complete (struct twist_ftp *f, int err)
       twist_timer_cancel (f->timer);
       f->timer = NULL;
     }
-  twist_easy_finish (f->easy, err);
+  twist_transfer_finish (f->transfer, err);
 }
 
 static int
@@ -436,34 +436,34 @@ bad_token (const char *s)
 static const char *
 ftp_user (struct twist_ftp *f)
 {
-  if (f->easy->username != NULL && f->easy->username[0] != 0)
-    return f->easy->username;
-  if (f->easy->url->user != NULL && f->easy->url->user[0] != 0)
-    return f->easy->url->user;
+  if (f->transfer->username != NULL && f->transfer->username[0] != 0)
+    return f->transfer->username;
+  if (f->transfer->url->user != NULL && f->transfer->url->user[0] != 0)
+    return f->transfer->url->user;
   return "anonymous";
 }
 
 static const char *
 ftp_pass (struct twist_ftp *f)
 {
-  if (f->easy->password != NULL && f->easy->password[0] != 0)
-    return f->easy->password;
-  if (f->easy->url->password != NULL && f->easy->url->password[0] != 0)
-    return f->easy->url->password;
+  if (f->transfer->password != NULL && f->transfer->password[0] != 0)
+    return f->transfer->password;
+  if (f->transfer->url->password != NULL && f->transfer->url->password[0] != 0)
+    return f->transfer->url->password;
   return "twist@";
 }
 
 static void
 prepare_arg (struct twist_ftp *f)
 {
-  const char *path = f->easy->url->path;
+  const char *path = f->transfer->url->path;
   size_t n;
   int dir;
 
   if (path == NULL)
     path = "";
   dir = path[0] == 0 || strcmp (path, "/") == 0
-        || path[strlen (path) - 1] == '/' || f->easy->nobody;
+        || path[strlen (path) - 1] == '/' || f->transfer->nobody;
   if (path[0] == '/')
     path++;
   n = strlen (path);
@@ -524,7 +524,7 @@ dial_tcp (struct twist_ftp *f, struct twist_connection **slot,
   size_t salen;
   int rc;
 
-  c = twist_connection_new (f->easy->loop);
+  c = twist_connection_new (f->transfer->loop);
   if (c == NULL)
     return TWIST_ERR_NOMEM;
   *slot = c;
@@ -550,7 +550,7 @@ dial_tcp (struct twist_ftp *f, struct twist_connection **slot,
       salen = sizeof sin;
     }
   rc = twist_connection_connect (c, sa, salen,
-                                 (uint64_t) f->easy->connect_timeout_ms);
+                                 (uint64_t) f->transfer->connect_timeout_ms);
   return rc;
 }
 
@@ -574,7 +574,8 @@ new_data_proxy (struct twist_ftp *f)
   int pport = 0;
   int rc = TWIST_OK;
 
-  if (twist_proxy_parse (twist_easy_proxy (f->easy), &kind, &phost, &pport,
+  if (twist_proxy_parse (twist_transfer_proxy (f->transfer), &kind, &phost,
+                         &pport,
                          &puser, &ppass) != TWIST_OK)
     return TWIST_ERR_URL;
   f->data_proxy = twist_proxy_new (kind, phost, pport, &ftp_data_handler);
@@ -582,8 +583,9 @@ new_data_proxy (struct twist_ftp *f)
     rc = TWIST_ERR_NOMEM;
   else
     {
-      twist_proxy_set_target (f->data_proxy, f->easy->url->host, f->data_port);
-      twist_proxy_configure (f->data_proxy, f->easy, puser, ppass);
+      twist_proxy_set_target (f->data_proxy, f->transfer->url->host,
+                              f->data_port);
+      twist_proxy_configure (f->data_proxy, f->transfer, puser, ppass);
       twist_proxy_set_user (f->data_proxy, f);
     }
   free (phost);
@@ -694,9 +696,9 @@ ftp_logged_in (struct twist_ftp *f)
 static void
 ftp_protect_refused (struct twist_ftp *f)
 {
-  twist_easy_set_error (f->easy,
-                        twist_strdup (_("the server will not protect the data "
-                                        "connection (PBSZ and PROT P)")));
+  twist_transfer_set_error
+    (f->transfer, twist_strdup (_("the server will not protect the data "
+                                  "connection (PBSZ and PROT P)")));
   ftp_complete (f, TWIST_ERR_TLS);
 }
 
@@ -709,7 +711,7 @@ ftp_on_reply (void *user, int code, int final, const char *text, size_t len)
 
   if (!final || f->finished)
     return;
-  f->easy->http_code = code;
+  f->transfer->http_code = code;
   switch (f->state)
     {
     case FTP_GREET:
@@ -740,24 +742,19 @@ ftp_on_reply (void *user, int code, int final, const char *text, size_t len)
              test with no connection has none to start.  */
           f->state = FTP_TLSWAIT;
           if (f->ep != NULL
-              && (user_ssl_rc = twist_connection_start_tls (f->ep->conn,
-                                                            f->easy->url->host,
-                                                            f->easy->verifypeer,
-                                                            NULL, 0,
-                                                            f->easy->cainfo,
-                                                            f->easy->capath,
-                                                            f->easy->sslcert,
-                                                            f->easy->sslkey))
-                 != TWIST_OK)
+              && (user_ssl_rc = twist_connection_start_tls
+                  (f->ep->conn, f->transfer->url->host,
+                   f->transfer->verifypeer, NULL, 0, f->transfer->cainfo,
+                   f->transfer->capath, f->transfer->sslcert,
+                   f->transfer->sslkey)) != TWIST_OK)
             ftp_complete (f, user_ssl_rc);
           return;
         }
       /* Refused: required, that is the end; wanted, go on as it is.  */
       if (f->use_ssl == TWIST_USE_SSL_ALL)
         {
-          ftp_complete (f, twist_easy_use_ssl_failed (f->easy,
-                                                      _("the server refused "
-                                                        "AUTH TLS")));
+          ftp_complete (f, twist_transfer_use_ssl_failed
+                        (f->transfer, _("the server refused AUTH TLS")));
           return;
         }
       ftp_begin_login (f);
@@ -858,7 +855,7 @@ ftp_on_reply (void *user, int code, int final, const char *text, size_t len)
           f->state = FTP_WAIT;
           f->expect = size;
           if (size >= 0)
-            twist_progress_dl_size (f->easy, size);
+            twist_progress_dl_size (f->transfer, size);
           return;
         }
       if (code == 226 || code == 250)
@@ -914,10 +911,10 @@ ftp_connected (struct twist_endpoint *ep)
   f->ep = ep;
   if (!f->implicit_tls)
     return;
-  rc = twist_connection_start_tls (ep->conn, f->easy->url->host,
-                                   f->easy->verifypeer, NULL, 0,
-                                   f->easy->cainfo, f->easy->capath, f->easy->sslcert,
-                                   f->easy->sslkey);
+  rc = twist_connection_start_tls (ep->conn, f->transfer->url->host,
+                                   f->transfer->verifypeer, NULL, 0,
+                                   f->transfer->cainfo, f->transfer->capath, f->transfer->sslcert,
+                                   f->transfer->sslkey);
   if (rc != TWIST_OK)
     ftp_complete (f, rc);
 }
@@ -989,12 +986,13 @@ ftp_data_connected (struct twist_endpoint *ep)
          commonly require of the data connection (vsftpd, ProFTPD and
          FileZilla Server do unless told not to).  */
       rc = twist_connection_start_tls_resuming (ep->conn, f->ctrl,
-                                                f->easy->url->host,
-                                                f->easy->verifypeer, NULL, 0,
-                                                f->easy->cainfo,
-                                                f->easy->capath,
-                                                f->easy->sslcert,
-                                                f->easy->sslkey);
+                                                f->transfer->url->host,
+                                                f->transfer->verifypeer, NULL,
+                                                0,
+                                                f->transfer->cainfo,
+                                                f->transfer->capath,
+                                                f->transfer->sslcert,
+                                                f->transfer->sslkey);
       if (rc != TWIST_OK)
         {
           ftp_complete (f, rc);
@@ -1108,18 +1106,19 @@ twist_ftp_data (struct twist_ftp *f, const uint8_t *data, size_t len)
   if (len == 0)
     return 0;
   f->received += (long long) len;
-  if (f->easy->write_cb != NULL)
+  if (f->transfer->write_cb != NULL)
     {
-      accepted = twist_write_bytes (f->easy->write_cb, f->easy->write_data,
+      accepted = twist_write_bytes (f->transfer->write_cb,
+                                    f->transfer->write_data,
                                     data, len);
       if (accepted < len)
         {
-          twist_easy_downloaded (f->easy, accepted);
+          twist_transfer_downloaded (f->transfer, accepted);
           ftp_complete (f, TWIST_ERR_ABORTED);
           return len;
         }
     }
-  twist_easy_downloaded (f->easy, len);
+  twist_transfer_downloaded (f->transfer, len);
   return len;
 }
 
@@ -1201,8 +1200,8 @@ on_resolved (void *user, int err, const struct twist_dns_addr *addr)
 static void
 ftp_begin (struct twist_ftp *f)
 {
-  struct twist_easy *easy = f->easy;
-  struct twist_url *url = easy->url;
+  struct twist_transfer *transfer = f->transfer;
+  struct twist_url *url = transfer->url;
   const char *dial;
   int kind = TWIST_PROXY_NONE;
   char *phost = NULL, *puser = NULL, *ppass = NULL;
@@ -1210,9 +1209,9 @@ ftp_begin (struct twist_ftp *f)
 
   f->dial_port = url->port;
   dial = url->host;
-  if (twist_easy_proxy (easy) != NULL)
+  if (twist_transfer_proxy (transfer) != NULL)
     {
-      if (twist_proxy_parse (twist_easy_proxy (easy), &kind, &phost, &pport, &puser,
+      if (twist_proxy_parse (twist_transfer_proxy (transfer), &kind, &phost, &pport, &puser,
                              &ppass) != TWIST_OK)
         {
           ftp_complete (f, TWIST_ERR_URL);
@@ -1224,9 +1223,10 @@ ftp_begin (struct twist_ftp *f)
           free (phost);
           free (puser);
           free (ppass);
-          twist_easy_set_error (easy, twist_strdup (_("an https proxy is not "
-                                                      "supported for ftp; use "
-                                                      "http:// or socks5://")));
+          twist_transfer_set_error (transfer,
+                                    twist_strdup (_("an https proxy is not "
+                                                    "supported for ftp; use "
+                                                    "http:// or socks5://")));
           ftp_complete (f, TWIST_ERR_UNSUPPORTED);
           return;
         }
@@ -1238,7 +1238,7 @@ ftp_begin (struct twist_ftp *f)
           return;
         }
       twist_proxy_set_target (f->proxy, url->host, url->port);
-      twist_proxy_configure (f->proxy, easy, puser, ppass);
+      twist_proxy_configure (f->proxy, transfer, puser, ppass);
       dial = phost;
       f->dial_port = pport;
     }
@@ -1255,12 +1255,13 @@ ftp_begin (struct twist_ftp *f)
       ftp_complete (f, TWIST_ERR_NOMEM);
       return;
     }
-  if (easy->timeout_ms > 0)
-    twist_loop_schedule (easy->loop,
-                         twist_loop_now (easy->loop) + (uint64_t) easy->timeout_ms,
+  if (transfer->timeout_ms > 0)
+    twist_loop_schedule (transfer->loop,
+                         twist_loop_now (transfer->loop) + (uint64_t) transfer->timeout_ms,
                          on_timeout, f, &f->timer);
   {
-    int rc = twist_dns_resolve_easy (easy, f->dial_host, on_resolved, f);
+    int rc = twist_dns_resolve_transfer (transfer, f->dial_host, on_resolved,
+                                         f);
 
     if (rc != TWIST_OK)
       ftp_complete (f, rc);
@@ -1286,23 +1287,23 @@ twist_ftp_free (void *p)
 }
 
 struct twist_ftp *
-twist_ftp_new (struct twist_easy *easy, int live)
+twist_ftp_new (struct twist_transfer *transfer, int live)
 {
   struct twist_ftp *f;
   struct twist_ftp_events ev;
 
-  if (easy == NULL || easy->url == NULL)
+  if (transfer == NULL || transfer->url == NULL)
     return NULL;
   f = calloc (1, sizeof *f);
   if (f == NULL)
     return NULL;
-  f->easy = easy;
+  f->transfer = transfer;
   f->live = live;
   f->expect = -1;
-  f->implicit_tls = easy->url->scheme != NULL
-                    && strcmp (easy->url->scheme, "ftps") == 0;
+  f->implicit_tls = transfer->url->scheme != NULL
+                    && strcmp (transfer->url->scheme, "ftps") == 0;
   f->ctrl_tls = f->implicit_tls;
-  f->use_ssl = f->implicit_tls ? TWIST_USE_SSL_NONE : easy->use_ssl;
+  f->use_ssl = f->implicit_tls ? TWIST_USE_SSL_NONE : transfer->use_ssl;
   prepare_arg (f);
   memset (&ev, 0, sizeof ev);
   ev.user = f;
@@ -1314,24 +1315,24 @@ twist_ftp_new (struct twist_easy *easy, int live)
       free (f);
       return NULL;
     }
-  easy->xfer = f;
-  easy->xfer_free = twist_ftp_free;
+  transfer->state = f;
+  transfer->state_free = twist_ftp_free;
   return f;
 }
 
 int
-twist_ftp_attach (struct twist_easy *easy)
+twist_ftp_attach (struct twist_transfer *transfer)
 {
   struct twist_ftp *f;
 
-  if (easy == NULL || easy->url == NULL || easy->loop == NULL)
+  if (transfer == NULL || transfer->url == NULL || transfer->loop == NULL)
     return TWIST_ERR_INVAL;
-  f = twist_ftp_new (easy, 1);
+  f = twist_ftp_new (transfer, 1);
   if (f == NULL)
     return TWIST_ERR_NOMEM;
   ftp_begin (f);
-  if (easy->done)
-    return easy->result;
+  if (transfer->done)
+    return transfer->result;
   return TWIST_OK;
 }
 

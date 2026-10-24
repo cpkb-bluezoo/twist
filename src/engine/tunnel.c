@@ -63,7 +63,7 @@ enum tunnel_state
 
 struct twist_tunnel
 {
-  struct twist_easy *easy;
+  struct twist_transfer *transfer;
   struct twist_loop *loop;
   struct twist_connection *outer;
   struct twist_connection *inner;	/* NULL once the protocol let go.  */
@@ -143,8 +143,8 @@ refused (struct twist_tunnel *t, int status)
   char msg[128];
 
   snprintf (msg, sizeof msg, _("CONNECT tunnel failed, response %d"), status);
-  twist_easy_set_error (t->easy, twist_strdup (msg));
-  t->easy->proto_status = 56;
+  twist_transfer_set_error (t->transfer, twist_strdup (msg));
+  t->transfer->proto_status = 56;
   tunnel_fail (t, TWIST_ERR_PROXY);
 }
 
@@ -158,8 +158,8 @@ on_timeout (void *p)
   if (t->state == T_UP || t->state == T_DEAD)
     return;
   snprintf (msg, sizeof msg, _("timed out after %ld ms making the "
-                               "connection"), t->easy->connect_timeout_ms);
-  twist_easy_set_error (t->easy, twist_strdup (msg));
+                               "connection"), t->transfer->connect_timeout_ms);
+  twist_transfer_set_error (t->transfer, twist_strdup (msg));
   tunnel_fail (t, TWIST_ERR_TIMEOUT);
 }
 
@@ -513,7 +513,7 @@ outer_connected (struct twist_endpoint *ep)
 {
   struct twist_tunnel *t = ep->user_data;
   static const char *const alpn[] = { "h2", "http/1.1" };
-  struct twist_easy *e = t->easy;
+  struct twist_transfer *e = t->transfer;
   int rc;
 
   if (t->state != T_DIAL)
@@ -623,7 +623,7 @@ basic_of (const char *user, const char *pass)
 }
 
 int
-twist_tunnel_connect (struct twist_easy *easy,
+twist_tunnel_connect (struct twist_transfer *transfer,
                       const struct twist_tunnel_spec *spec,
                       const struct twist_dns_addr *proxy_addr,
                       const struct twist_protocol_handler *handler,
@@ -643,38 +643,38 @@ twist_tunnel_connect (struct twist_easy *easy,
   t = calloc (1, sizeof *t);
   if (t == NULL)
     return TWIST_ERR_NOMEM;
-  t->easy = easy;
-  t->loop = easy->loop;
+  t->transfer = transfer;
+  t->loop = transfer->loop;
   t->proxy_host = twist_strdup (spec->proxy_host);
   t->authority = authority_of (spec->host, spec->port);
   /* Credentials of the proxy's URL, or else -U, as given.  */
-  if (u == NULL && easy->proxy_userpwd != NULL)
+  if (u == NULL && transfer->proxy_userpwd != NULL)
     {
-      const char *c = strchr (easy->proxy_userpwd, ':');
+      const char *c = strchr (transfer->proxy_userpwd, ':');
 
       if (c != NULL)
         {
-          split = twist_xmalloc ((size_t) (c - easy->proxy_userpwd) + 1);
+          split = twist_xmalloc ((size_t) (c - transfer->proxy_userpwd) + 1);
           if (split != NULL)
             {
-              memcpy (split, easy->proxy_userpwd,
-                      (size_t) (c - easy->proxy_userpwd));
-              split[c - easy->proxy_userpwd] = 0;
+              memcpy (split, transfer->proxy_userpwd,
+                      (size_t) (c - transfer->proxy_userpwd));
+              split[c - transfer->proxy_userpwd] = 0;
             }
           u = split;
           pw = c + 1;
         }
       else
         {
-          u = easy->proxy_userpwd;
+          u = transfer->proxy_userpwd;
           pw = "";
         }
     }
   if (u != NULL)
     t->auth = basic_of (u, pw);
   free (split);
-  t->outer = twist_connection_new (easy->loop);
-  t->inner = twist_connection_new (easy->loop);
+  t->outer = twist_connection_new (transfer->loop);
+  t->inner = twist_connection_new (transfer->loop);
   if (t->proxy_host == NULL || t->authority == NULL || t->outer == NULL
       || t->inner == NULL || (u != NULL && t->auth == NULL))
     {
@@ -709,13 +709,13 @@ twist_tunnel_connect (struct twist_easy *easy,
       sa = &sin;
       salen = sizeof sin;
     }
-  if (easy->connect_timeout_ms > 0)
-    twist_loop_schedule (easy->loop,
-                         twist_loop_now (easy->loop)
-                         + (uint64_t) easy->connect_timeout_ms,
+  if (transfer->connect_timeout_ms > 0)
+    twist_loop_schedule (transfer->loop,
+                         twist_loop_now (transfer->loop)
+                         + (uint64_t) transfer->connect_timeout_ms,
                          on_timeout, t, &t->timer);
   rc = twist_connection_connect (t->outer, sa, salen,
-                                 (uint64_t) easy->connect_timeout_ms);
+                                 (uint64_t) transfer->connect_timeout_ms);
   if (rc != TWIST_OK)
     {
       /* The inner connection is the caller's to free, as it would be.  */

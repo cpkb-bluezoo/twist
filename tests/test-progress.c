@@ -44,7 +44,7 @@ fake_now (void *user)
 struct rig
 {
   struct twist_loop *loop;
-  struct twist_easy *easy;
+  struct twist_transfer *transfer;
   FILE *out;
   char *buf;
   size_t len;
@@ -55,16 +55,16 @@ rig_open (struct rig *r, long noprogress)
 {
   memset (r, 0, sizeof *r);
   r->loop = twist_loop_new (1);
-  r->easy = twist_easy_init ();
-  if (r->loop == NULL || r->easy == NULL)
+  r->transfer = twist_transfer_new ();
+  if (r->loop == NULL || r->transfer == NULL)
     return -1;
   twist_loop_set_now (r->loop, fake_now, NULL);
-  r->easy->loop = r->loop;
+  r->transfer->loop = r->loop;
   r->out = open_memstream (&r->buf, &r->len);
   if (r->out == NULL)
     return -1;
-  twist_easy_setopt (r->easy, TWISTOPT_STDERR, r->out);
-  twist_easy_setopt (r->easy, TWISTOPT_NOPROGRESS, noprogress);
+  twist_transfer_setopt (r->transfer, TWISTOPT_STDERR, r->out);
+  twist_transfer_setopt (r->transfer, TWISTOPT_NOPROGRESS, noprogress);
   return 0;
 }
 
@@ -79,9 +79,9 @@ rig_text (struct rig *r)
 static void
 rig_close (struct rig *r)
 {
-  twist_progress_release (r->easy);
-  r->easy->loop = NULL;
-  twist_easy_cleanup (r->easy);
+  twist_progress_release (r->transfer);
+  r->transfer->loop = NULL;
+  twist_transfer_free (r->transfer);
   fclose (r->out);
   free (r->buf);
   twist_loop_free (r->loop);
@@ -150,34 +150,34 @@ test_download (void)
 
   check (rig_open (&r, 0) == 0, "rig");
   clock_ms = 10500;
-  twist_progress_begin (r.easy);
+  twist_progress_begin (r.transfer);
   /* Begin draws the heading and a line of zeros at once.  */
   snprintf (want, sizeof want,
             "%s\r  0     0    0     0    0     0      0      0 "
             "--:--:-- --:--:-- --:--:--     0", head);
   check (strcmp (rig_text (&r), want) == 0, "the first line");
 
-  twist_progress_dl_size (r.easy, 80000);
+  twist_progress_dl_size (r.transfer, 80000);
   clock_ms = 10900;
-  twist_progress_downloaded (r.easy, 20000);
+  twist_progress_downloaded (r.transfer, 20000);
   check (strcmp (rig_text (&r), want) == 0,
          "nothing more within the same second");
 
   clock_ms = 11401;
-  twist_progress_downloaded (r.easy, 20000);
+  twist_progress_downloaded (r.transfer, 20000);
   /* 40000 bytes in 901 ms is 44395 a second, 80000 in all will take 1 s.  */
   strcat (want, "\r 50 80000   50 40000    0     0  44395      0  "
                 "0:00:01 --:--:--  0:00:01 44395");
   check (strcmp (rig_text (&r), want) == 0, "half way");
 
   clock_ms = 12500;
-  twist_progress_downloaded (r.easy, 40000);
+  twist_progress_downloaded (r.transfer, 40000);
   strcat (want, "\r100 80000  100 80000    0     0  40000      0  "
                 "0:00:02  0:00:02 --:--:-- 40000");
   check (strcmp (rig_text (&r), want) == 0, "done");
 
   /* The end forces a line and closes it, even in the same second.  */
-  twist_progress_end (r.easy, TWIST_OK);
+  twist_progress_end (r.transfer, TWIST_OK);
   strcat (want, "\r100 80000  100 80000    0     0  40000      0  "
                 "0:00:02  0:00:02 --:--:-- 40000\n");
   check (strcmp (rig_text (&r), want) == 0, "the last line and the newline");
@@ -192,9 +192,9 @@ test_unknown_size (void)
 
   check (rig_open (&r, 0) == 0, "rig");
   clock_ms = 20000;
-  twist_progress_begin (r.easy);
+  twist_progress_begin (r.transfer);
   clock_ms = 21000;
-  twist_progress_downloaded (r.easy, 60000);
+  twist_progress_downloaded (r.transfer, 60000);
   check (strstr (rig_text (&r),
                  "\r100 60000    0 60000    0     0  60000      0 "
                  "--:--:--  0:00:01 --:--:-- 60000") != NULL,
@@ -209,10 +209,10 @@ test_upload (void)
 
   check (rig_open (&r, 0) == 0, "rig");
   clock_ms = 30000;
-  twist_progress_begin (r.easy);
-  twist_progress_ul_size (r.easy, 1000);
+  twist_progress_begin (r.transfer);
+  twist_progress_ul_size (r.transfer, 1000);
   clock_ms = 31000;
-  twist_progress_uploaded (r.easy, 500);
+  twist_progress_uploaded (r.transfer, 500);
   /* 500 of 1000 up and nothing down: half of the whole, and the upload's
      percentage in the third column.  */
   check (strstr (rig_text (&r),
@@ -232,19 +232,19 @@ test_percent (void)
 
   check (rig_open (&r, 0) == 0, "rig");
   clock_ms = 160000;
-  twist_progress_begin (r.easy);
-  twist_progress_dl_size (r.easy, 10001);
+  twist_progress_begin (r.transfer);
+  twist_progress_dl_size (r.transfer, 10001);
   clock_ms = 161000;
-  twist_progress_downloaded (r.easy, 100);
+  twist_progress_downloaded (r.transfer, 100);
   check (strstr (rig_text (&r), "\r  1 10001    1   100    0     0 ") != NULL,
          "1% of 10001");
   rig_close (&r);
   check (rig_open (&r, 0) == 0, "rig");
   clock_ms = 165000;
-  twist_progress_begin (r.easy);
-  twist_progress_ul_size (r.easy, 10001);
+  twist_progress_begin (r.transfer);
+  twist_progress_ul_size (r.transfer, 10001);
   clock_ms = 166000;
-  twist_progress_uploaded (r.easy, 100);
+  twist_progress_uploaded (r.transfer, 100);
   check (strstr (rig_text (&r), "\r  1 10001    0     0    1   100 ") != NULL,
          "the same for an upload");
   rig_close (&r);
@@ -263,12 +263,12 @@ test_huge_sizes (void)
 
   check (rig_open (&r, 0) == 0, "rig");
   clock_ms = 400000;
-  twist_progress_begin (r.easy);
-  twist_progress_ul_size (r.easy, 1000);
-  twist_progress_dl_size (r.easy, 9223372036854775807LL);
+  twist_progress_begin (r.transfer);
+  twist_progress_ul_size (r.transfer, 1000);
+  twist_progress_dl_size (r.transfer, 9223372036854775807LL);
   clock_ms = 401000;
-  twist_progress_downloaded (r.easy, 500);
-  twist_progress_uploaded (r.easy, 100);
+  twist_progress_downloaded (r.transfer, 500);
+  twist_progress_uploaded (r.transfer, 100);
   text = rig_text (&r);
   check (strstr (text, "\r") != NULL, "a line was drawn");
   {
@@ -296,11 +296,11 @@ test_current_speed (void)
 
   check (rig_open (&r, 0) == 0, "rig");
   clock_ms = 170000;
-  twist_progress_begin (r.easy);
+  twist_progress_begin (r.transfer);
   for (i = 1; i < sizeof added / sizeof added[0]; i++)
     {
       clock_ms = 170000 + 1000 * i;
-      twist_progress_downloaded (r.easy, (size_t) added[i]);
+      twist_progress_downloaded (r.transfer, (size_t) added[i]);
     }
   /* 2500 bytes in 7 seconds on average; from the second second to the
      seventh, 2300 in 5.  */
@@ -319,14 +319,14 @@ test_first_line_speed (void)
   /* The first line to be drawn has no second before it to measure: the
      average is the speed.  A file draws nothing when it begins.  */
   check (rig_open (&r, 0) == 0, "rig");
-  twist_url_parse_int ("file:///x", &r.easy->url);
+  twist_url_parse_int ("file:///x", &r.transfer->url);
   clock_ms = 180000;
-  twist_progress_begin (r.easy);
+  twist_progress_begin (r.transfer);
   clock_ms = 181000;
   /* Known already, so that the first thing drawn has the count.  */
-  r.easy->progress.size_dl = 10000;
-  r.easy->progress.dl_known = 1;
-  twist_progress_downloaded (r.easy, 5000);
+  r.transfer->progress.size_dl = 10000;
+  r.transfer->progress.dl_known = 1;
+  twist_progress_downloaded (r.transfer, 5000);
   check (strstr (rig_text (&r),
                  "\r 50 10000   50  5000    0     0   5000      0  "
                  "0:00:02  0:00:01  0:00:01  5000") != NULL,
@@ -342,11 +342,11 @@ test_hidden (void)
   /* The default: nothing is drawn, whatever happens.  */
   check (rig_open (&r, 1) == 0, "rig");
   clock_ms = 40000;
-  twist_progress_begin (r.easy);
-  twist_progress_dl_size (r.easy, 10);
+  twist_progress_begin (r.transfer);
+  twist_progress_dl_size (r.transfer, 10);
   clock_ms = 41000;
-  twist_progress_downloaded (r.easy, 10);
-  twist_progress_end (r.easy, TWIST_OK);
+  twist_progress_downloaded (r.transfer, 10);
+  twist_progress_end (r.transfer, TWIST_OK);
   check (strcmp (rig_text (&r), "") == 0, "no meter with NOPROGRESS");
   rig_close (&r);
 }
@@ -356,8 +356,8 @@ static long long last_dltotal, last_dlnow, last_ultotal, last_ulnow;
 static int answer;
 
 static int
-xfer (void *user, long long dltotal, long long dlnow, long long ultotal,
-      long long ulnow)
+state (void *user, long long dltotal, long long dlnow, long long ultotal,
+       long long ulnow)
 {
   (void) user;
   calls++;
@@ -376,66 +376,66 @@ test_callback (void)
   /* Called each time, even within the second; zero leaves the drawing to it.
      */
   check (rig_open (&r, 0) == 0, "rig");
-  twist_easy_setopt (r.easy, TWISTOPT_XFERINFOFUNCTION, xfer);
-  twist_easy_setopt (r.easy, TWISTOPT_XFERINFODATA, NULL);
+  twist_transfer_setopt (r.transfer, TWISTOPT_XFERINFOFUNCTION, state);
+  twist_transfer_setopt (r.transfer, TWISTOPT_XFERINFODATA, NULL);
   answer = 0;
   calls = 0;
   clock_ms = 50000;
-  twist_progress_begin (r.easy);
+  twist_progress_begin (r.transfer);
   check (calls == 1, "called at the start");
-  twist_progress_dl_size (r.easy, 100);
-  twist_progress_downloaded (r.easy, 40);
-  twist_progress_ul_size (r.easy, 7);
-  twist_progress_uploaded (r.easy, 3);
+  twist_progress_dl_size (r.transfer, 100);
+  twist_progress_downloaded (r.transfer, 40);
+  twist_progress_ul_size (r.transfer, 7);
+  twist_progress_uploaded (r.transfer, 3);
   check (calls == 5, "called for each thing");
   check (last_dltotal == 100 && last_dlnow == 40 && last_ultotal == 7
          && last_ulnow == 3, "with the totals and the counts");
-  twist_progress_end (r.easy, TWIST_OK);
+  twist_progress_end (r.transfer, TWIST_OK);
   check (strcmp (rig_text (&r), "") == 0,
          "nothing drawn, and no newline, when the callback answers 0");
   rig_close (&r);
 
   /* TWIST_PROGRESSFUNC_CONTINUE: the callback and the meter.  */
   check (rig_open (&r, 0) == 0, "rig");
-  twist_easy_setopt (r.easy, TWISTOPT_XFERINFOFUNCTION, xfer);
+  twist_transfer_setopt (r.transfer, TWISTOPT_XFERINFOFUNCTION, state);
   answer = TWIST_PROGRESSFUNC_CONTINUE;
   clock_ms = 60000;
-  twist_progress_begin (r.easy);
+  twist_progress_begin (r.transfer);
   check (strstr (rig_text (&r), "% Total") != NULL
          && strstr (rig_text (&r), "\r  0     0") != NULL,
          "the meter as well");
-  twist_progress_end (r.easy, TWIST_OK);
+  twist_progress_end (r.transfer, TWIST_OK);
   rig_close (&r);
 
   /* Unknown sizes are 0 to the callback, not -1.  */
   check (rig_open (&r, 0) == 0, "rig");
-  twist_easy_setopt (r.easy, TWISTOPT_XFERINFOFUNCTION, xfer);
+  twist_transfer_setopt (r.transfer, TWISTOPT_XFERINFOFUNCTION, state);
   answer = 0;
   clock_ms = 70000;
-  twist_progress_begin (r.easy);
-  twist_progress_downloaded (r.easy, 5);
+  twist_progress_begin (r.transfer);
+  twist_progress_downloaded (r.transfer, 5);
   check (last_dltotal == 0 && last_dlnow == 5, "unknown is 0");
   rig_close (&r);
 
   /* Anything else stops the transfer.  */
   check (rig_open (&r, 0) == 0, "rig");
-  twist_easy_setopt (r.easy, TWISTOPT_XFERINFOFUNCTION, xfer);
+  twist_transfer_setopt (r.transfer, TWISTOPT_XFERINFOFUNCTION, state);
   answer = 1;
   clock_ms = 80000;
-  r.easy->done = 0;
-  twist_progress_begin (r.easy);
-  check (r.easy->done && r.easy->result == TWIST_ERR_ABORTED,
+  r.transfer->done = 0;
+  twist_progress_begin (r.transfer);
+  check (r.transfer->done && r.transfer->result == TWIST_ERR_ABORTED,
          "a non-zero answer ends the transfer as aborted");
   rig_close (&r);
 
   /* With the meter hidden the callback is not called either.  */
   check (rig_open (&r, 1) == 0, "rig");
-  twist_easy_setopt (r.easy, TWISTOPT_XFERINFOFUNCTION, xfer);
+  twist_transfer_setopt (r.transfer, TWISTOPT_XFERINFOFUNCTION, state);
   answer = 0;
   calls = 0;
   clock_ms = 90000;
-  twist_progress_begin (r.easy);
-  twist_progress_downloaded (r.easy, 5);
+  twist_progress_begin (r.transfer);
+  twist_progress_downloaded (r.transfer, 5);
   check (calls == 0, "NOPROGRESS silences the callback too");
   rig_close (&r);
 }
@@ -449,10 +449,10 @@ test_hop (void)
      second heading.  */
   check (rig_open (&r, 0) == 0, "rig");
   clock_ms = 100000;
-  twist_progress_begin (r.easy);
-  twist_progress_dl_size (r.easy, 10);
+  twist_progress_begin (r.transfer);
+  twist_progress_dl_size (r.transfer, 10);
   clock_ms = 100200;
-  twist_progress_hop (r.easy);
+  twist_progress_hop (r.transfer);
   {
     const char *t = rig_text (&r);
     size_t lines = 0;
@@ -462,8 +462,8 @@ test_hop (void)
     /* The two lines of the heading and the end of the first response's.  */
     check (lines == 3 && t[-1] == '\n', "the first response's line is closed");
   }
-  twist_progress_downloaded (r.easy, 4);
-  twist_progress_end (r.easy, TWIST_OK);
+  twist_progress_downloaded (r.transfer, 4);
+  twist_progress_end (r.transfer, TWIST_OK);
   {
     const char *t = rig_text (&r);
     const char *h = strstr (t, "% Total");
@@ -481,9 +481,9 @@ test_resume_line (void)
   struct rig r;
 
   check (rig_open (&r, 0) == 0, "rig");
-  r.easy->resume_from = 1234;
+  r.transfer->resume_from = 1234;
   clock_ms = 110000;
-  twist_progress_begin (r.easy);
+  twist_progress_begin (r.transfer);
   check (strncmp (rig_text (&r), "** Resuming transfer from byte position "
                   "1234\n  % Total", 54) == 0,
          "the resume line comes before the heading");
@@ -497,10 +497,10 @@ test_file_failure (void)
 
   /* A file that cannot be opened has drawn nothing, and shows nothing.  */
   check (rig_open (&r, 0) == 0, "rig");
-  twist_url_parse_int ("file:///nonexistent", &r.easy->url);
+  twist_url_parse_int ("file:///nonexistent", &r.transfer->url);
   clock_ms = 120000;
-  twist_progress_begin (r.easy);
-  twist_progress_end (r.easy, TWIST_ERR_FILE);
+  twist_progress_begin (r.transfer);
+  twist_progress_end (r.transfer, TWIST_ERR_FILE);
   check (strcmp (rig_text (&r), "") == 0, "nothing for a file that is not there");
   rig_close (&r);
 }
@@ -514,7 +514,7 @@ test_tick (void)
   /* A transfer that is waiting is still drawn once a second: the timer.  */
   check (rig_open (&r, 0) == 0, "rig");
   clock_ms = 130000;
-  twist_progress_begin (r.easy);
+  twist_progress_begin (r.transfer);
   before = strlen (rig_text (&r));
   clock_ms = 130999;
   twist_loop_on_timer (r.loop, clock_ms);
@@ -526,7 +526,7 @@ test_tick (void)
   clock_ms = 132000;
   twist_loop_on_timer (r.loop, clock_ms);
   check (strlen (rig_text (&r)) > before, "and another");
-  twist_progress_end (r.easy, TWIST_OK);
+  twist_progress_end (r.transfer, TWIST_OK);
   before = strlen (rig_text (&r));
   clock_ms = 140000;
   twist_loop_on_timer (r.loop, clock_ms);
@@ -537,9 +537,9 @@ test_tick (void)
      when the data comes, and by nothing else.  */
   check (rig_open (&r, 0) == 0, "rig");
   clock_ms = 150000;
-  twist_progress_begin (r.easy);
+  twist_progress_begin (r.transfer);
   clock_ms = 150500;
-  twist_progress_downloaded (r.easy, 1);
+  twist_progress_downloaded (r.transfer, 1);
   before = strlen (rig_text (&r));
   clock_ms = 151000;
   twist_loop_on_timer (r.loop, clock_ms);

@@ -35,7 +35,7 @@
 
 struct twist_gopher
 {
-  struct twist_easy *easy;
+  struct twist_transfer *transfer;
   struct twist_endpoint *ep;
   struct twist_mail_link link;
   int implicit_tls;
@@ -52,7 +52,7 @@ gopher_complete (struct twist_gopher *g, int err)
   if (g == NULL || g->finished)
     return;
   g->finished = 1;
-  twist_easy_finish (g->easy, err);
+  twist_transfer_finish (g->transfer, err);
 }
 
 static int
@@ -106,7 +106,7 @@ decode (const char *in, size_t n, uint8_t *out, size_t cap, size_t *out_n)
 static int
 build_request (struct twist_gopher *g)
 {
-  struct twist_url *url = g->easy->url;
+  struct twist_url *url = g->transfer->url;
   const char *path = url->path != NULL && url->path[0] != 0 ? url->path : "/";
   char joined[GOPHER_MAX];
   size_t n = 0;
@@ -159,14 +159,14 @@ flush_request (struct twist_gopher *g)
 static int
 deliver (struct twist_gopher *g, const uint8_t *data, size_t len)
 {
-  struct twist_easy *easy = g->easy;
+  struct twist_transfer *transfer = g->transfer;
   size_t off = 0;
 
   if (len > 0)
     g->saw = 1;
-  if (easy->write_cb == NULL || len == 0)
+  if (transfer->write_cb == NULL || len == 0)
     {
-      twist_easy_downloaded (easy, len);
+      twist_transfer_downloaded (transfer, len);
       return TWIST_OK;
     }
   while (off < len)
@@ -178,12 +178,12 @@ deliver (struct twist_gopher *g, const uint8_t *data, size_t len)
       if (chunk > sizeof buf)
         chunk = sizeof buf;
       memcpy (buf, data + off, chunk);
-      n = easy->write_cb (buf, 1, chunk, easy->write_data);
+      n = transfer->write_cb (buf, 1, chunk, transfer->write_data);
       if (n < chunk)
         return TWIST_ERR_ABORTED;
       off += chunk;
     }
-  twist_easy_downloaded (easy, len);
+  twist_transfer_downloaded (transfer, len);
   return TWIST_OK;
 }
 
@@ -237,10 +237,10 @@ gopher_connected (struct twist_endpoint *ep)
   g->ep = ep;
   if (g->implicit_tls)
     {
-      rc = twist_connection_start_tls (ep->conn, g->easy->url->host,
-                                       g->easy->verifypeer, NULL, 0,
-                                       g->easy->cainfo, g->easy->capath, g->easy->sslcert,
-                                       g->easy->sslkey);
+      rc = twist_connection_start_tls (ep->conn, g->transfer->url->host,
+                                       g->transfer->verifypeer, NULL, 0,
+                                       g->transfer->cainfo, g->transfer->capath, g->transfer->sslcert,
+                                       g->transfer->sslkey);
       if (rc != TWIST_OK)
         gopher_complete (g, rc);
       return;
@@ -313,22 +313,22 @@ twist_gopher_free (void *p)
 }
 
 struct twist_gopher *
-twist_gopher_new (struct twist_easy *easy, int live)
+twist_gopher_new (struct twist_transfer *transfer, int live)
 {
   struct twist_gopher *g;
   int rc;
 
   (void) live;
-  if (easy == NULL || easy->url == NULL)
+  if (transfer == NULL || transfer->url == NULL)
     return NULL;
   g = calloc (1, sizeof *g);
   if (g == NULL)
     return NULL;
-  g->easy = easy;
-  g->implicit_tls = easy->url->scheme != NULL
-                    && strcmp (easy->url->scheme, "gophers") == 0;
-  easy->xfer = g;
-  easy->xfer_free = twist_gopher_free;
+  g->transfer = transfer;
+  g->implicit_tls = transfer->url->scheme != NULL
+                    && strcmp (transfer->url->scheme, "gophers") == 0;
+  transfer->state = g;
+  transfer->state_free = twist_gopher_free;
   rc = build_request (g);
   if (rc != TWIST_OK)
     gopher_complete (g, rc);
@@ -336,18 +336,19 @@ twist_gopher_new (struct twist_easy *easy, int live)
 }
 
 int
-twist_gopher_attach (struct twist_easy *easy)
+twist_gopher_attach (struct twist_transfer *transfer)
 {
   struct twist_gopher *g;
   int rc;
 
-  g = twist_gopher_new (easy, 1);
+  g = twist_gopher_new (transfer, 1);
   if (g == NULL)
     return TWIST_ERR_NOMEM;
   if (g->finished)
-    return easy->result;
-  rc = twist_mail_link_open (&g->link, easy, &gopher_handler, g, gopher_fail);
+    return transfer->result;
+  rc = twist_mail_link_open (&g->link, transfer, &gopher_handler, g,
+                             gopher_fail);
   if (rc != TWIST_OK)
     gopher_complete (g, rc);
-  return easy->done ? easy->result : TWIST_OK;
+  return transfer->done ? transfer->result : TWIST_OK;
 }

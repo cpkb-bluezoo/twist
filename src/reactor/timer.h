@@ -29,6 +29,7 @@ int twist_timer_heap_push (struct twist_timer_heap *heap, uint64_t deadline,
                            void (*cb) (void *), void *user,
                            struct twist_timer **out);
 uint64_t twist_timer_heap_deadline (struct twist_timer_heap *heap);
-void twist_timer_heap_fire (struct twist_timer_heap *heap, uint64_t now);
+/* Run the timers that are due at NOW.  Returns how many ran.  */
+int twist_timer_heap_fire (struct twist_timer_heap *heap, uint64_t now);
 
 #endif

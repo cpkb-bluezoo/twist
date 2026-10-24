@@ -64,7 +64,7 @@ struct held
 
 struct twist_masque
 {
-  struct twist_easy *easy;
+  struct twist_transfer *transfer;
   struct twist_loop *loop;
   struct twist_connection *outer;
   struct twist_connection *inner;
@@ -149,8 +149,8 @@ refused (struct twist_masque *m, int status)
 
   snprintf (msg, sizeof msg, _("CONNECT-UDP tunnel failed, response %d"),
             status);
-  twist_easy_set_error (m->easy, twist_strdup (msg));
-  m->easy->proto_status = 56;
+  twist_transfer_set_error (m->transfer, twist_strdup (msg));
+  m->transfer->proto_status = 56;
   masque_fail (m, TWIST_ERR_PROXY);
 }
 
@@ -164,8 +164,8 @@ on_timeout (void *p)
   if (m->state != M_ASK)
     return;
   snprintf (msg, sizeof msg, _("timed out after %ld ms making the "
-                               "connection"), m->easy->connect_timeout_ms);
-  twist_easy_set_error (m->easy, twist_strdup (msg));
+                               "connection"), m->transfer->connect_timeout_ms);
+  twist_transfer_set_error (m->transfer, twist_strdup (msg));
   masque_fail (m, TWIST_ERR_TIMEOUT);
 }
 
@@ -366,10 +366,10 @@ h3_switching (void *user)
     }
   if (twist_quic_datagram_max (m->outer) == 0)
     {
-      twist_easy_set_error (m->easy,
-                            twist_strdup (_("the proxy does not accept HTTP "
-                                            "Datagrams, so it cannot do "
-                                            "CONNECT-UDP")));
+      twist_transfer_set_error
+        (m->transfer, twist_strdup (_("the proxy does not accept HTTP "
+                                      "Datagrams, so it cannot do "
+                                      "CONNECT-UDP")));
       masque_fail (m, TWIST_ERR_PROXY);
       return 0;
     }
@@ -528,7 +528,7 @@ split_uri (const char *uri, char **authority, char **path)
 }
 
 int
-twist_masque_connect (struct twist_easy *easy,
+twist_masque_connect (struct twist_transfer *transfer,
                       const struct twist_masque_spec *spec,
                       const struct twist_dns_addr *proxy_addr,
                       const struct twist_protocol_handler *handler,
@@ -557,7 +557,7 @@ twist_masque_connect (struct twist_easy *easy,
     return TWIST_ERR_NOMEM;
   if (twist_template_check (tmpl, err, sizeof err) != TWIST_OK)
     {
-      twist_easy_set_error (easy, twist_strdup (err));
+      twist_transfer_set_error (transfer, twist_strdup (err));
       free (tmpl);
       return TWIST_ERR_URL;
     }
@@ -571,8 +571,8 @@ twist_masque_connect (struct twist_easy *easy,
       free (uri);
       return TWIST_ERR_NOMEM;
     }
-  m->easy = easy;
-  m->loop = easy->loop;
+  m->transfer = transfer;
+  m->loop = transfer->loop;
   rc = split_uri (uri, &m->authority, &m->path);
   free (uri);
   if (rc != TWIST_OK)
@@ -580,25 +580,25 @@ twist_masque_connect (struct twist_easy *easy,
       free (m);
       return rc;
     }
-  if (u == NULL && easy->proxy_userpwd != NULL)
+  if (u == NULL && transfer->proxy_userpwd != NULL)
     {
-      const char *c = strchr (easy->proxy_userpwd, ':');
+      const char *c = strchr (transfer->proxy_userpwd, ':');
 
       if (c != NULL)
         {
-          split = twist_xmalloc ((size_t) (c - easy->proxy_userpwd) + 1);
+          split = twist_xmalloc ((size_t) (c - transfer->proxy_userpwd) + 1);
           if (split != NULL)
             {
-              memcpy (split, easy->proxy_userpwd,
-                      (size_t) (c - easy->proxy_userpwd));
-              split[c - easy->proxy_userpwd] = 0;
+              memcpy (split, transfer->proxy_userpwd,
+                      (size_t) (c - transfer->proxy_userpwd));
+              split[c - transfer->proxy_userpwd] = 0;
             }
           u = split;
           pw = c + 1;
         }
       else
         {
-          u = easy->proxy_userpwd;
+          u = transfer->proxy_userpwd;
           pw = "";
         }
     }
@@ -632,12 +632,14 @@ twist_masque_connect (struct twist_easy *easy,
   /* To the proxy: QUIC with datagrams.  */
   memset (&oo, 0, sizeof oo);
   oo.datagrams = 1;
-  rc = twist_quic_dial (easy->loop, spec->proxy_host, "h3", proxy_addr,
+  rc = twist_quic_dial (transfer->loop, spec->proxy_host, "h3", proxy_addr,
                         spec->proxy_port,
-                        easy->proxy_cainfo != NULL ? easy->proxy_cainfo
-                        : easy->cainfo,
-                        easy->proxy_cainfo != NULL ? NULL : easy->capath, NULL,
-                        NULL, easy->proxy_verifypeer, &oo, &m->outer);
+                        transfer->proxy_cainfo != NULL ? transfer->proxy_cainfo
+                        : transfer->cainfo,
+                        transfer->proxy_cainfo != NULL ? NULL
+                        : transfer->capath,
+                        NULL, NULL, transfer->proxy_verifypeer, &oo,
+                        &m->outer);
   if (rc != TWIST_OK)
     {
       m->outer = NULL;
@@ -657,9 +659,11 @@ twist_masque_connect (struct twist_easy *easy,
 
     memset (&none, 0, sizeof none);
     none.family = 4;
-    rc = twist_quic_dial (easy->loop, spec->host, "h3", &none, spec->port,
-                          easy->cainfo, easy->capath, easy->sslcert,
-                          easy->sslkey, easy->verifypeer, &io, &m->inner);
+    rc = twist_quic_dial (transfer->loop, spec->host, "h3", &none, spec->port,
+                          transfer->cainfo, transfer->capath,
+                          transfer->sslcert,
+                          transfer->sslkey, transfer->verifypeer, &io,
+                          &m->inner);
   }
   if (rc != TWIST_OK)
     {
@@ -670,10 +674,10 @@ twist_masque_connect (struct twist_easy *easy,
   twist_connection_set_owner (m->inner, m, inner_free, NULL);
   twist_connection_endpoint (m->inner)->user_data = user;
   twist_connection_set_handler (m->inner, handler);
-  if (easy->connect_timeout_ms > 0)
-    twist_loop_schedule (easy->loop,
-                         twist_loop_now (easy->loop)
-                         + (uint64_t) easy->connect_timeout_ms,
+  if (transfer->connect_timeout_ms > 0)
+    twist_loop_schedule (transfer->loop,
+                         twist_loop_now (transfer->loop)
+                         + (uint64_t) transfer->connect_timeout_ms,
                          on_timeout, m, &m->timer);
   *out = m->inner;
   return TWIST_OK;

@@ -48,7 +48,7 @@ enum
 
 struct twist_ws
 {
-  struct twist_easy *easy;
+  struct twist_transfer *transfer;
   int (*send) (void *user, const uint8_t *data, size_t len);
   void *send_user;
   void (*done) (void *user, int err);
@@ -247,18 +247,18 @@ twist_ws_validate (const char *key, const char *upgrade,
 static int
 deliver (struct twist_ws *w, const uint8_t *data, size_t len)
 {
-  struct twist_easy *easy = w->easy;
+  struct twist_transfer *transfer = w->transfer;
   size_t off = 0;
 
-  if (easy == NULL || len == 0)
+  if (transfer == NULL || len == 0)
     {
-      if (easy != NULL)
-        twist_easy_downloaded (easy, len);
+      if (transfer != NULL)
+        twist_transfer_downloaded (transfer, len);
       return TWIST_OK;
     }
-  if (easy->write_cb == NULL)
+  if (transfer->write_cb == NULL)
     {
-      twist_easy_downloaded (easy, len);
+      twist_transfer_downloaded (transfer, len);
       return TWIST_OK;
     }
   while (off < len)
@@ -270,12 +270,12 @@ deliver (struct twist_ws *w, const uint8_t *data, size_t len)
       if (chunk > sizeof buf)
         chunk = sizeof buf;
       memcpy (buf, data + off, chunk);
-      n = easy->write_cb (buf, 1, chunk, easy->write_data);
+      n = transfer->write_cb (buf, 1, chunk, transfer->write_data);
       if (n < chunk)
         return TWIST_ERR_ABORTED;
       off += chunk;
     }
-  twist_easy_downloaded (easy, len);
+  twist_transfer_downloaded (transfer, len);
   return TWIST_OK;
 }
 
@@ -475,7 +475,7 @@ twist_ws_receive (struct twist_ws *w, const uint8_t *data, size_t len)
 }
 
 struct twist_ws *
-twist_ws_new (struct twist_easy *easy,
+twist_ws_new (struct twist_transfer *transfer,
               int (*send) (void *user, const uint8_t *data, size_t len),
               void *send_user, void (*done) (void *user, int err),
               void *done_user)
@@ -484,7 +484,7 @@ twist_ws_new (struct twist_easy *easy,
 
   if (w == NULL)
     return NULL;
-  w->easy = easy;
+  w->transfer = transfer;
   w->send = send;
   w->send_user = send_user;
   w->done = done;

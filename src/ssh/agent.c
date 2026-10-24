@@ -268,7 +268,8 @@ agent_connected (struct twist_endpoint *ep)
       agent_fail (a, _("cannot write to the agent"));
       return;
     }
-  twist_loop_schedule (s->easy->loop, twist_loop_now (s->easy->loop) + ms,
+  twist_loop_schedule (s->transfer->loop,
+                       twist_loop_now (s->transfer->loop) + ms,
                        identities_timeout, a, &a->timer);
 }
 
@@ -310,7 +311,7 @@ static const struct twist_protocol_handler agent_handler = {
 void
 twist_ssh_agent_start (struct twist_ssh *s)
 {
-  struct twist_easy *e = s->easy;
+  struct twist_transfer *e = s->transfer;
   struct sockaddr_un sa;
   struct ssh_agent *a;
   const char *path;

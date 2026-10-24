@@ -45,7 +45,7 @@
    record released and returns, and the record is freed by whichever of the
    loop (the last chunk it has to acknowledge) and the worker (when it ends)
    is the last to be done with it.  A released transfer delivers nothing to
-   the application and tells the multi handle nothing; the worker, which sees
+   the application and tells the runtime nothing; the worker, which sees
    that, stops.
 
    The worker tells the loop what it has by posting commands, and it must not
@@ -70,8 +70,8 @@ struct file_chunk
 
 struct twist_file
 {
-  struct twist_easy *easy;
-  /* The loop's, for the worker: it must not reach it through the easy handle,
+  struct twist_transfer *transfer;
+  /* The loop's, for the worker: it must not reach it through the transfer,
      which a released transfer may have left behind.  */
   struct twist_loop *loop;
   pthread_mutex_t mu;
@@ -127,7 +127,7 @@ file_unlock (struct twist_file *f)
 }
 
 /* The transfer is let go of: by the application, which no longer wants it,
-   or the multi handle going away.  It returns at once.  */
+   or the runtime going away.  It returns at once.  */
 static void
 file_free (void *p)
 {
@@ -191,12 +191,12 @@ file_on_loop (void *user)
 {
   struct file_chunk *c = user;
   struct twist_file *f = c->file;
-  struct twist_easy *easy;
+  struct twist_transfer *transfer;
   int err = c->err;
 
   if (f->released)
     {
-      /* Let go of: nothing is for the application or the multi handle now.
+      /* Let go of: nothing is for the application or the runtime now.
          Only the loop's thread sets RELEASED, and this is it.  */
       free (c->data);
       free (c->errmsg);
@@ -205,7 +205,7 @@ file_on_loop (void *user)
       chunk_done (f, c, 0);
       return;
     }
-  easy = f->easy;
+  transfer = f->transfer;
   if (!f->size_noted)
     {
       long long size = -1;
@@ -217,20 +217,21 @@ file_on_loop (void *user)
       if (size >= 0)
         {
           f->size_noted = 1;
-          twist_progress_dl_size (easy, size);
+          twist_progress_dl_size (transfer, size);
         }
     }
   if (c->data != NULL && c->len > 0 && f->err == TWIST_OK && err == TWIST_OK
-      && easy->write_cb != NULL)
+      && transfer->write_cb != NULL)
     {
-      size_t got = easy->write_cb (c->data, 1, c->len, easy->write_data);
+      size_t got = transfer->write_cb (c->data, 1, c->len,
+                                       transfer->write_data);
 
       if (got < c->len)
         err = TWIST_ERR_ABORTED;
       else
         {
           f->total += c->len;
-          twist_progress_downloaded (easy, c->len);
+          twist_progress_downloaded (transfer, c->len);
         }
     }
   free (c->data);
@@ -245,7 +246,7 @@ file_on_loop (void *user)
   if (c->errmsg != NULL)
     {
       if (f->err != TWIST_OK)
-        twist_easy_set_error (easy, c->errmsg);
+        twist_transfer_set_error (transfer, c->errmsg);
       else
         free (c->errmsg);
       c->errmsg = NULL;
@@ -253,8 +254,8 @@ file_on_loop (void *user)
   if (c->final_note)
     {
       if (f->err == TWIST_OK)
-        easy->size_download = f->total;
-      twist_easy_finish (easy, f->err);
+        transfer->size_download = f->total;
+      twist_transfer_finish (transfer, f->err);
     }
   chunk_done (f, c, f->err != TWIST_OK);
 }
@@ -580,23 +581,23 @@ done:
 }
 
 int
-twist_file_attach (struct twist_easy *easy)
+twist_file_attach (struct twist_transfer *transfer)
 {
   struct twist_file *f;
   const char *host;
   const char *path;
   int rc;
 
-  if (easy == NULL || easy->url == NULL || easy->loop == NULL
-      || easy->multi == NULL || easy->multi->storage == NULL)
+  if (transfer == NULL || transfer->url == NULL || transfer->loop == NULL
+      || transfer->runtime == NULL || transfer->runtime->storage == NULL)
     return TWIST_ERR_INVAL;
   /* The worker waits on the loop for room to hand over what it reads, so it
      cannot be the loop's own thread.  */
-  if (twist_storage_threads (easy->multi->storage) == 0)
+  if (twist_storage_threads (transfer->runtime->storage) == 0)
     return TWIST_ERR_UNSUPPORTED;
-  host = easy->url->host;
-  path = easy->url->path;
-  rc = twist_file_check_url (host, path, easy->url->path_set);
+  host = transfer->url->host;
+  path = transfer->url->path;
+  rc = twist_file_check_url (host, path, transfer->url->path_set);
   if (rc != TWIST_OK)
     return rc;
   f = calloc (1, sizeof *f);
@@ -613,8 +614,8 @@ twist_file_attach (struct twist_easy *easy)
       free (f);
       return TWIST_ERR_NOMEM;
     }
-  f->easy = easy;
-  f->loop = easy->loop;
+  f->transfer = transfer;
+  f->loop = transfer->loop;
   f->live = 1;
   f->final.file = f;
   f->final_cmd = twist_loop_cmd_new (file_on_loop, &f->final);
@@ -633,23 +634,24 @@ twist_file_attach (struct twist_easy *easy)
         return nul ? TWIST_ERR_URL : TWIST_ERR_NOMEM;
       }
   }
-  if (easy->range != NULL && easy->range[0] != 0)
+  if (transfer->range != NULL && transfer->range[0] != 0)
     {
-      rc = parse_range (easy->range, f);
+      rc = parse_range (transfer->range, f);
       if (rc != TWIST_OK)
         {
           file_destroy (f);
           return rc;
         }
     }
-  easy->xfer = f;
-  easy->xfer_free = file_free;
-  rc = twist_storage_submit (easy->multi->storage, file_work, f, NULL, NULL,
+  transfer->state = f;
+  transfer->state_free = file_free;
+  rc = twist_storage_submit (transfer->runtime->storage, file_work, f, NULL,
+                             NULL,
                              NULL);
   if (rc != TWIST_OK)
     {
-      easy->xfer = NULL;
-      easy->xfer_free = NULL;
+      transfer->state = NULL;
+      transfer->state_free = NULL;
       f->live = 0;
       file_free (f);
       return rc;

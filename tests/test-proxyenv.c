@@ -99,19 +99,19 @@ test_match (void)
   check (!m ("::1", "127.0.0.1"), "IPv4 is not IPv6");
 }
 
-static struct twist_easy *
-easy_for (const char *url)
+static struct twist_transfer *
+transfer_for (const char *url)
 {
-  struct twist_easy *e = twist_easy_init ();
+  struct twist_transfer *e = twist_transfer_new ();
 
   twist_url_parse_int (url, &e->url);
   return e;
 }
 
 static int
-is (const struct twist_easy *e, const char *want)
+is (const struct twist_transfer *e, const char *want)
 {
-  const char *got = twist_easy_proxy (e);
+  const char *got = twist_transfer_proxy (e);
 
   return want == NULL ? got == NULL : got != NULL && strcmp (got, want) == 0;
 }
@@ -119,16 +119,16 @@ is (const struct twist_easy *e, const char *want)
 static void
 test_proxy (void)
 {
-  struct twist_easy *e;
+  struct twist_transfer *e;
 
   clear_env ();
-  e = easy_for ("http://example.com/");
+  e = transfer_for ("http://example.com/");
   check (is (e, NULL), "no proxy without one");
   setenv ("http_proxy", "http://p1:3128", 1);
   check (is (e, "http://p1:3128"), "http_proxy");
-  twist_easy_cleanup (e);
+  twist_transfer_free (e);
 
-  e = easy_for ("https://example.com/");
+  e = transfer_for ("https://example.com/");
   check (is (e, NULL), "http_proxy is not for https");
   setenv ("https_proxy", "http://p2:3128", 1);
   check (is (e, "http://p2:3128"), "https_proxy");
@@ -136,114 +136,114 @@ test_proxy (void)
   check (is (e, "http://p2:3128"), "lower case first");
   unsetenv ("https_proxy");
   check (is (e, "http://p3:3128"), "HTTPS_PROXY");
-  twist_easy_cleanup (e);
+  twist_transfer_free (e);
 
   /* HTTP_PROXY is never read: a web server can set it from a header.  */
   clear_env ();
   setenv ("HTTP_PROXY", "http://evil:1", 1);
-  e = easy_for ("http://example.com/");
+  e = transfer_for ("http://example.com/");
   check (is (e, NULL), "HTTP_PROXY is not used");
-  twist_easy_cleanup (e);
+  twist_transfer_free (e);
 
   /* The scheme names the variable, for every scheme.  */
   clear_env ();
   setenv ("ftp_proxy", "http://pf:1", 1);
   setenv ("SFTP_PROXY", "http://ps:1", 1);
   setenv ("imaps_proxy", "http://pi:1", 1);
-  e = easy_for ("ftp://example.com/f");
+  e = transfer_for ("ftp://example.com/f");
   check (is (e, "http://pf:1"), "ftp_proxy");
-  twist_easy_cleanup (e);
-  e = easy_for ("sftp://example.com/f");
+  twist_transfer_free (e);
+  e = transfer_for ("sftp://example.com/f");
   check (is (e, "http://ps:1"), "SFTP_PROXY");
-  twist_easy_cleanup (e);
-  e = easy_for ("imaps://example.com/");
+  twist_transfer_free (e);
+  e = transfer_for ("imaps://example.com/");
   check (is (e, "http://pi:1"), "imaps_proxy");
-  twist_easy_cleanup (e);
-  e = easy_for ("smtp://example.com/");
+  twist_transfer_free (e);
+  e = transfer_for ("smtp://example.com/");
   check (is (e, NULL), "no smtp_proxy, no proxy");
-  twist_easy_cleanup (e);
+  twist_transfer_free (e);
 
   /* all_proxy for the rest.  */
   setenv ("ALL_PROXY", "socks5://pa:1080", 1);
-  e = easy_for ("smtp://example.com/");
+  e = transfer_for ("smtp://example.com/");
   check (is (e, "socks5://pa:1080"), "ALL_PROXY");
   setenv ("all_proxy", "socks5://pb:1080", 1);
   check (is (e, "socks5://pb:1080"), "all_proxy first");
-  twist_easy_cleanup (e);
-  e = easy_for ("ftp://example.com/f");
+  twist_transfer_free (e);
+  e = transfer_for ("ftp://example.com/f");
   check (is (e, "http://pf:1"), "the scheme's own before all_proxy");
-  twist_easy_cleanup (e);
+  twist_transfer_free (e);
 
   /* An empty variable is set: it says none, and all_proxy is not asked.  */
   setenv ("ftp_proxy", "", 1);
-  e = easy_for ("ftp://example.com/f");
+  e = transfer_for ("ftp://example.com/f");
   check (is (e, NULL), "an empty ftp_proxy is none");
-  twist_easy_cleanup (e);
+  twist_transfer_free (e);
 
   /* A WebSocket goes through the proxy of HTTP when it has none of its own.  */
   clear_env ();
   setenv ("http_proxy", "http://ph:1", 1);
   setenv ("https_proxy", "http://pp:1", 1);
-  e = easy_for ("ws://example.com/");
+  e = transfer_for ("ws://example.com/");
   check (is (e, "http://ph:1"), "ws uses http_proxy");
-  twist_easy_cleanup (e);
-  e = easy_for ("wss://example.com/");
+  twist_transfer_free (e);
+  e = transfer_for ("wss://example.com/");
   check (is (e, "http://pp:1"), "wss uses https_proxy");
   setenv ("ws_proxy", "http://pw:1", 1);
-  twist_easy_cleanup (e);
-  e = easy_for ("ws://example.com/");
+  twist_transfer_free (e);
+  e = transfer_for ("ws://example.com/");
   check (is (e, "http://pw:1"), "ws_proxy before it");
-  twist_easy_cleanup (e);
+  twist_transfer_free (e);
 
   /* A scheme that does not use a proxy is not given one.  */
   clear_env ();
   setenv ("ALL_PROXY", "http://pa:1", 1);
   setenv ("tftp_proxy", "http://pt:1", 1);
-  e = easy_for ("tftp://example.com/f");
+  e = transfer_for ("tftp://example.com/f");
   check (is (e, NULL), "tftp has none");
-  twist_easy_cleanup (e);
-  e = easy_for ("file:///etc/hostname");
+  twist_transfer_free (e);
+  e = transfer_for ("file:///etc/hostname");
   check (is (e, NULL), "nor file");
-  twist_easy_cleanup (e);
+  twist_transfer_free (e);
 }
 
 static void
 test_given (void)
 {
-  struct twist_easy *e;
+  struct twist_transfer *e;
 
   clear_env ();
   setenv ("http_proxy", "http://env:1", 1);
-  e = easy_for ("http://example.com/");
-  twist_easy_setopt (e, TWISTOPT_PROXY, "http://given:2");
+  e = transfer_for ("http://example.com/");
+  twist_transfer_setopt (e, TWISTOPT_PROXY, "http://given:2");
   check (is (e, "http://given:2"), "given before the environment");
-  twist_easy_setopt (e, TWISTOPT_PROXY, "");
+  twist_transfer_setopt (e, TWISTOPT_PROXY, "");
   check (is (e, NULL), "\"\" is none, whatever the environment says");
-  twist_easy_setopt (e, TWISTOPT_PROXY, NULL);
+  twist_transfer_setopt (e, TWISTOPT_PROXY, NULL);
   check (is (e, "http://env:1"), "NULL goes back to the environment");
-  twist_easy_cleanup (e);
+  twist_transfer_free (e);
 
   /* The proxy is looked at again when the URL changes, as with a redirect.  */
   clear_env ();
   setenv ("http_proxy", "http://env:1", 1);
   setenv ("no_proxy", "direct.example", 1);
-  e = easy_for ("http://example.com/");
+  e = transfer_for ("http://example.com/");
   check (is (e, "http://env:1"), "through the proxy");
   twist_url_free_int (e->url);
   e->url = NULL;
   twist_url_parse_int ("http://direct.example/x", &e->url);
   check (is (e, NULL), "and then not, for another host");
-  twist_easy_cleanup (e);
+  twist_transfer_free (e);
 }
 
 static void
 test_noproxy (void)
 {
-  struct twist_easy *e;
+  struct twist_transfer *e;
 
   clear_env ();
   setenv ("http_proxy", "http://env:1", 1);
-  e = easy_for ("http://www.local.com/");
+  e = transfer_for ("http://www.local.com/");
   setenv ("NO_PROXY", "local.com", 1);
   check (is (e, NULL), "NO_PROXY");
   unsetenv ("NO_PROXY");
@@ -254,39 +254,39 @@ test_noproxy (void)
   check (is (e, NULL), "no_proxy before NO_PROXY");
 
   /* It disables a proxy that was given, too.  */
-  twist_easy_setopt (e, TWISTOPT_PROXY, "http://given:2");
+  twist_transfer_setopt (e, TWISTOPT_PROXY, "http://given:2");
   check (is (e, NULL), "NO_PROXY with a proxy that was given");
 
   /* The application's list is used instead of the environment's, and "" is
      an empty one.  */
-  twist_easy_setopt (e, TWISTOPT_NOPROXY, "other.org");
+  twist_transfer_setopt (e, TWISTOPT_NOPROXY, "other.org");
   check (is (e, "http://given:2"), "the given list instead of the environment's");
-  twist_easy_setopt (e, TWISTOPT_NOPROXY, "www.local.com");
+  twist_transfer_setopt (e, TWISTOPT_NOPROXY, "www.local.com");
   check (is (e, NULL), "the given list");
-  twist_easy_setopt (e, TWISTOPT_NOPROXY, "");
+  twist_transfer_setopt (e, TWISTOPT_NOPROXY, "");
   check (is (e, "http://given:2"), "\"\" overrides the environment's list");
-  twist_easy_setopt (e, TWISTOPT_NOPROXY, NULL);
+  twist_transfer_setopt (e, TWISTOPT_NOPROXY, NULL);
   check (is (e, NULL), "NULL goes back to the environment's");
-  twist_easy_setopt (e, TWISTOPT_NOPROXY, "*");
-  twist_easy_setopt (e, TWISTOPT_PROXY, NULL);
+  twist_transfer_setopt (e, TWISTOPT_NOPROXY, "*");
+  twist_transfer_setopt (e, TWISTOPT_PROXY, NULL);
   unsetenv ("no_proxy");
   unsetenv ("NO_PROXY");
   check (is (e, NULL), "* is every host");
-  twist_easy_cleanup (e);
+  twist_transfer_free (e);
 
   /* An address in the list and a host that is one.  */
   clear_env ();
   setenv ("http_proxy", "http://env:1", 1);
   setenv ("no_proxy", "192.168.0.0/16,::1", 1);
-  e = easy_for ("http://192.168.7.7:8080/");
+  e = transfer_for ("http://192.168.7.7:8080/");
   check (is (e, NULL), "a network in no_proxy");
-  twist_easy_cleanup (e);
-  e = easy_for ("http://[::1]:8080/");
+  twist_transfer_free (e);
+  e = transfer_for ("http://[::1]:8080/");
   check (is (e, NULL), "an IPv6 address in no_proxy");
-  twist_easy_cleanup (e);
-  e = easy_for ("http://10.0.0.1/");
+  twist_transfer_free (e);
+  e = transfer_for ("http://10.0.0.1/");
   check (is (e, "http://env:1"), "an address outside it");
-  twist_easy_cleanup (e);
+  twist_transfer_free (e);
 }
 
 int

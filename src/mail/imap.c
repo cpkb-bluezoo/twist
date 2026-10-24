@@ -47,7 +47,7 @@ enum
 
 struct twist_imap
 {
-  struct twist_easy *easy;
+  struct twist_transfer *transfer;
   struct twist_mail_link link;
   struct twist_mail_sasl sasl;
   struct twist_endpoint *ep;
@@ -84,7 +84,7 @@ imap_complete (struct twist_imap *m, int err)
   if (m == NULL || m->finished)
     return;
   m->finished = 1;
-  twist_easy_finish (m->easy, err);
+  twist_transfer_finish (m->transfer, err);
 }
 
 static int
@@ -154,9 +154,9 @@ parse_target (struct twist_imap *m)
 
   m->uid = 0;
   memcpy (m->box, "INBOX", 6);
-  if (m->easy->url == NULL || m->easy->url->path == NULL)
+  if (m->transfer->url == NULL || m->transfer->url->path == NULL)
     return TWIST_OK;
-  path = m->easy->url->path;
+  path = m->transfer->url->path;
   if (path[0] == '/')
     path++;
   uid = strstr (path, ";UID=");
@@ -187,14 +187,14 @@ parse_target (struct twist_imap *m)
 static int
 deliver (struct twist_imap *m, const uint8_t *data, size_t len)
 {
-  struct twist_easy *easy = m->easy;
+  struct twist_transfer *transfer = m->transfer;
   size_t n;
 
   if (len == 0)
     return TWIST_OK;
-  if (easy->write_cb == NULL)
+  if (transfer->write_cb == NULL)
     {
-      twist_easy_downloaded (easy, len);
+      twist_transfer_downloaded (transfer, len);
       return TWIST_OK;
     }
   {
@@ -208,13 +208,13 @@ deliver (struct twist_imap *m, const uint8_t *data, size_t len)
         if (chunk > sizeof buf)
           chunk = sizeof buf;
         memcpy (buf, data + off, chunk);
-        n = easy->write_cb (buf, 1, chunk, easy->write_data);
+        n = transfer->write_cb (buf, 1, chunk, transfer->write_data);
         if (n < chunk)
           return TWIST_ERR_ABORTED;
         off += chunk;
       }
   }
-  twist_easy_downloaded (easy, len);
+  twist_transfer_downloaded (transfer, len);
   return TWIST_OK;
 }
 
@@ -239,8 +239,8 @@ start_box (struct twist_imap *m)
 static int
 start_auth (struct twist_imap *m)
 {
-  const char *user = twist_mail_user (m->easy);
-  const char *bearer = m->easy->bearer;
+  const char *user = twist_mail_user (m->transfer);
+  const char *bearer = m->transfer->bearer;
   char *b64 = NULL;
   int initial = 0;
   int rc;
@@ -248,9 +248,9 @@ start_auth (struct twist_imap *m)
   if ((user == NULL || user[0] == 0)
       && (bearer == NULL || bearer[0] == 0))
     return start_box (m);
-  if (bad_token (user) || bad_token (twist_mail_pass (m->easy)))
+  if (bad_token (user) || bad_token (twist_mail_pass (m->transfer)))
     return TWIST_ERR_PROTOCOL;
-  rc = twist_mail_sasl_start (&m->sasl, m->easy,
+  rc = twist_mail_sasl_start (&m->sasl, m->transfer,
                               m->auth_adv[0] != 0 ? m->auth_adv : NULL,
                               &b64, &initial);
   if (rc != TWIST_OK)
@@ -282,9 +282,9 @@ after_cap (struct twist_imap *m)
           return imap_send (m, "%s STARTTLS\r\n", m->expect);
         }
       if (m->use_ssl == TWIST_USE_SSL_ALL)
-        return twist_easy_use_ssl_failed (m->easy,
-                                          _("the server does not offer "
-                                            "STARTTLS"));
+        return twist_transfer_use_ssl_failed (m->transfer,
+                                              _("the server does not offer "
+                                                "STARTTLS"));
     }
   return start_auth (m);
 }
@@ -297,10 +297,11 @@ begin_tls (struct twist_imap *m)
   m->state = I_TLSWAIT;
   if (m->ep == NULL)
     return TWIST_OK;
-  return twist_connection_start_tls (m->ep->conn, m->easy->url->host,
-                                     m->easy->verifypeer, NULL, 0,
-                                     m->easy->cainfo, m->easy->capath,
-                                     m->easy->sslcert, m->easy->sslkey);
+  return twist_connection_start_tls (m->ep->conn, m->transfer->url->host,
+                                     m->transfer->verifypeer, NULL, 0,
+                                     m->transfer->cainfo, m->transfer->capath,
+                                     m->transfer->sslcert,
+                                     m->transfer->sslkey);
 }
 
 static void
@@ -330,7 +331,8 @@ note_cap (struct twist_imap *m, const uint8_t *line, size_t n)
           e = p;
           while (e < s + n && *e != ' ')
             e++;
-          if (m->auth_adv[0] != 0 && strlen (m->auth_adv) + 1 < sizeof m->auth_adv)
+          if (m->auth_adv[0] != 0
+              && strlen (m->auth_adv) + 1 < sizeof m->auth_adv)
             strcat (m->auth_adv, " ");
           if (strlen (m->auth_adv) + (size_t) (e - p) < sizeof m->auth_adv)
             strncat (m->auth_adv, p, (size_t) (e - p));
@@ -430,7 +432,7 @@ on_line (struct twist_imap *m, const uint8_t *line, size_t n)
       m->literal = lit;
       m->in_fetch = m->state == I_FETCH;
       if (m->in_fetch)
-        twist_progress_dl_size (m->easy, (long long) lit);
+        twist_progress_dl_size (m->transfer, (long long) lit);
     }
   if (!is_tagged (m, line, n, &ok))
     return;
@@ -439,9 +441,8 @@ on_line (struct twist_imap *m, const uint8_t *line, size_t n)
       /* Refused: required, that is the end; wanted, go on as it is.  */
       if (m->use_ssl == TWIST_USE_SSL_ALL)
         {
-          imap_complete (m, twist_easy_use_ssl_failed (m->easy,
-                                                       _("the server refused "
-                                                         "STARTTLS")));
+          imap_complete (m, twist_transfer_use_ssl_failed
+                         (m->transfer, _("the server refused STARTTLS")));
           return;
         }
       rc = start_auth (m);
@@ -564,10 +565,10 @@ imap_connected (struct twist_endpoint *ep)
   m->ep = ep;
   if (!m->implicit_tls)
     return;
-  rc = twist_connection_start_tls (ep->conn, m->easy->url->host,
-                                   m->easy->verifypeer, NULL, 0,
-                                   m->easy->cainfo, m->easy->capath, m->easy->sslcert,
-                                   m->easy->sslkey);
+  rc = twist_connection_start_tls (ep->conn, m->transfer->url->host,
+                                   m->transfer->verifypeer, NULL, 0,
+                                   m->transfer->cainfo, m->transfer->capath, m->transfer->sslcert,
+                                   m->transfer->sslkey);
   if (rc != TWIST_OK)
     imap_complete (m, rc);
 }
@@ -635,41 +636,41 @@ twist_imap_free (void *p)
 }
 
 struct twist_imap *
-twist_imap_new (struct twist_easy *easy, int live)
+twist_imap_new (struct twist_transfer *transfer, int live)
 {
   struct twist_imap *m;
 
   (void) live;
-  if (easy == NULL || easy->url == NULL)
+  if (transfer == NULL || transfer->url == NULL)
     return NULL;
   m = calloc (1, sizeof *m);
   if (m == NULL)
     return NULL;
-  m->easy = easy;
-  m->implicit_tls = easy->url->scheme != NULL
-                    && strcmp (easy->url->scheme, "imaps") == 0;
-  m->use_ssl = m->implicit_tls ? TWIST_USE_SSL_NONE : easy->use_ssl;
+  m->transfer = transfer;
+  m->implicit_tls = transfer->url->scheme != NULL
+                    && strcmp (transfer->url->scheme, "imaps") == 0;
+  m->use_ssl = m->implicit_tls ? TWIST_USE_SSL_NONE : transfer->use_ssl;
   twist_mail_sasl_init (&m->sasl);
-  easy->xfer = m;
-  easy->xfer_free = twist_imap_free;
+  transfer->state = m;
+  transfer->state_free = twist_imap_free;
   return m;
 }
 
 int
-twist_imap_attach (struct twist_easy *easy)
+twist_imap_attach (struct twist_transfer *transfer)
 {
   struct twist_imap *m;
   int rc;
 
-  if (easy == NULL || easy->url == NULL || easy->loop == NULL)
+  if (transfer == NULL || transfer->url == NULL || transfer->loop == NULL)
     return TWIST_ERR_INVAL;
-  m = twist_imap_new (easy, 1);
+  m = twist_imap_new (transfer, 1);
   if (m == NULL)
     return TWIST_ERR_NOMEM;
-  rc = twist_mail_link_open (&m->link, easy, &imap_handler, m, imap_fail);
+  rc = twist_mail_link_open (&m->link, transfer, &imap_handler, m, imap_fail);
   if (rc != TWIST_OK)
     imap_complete (m, rc);
-  return easy->done ? easy->result : TWIST_OK;
+  return transfer->done ? transfer->result : TWIST_OK;
 }
 
 /* The handshake that followed STARTTLS is done.  What the server said before

@@ -1225,15 +1225,18 @@ twist_quic_dial (struct twist_loop *loop, const char *server_name,
    so that, and not the address, is the name the certificate is checked
    against.  */
 static int
-quic_connect (struct twist_easy *easy, const struct twist_dns_addr *addr,
+quic_connect (struct twist_transfer *transfer,
+              const struct twist_dns_addr *addr,
               int port, struct twist_connection **out)
 {
-  if (easy == NULL || easy->url == NULL || easy->url->host == NULL
+  if (transfer == NULL || transfer->url == NULL || transfer->url->host == NULL
       || addr == NULL)
     return TWIST_ERR_INVAL;
-  return twist_quic_dial (easy->loop, easy->url->host, "h3", addr, port,
-                          easy->cainfo, easy->capath, easy->sslcert,
-                          easy->sslkey, easy->verifypeer, NULL, out);
+  return twist_quic_dial (transfer->loop, transfer->url->host, "h3", addr,
+                          port,
+                          transfer->cainfo, transfer->capath,
+                          transfer->sslcert,
+                          transfer->sslkey, transfer->verifypeer, NULL, out);
 }
 
 int

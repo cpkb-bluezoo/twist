@@ -100,7 +100,7 @@ Twist TODO List
       named resolver's own host name still uses plain UDP, as it must.
   [ ] The HTTP pool's key is the loop, scheme, host, port and proxy; it has
       nothing of the TLS settings (verification, CA, client certificate,
-      pinning).  A multi handle or share whose handles differ in them can
+      pinning).  A runtime whose transfers differ in them can
       use a connection made under others.  The SSH key hashes its
       equivalents (see ssh_pool_key in src/ssh/ssh.c).  The command line is
       unaffected because one operation has one set of options.

@@ -57,19 +57,19 @@ fuzz_seeds (void (*add) (const void *, size_t))
 int
 LLVMFuzzerTestOneInput (const uint8_t *data, size_t size)
 {
-  twist_easy *easy;
+  twist_transfer *transfer;
   struct twist_telnet *t;
   struct twist_slist *opts = NULL;
 
   if (size < 2)
     return 0;
-  easy = twist_easy_init ();
-  if (easy == NULL)
+  transfer = twist_transfer_new ();
+  if (transfer == NULL)
     abort ();
-  if (twist_url_parse_int ("telnet://127.0.0.1/", &easy->url) != TWIST_OK)
+  if (twist_url_parse_int ("telnet://127.0.0.1/", &transfer->url) != TWIST_OK)
     abort ();
   if (data[1] & 0x01)
-    twist_easy_setopt (easy, TWISTOPT_USERNAME, "fuzz");
+    twist_transfer_setopt (transfer, TWISTOPT_USERNAME, "fuzz");
   if (data[1] & 0x02)
     opts = twist_slist_append (opts, "TTYPE=xterm");
   if (data[1] & 0x04)
@@ -81,16 +81,16 @@ LLVMFuzzerTestOneInput (const uint8_t *data, size_t size)
   if (data[1] & 0x20)
     opts = twist_slist_append (opts, "BINARY=0");
   if (opts != NULL)
-    twist_easy_setopt (easy, TWISTOPT_TELNETOPTIONS, opts);
-  easy->write_cb = fuzz_sink;
-  t = twist_telnet_new (easy, 0);
+    twist_transfer_setopt (transfer, TWISTOPT_TELNETOPTIONS, opts);
+  transfer->write_cb = fuzz_sink;
+  t = twist_telnet_new (transfer, 0);
   if (t == NULL)
     abort ();
   fuzz_feed ((fuzz_recv) twist_telnet_receive, t, data + 2, size - 2,
              fuzz_piece (data[0], size));
   twist_telnet_input (t, data + 2, size - 2);
   twist_telnet_closed (t, TWIST_ERR_CLOSED);
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
   twist_slist_free_all (opts);
   return 0;
 }

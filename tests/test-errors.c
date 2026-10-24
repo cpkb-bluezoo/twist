@@ -30,7 +30,7 @@
 static void
 test_errors (void)
 {
-  struct twist_easy *easy;
+  struct twist_transfer *transfer;
 
   check (strcmp (twist_strerror (TWIST_ERR_FILE),
                  twist_strerror (TWIST_ERR_URL)) != 0, "file distinct");
@@ -53,13 +53,15 @@ test_errors (void)
                  twist_strerror (-1)) != 0, "unknown option has a sentence");
   check (strcmp (twist_strerror (TWIST_ERR_OPTION_SYNTAX),
                  twist_strerror (-1)) != 0, "option syntax has a sentence");
-  easy = twist_easy_init ();
-  check (easy != NULL && twist_easy_error (easy) == NULL, "no detail");
-  twist_easy_set_error (easy, twist_strdup ("could not open file /no/such"));
-  check (twist_easy_error (easy) != NULL
-         && strcmp (twist_easy_error (easy),
+  transfer = twist_transfer_new ();
+  check (transfer != NULL && twist_transfer_error (transfer) == NULL,
+         "no detail");
+  twist_transfer_set_error (transfer,
+                            twist_strdup ("could not open file /no/such"));
+  check (twist_transfer_error (transfer) != NULL
+         && strcmp (twist_transfer_error (transfer),
                     "could not open file /no/such") == 0, "detail");
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
 }
 
 int

@@ -25,88 +25,88 @@
 #include <string.h>
 
 int
-twist_scheme_unsupported (struct twist_easy *easy)
+twist_scheme_unsupported (struct twist_transfer *transfer)
 {
-  (void) easy;
+  (void) transfer;
   return TWIST_ERR_UNSUPPORTED;
 }
 
 static int
-attach_http (struct twist_easy *easy)
+attach_http (struct twist_transfer *transfer)
 {
-  return twist_http_attach (easy);
+  return twist_http_attach (transfer);
 }
 
 static int
-attach_file (struct twist_easy *easy)
+attach_file (struct twist_transfer *transfer)
 {
-  return twist_file_attach (easy);
+  return twist_file_attach (transfer);
 }
 
 static int
-attach_ftp (struct twist_easy *easy)
+attach_ftp (struct twist_transfer *transfer)
 {
-  return twist_ftp_attach (easy);
+  return twist_ftp_attach (transfer);
 }
 
 static int
-attach_smtp (struct twist_easy *easy)
+attach_smtp (struct twist_transfer *transfer)
 {
-  return twist_smtp_attach (easy);
+  return twist_smtp_attach (transfer);
 }
 
 static int
-attach_imap (struct twist_easy *easy)
+attach_imap (struct twist_transfer *transfer)
 {
-  return twist_imap_attach (easy);
+  return twist_imap_attach (transfer);
 }
 
 static int
-attach_pop3 (struct twist_easy *easy)
+attach_pop3 (struct twist_transfer *transfer)
 {
-  return twist_pop3_attach (easy);
+  return twist_pop3_attach (transfer);
 }
 
 static int
-attach_mqtt (struct twist_easy *easy)
+attach_mqtt (struct twist_transfer *transfer)
 {
-  return twist_mqtt_attach (easy);
+  return twist_mqtt_attach (transfer);
 }
 
 static int
-attach_ldap (struct twist_easy *easy)
+attach_ldap (struct twist_transfer *transfer)
 {
-  return twist_ldap_attach (easy);
+  return twist_ldap_attach (transfer);
 }
 
 static int
-attach_gopher (struct twist_easy *easy)
+attach_gopher (struct twist_transfer *transfer)
 {
-  return twist_gopher_attach (easy);
+  return twist_gopher_attach (transfer);
 }
 
 static int
-attach_dict (struct twist_easy *easy)
+attach_dict (struct twist_transfer *transfer)
 {
-  return twist_dict_attach (easy);
+  return twist_dict_attach (transfer);
 }
 
 static int
-attach_ssh (struct twist_easy *easy)
+attach_ssh (struct twist_transfer *transfer)
 {
-  return twist_ssh_attach (easy);
+  return twist_ssh_attach (transfer);
 }
 
 static int
-attach_tftp (struct twist_easy *easy)
+attach_tftp (struct twist_transfer *transfer)
 {
-  return twist_tftp_attach (easy);
+  return twist_tftp_attach (transfer);
 }
 
 static int
-attach_telnet (struct twist_easy *easy)
+attach_telnet (struct twist_transfer *transfer)
 {
-  return twist_telnet_attach (easy);
+  return twist_telnet_attach (transfer);
 }
 
 static const struct twist_scheme schemes[] = {

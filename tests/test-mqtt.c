@@ -51,15 +51,15 @@ test_mqtt (void)
   };
   static const uint8_t disc[] = { 0xe0, 0x00 };
 
-  twist_easy *easy = twist_easy_init ();
+  twist_transfer *transfer = twist_transfer_new ();
   struct twist_mqtt *mqtt;
   const uint8_t *cmd;
   size_t n = 0;
   char ping[] = "ping";
 
-  check (twist_url_parse_int ("mqtt://127.0.0.1/sensors/temp", &easy->url)
+  check (twist_url_parse_int ("mqtt://127.0.0.1/sensors/temp", &transfer->url)
          == TWIST_OK, "mqtt url");
-  mqtt = twist_mqtt_new (easy, 0);
+  mqtt = twist_mqtt_new (transfer, 0);
   cmd = twist_mqtt_command (mqtt, &n);
   check (n == sizeof connect && memcmp (cmd, connect, n) == 0, "connect");
   feed_bin (mqtt_recv, mqtt, connack, sizeof connack, 1);
@@ -67,45 +67,48 @@ test_mqtt (void)
   check (has_bytes (cmd, n, "sensors/temp", 12), "subscribe");
   feed_bin (mqtt_recv, mqtt, suback, sizeof suback, 1);
   mail_body_len = 0;
-  easy->write_cb = mail_write;
+  transfer->write_cb = mail_write;
   feed_bin (mqtt_recv, mqtt, publish, sizeof publish, 1);
   check (mail_body_len == 5 && memcmp (mail_body, "hello", 5) == 0,
          "mqtt payload");
-  check (easy->progress.downloaded == 5, "mqtt progress");
+  check (transfer->progress.downloaded == 5, "mqtt progress");
   feed_bin (mqtt_recv, mqtt, disc, sizeof disc, 1);
-  check (easy->done && easy->result == TWIST_OK, "mqtt done");
-  twist_easy_cleanup (easy);
+  check (transfer->done && transfer->result == TWIST_OK, "mqtt done");
+  twist_transfer_free (transfer);
 
-  easy = twist_easy_init ();
-  check (twist_url_parse_int ("mqtt://127.0.0.1/a", &easy->url) == TWIST_OK,
+  transfer = twist_transfer_new ();
+  check (twist_url_parse_int ("mqtt://127.0.0.1/a",
+                              &transfer->url) == TWIST_OK,
          "pub url");
-  easy->postfields = ping;
-  mqtt = twist_mqtt_new (easy, 0);
+  transfer->postfields = ping;
+  mqtt = twist_mqtt_new (transfer, 0);
   feed_bin (mqtt_recv, mqtt, connack, sizeof connack, 1);
   cmd = twist_mqtt_command (mqtt, &n);
-  check (easy->done && easy->result == TWIST_OK, "published");
-  check (easy->progress.ul_known && easy->progress.size_ul == 4
-         && easy->progress.uploaded == 4, "mqtt upload progress");
+  check (transfer->done && transfer->result == TWIST_OK, "published");
+  check (transfer->progress.ul_known && transfer->progress.size_ul == 4
+         && transfer->progress.uploaded == 4, "mqtt upload progress");
   check (has_bytes (cmd, n, "ping", 4)
          && n >= 2 && cmd[n - 2] == 0xe0 && cmd[n - 1] == 0x00, "pub bytes");
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
 
-  easy = twist_easy_init ();
-  check (twist_url_parse_int ("mqtt://127.0.0.1/a", &easy->url) == TWIST_OK,
+  transfer = twist_transfer_new ();
+  check (twist_url_parse_int ("mqtt://127.0.0.1/a",
+                              &transfer->url) == TWIST_OK,
          "refuse url");
-  mqtt = twist_mqtt_new (easy, 0);
+  mqtt = twist_mqtt_new (transfer, 0);
   feed_bin (mqtt_recv, mqtt, refused, sizeof refused, 1);
-  check (easy->done && easy->result == TWIST_ERR_AUTH, "connack auth");
-  twist_easy_cleanup (easy);
+  check (transfer->done && transfer->result == TWIST_ERR_AUTH, "connack auth");
+  twist_transfer_free (transfer);
 
-  easy = twist_easy_init ();
-  check (twist_url_parse_int ("mqtt://alice:secret@127.0.0.1/a", &easy->url)
+  transfer = twist_transfer_new ();
+  check (twist_url_parse_int ("mqtt://alice:secret@127.0.0.1/a",
+                              &transfer->url)
          == TWIST_OK, "mqtt user");
-  mqtt = twist_mqtt_new (easy, 0);
+  mqtt = twist_mqtt_new (transfer, 0);
   cmd = twist_mqtt_command (mqtt, &n);
   check (has_bytes (cmd, n, "alice", 5) && has_bytes (cmd, n, "secret", 6),
          "mqtt credentials");
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
 }
 
 int

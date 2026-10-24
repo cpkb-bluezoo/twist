@@ -41,24 +41,24 @@
 static void ssh_complete (struct twist_ssh *s, int err);
 static void ssh_arm (struct twist_ssh *s);
 static void ssh_after (struct twist_ssh *s, int rc);
-static const char *ssh_user_name (const struct twist_easy *easy);
-static const char *ssh_password (const struct twist_easy *easy);
+static const char *ssh_user_name (const struct twist_transfer *transfer);
+static const char *ssh_password (const struct twist_transfer *transfer);
 static const struct twist_protocol_handler ssh_handler;
 
 uint64_t
 twist_ssh_now_us (const struct twist_ssh *s)
 {
-  if (s->easy->loop != NULL)
-    return twist_loop_now (s->easy->loop) * 1000u;
+  if (s->transfer->loop != NULL)
+    return twist_loop_now (s->transfer->loop) * 1000u;
   return s->clock_us;
 }
 
 void
 twist_ssh_detail (struct twist_ssh *s, const char *detail)
 {
-  if (twist_easy_error (s->easy) != NULL)
+  if (twist_transfer_error (s->transfer) != NULL)
     return;
-  twist_easy_set_error (s->easy, twist_strdup (detail));
+  twist_transfer_set_error (s->transfer, twist_strdup (detail));
 }
 
 static int
@@ -108,7 +108,7 @@ ssh_complete (struct twist_ssh *s, int err)
       twist_timer_cancel (s->timer);
       s->timer = NULL;
     }
-  twist_easy_finish (s->easy, err);
+  twist_transfer_finish (s->transfer, err);
 }
 
 /* ---- keeping the session for the next URL ----
@@ -153,7 +153,7 @@ terms_add (uint8_t **buf, size_t *len, size_t *cap, const char *s)
 }
 
 static int
-ssh_pool_key (struct twist_easy *e, char *key, size_t cap)
+ssh_pool_key (struct twist_transfer *e, char *key, size_t cap)
 {
   uint8_t *buf = NULL, d[32];
   size_t len = 0, bcap = 0, i;
@@ -175,7 +175,7 @@ ssh_pool_key (struct twist_easy *e, char *key, size_t cap)
   /* A tunnel through one proxy is not one through another, or through the
      same with other credentials: the proxy is part of who the server sees
      and what let us in.  */
-  terms_add (&buf, &len, &bcap, twist_easy_proxy (e));
+  terms_add (&buf, &len, &bcap, twist_transfer_proxy (e));
   terms_add (&buf, &len, &bcap, e->proxy_userpwd);
   if (len == (size_t) -1 || twist_sha256 (buf, len, d) != TWIST_OK)
     {
@@ -200,7 +200,7 @@ ssh_pool_key (struct twist_easy *e, char *key, size_t cap)
 static int
 ssh_park (struct twist_ssh *s)
 {
-  struct twist_easy *e = s->easy;
+  struct twist_transfer *e = s->transfer;
   struct twist_pool *pool;
   struct twist_connection *conn;
   char key[1024];
@@ -210,12 +210,9 @@ ssh_park (struct twist_ssh *s)
       || gf_session_phase (s->session) != GF_PHASE_READY
       || !twist_sftp_idle (s->sftp))
     return 0;
-  pool = twist_easy_pool (e);
+  pool = twist_transfer_pool (e);
   if (pool == NULL || ssh_pool_key (e, key, sizeof key) != TWIST_OK)
     return 0;
-  /* A pool that is not the handle's own outlives its loop.  */
-  if (e->multi != NULL)
-    twist_multi_note_pool (e->multi, pool);
   conn = twist_mail_link_detach (&s->link);
   if (twist_pool_put_payload (pool, key, conn, s, twist_ssh_free) != TWIST_OK)
     {
@@ -226,8 +223,8 @@ ssh_park (struct twist_ssh *s)
   twist_sftp_recycle (s->sftp);
   twist_ssh_agent_free (s);
   s->ep = NULL;
-  e->xfer = NULL;
-  e->xfer_free = NULL;
+  e->state = NULL;
+  e->state_free = NULL;
   return 1;
 }
 
@@ -302,13 +299,13 @@ ssh_arm (struct twist_ssh *s)
       twist_timer_cancel (s->timer);
       s->timer = NULL;
     }
-  if (s->finished || s->session == NULL || s->easy->loop == NULL)
+  if (s->finished || s->session == NULL || s->transfer->loop == NULL)
     return;
   us = gf_session_timeout (s->session);
   if (us == UINT64_MAX)
     return;
   ms = us / 1000u + (us % 1000u != 0);
-  twist_loop_schedule (s->easy->loop, ms, ssh_on_timer, s, &s->timer);
+  twist_loop_schedule (s->transfer->loop, ms, ssh_on_timer, s, &s->timer);
 }
 
 static int
@@ -354,22 +351,22 @@ ssh_closed (void *user, int error, uint32_t reason, gf_slice text)
 }
 
 static const char *
-ssh_user_name (const struct twist_easy *easy)
+ssh_user_name (const struct twist_transfer *transfer)
 {
-  if (easy->username != NULL && easy->username[0] != 0)
-    return easy->username;
-  if (easy->url->user != NULL)
-    return easy->url->user;
+  if (transfer->username != NULL && transfer->username[0] != 0)
+    return transfer->username;
+  if (transfer->url->user != NULL)
+    return transfer->url->user;
   return "";
 }
 
 static const char *
-ssh_password (const struct twist_easy *easy)
+ssh_password (const struct twist_transfer *transfer)
 {
-  if (easy->password != NULL && easy->password[0] != 0)
-    return easy->password;
-  if (easy->url->password != NULL && easy->url->password[0] != 0)
-    return easy->url->password;
+  if (transfer->password != NULL && transfer->password[0] != 0)
+    return transfer->password;
+  if (transfer->url->password != NULL && transfer->url->password[0] != 0)
+    return transfer->url->password;
   return NULL;
 }
 
@@ -535,8 +532,8 @@ twist_ssh_begin (struct twist_ssh *s)
   s->config.conn.software = "twist_" TWIST_VERSION_STRING;
   /* The key exchange has the time allowed for connecting, not foxtrot's 60
      seconds; the time to be connected in is the user's to set.  */
-  if (s->easy->connect_timeout_ms > 0)
-    s->config.conn.kex_timeout_us = (uint64_t) s->easy->connect_timeout_ms * 1000u;
+  if (s->transfer->connect_timeout_ms > 0)
+    s->config.conn.kex_timeout_us = (uint64_t) s->transfer->connect_timeout_ms * 1000u;
   s->config.client_auth.user = s->user;
   /* The agent's keys first, then those read from files.  */
   {
@@ -592,7 +589,7 @@ twist_ssh_begin (struct twist_ssh *s)
       twist_endpoint_resume_read (s->ep);
     }
   return rc == GF_OK ? TWIST_OK
-                     : s->easy->result != TWIST_OK ? s->easy->result
+                     : s->transfer->result != TWIST_OK ? s->transfer->result
                                                    : TWIST_ERR_PROTOCOL;
 }
 
@@ -792,20 +789,20 @@ twist_ssh_free (void *p)
 }
 
 struct twist_ssh *
-twist_ssh_new (struct twist_easy *easy, int live)
+twist_ssh_new (struct twist_transfer *transfer, int live)
 {
   struct twist_ssh *s;
   const char *pw;
 
   (void) live;
-  if (easy == NULL || easy->url == NULL)
+  if (transfer == NULL || transfer->url == NULL)
     return NULL;
   s = calloc (1, sizeof *s);
   if (s == NULL)
     return NULL;
-  s->easy = easy;
-  s->user = twist_strdup (ssh_user_name (easy));
-  pw = ssh_password (easy);
+  s->transfer = transfer;
+  s->user = twist_strdup (ssh_user_name (transfer));
+  pw = ssh_password (transfer);
   if (pw != NULL)
     s->password = twist_strdup (pw);
   if (s->user == NULL || (pw != NULL && s->password == NULL))
@@ -814,8 +811,8 @@ twist_ssh_new (struct twist_easy *easy, int live)
       free (s);
       return NULL;
     }
-  easy->xfer = s;
-  easy->xfer_free = twist_ssh_free;
+  transfer->state = s;
+  transfer->state_free = twist_ssh_free;
   return s;
 }
 
@@ -823,27 +820,27 @@ twist_ssh_new (struct twist_easy *easy, int live)
    that was made under the same terms.  It is taken whole, and goes straight
    to the file.  */
 static struct twist_ssh *
-ssh_resume (struct twist_easy *easy)
+ssh_resume (struct twist_transfer *transfer)
 {
-  struct twist_pool *pool = twist_easy_pool (easy);
+  struct twist_pool *pool = twist_transfer_pool (transfer);
   struct twist_connection *conn = NULL;
   struct twist_ssh *s = NULL;
   char key[1024];
   int rc;
 
-  if (pool == NULL || ssh_pool_key (easy, key, sizeof key) != TWIST_OK)
+  if (pool == NULL || ssh_pool_key (transfer, key, sizeof key) != TWIST_OK)
     return NULL;
   if (twist_pool_take_payload (pool, key, &conn, (void **) &s) != TWIST_OK
       || conn == NULL || s == NULL)
     return NULL;
-  s->easy = easy;
-  easy->xfer = s;
-  easy->xfer_free = twist_ssh_free;
+  s->transfer = transfer;
+  transfer->state = s;
+  transfer->state_free = twist_ssh_free;
   s->finished = s->ending = s->pending_err = 0;
   s->depth = s->end_pending = s->end_err = 0;
   s->read_paused = 0;
   s->ep = twist_connection_endpoint (conn);
-  twist_mail_link_attach (&s->link, easy, conn);
+  twist_mail_link_attach (&s->link, transfer, conn);
   /* Back in the session as a callback is: what it asks of the session is
      done when it is back.  */
   s->depth++;
@@ -856,22 +853,22 @@ ssh_resume (struct twist_easy *easy)
 }
 
 int
-twist_ssh_attach (struct twist_easy *easy)
+twist_ssh_attach (struct twist_transfer *transfer)
 {
   struct twist_ssh *s;
   int rc;
 
-  if (ssh_resume (easy) != NULL)
-    return easy->done ? easy->result : TWIST_OK;
-  s = twist_ssh_new (easy, 1);
+  if (ssh_resume (transfer) != NULL)
+    return transfer->done ? transfer->result : TWIST_OK;
+  s = twist_ssh_new (transfer, 1);
   if (s == NULL)
     return TWIST_ERR_NOMEM;
-  rc = twist_mail_link_open (&s->link, easy, &ssh_handler, s, ssh_fail);
+  rc = twist_mail_link_open (&s->link, transfer, &ssh_handler, s, ssh_fail);
   if (rc != TWIST_OK)
     ssh_complete (s, rc);
   else
     /* Connected, through a proxy if there is one, and logged in, in the time
        allowed for it.  */
     twist_mail_link_phase_begin (&s->link);
-  return easy->done ? easy->result : TWIST_OK;
+  return transfer->done ? transfer->result : TWIST_OK;
 }

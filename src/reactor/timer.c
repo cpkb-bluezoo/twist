@@ -253,9 +253,11 @@ twist_timer_heap_deadline (struct twist_timer_heap *h)
   return h->tab[0]->deadline;
 }
 
-void
+int
 twist_timer_heap_fire (struct twist_timer_heap *h, uint64_t now)
 {
+  int ran = 0;
+
   while (h != NULL && h->n > 0 && h->tab[0]->deadline <= now)
     {
       struct twist_timer *t = h->tab[0];
@@ -276,8 +278,10 @@ twist_timer_heap_fire (struct twist_timer_heap *h, uint64_t now)
         {
           if (t->slot != NULL && *t->slot == t)
             *t->slot = NULL;
+          ran++;
           t->cb (t->user);
         }
       give_timer (h, t);
     }
+  return ran;
 }

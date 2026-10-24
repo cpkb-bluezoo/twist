@@ -51,24 +51,24 @@ fuzz_seeds (void (*add) (const void *, size_t))
 int
 LLVMFuzzerTestOneInput (const uint8_t *data, size_t size)
 {
-  twist_easy *easy;
+  twist_transfer *transfer;
   struct twist_ws *ws;
   char *text, *a, *b, *c, *nl;
 
   if (size == 0)
     return 0;
-  easy = twist_easy_init ();
-  if (easy == NULL)
+  transfer = twist_transfer_new ();
+  if (transfer == NULL)
     abort ();
-  easy->write_cb = fuzz_sink;
-  ws = twist_ws_new (easy, send_frame, NULL, finished, NULL);
+  transfer->write_cb = fuzz_sink;
+  ws = twist_ws_new (transfer, send_frame, NULL, finished, NULL);
   if (ws == NULL)
     abort ();
   fuzz_feed ((fuzz_recv) twist_ws_receive, ws, data + 1, size - 1,
              fuzz_piece (data[0], size));
   twist_ws_send (ws, 1, 1, data, size < 200 ? size : 200);
   twist_ws_free (ws);
-  twist_easy_cleanup (easy);
+  twist_transfer_free (transfer);
 
   /* The handshake: four lines make the key, the upgrade header, the
      connection header and the accept value.  */

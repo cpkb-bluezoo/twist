@@ -25,7 +25,7 @@
      on the worker.
    - fread is slow on a worker thread when asked to, as a disk that is slow or
      does not answer is.  The loop's thread must not wait for it.
-   - twist_easy_finish notes the thread it is called on.  It changes the
+   - twist_transfer_finish notes the thread it is called on.  It changes the
      state of a transfer, which belongs to the loop's thread.  */
 
 #define _GNU_SOURCE
@@ -81,15 +81,15 @@ fread (void *p, size_t s, size_t n, FILE *f)
 }
 
 int
-twist_easy_finish (struct twist_easy *easy, int result)
+twist_transfer_finish (struct twist_transfer *transfer, int result)
 {
-  static union { void *p; int (*f) (struct twist_easy *, int); } real;
+  static union { void *p; int (*f) (struct twist_transfer *, int); } real;
 
   if (real.p == NULL)
-    real.p = next_symbol ("twist_easy_finish");
+    real.p = next_symbol ("twist_transfer_finish");
   if (!pthread_equal (pthread_self (), main_tid))
     off_thread_finish++;
-  return real.f (easy, result);
+  return real.f (transfer, result);
 }
 
 static double
@@ -176,15 +176,16 @@ job_done (void *user, int err)
 static void
 test_completion_on_the_loop (void)
 {
-  struct twist_multi *multi = twist_multi_init ();
+  struct twist_runtime *runtime = twist_runtime_new ();
   int i;
 
-  check (multi != NULL, "a multi");
-  check (twist_storage_submit (multi->storage, job_work, NULL, job_done, NULL,
-                               multi->loop) == TWIST_OK, "submit");
+  check (runtime != NULL, "a runtime");
+  check (twist_storage_submit (runtime->storage, job_work, NULL, job_done,
+                               NULL,
+                               runtime->loop) == TWIST_OK, "submit");
   for (i = 0; i < 400 && !job_ran; i++)
     {
-      twist_multi_perform (multi, NULL);
+      twist_runtime_run_once (runtime, 0);
       nap_ms (5);
     }
   fail_alloc = 0;
@@ -192,83 +193,86 @@ test_completion_on_the_loop (void)
   check (pthread_equal (job_tid, main_tid),
          "on the loop's thread, not a worker's");
   check (job_err == TWIST_OK, "as a success");
-  twist_multi_cleanup (multi);
+  twist_runtime_free (runtime);
 }
 
 /* ---- a transfer is finished on the loop ---- */
 
 /* The file handler's worker tells the loop that it is done by posting a last
-   note.  When that could not be posted, the worker called twist_easy_finish
-   itself.  The note's command is made when the transfer attaches.  The
-   chunks it posts before can fail, and the transfer then ends with that
-   error, on the loop.  */
+   note.  When that could not be posted, the worker called
+   twist_transfer_finish itself.  The note's command is made when the
+   transfer attaches.  The chunks it posts before can fail, and the transfer
+   then ends with that error, on the loop.  */
 static void
 test_finish_on_the_loop (const char *path)
 {
-  struct twist_multi *multi = twist_multi_init ();
-  struct twist_easy *easy = twist_easy_init ();
+  struct twist_runtime *runtime = twist_runtime_new ();
+  struct twist_transfer *transfer = twist_transfer_new ();
   char url[128];
-  int running = 1;
+  struct check_job job = { 0, 0, 0 };
   int i;
 
   snprintf (url, sizeof url, "file://%s", path);
-  twist_easy_setopt (easy, TWISTOPT_URL, url);
-  easy->write_cb = body;
-  check (twist_multi_add_handle (multi, easy) == TWIST_OK, "add");
+  twist_transfer_setopt (transfer, TWISTOPT_URL, url);
+  transfer->write_cb = body;
+  /* Before the start: the worker may run as soon as it has the job, and what
+     it allocates before the flag is set is what the test is not about.  */
   off_thread_finish = 0;
   fail_alloc = 1;
-  for (i = 0; i < 400 && running > 0; i++)
+  check (twist_runtime_start (runtime, transfer, check_job_done,
+                              &job) == TWIST_OK,
+         "start");
+  for (i = 0; i < 400 && !job.done; i++)
     {
-      twist_multi_perform (multi, &running);
+      twist_runtime_run_once (runtime, 0);
       nap_ms (5);
     }
   fail_alloc = 0;
-  check (running == 0 && easy->done, "the transfer ended, though nothing posted");
-  check (easy->result == TWIST_ERR_NOMEM,
-         "with the error that stopped it");
+  check (job.done && job.calls == 1,
+         "the transfer ended, though nothing posted");
+  check (job.result == TWIST_ERR_NOMEM, "with the error that stopped it");
   check (off_thread_finish == 0,
          "and was finished on the loop's thread, not a worker's");
-  twist_multi_remove_handle (multi, easy);
-  twist_easy_cleanup (easy);
-  twist_multi_cleanup (multi);
+  twist_transfer_free (transfer);
+  twist_runtime_free (runtime);
 }
 
 /* ---- letting go of a transfer does not wait ---- */
 
 #define LET_GO_LIMIT 0.5
 
-/* Removing a handle whose worker is in a read that does not come back: the
+/* Cancelling a handle whose worker is in a read that does not come back: the
    loop's thread waited for it, and so did every other transfer on that loop.
    Letting go of a transfer is to return at once, and the worker, when it is
    done, to clean up after itself.  */
 static void
 test_let_go_of_a_stuck_read (const char *path)
 {
-  struct twist_multi *multi = twist_multi_init ();
-  struct twist_easy *easy = twist_easy_init ();
+  struct twist_runtime *runtime = twist_runtime_new ();
+  struct twist_transfer *transfer = twist_transfer_new ();
   char url[128];
-  int running = 0;
   double t0;
   double took;
 
   snprintf (url, sizeof url, "file://%s", path);
-  twist_easy_setopt (easy, TWISTOPT_URL, url);
-  easy->write_cb = body;
+  twist_transfer_setopt (transfer, TWISTOPT_URL, url);
+  transfer->write_cb = body;
   slow_read_ms = 1500;
-  check (twist_multi_add_handle (multi, easy) == TWIST_OK, "add");
-  twist_multi_perform (multi, &running);
+  check (twist_runtime_start (runtime, transfer, NULL, NULL) == TWIST_OK,
+         "start");
+  twist_runtime_run_once (runtime, 0);
   nap_ms (200);
   body_calls = 0;
   t0 = now ();
-  check (twist_multi_remove_handle (multi, easy) == TWIST_OK, "remove");
+  check (twist_runtime_cancel (runtime, transfer) == TWIST_OK, "cancel");
   took = now () - t0;
   check (took < LET_GO_LIMIT,
-         "removing a transfer whose read is stuck does not wait for the read");
-  twist_easy_cleanup (easy);
+         "cancelling a transfer whose read is stuck does not wait for the read");
+  twist_transfer_free (transfer);
   /* The worker comes back by itself and finds nobody; what it read is not
      for the application.  */
   slow_read_ms = 0;
-  twist_multi_cleanup (multi);
+  twist_runtime_free (runtime);
   check (body_calls == 0, "and nothing was delivered after the transfer was let go");
 }
 
@@ -278,10 +282,9 @@ test_let_go_of_a_stuck_read (const char *path)
 static void
 test_let_go_of_a_queued_transfer (const char *path)
 {
-  struct twist_multi *multi = twist_multi_init ();
-  struct twist_easy *easy[3];
+  struct twist_runtime *runtime = twist_runtime_new ();
+  struct twist_transfer *transfer[3];
   char url[128];
-  int running = 0;
   double t0;
   double took;
   int i;
@@ -290,26 +293,25 @@ test_let_go_of_a_queued_transfer (const char *path)
   slow_read_ms = 400;
   for (i = 0; i < 3; i++)
     {
-      easy[i] = twist_easy_init ();
-      twist_easy_setopt (easy[i], TWISTOPT_URL, url);
-      easy[i]->write_cb = body;
-      check (twist_multi_add_handle (multi, easy[i]) == TWIST_OK, "add");
+      transfer[i] = twist_transfer_new ();
+      twist_transfer_setopt (transfer[i], TWISTOPT_URL, url);
+      transfer[i]->write_cb = body;
+      check (twist_runtime_start (runtime, transfer[i], NULL,
+                                  NULL) == TWIST_OK,
+             "start");
     }
-  twist_multi_perform (multi, &running);
+  twist_runtime_run_once (runtime, 0);
   nap_ms (100);
   t0 = now ();
-  check (twist_multi_remove_handle (multi, easy[2]) == TWIST_OK, "remove third");
+  check (twist_runtime_cancel (runtime, transfer[2]) == TWIST_OK,
+         "cancel third");
   took = now () - t0;
   check (took < LET_GO_LIMIT,
-         "removing a transfer that has not started does not wait for the pool");
-  twist_easy_cleanup (easy[2]);
-  for (i = 0; i < 2; i++)
-    {
-      twist_multi_remove_handle (multi, easy[i]);
-      twist_easy_cleanup (easy[i]);
-    }
+         "cancelling a transfer that has not started does not wait for the pool");
+  for (i = 0; i < 3; i++)
+    twist_transfer_free (transfer[i]);
   slow_read_ms = 0;
-  twist_multi_cleanup (multi);
+  twist_runtime_free (runtime);
 }
 
 int
