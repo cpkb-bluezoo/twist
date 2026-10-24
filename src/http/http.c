@@ -1060,6 +1060,9 @@ arm_parsers (struct twist_http *h)
 /* Add to LIST a header line made from FMT, as long as it is.  A token, a
    cookie or a URL is whatever length the caller has, and a line cut off at
    some size would be sent as if it were whole.  */
+static struct twist_slist * add_header (struct twist_slist *list, const char *fmt, ...)
+  __attribute__ ((format (printf, 2, 3)));
+
 static struct twist_slist *
 add_header (struct twist_slist *list, const char *fmt, ...)
 {

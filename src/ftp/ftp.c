@@ -115,7 +115,8 @@ struct twist_ftp
 static void ftp_complete (struct twist_ftp *f, int err);
 static void ftp_finish_ok (struct twist_ftp *f);
 static void ftp_begin (struct twist_ftp *f);
-static int ftp_send (struct twist_ftp *f, const char *fmt, ...);
+static int ftp_send (struct twist_ftp *f, const char *fmt, ...)
+  __attribute__ ((format (printf, 2, 3)));
 static int ftp_send_transfer (struct twist_ftp *f);
 
 static void

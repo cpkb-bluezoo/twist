@@ -176,6 +176,9 @@ param (const char *chal, const char *key, char *buf, size_t cap)
 }
 
 /* A formatted string of whatever length, in memory of its own.  */
+static char * dformat (const char *fmt, ...)
+  __attribute__ ((format (printf, 1, 2)));
+
 static char *
 dformat (const char *fmt, ...)
 {

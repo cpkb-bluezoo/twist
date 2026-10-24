@@ -158,8 +158,12 @@ h3_open_streams (struct twist_quic *q)
     0x33, 0x01			/* H3_DATAGRAM 1 (RFC 9297) */
   };
 #undef H3_SETTINGS_BASE
-  _Static_assert (sizeof control == 3 + 4, "SETTINGS length");
-  _Static_assert (sizeof control_dg == 3 + 6, "SETTINGS length");
+  /* C99 has no static assertion: a length that is wrong divides by zero.  */
+  enum
+  {
+    control_length_ok = 1 / (sizeof control == 3 + 4),
+    control_dg_length_ok = 1 / (sizeof control_dg == 3 + 6)
+  };
   static const uint8_t encoder[] = { 0x02 };
   static const uint8_t decoder[] = { 0x03 };
   uint64_t id = 0;
@@ -649,8 +653,6 @@ quic_read (void *user, uint8_t *buf, size_t len)
   for (;;)
     {
       int room = QUIC_BATCH - q->dg_n;
-      int got;
-      int i;
 
       if (room <= 0)
         {
@@ -666,6 +668,8 @@ quic_read (void *user, uint8_t *buf, size_t len)
       {
         struct mmsghdr msg[QUIC_BATCH];
         struct iovec iov[QUIC_BATCH];
+        int got;
+        int i;
 
         memset (msg, 0, sizeof msg);
         for (i = 0; i < room; i++)

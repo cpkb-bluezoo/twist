@@ -561,7 +561,10 @@ format_url (const struct twist_url *url, int with_userinfo)
   if (twist_url_host_text (url, 1, host, sizeof host) != TWIST_OK)
     return NULL;
   /* A scheme with no port, such as file, is written without one.  */
-  snprintf (portbuf, sizeof portbuf, url->port > 0 ? ":%d" : "", url->port);
+  if (url->port > 0)
+    snprintf (portbuf, sizeof portbuf, ":%d", url->port);
+  else
+    portbuf[0] = 0;
   n = snprintf (buf, sizeof buf, "%s://%s%s%s%s%s%s%s%s%s",
                 url->scheme,
                 user,

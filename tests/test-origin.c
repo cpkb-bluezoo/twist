@@ -251,7 +251,9 @@ srv_serve (struct srv *s, int i)
             }
           else if (ping)
             {
-              static const unsigned char payload[8] = "pingpong";
+              static const unsigned char payload[8] = {
+                'p', 'i', 'n', 'g', 'p', 'o', 'n', 'g'
+              };
 
               /* Let what came before be over, so that the ping is for a
                  connection whose first transfer has ended.  */

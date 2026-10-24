@@ -87,6 +87,9 @@ imap_complete (struct twist_imap *m, int err)
   twist_transfer_finish (m->transfer, err);
 }
 
+static int imap_send (struct twist_imap *m, const char *fmt, ...)
+  __attribute__ ((format (printf, 2, 3)));
+
 static int
 imap_send (struct twist_imap *m, const char *fmt, ...)
 {
@@ -363,7 +366,7 @@ literal_len (const uint8_t *line, size_t n, size_t *out)
     i--;
   if (i == 0 || line[i - 1] != '{')
     return 0;
-  for (i = i; i < n - 1; i++)
+  for (; i < n - 1; i++)
     v = v * 10 + (size_t) (line[i] - '0');
   *out = v;
   return 1;

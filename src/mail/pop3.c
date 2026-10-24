@@ -85,6 +85,9 @@ pop3_complete (struct twist_pop3 *p, int err)
   twist_transfer_finish (p->transfer, err);
 }
 
+static int pop3_send (struct twist_pop3 *p, const char *fmt, ...)
+  __attribute__ ((format (printf, 2, 3)));
+
 static int
 pop3_send (struct twist_pop3 *p, const char *fmt, ...)
 {

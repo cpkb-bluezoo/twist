@@ -110,6 +110,9 @@ smtp_send (struct twist_smtp *s, const void *data, size_t n, int append)
   return twist_endpoint_send (s->ep, p, n);
 }
 
+static int smtp_printf (struct twist_smtp *s, const char *fmt, ...)
+  __attribute__ ((format (printf, 2, 3)));
+
 static int
 smtp_printf (struct twist_smtp *s, const char *fmt, ...)
 {
