@@ -3660,6 +3660,7 @@ struct tcp_server
   unsigned disconnects;		/* Disconnect messages it was sent.  */
   uint32_t reason;		/* The reason in the last.  */
   int hang_up;			/* Asked to close every connection.  */
+  int drop_next;		/* Close on the next bytes, unanswered.  */
   size_t up_len;		/* What was uploaded, on any of them.  */
   unsigned up_sum;
   int late_eof;			/* Set on each server it makes.  */
@@ -3765,6 +3766,7 @@ ts_serve (void *arg)
         {
           struct ts_conn *c;
           ssize_t nread;
+          int drop;
 
           if (!(fds[i].revents & (POLLIN | POLLHUP | POLLERR)))
             continue;
@@ -3801,6 +3803,15 @@ ts_serve (void *arg)
           c = &ts->conns[which[i]];
           nread = read (c->fd, buf, sizeof buf);
           if (nread <= 0)
+            {
+              ts_close (c);
+              continue;
+            }
+          pthread_mutex_lock (&ts->mu);
+          drop = ts->drop_next;
+          ts->drop_next = 0;
+          pthread_mutex_unlock (&ts->mu);
+          if (drop)
             {
               ts_close (c);
               continue;
@@ -4250,6 +4261,36 @@ test_reuse_hung_up (void)
   check (tcp_get (runtime, transfer, &ts, "sftp", "/data.bin") == TWIST_OK
          && got_data (), "after the server hung up");
   check (ts_accepted (&ts) == 2, "on a new connection");
+  twist_transfer_free (transfer);
+  twist_runtime_free (runtime);
+  ts_stop (&ts);
+}
+
+/* A server that closes a connection an instant before the next URL uses it:
+   the close has not reached us when the session is taken, and the first thing
+   sent on it finds it shut.  Nothing was answered, so the transfer goes again
+   on a new connection, once, and succeeds.  */
+static void
+test_reuse_closed_as_taken (void)
+{
+  struct tcp_server ts;
+  struct twist_runtime *runtime;
+  struct twist_transfer *transfer;
+
+  check (ts_start (&ts) == 0, "server");
+  runtime = twist_runtime_new ();
+  transfer = tcp_transfer (0, "secret", NULL);
+  check (tcp_get (runtime, transfer, &ts, "sftp", "/data.bin") == TWIST_OK
+         && got_data (), "first");
+  pthread_mutex_lock (&ts.mu);
+  ts.drop_next = 1;
+  pthread_mutex_unlock (&ts.mu);
+  check (tcp_get (runtime, transfer, &ts, "sftp", "/data.bin") == TWIST_OK
+         && got_data (), "after the server closed it unanswered");
+  check (ts_accepted (&ts) == 2, "on a new connection");
+  check (tcp_get (runtime, transfer, &ts, "sftp", "/data.bin") == TWIST_OK
+         && got_data () && ts_accepted (&ts) == 2,
+         "and that one is kept");
   twist_transfer_free (transfer);
   twist_runtime_free (runtime);
   ts_stop (&ts);
@@ -5802,6 +5843,7 @@ run_tests (void)
   test_reuse_mixed ();
   test_reuse_terms ();
   test_reuse_hung_up ();
+  test_reuse_closed_as_taken ();
   test_reuse_after_error ();
   test_reuse_unanswered ();
   test_reuse_concurrent ();

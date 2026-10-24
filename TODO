@@ -6,10 +6,6 @@ SCP/SFTP (src/ssh, over foxtrot)
   - A transfer that fails, even for a missing file, closes its connection, so
     the next URL logs in again.  An SFTP status that leaves the channel sound
     could keep it.
-  - A parked connection that the server closed an instant before it is taken
-    fails the transfer with "closed" and does not retry on a new one.  The
-    command line runs the loop once before each URL, which catches closes that
-    have already arrived; the window left is a race.
   - There is no way to forbid reuse, in the library or in the tool.
   - Ask foxtrot for the number of requests outstanding in an SFTP client.
     gf_sftp_client_pending is the bytes queued, so twist counts its own (sftp.c

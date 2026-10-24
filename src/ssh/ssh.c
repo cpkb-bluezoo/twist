@@ -97,11 +97,52 @@ ssh_fail_status (struct twist_ssh *s, int status)
                                               : ssh_map_status (status));
 }
 
+/* A session that was taken from the pool and found closed, before anything
+   came from the server and before any upload was read: the server closed it
+   an instant before it was taken.  */
+static int
+ssh_retryable (const struct twist_ssh *s, int err)
+{
+  return s->resumed && !s->retrying && s->recv_total == 0 && !s->body_read
+         && (err == TWIST_ERR_CLOSED || err == TWIST_ERR_CONNECT)
+         && s->transfer->loop != NULL && !s->transfer->done;
+}
+
+static void ssh_attach (struct twist_transfer *transfer, int may_resume);
+
+/* From the loop: the transfer is begun again with a session of its own.  */
+static void
+ssh_retry_run (void *user)
+{
+  struct twist_ssh *s = user;
+  struct twist_transfer *transfer = s->transfer;
+
+  s->retry = NULL;
+  transfer->state = NULL;
+  transfer->state_free = NULL;
+  twist_ssh_free (s);
+  ssh_attach (transfer, 0);
+}
+
 static void
 ssh_complete (struct twist_ssh *s, int err)
 {
-  if (s == NULL || s->finished)
+  if (s == NULL || s->finished || s->retrying)
     return;
+  if (err != TWIST_OK && ssh_retryable (s, err)
+      && twist_loop_schedule (s->transfer->loop,
+                              twist_loop_now (s->transfer->loop),
+                              ssh_retry_run, s, &s->retry) == TWIST_OK)
+    {
+      s->retrying = 1;
+      s->ending = 1;
+      if (s->timer != NULL)
+        {
+          twist_timer_cancel (s->timer);
+          s->timer = NULL;
+        }
+      return;
+    }
   s->finished = 1;
   if (s->timer != NULL)
     {
@@ -736,6 +777,7 @@ ssh_on_recv (struct twist_endpoint *ep, const uint8_t *data, size_t len)
   size_t took;
 
   s->ep = ep;
+  s->recv_total += len;
   took = twist_ssh_receive (s, data, len);
   if (took == 0 && s->session == NULL && !s->finished && !s->read_paused)
     {
@@ -791,6 +833,8 @@ twist_ssh_free (void *p)
     return;
   if (s->timer != NULL)
     twist_timer_cancel (s->timer);
+  if (s->retry != NULL)
+    twist_timer_cancel (s->retry);
   twist_mail_link_close (&s->link);
   twist_ssh_load_abandon (s);
   twist_ssh_agent_free (s);
@@ -861,6 +905,9 @@ ssh_resume (struct twist_transfer *transfer)
   s->finished = s->ending = s->pending_err = 0;
   s->depth = s->end_pending = s->end_err = 0;
   s->read_paused = 0;
+  s->resumed = 1;
+  s->recv_total = 0;
+  s->body_read = 0;
   s->ep = twist_connection_endpoint (conn);
   twist_mail_link_attach (&s->link, transfer, conn);
   /* Back in the session as a callback is: what it asks of the session is
@@ -872,6 +919,27 @@ ssh_resume (struct twist_transfer *transfer)
   s->depth--;
   ssh_after (s, GF_OK);
   return s;
+}
+
+static void
+ssh_attach (struct twist_transfer *transfer, int may_resume)
+{
+  struct twist_ssh *s;
+  int rc;
+
+  if (may_resume && ssh_resume (transfer) != NULL)
+    return;
+  s = twist_ssh_new (transfer, 1);
+  if (s == NULL)
+    {
+      twist_transfer_finish (transfer, TWIST_ERR_NOMEM);
+      return;
+    }
+  rc = twist_mail_link_open (&s->link, transfer, &ssh_handler, s, ssh_fail);
+  if (rc != TWIST_OK)
+    ssh_complete (s, rc);
+  else
+    twist_mail_link_phase_begin (&s->link);
 }
 
 int

@@ -58,6 +58,9 @@ Version 0.1 - unreleased
   * a parked sftp or scp session that is dropped (idle for two minutes, or at
     exit) says goodbye to the server with an SSH disconnect before the
     connection closes
+  * a parked sftp or scp session that the server closed an instant before it
+    was taken is not a failed transfer: if nothing has come from the server
+    and no upload has been read, the transfer goes again on a new connection
   * gzip and deflate request and response coding, via zlib
   * the progress meter and the bar (-#), and the library's
     TWISTOPT_XFERINFOFUNCTION

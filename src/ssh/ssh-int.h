@@ -100,6 +100,17 @@ struct twist_ssh
   int end_err;
   /* Reading was paused because bytes came before the session existed.  */
   int read_paused;
+  /* A session taken from the pool may have been closed by the server an
+     instant before, so that the first thing sent on it finds it shut.  Then,
+     if nothing has come from the server since it was taken and nothing has
+     been read from the application's upload (which could not be read again),
+     the transfer goes again on a new connection, once: RETRY is the wait for
+     that to begin.  */
+  int resumed;
+  size_t recv_total;
+  int body_read;
+  int retrying;
+  struct twist_timer *retry;
 };
 
 /* The transfer is over or about to be.  */

@@ -916,6 +916,7 @@ fill_chunk (struct twist_sftp_xfer *g)
       g->chunk_len = n;
       return 1;
     }
+  g->ssh->body_read = 1;
   n = e->read_cb ((char *) g->chunk, 1, g->chunk_max, e->read_data);
   if (n == 0)
     {
@@ -948,8 +949,10 @@ discard_source (struct twist_sftp_xfer *g)
   while (left > 0)
     {
       size_t want = left < SFTP_CHUNK ? (size_t) left : SFTP_CHUNK;
-      size_t n = e->read_cb ((char *) g->chunk, 1, want, e->read_data);
+      size_t n;
 
+      g->ssh->body_read = 1;
+      n = e->read_cb ((char *) g->chunk, 1, want, e->read_data);
       if (n == 0 || n > want)
         return -1;
       left -= n;
