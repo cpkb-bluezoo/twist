@@ -546,6 +546,10 @@ fail_status (struct twist_sftp_xfer *g, const gf_sftp_response *r)
   snprintf (msg, sizeof msg, "%s: %s%s%s%s", g->path, what,
             said[0] != 0 ? " (" : "", said, said[0] != 0 ? ")" : "");
   g->ssh->transfer->proto_status = status;
+  /* A status to the open, or to a request made before it, leaves the channel
+     as it was: no handle is held on the server and nothing is outstanding.  */
+  if (!g->have_handle && g->inflight == 0)
+    g->ssh->keep = 1;
   fail (g, TWIST_ERR_FILE, msg);
 }
 

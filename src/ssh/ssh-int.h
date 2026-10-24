@@ -107,6 +107,10 @@ struct twist_ssh
      the transfer goes again on a new connection, once: RETRY is the wait for
      that to begin.  */
   int resumed;
+  /* The transfer failed with an SFTP status and the channel is sound (no
+     handle is open, nothing is outstanding): the session is kept all the
+     same.  */
+  int keep;
   size_t recv_total;
   int body_read;
   int retrying;

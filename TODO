@@ -3,9 +3,10 @@ Twist TODO List
 
 SCP/SFTP (src/ssh, over foxtrot)
 
-  - A transfer that fails, even for a missing file, closes its connection, so
-    the next URL logs in again.  An SFTP status that leaves the channel sound
-    could keep it.
+  - A transfer that fails after the file is open (a read or write that the
+    server refuses, a directory listing that stops) still closes its
+    connection, as the handle on the server would have to be closed first.
+    Only a status to the open, or to a request before it, keeps the session.
   - There is no way to forbid reuse, in the library or in the tool.
   - Ask foxtrot for the number of requests outstanding in an SFTP client.
     gf_sftp_client_pending is the bytes queued, so twist counts its own (sftp.c
@@ -17,9 +18,6 @@ SCP/SFTP (src/ssh, over foxtrot)
   - statvfs, and the other commands the sftp tool has, as -Q commands;
     --create-file-mode and the directory mode.
   - Quote commands for scp URLs.
-  - --limit-rate is not kept over HTTP/3 (QUIC has no connection of the kind
-    the limit is kept on): an https transfer uses HTTP/2 or HTTP/1, and
-    --http3-only fails; tftp is refused.  Nor over DNS, or an ssh-agent.
   - Certificates are found only as KEY-cert.pub beside a key file; there is no
     option to name a certificate elsewhere (ssh's CertificateFile).
   - -l for ftp URLs, which would send NLST; it only affects sftp now.

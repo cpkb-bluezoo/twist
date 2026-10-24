@@ -4106,6 +4106,30 @@ test_reuse_basic (void)
   unlink (kh);
 }
 
+/* A transfer that fails with a status that leaves the channel sound (a file
+   that is not there) does not cost the session: the next URL is fetched on
+   it.  */
+static void
+test_reuse_after_missing (void)
+{
+  struct tcp_server ts;
+  struct twist_runtime *runtime;
+  struct twist_transfer *transfer;
+
+  check (ts_start (&ts) == 0, "server");
+  runtime = twist_runtime_new ();
+  transfer = tcp_transfer (0, "secret", NULL);
+  check (tcp_get (runtime, transfer, &ts, "sftp", "/nope") == TWIST_ERR_FILE
+         && got_len == 0, "a file that is not there");
+  check (twist_pool_count (runtime->pool) == 1, "the session is kept");
+  check (tcp_get (runtime, transfer, &ts, "sftp", "/data.bin") == TWIST_OK
+         && got_data (), "the next file");
+  check (ts_accepted (&ts) == 1, "on the same connection");
+  twist_transfer_free (transfer);
+  twist_runtime_free (runtime);
+  ts_stop (&ts);
+}
+
 /* A session that is kept and then let go (the pool is emptied, as it is when
    the connection has been idle for two minutes, or at exit) says goodbye
    first: the server is sent a disconnect by the application, and not just a
@@ -5840,6 +5864,7 @@ run_tests (void)
   alarm (240);
   test_reuse_basic ();
   test_reuse_farewell ();
+  test_reuse_after_missing ();
   test_reuse_mixed ();
   test_reuse_terms ();
   test_reuse_hung_up ();

@@ -61,6 +61,8 @@ Version 0.1 - unreleased
   * a parked sftp or scp session that the server closed an instant before it
     was taken is not a failed transfer: if nothing has come from the server
     and no upload has been read, the transfer goes again on a new connection
+  * an sftp or scp transfer that fails because the file is missing or may not
+    be opened keeps its session for the next URL
   * gzip and deflate request and response coding, via zlib
   * the progress meter and the bar (-#), and the library's
     TWISTOPT_XFERINFOFUNCTION

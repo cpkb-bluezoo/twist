@@ -294,7 +294,7 @@ ssh_park (struct twist_ssh *s)
 static void
 ssh_end (struct twist_ssh *s, int err)
 {
-  if (err == TWIST_OK && ssh_park (s))
+  if ((err == TWIST_OK || s->keep) && ssh_park (s))
     {
       ssh_complete (s, err);
       return;
@@ -906,6 +906,7 @@ ssh_resume (struct twist_transfer *transfer)
   s->depth = s->end_pending = s->end_err = 0;
   s->read_paused = 0;
   s->resumed = 1;
+  s->keep = 0;
   s->recv_total = 0;
   s->body_read = 0;
   s->ep = twist_connection_endpoint (conn);
