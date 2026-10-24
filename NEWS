@@ -55,6 +55,9 @@ Version 0.1 - unreleased
     transfer that fails first leaves none, and does not empty one that was there
   * --limit-rate for every scheme but tftp, kept on the connection (not over
     HTTP/3, which an https transfer then does not use)
+  * a parked sftp or scp session that is dropped (idle for two minutes, or at
+    exit) says goodbye to the server with an SSH disconnect before the
+    connection closes
   * gzip and deflate request and response coding, via zlib
   * the progress meter and the bar (-#), and the library's
     TWISTOPT_XFERINFOFUNCTION

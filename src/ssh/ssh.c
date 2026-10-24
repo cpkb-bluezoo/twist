@@ -197,6 +197,27 @@ ssh_pool_key (struct twist_transfer *e, char *key, size_t cap)
    connection of its own, the channel has nothing in it, and there is a pool
    to keep it in.  On success the pool has it, and the transfer is no longer
    its owner.  */
+/* A parked session that is dropped says so to the server, as ssh does when it
+   is closed, before its connection goes: the pool calls this with the
+   connection still open.  The transfer that parked it has gone, so nothing
+   the session reports now is a result.  */
+static void
+ssh_farewell (void *payload, struct twist_connection *conn)
+{
+  struct twist_ssh *s = payload;
+
+  if (s->session == NULL || s->ending
+      || gf_session_phase (s->session) == GF_PHASE_CLOSED)
+    return;
+  s->ending = 1;
+  s->ep = twist_connection_endpoint (conn);
+  /* The clock is the loop's, not the transfer's, which may be gone.  */
+  gf_session_disconnect (s->session,
+                         twist_loop_now (twist_endpoint_loop (s->ep)) * 1000u,
+                         GF_DISCONNECT_BY_APPLICATION, "done");
+  s->ep = NULL;
+}
+
 static int
 ssh_park (struct twist_ssh *s)
 {
@@ -219,6 +240,7 @@ ssh_park (struct twist_ssh *s)
       s->link.conn = conn;
       return 0;
     }
+  twist_pool_set_farewell (pool, conn, ssh_farewell);
   /* The pool has the session.  The agent was for logging in.  */
   twist_sftp_recycle (s->sftp);
   twist_ssh_agent_free (s);

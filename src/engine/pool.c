@@ -39,6 +39,9 @@ struct twist_pool_slot
      SSH session.  The slot owns it until it is taken.  */
   void *payload;
   void (*payload_free) (void *payload);
+  /* Called when the slot is discarded, before the connection is closed, so
+     that the payload can say goodbye on it.  */
+  void (*farewell) (void *payload, struct twist_connection *conn);
   uint64_t idle_at;
   int queued;
   int discarded;
@@ -144,6 +147,8 @@ slot_discard (struct twist_pool *pool, struct twist_pool_slot *s)
     }
   conn = s->conn;
   s->conn = NULL;
+  if (conn != NULL && s->farewell != NULL && s->payload != NULL)
+    s->farewell (s->payload, conn);
   if (conn != NULL)
     {
       struct twist_endpoint *ep = twist_connection_endpoint (conn);
@@ -431,6 +436,23 @@ twist_pool_put (struct twist_pool *pool, const char *key,
   if (loop != NULL)
     now = twist_loop_now (loop);
   return twist_pool_put_idle (pool, key, conn, now);
+}
+
+void
+twist_pool_set_farewell (struct twist_pool *pool, struct twist_connection *conn,
+                         void (*farewell) (void *payload,
+                                           struct twist_connection *conn))
+{
+  struct twist_pool_slot *s;
+
+  if (pool == NULL || conn == NULL)
+    return;
+  for (s = pool->head; s != NULL; s = s->next)
+    if (s->conn == conn)
+      {
+        s->farewell = farewell;
+        return;
+      }
 }
 
 /* Park CONN with PAYLOAD, which PAYLOAD_FREE frees if the connection is

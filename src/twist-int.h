@@ -1149,6 +1149,14 @@ int twist_pool_put_idle_payload (struct twist_pool *pool, const char *key,
                                  struct twist_connection *conn,
                                  uint64_t now_ms, void *payload,
                                  void (*payload_free) (void *));
+/* What is said on a parked connection that is dropped, before it is closed
+   (it has been idle too long, or the pool is being freed): FAREWELL is called
+   with the payload and the connection.  Set after the put.  Not called for a
+   connection that is taken.  */
+void twist_pool_set_farewell (struct twist_pool *pool,
+                              struct twist_connection *conn,
+                              void (*farewell) (void *payload,
+                                                struct twist_connection *conn));
 int twist_pool_put_payload (struct twist_pool *pool, const char *key,
                             struct twist_connection *conn, void *payload,
                             void (*payload_free) (void *));

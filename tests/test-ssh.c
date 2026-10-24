@@ -3657,6 +3657,8 @@ struct tcp_server
   struct ts_conn conns[TS_CONNS];
   pthread_mutex_t mu;
   unsigned accepted;		/* Connections made to it.  */
+  unsigned disconnects;		/* Disconnect messages it was sent.  */
+  uint32_t reason;		/* The reason in the last.  */
   int hang_up;			/* Asked to close every connection.  */
   size_t up_len;		/* What was uploaded, on any of them.  */
   unsigned up_sum;
@@ -3816,7 +3818,13 @@ ts_serve (void *arg)
             }
           ts_note_upload (ts, c->sv);
           if (c->sv->closed)
-            ts_close (c);
+            {
+              pthread_mutex_lock (&ts->mu);
+              ts->disconnects++;
+              ts->reason = c->sv->reason;
+              pthread_mutex_unlock (&ts->mu);
+              ts_close (c);
+            }
         }
     }
   return NULL;
@@ -3959,6 +3967,30 @@ ts_accepted (struct tcp_server *ts)
   return n;
 }
 
+/* Wait for the server to have been sent N disconnect messages, for up to two
+   seconds.  Returns how many it has been sent.  */
+static unsigned
+ts_wait_disconnects (struct tcp_server *ts, unsigned n, uint32_t *reason)
+{
+  struct timespec nap = { 0, 2000000 };
+  unsigned seen = 0;
+  int i;
+
+  for (i = 0; i < 1000; i++)
+    {
+      pthread_mutex_lock (&ts->mu);
+      seen = ts->disconnects;
+      if (reason != NULL)
+        *reason = ts->reason;
+      pthread_mutex_unlock (&ts->mu);
+      if (seen >= n)
+        break;
+      nap.tv_nsec = 2000000;
+      nanosleep (&nap, NULL);
+    }
+  return seen;
+}
+
 /* The server closes everything it holds, and the call returns when it has.  */
 static void
 ts_hang_up (struct tcp_server *ts)
@@ -4059,6 +4091,41 @@ test_reuse_basic (void)
   check (ts_accepted (&ts) == 1, "scp used it too");
   twist_transfer_free (transfer);
   twist_runtime_free (runtime);
+  ts_stop (&ts);
+  unlink (kh);
+}
+
+/* A session that is kept and then let go (the pool is emptied, as it is when
+   the connection has been idle for two minutes, or at exit) says goodbye
+   first: the server is sent a disconnect by the application, and not just a
+   closed connection.  */
+static void
+test_reuse_farewell (void)
+{
+  struct tcp_server ts;
+  struct twist_runtime *runtime;
+  struct twist_transfer *transfer;
+  char kh[300], line[300];
+  size_t n = 0;
+  uint32_t reason = 0;
+
+  check (ts_start (&ts) == 0, "server");
+  snprintf (kh, sizeof kh, "%s/known_hosts", home);
+  check (gf_knownhosts_format (line, sizeof line, &n, ts.khost,
+                               (unsigned) ts.port, ts.host, 0) == GF_OK,
+         "known_hosts line");
+  write_file (kh, line, n, 0600);
+  runtime = twist_runtime_new ();
+  transfer = tcp_transfer (1, "secret", kh);
+  check (tcp_get (runtime, transfer, &ts, "sftp", "/data.bin") == TWIST_OK
+         && got_data (), "a file");
+  check (twist_pool_count (runtime->pool) == 1, "the session is kept");
+  check (ts.disconnects == 0, "nothing was said to the server while it was kept");
+  twist_transfer_free (transfer);
+  twist_runtime_free (runtime);
+  check (ts_wait_disconnects (&ts, 1, &reason) == 1,
+         "the server was sent a disconnect when the session was dropped");
+  check (reason == GF_DISCONNECT_BY_APPLICATION, "by the application");
   ts_stop (&ts);
   unlink (kh);
 }
@@ -5731,6 +5798,7 @@ run_tests (void)
   test_abandoned_job ();
   alarm (240);
   test_reuse_basic ();
+  test_reuse_farewell ();
   test_reuse_mixed ();
   test_reuse_terms ();
   test_reuse_hung_up ();
