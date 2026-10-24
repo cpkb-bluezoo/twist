@@ -104,6 +104,33 @@ twist_transfer_release (struct twist_transfer *transfer)
     state_free (state);
 }
 
+void
+twist_transfer_chain (struct twist_transfer *transfer)
+{
+  const struct twist_scheme *scheme;
+  void *state = transfer->state;
+  void (*state_free) (void *) = transfer->state_free;
+  int rc;
+
+  /* The state, and not the progress: that goes on, with its counters for the
+     next hop begun, as for a redirect within one handler.  */
+  transfer->state = NULL;
+  transfer->state_free = NULL;
+  if (state_free != NULL && state != NULL)
+    state_free (state);
+  transfer->http_version_seen = 0;
+  scheme = transfer->url != NULL ? twist_scheme_by_name (transfer->url->scheme)
+                                 : NULL;
+  if (scheme == NULL || (scheme->flags & TWIST_SCHEME_READY) == 0)
+    {
+      twist_transfer_finish (transfer, TWIST_ERR_UNSUPPORTED);
+      return;
+    }
+  rc = scheme->attach (transfer);
+  if (rc != TWIST_OK && !transfer->done)
+    twist_transfer_finish (transfer, rc);
+}
+
 static void
 transfer_clear (struct twist_transfer *transfer)
 {
@@ -622,6 +649,8 @@ twist_transfer_start (struct twist_transfer *transfer)
   int rc;
 
   twist_transfer_set_error (transfer, NULL);
+  transfer->creds_stripped = 0;
+  transfer->hop_timeout_ms = 0;
   if (transfer->url_string == NULL && transfer->url == NULL)
     {
       twist_transfer_finish (transfer, TWIST_ERR_URL);

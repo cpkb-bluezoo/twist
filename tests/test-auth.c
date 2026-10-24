@@ -65,21 +65,48 @@ test_auth (void)
          "not following");
   check (twist_http_should_redirect (302, "GET", 1, 1000, -1, &use_get) == 1,
          "no limit");
-  /* A redirect is followed only to the schemes this transfer speaks.  */
-  check (twist_http_redirect_scheme_ok ("http") == 1
-         && twist_http_redirect_scheme_ok ("https") == 1
-         && twist_http_redirect_scheme_ok ("HTTPS") == 1
-         && twist_http_redirect_scheme_ok ("ws") == 1
-         && twist_http_redirect_scheme_ok ("wss") == 1, "redirect schemes");
-  check (twist_http_redirect_scheme_ok ("file") == 0
-         && twist_http_redirect_scheme_ok ("sftp") == 0
-         && twist_http_redirect_scheme_ok ("scp") == 0
-         && twist_http_redirect_scheme_ok ("ftp") == 0
-         && twist_http_redirect_scheme_ok ("gopher") == 0
-         && twist_http_redirect_scheme_ok ("dict") == 0
-         && twist_http_redirect_scheme_ok ("") == 0
-         && twist_http_redirect_scheme_ok (NULL) == 0,
-         "no redirect to anything else");
+  /* A redirect is followed by scheme alone: from http to http, https, ftp
+     and ftps; from https to https and ftps; and from nothing else to anything.
+     Every pair of the schemes there are is tried against that table.  */
+  {
+    static const char *const schemes[] = {
+      "http", "https", "ws", "wss", "ftp", "ftps", "file", "sftp", "scp",
+      "gopher", "gophers", "dict", "smtp", "smtps", "imap", "pop3", "ldap",
+      "mqtt", "telnet", "tftp", "rtsp", "smb", "rtmp", ""
+    };
+    static const char *const allowed[][2] = {
+      { "http", "http" }, { "http", "https" }, { "http", "ftp" },
+      { "http", "ftps" }, { "https", "https" }, { "https", "ftps" }
+    };
+    size_t i, j, k;
+    int wrong = 0;
+
+    for (i = 0; i < sizeof schemes / sizeof schemes[0]; i++)
+      for (j = 0; j < sizeof schemes / sizeof schemes[0]; j++)
+        {
+          int want = 0;
+
+          for (k = 0; k < sizeof allowed / sizeof allowed[0]; k++)
+            if (strcmp (schemes[i], allowed[k][0]) == 0
+                && strcmp (schemes[j], allowed[k][1]) == 0)
+              want = 1;
+          if ((twist_http_redirect_ok (schemes[i], schemes[j]) != 0) != want)
+            {
+              fprintf (stderr, "redirect %s -> %s: wanted %d\n", schemes[i],
+                       schemes[j], want);
+              wrong++;
+            }
+        }
+    check (wrong == 0, "redirects go only where the table says");
+  }
+  check (twist_http_redirect_ok ("HTTP", "Ftps") == 1
+         && twist_http_redirect_ok ("Https", "HTTPS") == 1
+         && twist_http_redirect_ok ("HTTPS", "FTP") == 0,
+         "the case of a scheme does not matter");
+  check (twist_http_redirect_ok (NULL, "http") == 0
+         && twist_http_redirect_ok ("http", NULL) == 0
+         && twist_http_redirect_ok (NULL, NULL) == 0,
+         "and nothing is allowed from or to no scheme");
   check (twist_http_redirect_sensitive ("bank.example", 1, "bank.example", 1)
          == 0, "same origin");
   check (twist_http_redirect_sensitive ("Bank.Example", 1, "bank.example", 1)

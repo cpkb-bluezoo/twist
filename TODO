@@ -1,11 +1,7 @@
 Twist TODO List
 ================
 
-Work that is still to be done.  What is done is in NEWS and the manual, and
-what was decided against is not here.
-
-
-SCP/SFTP (src/ssh, over foxtrot, ../foxtrot)
+SCP/SFTP (src/ssh, over foxtrot)
 
   - A transfer that fails, even for a missing file, closes its connection, so
     the next URL logs in again.  An SFTP status that leaves the channel sound
@@ -62,8 +58,6 @@ HTTP
   - Cookies (src/http/cookie.c): Expires and Max-Age are not read, so a cookie
     lives as long as the jar and Max-Age=0 does not delete.  SameSite and
     HttpOnly are not looked at.
-  - A redirect is followed only to http, https, ws and wss; there is no
-    --proto-redir to change that.
   - The output buffer of a connection has no limit.  A handler that queues
     without end against a peer that does not read grows it, so each handler
     limits itself (SFTP does, by its window); none does for a body given in

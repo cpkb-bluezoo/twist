@@ -540,8 +540,11 @@ is standard output.
 .B \-L, \-\-location
 Follow redirections, up to
 .B \-\-max\-redirs
-of them.  A redirect goes only to http, https, ws or wss.  One to another
-scheme exits 1, and one to a URL that names no host, such as
+of them.  Where a redirect may go depends on the scheme it comes from, and on that alone: from http to http, https, ftp or ftps, and from https to https or ftps, so that a transfer that was encrypted is never carried to one that is not.  From any other scheme, a WebSocket handshake included, a redirect is not followed.  One that is not allowed exits 1, and there is no option to change it:
+.B \-\-proto\-redir
+is accepted, says that it has no effect (not with
+.BR \-s ),
+and does nothing.  One to a URL that names no host, such as
 .IR http:// ,
 exits 3.  The Location is resolved against the URL as RFC 3986 section 5.2
 says.  A 301, 302 or 303 is followed with GET and no body, and a 307 or 308
@@ -551,7 +554,9 @@ take the credentials along: the user name and password,
 .BR \-b ,
 the Authorization, Proxy-Authorization and Cookie headers of
 .BR \-H ,
-and the request body are left out of the request that follows.
+and the request body are left out of the request that follows.  A redirect to ftp or ftps makes the transfer one of the FTP handler, which begins afresh: the user name and password given for the request are not used (those of the Location are, or else the login is anonymous), the headers of the redirect are written before the file as for any other, and
+.B \-\-max\-time
+is still for the whole of it.
 .TP
 .BI \-\-max\-redirs " n"
 Redirect limit.  The default is 50, and \-1 is no limit.  A redirect after the

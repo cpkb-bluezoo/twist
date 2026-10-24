@@ -507,15 +507,24 @@ http_complete (struct twist_http *h, int err)
 }
 
 int
-twist_http_redirect_scheme_ok (const char *scheme)
+twist_http_redirect_ok (const char *from, const char *to)
 {
-  static const char *const ok[] = { "http", "https", "ws", "wss" };
+  /* By scheme alone.  What a transfer that is encrypted may be carried to is
+     encrypted too.  */
+  static const struct
+  {
+    const char *from;
+    const char *to;
+  } ok[] = {
+    { "http", "http" }, { "http", "https" }, { "http", "ftp" },
+    { "http", "ftps" }, { "https", "https" }, { "https", "ftps" }
+  };
   size_t i;
 
-  if (scheme == NULL)
+  if (from == NULL || to == NULL)
     return 0;
   for (i = 0; i < sizeof ok / sizeof ok[0]; i++)
-    if (strcasecmp (scheme, ok[i]) == 0)
+    if (strcasecmp (from, ok[i].from) == 0 && strcasecmp (to, ok[i].to) == 0)
       return 1;
   return 0;
 }
@@ -1504,6 +1513,50 @@ http_auth_again (void *user)
     http_complete (h, TWIST_ERR_AUTH);
 }
 
+/* Whether the scheme is one this handler hands the transfer to: ftp and
+   ftps, which the table of redirects allows and which another handler speaks.  */
+static int
+http_hands_off (const char *scheme)
+{
+  return scheme != NULL
+         && (strcasecmp (scheme, "ftp") == 0 || strcasecmp (scheme, "ftps") == 0);
+}
+
+/* The transfer goes on in the handler of the URL it was redirected to.  This
+   handler is let go of, with its connection, and the other is attached to the
+   same transfer, with what the transfer has counted so far and what is left of
+   its time.  It is posted, to run when nothing of this handler is on the stack
+   and the state can be freed.  */
+static void
+http_handoff (void *user)
+{
+  struct twist_http *h = user;
+  struct twist_transfer *transfer;
+  long long left;
+
+  if (http_posted_done (h))
+    return;
+  /* Completed meanwhile (a timeout): it stays so.  */
+  if (h->finished)
+    return;
+  transfer = h->transfer;
+  /* --max-time is for the whole of it, hops included.  */
+  transfer->hop_timeout_ms = 0;
+  if (transfer->timeout_ms > 0)
+    {
+      left = (long long) transfer->timeout_ms
+             - (long long) (twist_loop_now (transfer->loop)
+                            - transfer->progress.start_ms);
+      if (left <= 0)
+        {
+          http_complete (h, TWIST_ERR_TIMEOUT);
+          return;
+        }
+      transfer->hop_timeout_ms = (long) left;
+    }
+  twist_transfer_chain (transfer);
+}
+
 static void
 http_restart (void *user)
 {
@@ -1680,13 +1733,15 @@ http_message_done (void *user)
           http_complete (h, TWIST_ERR_URL);
           return;
         }
-      if (!twist_http_redirect_scheme_ok (next->scheme))
+      if (!twist_http_redirect_ok (transfer->url->scheme, next->scheme))
         {
           char msg[96];
 
-          /* The same refusal as curl's: the transfer is not carried to a
-             scheme this handler does not speak.  */
-          snprintf (msg, sizeof msg, _("redirect to \"%.20s\" is not followed"),
+          /* Refused as curl refuses a protocol that is disabled for a
+             redirect (status 1), by the scheme alone.  */
+          snprintf (msg, sizeof msg,
+                    _("redirect from \"%.10s\" to \"%.20s\" is not followed"),
+                    transfer->url->scheme != NULL ? transfer->url->scheme : "",
                     next->scheme != NULL ? next->scheme : "");
           twist_transfer_set_error (transfer, twist_strdup (msg));
           twist_url_free_int (next);
@@ -1698,6 +1753,18 @@ http_message_done (void *user)
       free (transfer->effective_url);
       transfer->effective_url = twist_url_effective (next);
       transfer->redirs++;
+      if (http_hands_off (next->scheme))
+        {
+          /* Another handler's: the headers of this response are done with,
+             and the transfer goes on there, as a transfer of its own that has
+             none of the credentials that were given for this request.  */
+          transfer->creds_stripped = 1;
+          twist_progress_hop (transfer);
+          h->restarting = 1;
+          if (http_post (h, http_handoff) != TWIST_OK)
+            http_complete (h, TWIST_ERR_NOMEM);
+          return;
+        }
       if (use_get)
         h->suppress_body = 1;
       h->https = scheme_is_tls (next->scheme);

@@ -222,6 +222,11 @@ struct twist_transfer
   int proto_status;
   char *error;
   long http_code;
+  /* Set when a redirect took the transfer to a handler other than the one it
+     began in: the credentials that were given for the first request are not
+     to be sent, and the time left of --max-time is what is left.  */
+  int creds_stripped;
+  long hop_timeout_ms;
   int http_version_seen;	/* TWIST_HTTP_VERSION_* of the response.  */
   char *effective_url;
   char *content_type;
@@ -1193,11 +1198,14 @@ void twist_coding_free (struct twist_coding *c);
 int twist_coding_encode (const char *name, const uint8_t *in, size_t n,
                          uint8_t **out, size_t *out_n);
 
-/* Whether a redirect may go to SCHEME: http, https, ws and wss, the schemes
-   this handler speaks.  The transfer stays on the HTTP handler whatever the
-   Location says, so any other scheme would be an HTTP request to a host and
-   port the server chose, and file:// an empty host that never resolves.  */
-int twist_http_redirect_scheme_ok (const char *scheme);
+/* Whether a redirect may go from a URL of scheme FROM to one of scheme TO, by
+   the scheme alone.  From http: to http, https, ftp and ftps.  From https: to
+   https and ftps, so that a transfer that was encrypted is never carried to a
+   place that is not.  From anything else, nowhere: a WebSocket handshake is not
+   redirected, and nothing that was not asked for as a download is made to
+   happen by a Location (file, gopher, smtp...).  The case of the schemes does
+   not matter.  There is no option to change this.  */
+int twist_http_redirect_ok (const char *from, const char *to);
 int twist_http_should_redirect (int status, const char *method, int follow,
                                 long redirs, long maxredirs, int *use_get);
 /* 1 when a redirect must not replay credentials or a body.  */
@@ -1570,6 +1578,12 @@ int twist_transfer_use_ssl_failed (struct twist_transfer *transfer,
                                    const char *why);
 int twist_transfer_finish (struct twist_transfer *transfer, int result);
 void twist_transfer_release (struct twist_transfer *transfer);
+/* Carry the transfer on in the handler of its URL, which a redirect has
+   changed to another scheme.  The state of the handler that has it is let go
+   (not on the loop's stack: from a command posted for it), the progress it has
+   counted is kept, and the other handler is attached.  If that cannot be, the
+   transfer ends.  */
+void twist_transfer_chain (struct twist_transfer *transfer);
 int twist_transfer_start (struct twist_transfer *transfer);
 
 /* ---- the URI Template of a UDP proxy (engine/template.c) ---- */

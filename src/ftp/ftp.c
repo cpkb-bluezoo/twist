@@ -440,7 +440,8 @@ bad_token (const char *s)
 static const char *
 ftp_user (struct twist_ftp *f)
 {
-  if (f->transfer->username != NULL && f->transfer->username[0] != 0)
+  if (!f->transfer->creds_stripped && f->transfer->username != NULL
+      && f->transfer->username[0] != 0)
     return f->transfer->username;
   if (f->transfer->url->user != NULL && f->transfer->url->user[0] != 0)
     return f->transfer->url->user;
@@ -450,7 +451,8 @@ ftp_user (struct twist_ftp *f)
 static const char *
 ftp_pass (struct twist_ftp *f)
 {
-  if (f->transfer->password != NULL && f->transfer->password[0] != 0)
+  if (!f->transfer->creds_stripped && f->transfer->password != NULL
+      && f->transfer->password[0] != 0)
     return f->transfer->password;
   if (f->transfer->url->password != NULL && f->transfer->url->password[0] != 0)
     return f->transfer->url->password;
@@ -1278,7 +1280,10 @@ ftp_begin (struct twist_ftp *f)
     }
   if (transfer->timeout_ms > 0)
     twist_loop_schedule (transfer->loop,
-                         twist_loop_now (transfer->loop) + (uint64_t) transfer->timeout_ms,
+                         twist_loop_now (transfer->loop)
+                         + (uint64_t) (transfer->hop_timeout_ms > 0
+                                       ? transfer->hop_timeout_ms
+                                       : transfer->timeout_ms),
                          on_timeout, f, &f->timer);
   /* From the lookup to the login, in the time allowed for connecting.  */
   twist_phase_begin (&f->phase, transfer, ftp_phase_fail, f);

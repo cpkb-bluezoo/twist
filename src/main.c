@@ -249,7 +249,9 @@ usage (void)
   fputs (_("  -i, --include           write response headers before the body\n"),
          stdout);
   fputs (_("  -D, --dump-header FILE  write response headers to FILE\n"), stdout);
-  fputs (_("  -L, --location          follow redirects\n"), stdout);
+  fputs (_("  -L, --location          follow redirects (http to http, https, ftp, ftps;\n"
+           "                          https to https, ftps)\n"), stdout);
+  fputs (_("      --proto-redir P     accepted, and ignored\n"), stdout);
   fputs (_("      --max-redirs N      redirect limit (default 50)\n"), stdout);
   fputs (_("  -f, --fail              fail on HTTP errors (400 and above)\n"),
          stdout);
@@ -2317,6 +2319,7 @@ main (int argc, char **argv)
     { "no-parallel-immediate", no_argument, NULL, 56 },
     { "parallel-max-host", required_argument, NULL, 57 },
     { "threads", required_argument, NULL, 59 },
+    { "proto-redir", required_argument, NULL, 60 },
     { "compressed", no_argument, NULL, 30 },
     { "no-compressed", no_argument, NULL, NEGATE_BIT | 30 },
     { "content-encoding", required_argument, NULL, 31 },
@@ -2399,6 +2402,7 @@ main (int argc, char **argv)
   struct twist_vars *vars = NULL;
   char *expanded = NULL;
   int negate = 0;
+  int proto_redir_given = 0;
   int c;
   int status = 0;
 
@@ -3037,6 +3041,11 @@ main (int argc, char **argv)
               status = 2;
             }
           break;
+        case 60:
+          /* Where a redirect may go is not for an option to say; it is told
+             of this when all the options are read, and -s may be among them.  */
+          proto_redir_given = 1;
+          break;
         case 'h':
           usage ();
           status = 0;
@@ -3087,6 +3096,11 @@ main (int argc, char **argv)
       if (status != 0)
         goto done;
     }
+  if (proto_redir_given && !silent)
+    fputs (_("Warning: --proto-redir has no effect: a redirect goes by the "
+             "scheme alone,\n"
+             "Warning: from http to http, https, ftp or ftps, and from https "
+             "to https or ftps.\n"), err_fp);
   status = run_all (ops);
 done:
   twist_transfer_free (validator);

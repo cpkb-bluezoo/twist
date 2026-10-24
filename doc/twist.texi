@@ -1039,9 +1039,15 @@ Write response headers before the body.
 Write response headers to @var{file}.  @code{-} is standard output.
 @item -L
 @itemx --location
-Follow redirections, up to @option{--max-redirs} of them.  A redirect goes
-only to @code{http}, @code{https}, @code{ws} or @code{wss}.  One to another
-scheme is exit status 1, and one to a URL that names no host, such as
+Follow redirections, up to @option{--max-redirs} of them.  Where a redirect may
+go depends on the scheme it comes from, and on that alone: from @code{http} to
+@code{http}, @code{https}, @code{ftp} or @code{ftps}, and from @code{https} to
+@code{https} or @code{ftps}, so that a transfer that was encrypted is never
+carried to one that is not.  From any other scheme, a WebSocket handshake
+included, a redirect is not followed.  One that is not allowed is exit status
+1, and there is no option to change it: @option{--proto-redir} is accepted,
+says that it has no effect (not with @option{-s}), and does nothing.  One to a
+URL that names no host, such as
 @samp{http://}, is exit status 3.  The @code{Location} is resolved against the
 URL as RFC 3986 section 5.2 says.  A 301, 302 or 303 is followed with GET and
 no body, and a 307 or 308 keeps the method.  A redirect to another host, or
@@ -1049,7 +1055,11 @@ from @code{https} to @code{http}, does not take the credentials along: the
 user name and password, @option{--oauth2-bearer}, @option{-b}, the
 @code{Authorization}, @code{Proxy-Authorization} and @code{Cookie} headers
 of @option{-H}, and the request body are left out of the request that
-follows.
+follows.  A redirect to @code{ftp} or @code{ftps} makes the transfer one of the
+FTP handler, which begins afresh: the user name and password given for the
+request are not used (those of the @code{Location} are, or else the login is
+anonymous), the headers of the redirect are written before the file as for any
+other, and @option{--max-time} is still for the whole of it.
 @item --max-redirs @var{n}
 Redirect limit.  The default is 50, and @minus{}1 is no limit.  A redirect after
 the @var{n}th is exit status 47, and 0 refuses the first.

@@ -34,6 +34,12 @@ Version 0.1 - unreleased
     and ftp (and the schemes with an s), as curl's does, and not only the TCP
     connect: a server that is silent, or greets and goes quiet, ends the
     transfer at the limit with status 28
+  * a redirect goes by scheme alone: from http to http, https, ftp and ftps,
+    from https to https and ftps, and from nothing else (a WebSocket
+    handshake included) to anything; an ftp or ftps target is followed, as a
+    transfer of the FTP handler that does not take the request's user and
+    password; --proto-redir is accepted, warns that it has no effect, and does
+    nothing
   * gzip and deflate request and response coding, via zlib
   * the progress meter and the bar (-#), and the library's
     TWISTOPT_XFERINFOFUNCTION
