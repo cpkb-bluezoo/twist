@@ -40,6 +40,9 @@ Version 0.1 - unreleased
     transfer of the FTP handler that does not take the request's user and
     password; --proto-redir is accepted, warns that it has no effect, and does
     nothing
+  * names are looked for in /etc/hosts before any DNS is asked, and localhost
+    and any name under it are the loopback (RFC 6761), as they are not known
+    to a public resolver
   * gzip and deflate request and response coding, via zlib
   * the progress meter and the bar (-#), and the library's
     TWISTOPT_XFERINFOFUNCTION

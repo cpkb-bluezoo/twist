@@ -80,6 +80,7 @@ libtwist_la_SOURCES = \
   dns/doh.c \
   dns/policy.c \
   dns/cache.c \
+  dns/hosts.c \
   dns/resolve.c \
   dns/wire.c \
   http/altsvc.c \

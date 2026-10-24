@@ -27,6 +27,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 struct dns_saw
 {
@@ -801,6 +802,170 @@ test_dns_cache (void)
   twist_dns_cache_free (cache);
 }
 
+/* The hosts file is read before any name is asked of DNS: a line is an address
+   and its names, # makes a comment, the case of a name does not matter, and
+   the first IPv4 address of a name is its answer (the resolver asks DNS for
+   A records only), or else the first IPv6 one.  And localhost, and any name
+   under it, is the loopback, whatever the file says or does not.  */
+static char hosts_path[256];
+
+static void
+hosts_write (const char *text)
+{
+  FILE *fp = fopen (hosts_path, "wb");
+
+  if (fp == NULL)
+    abort ();
+  fputs (text, fp);
+  fclose (fp);
+}
+
+static int
+hosts_is (const char *name, const char *want)
+{
+  struct twist_dns_addr a;
+
+  memset (&a, 0, sizeof a);
+  return twist_hosts_lookup (hosts_path, name, &a) == 1
+         && strcmp (a.text, want) == 0;
+}
+
+static int
+hosts_none (const char *name)
+{
+  struct twist_dns_addr a;
+
+  return twist_hosts_lookup (hosts_path, name, &a) == 0;
+}
+
+static void
+test_hosts (void)
+{
+  struct twist_transfer *transfer = twist_transfer_new ();
+  struct doh_saw saw;
+  struct twist_dns_addr a;
+  char loname[32] = "lo";
+  char line[128];
+  FILE *fp;
+  int i;
+
+  snprintf (hosts_path, sizeof hosts_path, "%s/twist-hosts.%ld",
+            getenv ("TMPDIR") != NULL ? getenv ("TMPDIR") : "/tmp",
+            (long) getpid ());
+  if (if_nametoindex ("lo") == 0)
+    snprintf (loname, sizeof loname, "lo0");
+
+  hosts_write ("# a comment\n"
+               "127.0.0.1\tlocalhost  loopback.example   # and a comment\n"
+               "\n"
+               "192.0.2.10 Web.Example www.example\r\n"
+               "2001:db8::5 v6only.example\n"
+               "2001:db8::1 both.example\n"
+               "192.0.2.20 both.example\n"
+               "192.0.2.30 twice.example\n"
+               "192.0.2.31 twice.example\n"
+               "not-an-address bad.example\n"
+               "192.0.2.40\n"
+               "   192.0.2.50   indented.example\n"
+               "300.1.1.1 outofrange.example\n"
+               "192.0.2.60 trailing.example#glued\n");
+  check (hosts_is ("localhost", "127.0.0.1"), "hosts: a name");
+  check (hosts_is ("loopback.example", "127.0.0.1"), "hosts: an alias");
+  check (hosts_is ("web.example", "192.0.2.10"), "hosts: the case of a name does not matter");
+  check (hosts_is ("WWW.EXAMPLE", "192.0.2.10") && hosts_is ("Web.Example", "192.0.2.10"),
+         "hosts: nor the case in the file, and a line may end in CR LF");
+  check (hosts_is ("web.example.", "192.0.2.10"), "hosts: a name with a dot at its end");
+  check (hosts_is ("v6only.example", "2001:db8::5"), "hosts: IPv6, when it is all there is");
+  check (hosts_is ("both.example", "192.0.2.20"), "hosts: IPv4 before IPv6, though it came after");
+  check (hosts_is ("twice.example", "192.0.2.30"), "hosts: the first of two");
+  check (hosts_is ("indented.example", "192.0.2.50"), "hosts: a line that begins with blanks");
+  check (hosts_is ("trailing.example", "192.0.2.60"), "hosts: a # ends a name");
+  check (hosts_none ("bad.example") && hosts_none ("outofrange.example"),
+         "hosts: a line with no good address is not used");
+  check (hosts_none ("example") && hosts_none ("web") && hosts_none ("web.exampl")
+         && hosts_none ("eb.example") && hosts_none ("") && hosts_none ("a comment"),
+         "hosts: only a whole name matches, and a comment is not names");
+  check (twist_hosts_lookup ("/nonexistent/twist-hosts", "localhost", &a) == 0,
+         "hosts: no file, nothing found");
+
+  /* A zone is the interface of this machine, or the line is not used.  */
+  snprintf (line, sizeof line, "fe80::1%%%s zoned.example\nfe80::2%%no-such-if0 nozone.example\n",
+            loname);
+  hosts_write (line);
+  memset (&a, 0, sizeof a);
+  check (twist_hosts_lookup (hosts_path, "zoned.example", &a) == 1 && a.family == 6
+         && a.scope_id == if_nametoindex (loname), "hosts: an address with a zone");
+  check (hosts_none ("nozone.example"), "hosts: and with a zone that is not an interface, none");
+
+  /* It is read again when it changes.  */
+  hosts_write ("192.0.2.1 changing.example\n");
+  check (hosts_is ("changing.example", "192.0.2.1"), "hosts: before");
+  hosts_write ("192.0.2.22 changing.example\n");
+  check (hosts_is ("changing.example", "192.0.2.22"), "hosts: and after the file changes");
+  hosts_write ("192.0.2.3 other.example\n");
+  check (hosts_none ("changing.example") && hosts_is ("other.example", "192.0.2.3"),
+         "hosts: and when a name goes");
+
+  /* A long file, as the lists that block advertisements are.  */
+  fp = fopen (hosts_path, "wb");
+  for (i = 0; i < 50000; i++)
+    fprintf (fp, "0.0.0.0 host%d.ads.example\n", i);
+  fprintf (fp, "192.0.2.77 needle.example\n");
+  fclose (fp);
+  check (hosts_is ("needle.example", "192.0.2.77") && hosts_is ("host49999.ads.example", "0.0.0.0")
+         && hosts_none ("host50000.ads.example"), "hosts: a file of 50000 names");
+
+  /* The resolver: the file first, a hit is answered at once, the same way an
+     address is, with no loop and no network.  */
+  hosts_write ("192.0.2.88 resolved.example\n127.0.0.1 localhost\n"
+               "192.0.2.5 override.localhost\n");
+  twist_dns_set_hosts_file (hosts_path);
+  memset (&saw, 0, sizeof saw);
+  check (twist_dns_resolve_transfer (transfer, "resolved.example", on_literal, &saw) == TWIST_OK
+         && saw.calls == 1 && saw.err == TWIST_OK && saw.family == 4
+         && strcmp (saw.text, "192.0.2.88") == 0, "hosts: the resolver answers from the file");
+  memset (&saw, 0, sizeof saw);
+  check (twist_dns_resolve_transfer (transfer, "Resolved.Example.", on_literal, &saw) == TWIST_OK
+         && saw.calls == 1 && strcmp (saw.text, "192.0.2.88") == 0,
+         "hosts: whatever its case, and a dot at its end");
+  memset (&saw, 0, sizeof saw);
+  check (twist_dns_resolve_transfer (transfer, "override.localhost", on_literal, &saw) == TWIST_OK
+         && saw.calls == 1 && strcmp (saw.text, "192.0.2.5") == 0,
+         "hosts: the file is before the rule for localhost");
+
+  /* localhost, and what is under it, is the loopback with no file at all.  */
+  twist_dns_set_hosts_file ("/nonexistent/twist-hosts");
+  memset (&saw, 0, sizeof saw);
+  check (twist_dns_resolve_transfer (transfer, "localhost", on_literal, &saw) == TWIST_OK
+         && saw.calls == 1 && saw.family == 4 && strcmp (saw.text, "127.0.0.1") == 0,
+         "localhost is the loopback");
+  memset (&saw, 0, sizeof saw);
+  check (twist_dns_resolve_transfer (transfer, "LocalHost.", on_literal, &saw) == TWIST_OK
+         && saw.calls == 1 && strcmp (saw.text, "127.0.0.1") == 0,
+         "whatever its case, and a dot at its end");
+  memset (&saw, 0, sizeof saw);
+  check (twist_dns_resolve_transfer (transfer, "api.dev.localhost", on_literal, &saw) == TWIST_OK
+         && saw.calls == 1 && strcmp (saw.text, "127.0.0.1") == 0,
+         "and any name under it");
+  check (twist_dns_local_name ("localhost", &a) == 1 && twist_dns_local_name ("x.localhost", &a) == 1
+         && twist_dns_local_name ("notlocalhost", &a) == 0
+         && twist_dns_local_name ("localhost.example", &a) == 0
+         && twist_dns_local_name ("xlocalhost", &a) == 0
+         && twist_dns_local_name ("localhostx", &a) == 0
+         && twist_dns_local_name (".localhost", &a) == 0
+         && twist_dns_local_name ("localhost..", &a) == 0
+         && twist_dns_local_name ("", &a) == 0
+         && twist_dns_local_name ("example.com", &a) == 0,
+         "and nothing that only looks like it");
+  /* Not a local name, and no loop: nothing to ask, and no answer.  */
+  memset (&saw, 0, sizeof saw);
+  check (twist_dns_resolve_transfer (transfer, "notlocalhost", on_literal, &saw) != TWIST_OK
+         && saw.calls == 0, "a name that is not local is left to DNS");
+  twist_dns_set_hosts_file (NULL);
+  unlink (hosts_path);
+  twist_transfer_free (transfer);
+}
+
 int
 main (void)
 {
@@ -808,5 +973,6 @@ main (void)
   test_doh ();
   test_svcb ();
   test_dns_cache ();
+  test_hosts ();
   return tests_finish ();
 }

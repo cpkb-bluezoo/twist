@@ -853,6 +853,24 @@ int twist_dns_parse_order (const char *text, int *out, size_t cap, size_t *n);
 int twist_dns_transport_plan (const int *user, size_t nuser, int *out,
                               size_t cap, size_t *n);
 
+/* The hosts file, which a name is looked for in before any DNS is asked: one
+   address and one or more names a line, # to the end of the line a comment.
+   The first IPv4 address a name has is its answer, or else the first IPv6
+   one; an address with a zone (fe80::1%lo0) is taken if the interface is
+   there.  Returns 1 and fills OUT, or 0: the name is not in it, or there is
+   no file.  The file is read again when it changes.  PATH is the file, or NULL
+   for the resolver's: /etc/hosts, or what twist_dns_set_hosts_file says (which
+   is for tests).  */
+int twist_hosts_lookup (const char *path, const char *host,
+                        struct twist_dns_addr *out);
+/* 1 and the address in OUT if HOST is one (an IPv4 address, or an IPv6 one
+   with or without a zone that is an interface of this machine), else 0.  */
+int twist_dns_literal (const char *host, struct twist_dns_addr *out);
+void twist_dns_set_hosts_file (const char *path);
+/* "localhost" and any name under it are the loopback (RFC 6761), and are not
+   looked up anywhere else.  Returns 1 and fills OUT, or 0.  */
+int twist_dns_local_name (const char *host, struct twist_dns_addr *out);
+
 struct twist_dns_service
 {
   struct twist_dns_addr addr;

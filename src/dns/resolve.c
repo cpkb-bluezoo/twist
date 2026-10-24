@@ -1407,6 +1407,17 @@ literal (const char *host, struct twist_dns_service *svc)
   return 1;
 }
 
+int
+twist_dns_literal (const char *host, struct twist_dns_addr *out)
+{
+  struct twist_dns_service svc;
+
+  if (literal (host, &svc) != 1)
+    return 0;
+  *out = svc.addr;
+  return 1;
+}
+
 static void
 cache_abort (struct twist_dns_cache *cache, struct twist_loop *loop,
              const char *host, int lead, int err)
@@ -1444,6 +1455,22 @@ resolve (struct twist_loop *loop, const char *host, const int *order,
     return TWIST_ERR_RESOLVE;
   if (rc == 1)
     {
+      if (svc_cb != NULL)
+        svc_cb (user, TWIST_OK, &lit);
+      else
+        cb (user, TWIST_OK, &lit.addr);
+      return TWIST_OK;
+    }
+  /* A name that this machine knows, from its hosts file, or that is its own
+     (localhost): answered here, at once, before the cache and before any
+     network, as an address is.  */
+  if (twist_hosts_lookup (NULL, host, &lit.addr) == 1
+      || twist_dns_local_name (host, &lit.addr) == 1)
+    {
+      struct twist_dns_addr found = lit.addr;
+
+      memset (&lit, 0, sizeof lit);
+      lit.addr = found;
       if (svc_cb != NULL)
         svc_cb (user, TWIST_OK, &lit);
       else
