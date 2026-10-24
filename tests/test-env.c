@@ -76,16 +76,19 @@ test_keylog_writer (void)
 }
 
 
-/* A self-signed authority, good from the year 2000 to 2999.  */
+/* A self-signed authority, good from the year 2000 to 2999.  Its key usage
+   has digitalSignature as well as keyCertSign: the chain is this one
+   certificate, so quickstep checks it as it checks a server's own, and
+   refuses a leaf that cannot sign a handshake.  */
 static const char ca_pem[] =
   "-----BEGIN CERTIFICATE-----\n"
   "MIIBQjCB6qADAgECAgEBMAoGCCqGSM49BAMCMBgxFjAUBgNVBAMMDXR3aXN0IHRl\n"
   "c3QgQ0EwIBcNMDAwMTAxMDAwMDAwWhgPMjk5OTEyMzEwMDAwMDBaMBgxFjAUBgNV\n"
-  "BAMMDXR3aXN0IHRlc3QgQ0EwWTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAAQ5AR62\n"
-  "6tzatUawNljQwiM4UL7nwLjP3OJd9HYEomiEbBOdgSYMI3NYcwxa0A+LNbgSOS9w\n"
-  "N5TH9IbPRoqe7MESoyMwITAPBgNVHRMBAf8EBTADAQH/MA4GA1UdDwEB/wQEAwIC\n"
-  "BDAKBggqhkjOPQQDAgNHADBEAiAsbH4mFRQ3+URzRTxpr+Cf7M+PNPgx9X86nF+y\n"
-  "DEQqUAIgWJaOJJKpiDptzdL4TGzEZMtMA8yngcwls6kS+Pz6aQc=\n"
+  "BAMMDXR3aXN0IHRlc3QgQ0EwWTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAAQGOHkV\n"
+  "gx10KFFFG7mahjVswfl2pYZRzR9dCPbuwalmr/rwPer4illNs6M7UPz90H4CDJGa\n"
+  "9HBZLfDUphOyll4doyMwITAPBgNVHRMBAf8EBTADAQH/MA4GA1UdDwEB/wQEAwIC\n"
+  "hDAKBggqhkjOPQQDAgNHADBEAiBeJGusEYeRyxURPX5wzl6LfkLNrGcMnycJwHmP\n"
+  "wqmoMQIgLGetpxOAqf2EXlxyEv7A0edTCcjtQMIlqQhguvs3shU=\n"
   "-----END CERTIFICATE-----\n";
 
 static void
