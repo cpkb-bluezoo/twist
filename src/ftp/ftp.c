@@ -81,6 +81,11 @@ struct twist_ftp
   struct twist_proxy *proxy;
   /* The data connection's own tunnel through the same proxy.  */
   struct twist_proxy *data_proxy;
+  /* Through an https proxy: the control connection and each data connection
+     are tunnels in TLS to it (tunnel.c), with these credentials.  */
+  int tls_tunnel;
+  char *tun_user;
+  char *tun_pass;
   struct twist_endpoint *ep;
   struct twist_timer *timer;
   /* The time allowed to be connected and logged in.  */
@@ -640,6 +645,24 @@ new_data_proxy (struct twist_ftp *f)
   return rc;
 }
 
+/* A tunnel through the https proxy to PORT of the server, which is the
+   connection in *SLOT; f->peer is the proxy's address.  */
+static int
+dial_tunnel (struct twist_ftp *f, struct twist_connection **slot,
+             const struct twist_protocol_handler *handler, int port)
+{
+  struct twist_tunnel_spec spec;
+
+  memset (&spec, 0, sizeof spec);
+  spec.proxy_host = f->dial_host;
+  spec.proxy_port = f->dial_port;
+  spec.user = f->tun_user;
+  spec.pass = f->tun_pass;
+  spec.host = f->transfer->url->host;
+  spec.port = port;
+  return twist_tunnel_connect (f->transfer, &spec, &f->peer, handler, f, slot);
+}
+
 static void
 dial_data (struct twist_ftp *f)
 {
@@ -654,6 +677,8 @@ dial_data (struct twist_ftp *f)
         rc = dial_tcp (f, &f->data, twist_proxy_handler (f->data_proxy),
                        f->data_proxy, &f->peer, f->dial_port);
     }
+  else if (f->tls_tunnel)
+    rc = dial_tunnel (f, &f->data, &ftp_data_handler, f->data_port);
   else
     rc = dial_tcp (f, &f->data, &ftp_data_handler, f, &f->data_addr,
                    f->data_port);
@@ -1443,6 +1468,27 @@ ftp_race_failed (void *user, int err)
   ftp_complete (user, err);
 }
 
+/* The proxy's address is known: the control connection is a tunnel to the
+   server through it.  */
+static void
+ctrl_tunnel_resolved (void *user, int err, const struct twist_dns_addr *addr)
+{
+  struct twist_ftp *f = user;
+  int rc;
+
+  if (f->finished)
+    return;
+  if (err != TWIST_OK || addr == NULL)
+    {
+      ftp_complete (f, err != TWIST_OK ? err : TWIST_ERR_RESOLVE);
+      return;
+    }
+  f->peer = *addr;
+  rc = dial_tunnel (f, &f->ctrl, &ftp_ctrl_handler, f->transfer->url->port);
+  if (rc != TWIST_OK)
+    ftp_complete (f, rc);
+}
+
 /* The control connection, made and given its handler, and then the name looked
    up and its addresses raced: the connection can be up before the lookup is
    over.  */
@@ -1454,6 +1500,14 @@ dial_control (struct twist_ftp *f)
   struct twist_connection *c;
   int rc;
 
+  if (f->tls_tunnel)
+    {
+      rc = twist_dns_resolve_transfer (f->transfer, f->dial_host,
+                                       ctrl_tunnel_resolved, f);
+      if (rc != TWIST_OK)
+        ftp_complete (f, rc);
+      return;
+    }
   if (f->proxy != NULL)
     {
       user = f->proxy;
@@ -1498,28 +1552,29 @@ ftp_begin (struct twist_ftp *f)
         }
       if (kind == TWIST_PROXY_HTTPS)
         {
-          /* The data connection has to go through it as well; not yet.  */
-          free (phost);
-          free (puser);
-          free (ppass);
-          twist_transfer_set_error (transfer,
-                                    twist_strdup (_("an https proxy is not "
-                                                    "supported for ftp; use "
-                                                    "http:// or socks5://")));
-          ftp_complete (f, TWIST_ERR_UNSUPPORTED);
-          return;
+          /* TLS to the proxy and CONNECT in it, for the control connection
+             and each data connection (tunnel.c).  */
+          f->tls_tunnel = 1;
+          f->tun_user = puser;
+          f->tun_pass = ppass;
+          puser = ppass = NULL;
+          dial = phost;
+          f->dial_port = pport;
         }
-      f->proxy = twist_proxy_new (kind, phost, pport, &ftp_ctrl_handler);
-      if (f->proxy == NULL)
+      else
         {
-          free (phost);
-          ftp_complete (f, TWIST_ERR_NOMEM);
-          return;
+        f->proxy = twist_proxy_new (kind, phost, pport, &ftp_ctrl_handler);
+        if (f->proxy == NULL)
+          {
+            free (phost);
+            ftp_complete (f, TWIST_ERR_NOMEM);
+            return;
+          }
+        twist_proxy_set_target (f->proxy, url->host, url->port);
+        twist_proxy_configure (f->proxy, transfer, puser, ppass);
+        dial = phost;
+        f->dial_port = pport;
         }
-      twist_proxy_set_target (f->proxy, url->host, url->port);
-      twist_proxy_configure (f->proxy, transfer, puser, ppass);
-      dial = phost;
-      f->dial_port = pport;
     }
   f->dial_host = twist_strdup (dial != NULL ? dial : "");
   free (phost);
@@ -1563,6 +1618,12 @@ twist_ftp_free (void *p)
   twist_connection_free (f->data);
   twist_proxy_free (f->proxy);
   twist_proxy_free (f->data_proxy);
+  free (f->tun_user);
+  if (f->tun_pass != NULL)
+    {
+      memset (f->tun_pass, 0, strlen (f->tun_pass));
+      free (f->tun_pass);
+    }
   twist_ftp_parser_free (f->parser);
   free (f->dial_host);
   free (f);

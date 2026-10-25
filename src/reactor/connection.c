@@ -83,6 +83,7 @@ struct twist_connection
   twist_stream_end_fn stream_end;
   void *stream_user;
   int filling;
+  void (*shutdown_fn) (void *);	/* Shuts the write side of one with no fd.  */
   int half_close;               /* Shut the write side when it is all written.  */
   int writing;                  /* In the loop that writes (see on_writable).  */
   struct twist_rate rrate;
@@ -343,11 +344,23 @@ twist_connection_stream (struct twist_connection *c, twist_stream_read_fn read,
 static void
 try_half_close (struct twist_connection *c)
 {
-  if (c->half_close == 1 && c->out_len == 0 && c->fd >= 0 && !c->failed)
-    {
-      shutdown (c->fd, SHUT_WR);
-      c->half_close = 2;
-    }
+  if (c->half_close != 1 || c->out_len != 0 || c->failed)
+    return;
+  if (c->fd >= 0)
+    shutdown (c->fd, SHUT_WR);
+  else if (c->shutdown_fn != NULL)
+    c->shutdown_fn (c->io_user);
+  else
+    return;
+  c->half_close = 2;
+}
+
+void
+twist_connection_set_shutdown (struct twist_connection *c,
+                               void (*fn) (void *))
+{
+  if (c != NULL)
+    c->shutdown_fn = fn;
 }
 
 void

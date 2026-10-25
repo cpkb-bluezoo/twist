@@ -81,6 +81,9 @@ Version 0.1 - unreleased
     connection to it, whichever protocol they carry, and the connection is
     kept for 30 seconds after the last; an HTTP/1.1 proxy has a connection to
     each, and is not waited for again once known
+  * ftp and ftps go through an https proxy: the control connection and each
+    data connection are tunnels, streams of one connection to an HTTP/2 proxy,
+    and the end of an upload ends its tunnel
   * requests forwarded to a proxy share its connection whatever their
     origin, as the connection is kept for the proxy and not for the origin
   * the file given to -T is a glob pattern ({a,b}, [1-9]; -g turns it off): each

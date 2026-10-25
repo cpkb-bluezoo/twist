@@ -294,7 +294,72 @@ while True:
     threading.Thread(target=serve, args=(tc, conn_no[0]), daemon=True).start()
 PY
 
+cat > "$work/ftpd.py" <<'PY'
+import socket, sys, threading
+
+portfile, store = sys.argv[1], sys.argv[2]
+
+def serve(c):
+    f = c.makefile('rwb', buffering=0)
+    def say(s):
+        f.write((s + '\r\n').encode())
+    say('220 hi')
+    pasv = None
+    while True:
+        line = f.readline()
+        if not line:
+            break
+        cmd = line.decode().strip().partition(' ')[0].upper()
+        if cmd == 'USER':
+            say('331 pass')
+        elif cmd == 'PASS':
+            say('230 in')
+        elif cmd in ('TYPE', 'EPRT', 'PORT'):
+            say('200 ok' if cmd == 'TYPE' else '500 no')
+        elif cmd == 'SIZE':
+            say('213 10')
+        elif cmd == 'EPSV':
+            pasv = socket.socket()
+            pasv.bind(('127.0.0.1', 0))
+            pasv.listen(1)
+            say('229 Entering Extended Passive Mode (|||%d|)' % pasv.getsockname()[1])
+        elif cmd == 'RETR':
+            say('150 go')
+            d, _ = pasv.accept()
+            d.sendall(b'hello-ftp\n')
+            d.close()
+            say('226 done')
+        elif cmd == 'STOR':
+            say('150 go')
+            d, _ = pasv.accept()
+            with open(store, 'wb') as out:
+                while True:
+                    b = d.recv(1 << 20)
+                    if not b:
+                        break
+                    out.write(b)
+            d.close()
+            say('226 done')
+        elif cmd == 'QUIT':
+            say('221 bye')
+            break
+        else:
+            say('502 no')
+    c.close()
+
+s = socket.socket()
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(('127.0.0.1', 0))
+s.listen(8)
+open(portfile, 'w').write(str(s.getsockname()[1]))
+while True:
+    c, _ = s.accept()
+    threading.Thread(target=serve, args=(c,), daemon=True).start()
+PY
+
 python3 "$work/origin.py" "$work/oport" &
+pids="$pids $!"
+python3 "$work/ftpd.py" "$work/fport" "$work/fstore" &
 pids="$pids $!"
 for m in h2 h1; do
   : > "$work/$m.log"
@@ -302,10 +367,11 @@ for m in h2 h1; do
   pids="$pids $!"
 done
 n=0
-while { [ ! -s "$work/oport" ] || [ ! -s "$work/h2.port" ] || [ ! -s "$work/h1.port" ]; } \
+while { [ ! -s "$work/oport" ] || [ ! -s "$work/fport" ] || [ ! -s "$work/h2.port" ] || [ ! -s "$work/h1.port" ]; } \
       && [ $n -lt 50 ]; do sleep 0.1; n=$((n + 1)); done
 [ -s "$work/h1.port" ] || skip "the servers did not start"
 o=127.0.0.1:$(cat "$work/oport")
+f=127.0.0.1:$(cat "$work/fport")
 px () { echo "https://localhost:$(cat "$work/$1.port")"; }
 conns () { sed -n 's/^conn=\([0-9]*\) .*/\1/p' "$work/$1.log" | sort -u | wc -l | tr -d ' '; }
 tunnels () { wc -l < "$work/$1.log" | tr -d ' '; }
@@ -347,5 +413,27 @@ fresh h2
 get -Z -x "$(px h2)" "http://$o/big" -o "$work/big1" "http://$o/big" -o "$work/big2"
 check "$([ "$(wc -c < "$work/big1")" -eq 3145728 ] && [ "$(wc -c < "$work/big2")" -eq 3145728 ] && [ "$(conns h2)" -eq 1 ] && echo ok)" \
   "3 MiB, twice at once, through the windows"
+
+# ftp: the control connection and the data connection are two tunnels, and
+# over HTTP/2 two streams of one connection to the proxy.
+fresh h2
+out=$(get -x "$(px h2)" "ftp://$f/file")
+check "$([ "$out" = hello-ftp ] && [ "$(tunnels h2)" -eq 2 ] && [ "$(conns h2)" -eq 1 ] && echo ok)" \
+  "ftp over HTTP/2: control and data on one connection ($out, $(tunnels h2) tunnels, $(conns h2) connections)"
+fresh h1
+out=$(get -x "$(px h1)" "ftp://$f/file")
+check "$([ "$out" = hello-ftp ] && [ "$(tunnels h1)" -eq 2 ] && [ "$(conns h1)" -eq 2 ] && echo ok)" \
+  "ftp over HTTP/1.1: a connection each ($out, $(tunnels h1) tunnels, $(conns h1) connections)"
+
+# ... and an upload ends the data tunnel with the end of the file.
+head -c 2000000 /dev/urandom > "$work/up"
+fresh h2
+get -x "$(px h2)" -T "$work/up" "ftp://$f/up"
+check "$(cmp -s "$work/up" "$work/fstore" && [ "$(conns h2)" -eq 1 ] && echo ok)" \
+  "an ftp upload over HTTP/2 is whole ($(conns h2) connections)"
+rm -f "$work/fstore"
+fresh h1
+get -x "$(px h1)" -T "$work/up" "ftp://$f/up"
+check "$(cmp -s "$work/up" "$work/fstore" && echo ok)" "and over HTTP/1.1"
 
 exit $fail

@@ -548,6 +548,10 @@ void twist_connection_set_owner (struct twist_connection *conn, void *owner,
                                  void (*free_fn) (void *),
                                  void (*resume_fn) (void *));
 int twist_connection_paused (const struct twist_connection *conn);
+/* What half_close does on a connection with no descriptor (a tunnel): it is
+   called, with the io user, once all that was queued has been written.  */
+void twist_connection_set_shutdown (struct twist_connection *conn,
+                                    void (*fn) (void *));
 void twist_connection_set_io (struct twist_connection *conn,
                               ssize_t (*read_fn) (void *, uint8_t *, size_t),
                               ssize_t (*write_fn) (void *, const uint8_t *,

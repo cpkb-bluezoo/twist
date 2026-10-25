@@ -507,6 +507,22 @@ inner_write (void *p, const uint8_t *buf, size_t len)
   return (ssize_t) len;
 }
 
+/* The protocol has sent all it will on this tunnel (the end of an upload):
+   its direction ends, and the other goes on.  */
+static void
+inner_shutdown (void *p)
+{
+  struct twist_tunnel *t = p;
+  struct tunnel_hub *hub = t->hub;
+
+  if (t->state != T_UP || hub == NULL || hub->outer == NULL)
+    return;
+  if (hub->state == H_H2)
+    twist_h2_send_data (hub->h2c, t->stream, NULL, 0, 1);
+  else
+    twist_connection_half_close (hub->outer);
+}
+
 /* The tunnels on the hub can write, each to the protocol that has it.  A
    protocol that lets go of its tunnel does not unlink it until later, so the
    list stands.  */
@@ -1166,6 +1182,7 @@ twist_tunnel_connect (struct twist_transfer *transfer,
   t->state = T_WAIT;
   twist_connection_set_io (t->inner, inner_read, inner_write, t);
   twist_connection_set_owner (t->inner, t, inner_free, inner_resume);
+  twist_connection_set_shutdown (t->inner, inner_shutdown);
   twist_connection_endpoint (t->inner)->user_data = user;
   twist_connection_set_handler (t->inner, handler);
   rc = tunnel_place (t);

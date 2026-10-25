@@ -52,12 +52,6 @@ https proxies (src/engine/tunnel.c, masque.c)
     (tests/test-masque.c) remain.  HTTP/3 directly has none either.
   - Templated CONNECT-TCP (draft-ietf-httpbis-connect-tcp), and
     --proxy-template-tcp for it, when it is an RFC.
-  - ftp and ftps through an https proxy (the data connection too).
-  - The proxy's version is found by ALPN alone.  HTTPS RR, Alt-Svc and the
-    HTTP/1-only facts that origins use are not asked for the proxy, and there
-    is no HTTP/3 to a proxy for CONNECT or for a forwarded request; the
-    discovery for origins (http.c) and the hub for tunnels (tunnel.c) are two
-    pieces of code, and could be one peer layer.
 
 
 Progress meter (see HACKING)
