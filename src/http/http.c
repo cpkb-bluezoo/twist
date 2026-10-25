@@ -1474,7 +1474,7 @@ up_read (void *user, uint8_t *buf, size_t cap)
     {
       want = cap - UP_HEAD - 2;
       n = t->read_cb ((char *) buf + UP_HEAD, 1, want, t->read_data);
-      if (n == TWIST_READFUNC_ABORT || n > want)
+      if (n == TWIST_READFUNC_ABORT || n > want || n > 0xffff)
         return (size_t) -1;
       if (n == 0)
         {
@@ -1486,7 +1486,7 @@ up_read (void *user, uint8_t *buf, size_t cap)
         char head[UP_HEAD + 1];
 
         /* The terminator snprintf writes would be the first data byte.  */
-        snprintf (head, sizeof head, "%04zx\r\n", n);
+        snprintf (head, sizeof head, "%04x\r\n", (unsigned) (n & 0xffff));
         memcpy (buf, head, UP_HEAD);
       }
       memcpy (buf + UP_HEAD + n, "\r\n", 2);
