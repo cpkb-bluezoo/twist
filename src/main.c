@@ -863,7 +863,7 @@ remote_file (const char *url)
 }
 
 static char *
-output_path (const struct cli_op *op, const char *name)
+output_path (const char *dir, const char *name)
 {
   size_t dn;
   size_t nn;
@@ -871,14 +871,14 @@ output_path (const struct cli_op *op, const char *name)
 
   if (name == NULL || strcmp (name, "-") == 0)
     return NULL;
-  if (op->output_dir == NULL || op->output_dir[0] == 0 || name[0] == '/')
+  if (dir == NULL || dir[0] == 0 || name[0] == '/')
     return twist_strdup (name);
-  dn = strlen (op->output_dir);
+  dn = strlen (dir);
   nn = strlen (name);
   path = twist_xmalloc (dn + 1 + nn + 1);
   if (path == NULL)
     return NULL;
-  memcpy (path, op->output_dir, dn);
+  memcpy (path, dir, dn);
   path[dn] = '/';
   memcpy (path + dn + 1, name, nn + 1);
   return path;
@@ -1129,6 +1129,13 @@ is_ssh_url (const char *url)
 }
 
 static int
+is_http_url (const char *url)
+{
+  return strncasecmp (url, "http://", 7) == 0
+         || strncasecmp (url, "https://", 8) == 0;
+}
+
+static int
 is_ftp_url (const char *url)
 {
   return strncasecmp (url, "ftp://", 6) == 0
@@ -1193,6 +1200,7 @@ struct cli_job
   char *url;                    /* As written, or as a glob made it.  */
   const char *use_url;          /* What the transfer is given.  */
   const char *upload;           /* The name given to -T, or NULL.  */
+  char *up_owned;               /* UPLOAD, when a -T pattern made it.  */
   FILE *body;                   /* NULL until the file is made.  */
   char *out_path;               /* The file, while it is not.  */
   const char *out_mode;
@@ -1339,6 +1347,11 @@ struct cli_run
   struct cli_item *up;          /* The next -T of OP.  */
   struct twist_glob *glob;      /* The pattern being expanded, or NULL.  */
   int glob_yielded;             /* How many URLs it has given.  */
+  /* The file given to -T is a pattern too: for each URL of GLOB, the files of
+     UP_GLOB, the URL being CUR_URL.  The globs of the URL are numbered first
+     and the file's after them.  */
+  struct twist_glob *up_glob;
+  char *cur_url;
   const char *item_output;      /* The -o of the pattern, or NULL.  */
   int item_remote;              /* ... is -O.  */
   const char *item_upload;      /* The -T of the pattern.  */
@@ -1361,6 +1374,8 @@ struct cli_next
 {
   char *url;
   char *name;
+  char *dir;                    /* --output-dir with its #N made, or NULL.  */
+  char *up_owned;               /* The file of a -T pattern, to free.  */
   const char *output;
   int remote;
   const char *upload;
@@ -1401,6 +1416,51 @@ run_note (struct cli_run *run, int code, int aborted)
     }
 }
 
+/* Fill NEXT for URL (which is taken) and FILE, the file of a -T pattern (taken,
+   or NULL): #N in the URL, the output name and --output-dir are made with the
+   globs as they stand.  1; or 0 if there is no memory (and nothing is left
+   in NEXT).  */
+static int
+make_next (struct cli_run *run, struct cli_next *next, char *url, char *file)
+{
+  if (run->up_glob != NULL)
+    {
+      char *made = twist_glob_name2 (run->glob, run->up_glob, url);
+
+      free (url);
+      url = made;
+      if (url == NULL)
+        goto nomem;
+    }
+  next->url = url;
+  next->up_owned = file;
+  next->upload = file != NULL ? file : run->item_upload;
+  if (run->item_output != NULL && !run->item_remote)
+    {
+      next->name = twist_glob_name2 (run->glob, run->up_glob,
+                                     run->item_output);
+      if (next->name == NULL)
+        goto nomem;
+    }
+  next->output = next->name != NULL ? next->name : run->item_output;
+  next->remote = run->item_remote;
+  if (run->op->output_dir != NULL && strchr (run->op->output_dir, '#') != NULL)
+    {
+      next->dir = twist_glob_name2 (run->glob, run->up_glob,
+                                    run->op->output_dir);
+      if (next->dir == NULL)
+        goto nomem;
+    }
+  return 1;
+nomem:
+  free (next->url);
+  free (next->up_owned);
+  free (next->name);
+  free (next->dir);
+  memset (next, 0, sizeof *next);
+  return 0;
+}
+
 /* The next URL, in order, across URLs and operations: 1, or 0 when there is
    none or the run is to stop.  Trouble in producing one (a pattern that is
    wrong, no URL, no memory) is told here and noted, and the cursor goes on.  */
@@ -1418,30 +1478,76 @@ run_next_url (struct cli_run *run, struct cli_next *next)
         {
           char *url = NULL;
 
-          rc = twist_glob_next (run->glob, &url);
-          if (rc == 1)
+          /* The files of -T for the URL the outer loop is at.  */
+          if (run->up_glob != NULL)
             {
-              char *name = NULL;
+              char *file = NULL;
 
-              run->glob_yielded++;
-              if (run->item_output != NULL && !run->item_remote)
+              rc = twist_glob_next (run->up_glob, &file);
+              if (rc == 1)
                 {
-                  name = twist_glob_name (run->glob, run->item_output);
-                  if (name == NULL)
+                  char *copy = twist_strdup (run->cur_url);
+
+                  if (copy == NULL || !make_next (run, next, copy, file))
                     {
-                      free (url);
-                      twist_glob_free (run->glob);
-                      run->glob = NULL;
+                      free (file);
                       diag_code (27, twist_strerror (TWIST_ERR_NOMEM));
                       run_note (run, 27, 0);
                       continue;
                     }
+                  return 1;
                 }
-              next->url = url;
-              next->name = name;
-              next->output = name != NULL ? name : run->item_output;
-              next->remote = run->item_remote;
-              next->upload = run->item_upload;
+              twist_glob_free (run->up_glob);
+              run->up_glob = NULL;
+              free (run->cur_url);
+              run->cur_url = NULL;
+              if (rc < 0)
+                {
+                  diag_code (27, twist_strerror (TWIST_ERR_NOMEM));
+                  run_note (run, 27, 0);
+                }
+              continue;
+            }
+          rc = twist_glob_next (run->glob, &url);
+          if (rc == 1)
+            {
+              run->glob_yielded++;
+              if (run->item_upload != NULL)
+                {
+                  char err[1200];
+                  int prc = twist_glob_parse (run->item_upload, &run->up_glob,
+                                              err, sizeof err);
+
+                  if (prc != TWIST_OK)
+                    {
+                      /* The same pattern would fail with every URL.  */
+                      free (url);
+                      run->up_glob = NULL;
+                      if (prc == TWIST_ERR_URL)
+                        {
+                          diag_code (3, err);
+                          run_note (run, 3, 0);
+                        }
+                      else
+                        {
+                          diag_code (27, twist_strerror (prc));
+                          run_note (run, 27, 0);
+                        }
+                      twist_glob_free (run->glob);
+                      run->glob = NULL;
+                      continue;
+                    }
+                  run->cur_url = url;
+                  continue;
+                }
+              if (!make_next (run, next, url, NULL))
+                {
+                  diag_code (27, twist_strerror (TWIST_ERR_NOMEM));
+                  run_note (run, 27, 0);
+                  twist_glob_free (run->glob);
+                  run->glob = NULL;
+                  continue;
+                }
               return 1;
             }
           if (rc < 0)
@@ -1569,6 +1675,7 @@ job_free (struct cli_job *job)
   free (job->query_url);
   free (job->named_url);
   free (job->url);
+  free (job->up_owned);
   free (job);
 }
 
@@ -1603,6 +1710,8 @@ job_prepare (struct cli_run *run, struct cli_next *next, struct cli_job **out)
     {
       free (next->url);
       next->url = NULL;
+      free (next->up_owned);
+      next->up_owned = NULL;
       diag_code (27, twist_strerror (TWIST_ERR_NOMEM));
       return 27;
     }
@@ -1611,6 +1720,9 @@ job_prepare (struct cli_run *run, struct cli_next *next, struct cli_job **out)
   job->url = next->url;
   next->url = NULL;
   job->upload = upload;
+  /* The file of a -T pattern is the job's now.  */
+  job->up_owned = next->up_owned;
+  next->up_owned = NULL;
   job->body = stdout;
   job->ustream.fd = -1;
   job->use_url = job->url;
@@ -1643,7 +1755,8 @@ job_prepare (struct cli_run *run, struct cli_next *next, struct cli_job **out)
     }
   else if (output != NULL)
     out_name = twist_strdup (output);
-  out_path = output_path (op, out_name);
+  out_path = output_path (next->dir != NULL ? next->dir : op->output_dir,
+                          out_name);
   free (out_name);
   if (output != NULL && strcmp (output, "-") != 0 && out_path == NULL)
     {
@@ -1801,7 +1914,8 @@ job_prepare (struct cli_run *run, struct cli_next *next, struct cli_job **out)
   job->hdrs.dump = job->dump;
   job->hdrs.include = op->include;
   /* An upload to a directory goes to the file with the name it has here.  */
-  if (upload != NULL && (is_ssh_url (job->use_url) || is_ftp_url (job->use_url)))
+  if (upload != NULL && (is_ssh_url (job->use_url) || is_ftp_url (job->use_url)
+                         || is_http_url (job->use_url)))
     {
       job->named_url = with_file_name (job->use_url, upload);
       if (job->named_url != NULL)
@@ -2089,6 +2203,8 @@ run_fill (struct cli_run *run)
       int code = job_prepare (run, &next, &job);
 
       free (next.name);
+      free (next.dir);
+      free (next.up_owned);
       if (code != 0)
         run_note (run, code, 0);
       else
@@ -2197,6 +2313,8 @@ run_all (struct cli_op *ops)
   if (run.meter_on && run.meter.started > 0)
     twist_meter_draw (&run.meter, clock_ms (), 1);
   twist_glob_free (run.glob);
+  twist_glob_free (run.up_glob);
+  free (run.cur_url);
   twist_runtime_free (run.runtime);
   /* A command line that asks for two readers of standard input is wrong,
      whatever else happened.  */

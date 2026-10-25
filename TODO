@@ -35,36 +35,12 @@ FTPS (src/ftp/ftp.c)
     has not been run (integration/ftp-proxy.sh does plain ftp).
 
 
-HTTP
+Misc
 
-  - A connection says when it holds a chunk (16 KiB) that was not written
-    (twist_endpoint_full), and a producer stops until on_write_ready (HACKING).
-    Every upload there is does: HTTP request bodies (HTTP/1, HTTP/2, HTTP/3),
-    WebSocket messages, the message of smtp, tftp (a block at a time, as it
-    is acknowledged), telnet, sftp and scp (also held by the SFTP window), and
-    what goes through an https proxy's tunnel.  mqtt reads a message of at
-    most 16 KiB.  A WebSocket over HTTP/2 does not keep to the server's
-    windows (http_ws_send writes DATA frames of stream 1 directly).
-  - ftp upload (STOR, APPE, SIZE; REST for a download) and imap APPEND stream
-    as above.  Not done: ftps upload has no test that runs (the data
-    connection is started on TLS before the data goes, as for a download);
-    the end of an upload is a shut write side (the data connection of ftps is
-    not sent a close_notify, which a server that is strict about it, as
-    vsftpd can be, reports as a failed upload);
-    imap APPEND takes no flags or date and no unknown size (curl neither),
-    nor MULTIAPPEND or LITERAL+; -a/--append is for ftp only (sftp ignores
-    it).
-  - HTTP/3 request bodies are sent the same way as HTTP/2's, but there is no
-    HTTP/3 server to test with (nghttpx here is built without QUIC): only the
-    DATA frame and the QUIC stream's own pieces are tested.  The QUIC
-    connection is given to one body at a time, and holds one stream open
-    (twist_quic_hold_stream) for it.
   - --connect-timeout for ldap covers the lookup and the TCP connect only; a
     server that takes the connection and does not answer the bind is waited for
     until --max-time.  What curl does for ldap is not known: the curl it was
     compared with has no LDAP.
-  - URL globbing does not reach the file given to -T ({a,b} there, with #N in
-    the URL), nor #N in --output-dir.  -T takes the name as written.
   - STARTTLS for ldap (curl has it through OpenLDAP only).  A user name and
     password for ldap without the s go in the clear.
 

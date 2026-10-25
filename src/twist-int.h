@@ -1152,6 +1152,11 @@ const char *twist_glob_value (const struct twist_glob *g, size_t n);
    glob's value in the URL last made.  Anything else, #0 or #3 of two, a #
    with no number, stays as it is.  A new string.  */
 char *twist_glob_name (const struct twist_glob *g, const char *tmpl);
+/* As twist_glob_name for two sets of globs numbered one after the other: A's,
+   and then B's (either may be NULL): the globs of a URL and of the file given
+   to -T.  */
+char *twist_glob_name2 (const struct twist_glob *a, const struct twist_glob *b,
+                        const char *tmpl);
 void twist_glob_free (struct twist_glob *g);
 
 /* Variables (the tool's --variable and

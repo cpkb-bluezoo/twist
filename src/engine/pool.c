@@ -88,8 +88,17 @@ discard_posted (void *user)
 {
   struct twist_pool_slot *s = user;
 
-  if (s != NULL)
-    slot_discard (s->pool, s);
+  if (s == NULL)
+    return;
+  /* The pool may have been freed, and the slot discarded with it, while this
+     waited: the slot was kept for this to free.  */
+  if (s->discarded)
+    {
+      free (s);
+      return;
+    }
+  s->queued = 0;
+  slot_discard (s->pool, s);
 }
 
 static size_t
@@ -163,6 +172,10 @@ slot_discard (struct twist_pool *pool, struct twist_pool_slot *s)
   if (s->held && s->pool != NULL && s->pool->discard_cb != NULL)
     s->pool->discard_cb (s->pool->discard_user, s->key);
   free (s->key);
+  s->key = NULL;
+  /* A discard that is posted still has the slot; it frees it.  */
+  if (s->queued)
+    return;
   free (s);
 }
 

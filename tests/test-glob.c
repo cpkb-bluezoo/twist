@@ -186,6 +186,40 @@ test_ipv6 (void)
          "and a range after it is one");
 }
 
+/* The globs of a URL and of the file given to -T are numbered one after the
+   other, the URL's first, so that #N means the same in an output name, a
+   directory and the URL.  */
+static void
+test_two_sets (void)
+{
+  struct twist_glob *u = NULL, *f = NULL;
+  char err[256], *s, *name;
+
+  check (twist_glob_parse ("http://h/{x,y}/[1-2]", &u, err, sizeof err)
+         == TWIST_OK && twist_glob_parse ("img{a,b}.png", &f, err, sizeof err)
+         == TWIST_OK, "two patterns");
+  twist_glob_next (u, &s);
+  free (s);
+  twist_glob_next (f, &s);
+  free (s);
+  name = twist_glob_name2 (u, f, "#1-#2-#3");
+  check (name != NULL && strcmp (name, "x-1-a") == 0,
+         "the file's globs follow the URL's");
+  free (name);
+  name = twist_glob_name2 (u, f, "#4 #0 #");
+  check (name != NULL && strcmp (name, "#4 #0 #") == 0,
+         "a number past them all, and #0, are text");
+  free (name);
+  name = twist_glob_name2 (NULL, f, "#1");
+  check (name != NULL && strcmp (name, "a") == 0, "no URL glob: the file's");
+  free (name);
+  name = twist_glob_name2 (u, NULL, "#3");
+  check (name != NULL && strcmp (name, "#3") == 0, "no file glob");
+  free (name);
+  twist_glob_free (u);
+  twist_glob_free (f);
+}
+
 static void
 test_values (void)
 {
@@ -264,6 +298,7 @@ main (void)
   test_errors ();
   test_ipv6 ();
   test_values ();
+  test_two_sets ();
   test_lazy ();
   return tests_finish ();
 }

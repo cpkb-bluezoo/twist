@@ -554,10 +554,24 @@ twist_glob_next (struct twist_glob *g, char **url)
   return 1;
 }
 
-char *
-twist_glob_name (const struct twist_glob *g, const char *tmpl)
+/* The value of glob N, counted over A's and then B's.  */
+static const char *
+value2 (const struct twist_glob *a, const struct twist_glob *b, size_t n)
 {
-  struct buf b = { NULL, 0, 0 };
+  size_t na = a != NULL ? twist_glob_count (a) : 0;
+
+  if (n >= 1 && n <= na)
+    return twist_glob_value (a, n);
+  if (b != NULL && n > na)
+    return twist_glob_value (b, n - na);
+  return NULL;
+}
+
+char *
+twist_glob_name2 (const struct twist_glob *a, const struct twist_glob *b,
+                  const char *tmpl)
+{
+  struct buf bf = { NULL, 0, 0 };
   size_t i = 0;
 
   while (tmpl[i] != 0)
@@ -573,26 +587,32 @@ twist_glob_name (const struct twist_glob *g, const char *tmpl)
                 n = n * 10 + (size_t) (tmpl[j] - '0');
               j++;
             }
-          v = twist_glob_value (g, n);
+          v = value2 (a, b, n);
           if (v != NULL)
             {
               for (; *v != 0; v++)
-                if (buf_add (&b, *v) != 0)
+                if (buf_add (&bf, *v) != 0)
                   {
-                    free (b.p);
+                    free (bf.p);
                     return NULL;
                   }
               i = j;
               continue;
             }
         }
-      if (buf_add (&b, tmpl[i++]) != 0)
+      if (buf_add (&bf, tmpl[i++]) != 0)
         {
-          free (b.p);
+          free (bf.p);
           return NULL;
         }
     }
-  if (b.p == NULL)
+  if (bf.p == NULL)
     return twist_strdup ("");
-  return b.p;
+  return bf.p;
+}
+
+char *
+twist_glob_name (const struct twist_glob *g, const char *tmpl)
+{
+  return twist_glob_name2 (g, NULL, tmpl);
 }

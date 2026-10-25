@@ -1013,8 +1013,9 @@ anyway.
 Write the body to the last segment of the URL path.  A last segment of
 @samp{-} is a file called @file{-}, not standard output.
 @item --output-dir @var{dir}
-Directory for a relative @option{-o} or @option{-O} name.  Reset by
-@option{--next}.
+Directory for a relative @option{-o} or @option{-O} name; it may hold
+@samp{#1} and so on, as an @option{-o} name does (@pxref{URL globbing}).  Reset
+by @option{--next}.
 @item --create-dirs
 Create missing parent directories for @option{-o} and @option{-O}, with mode
 0750 whatever the umask is.  Reset by @option{--next}.
@@ -2031,6 +2032,18 @@ URL makes: a name with no @samp{#} is written by each in turn.  @option{-O}
 names each file from its own URL.  Each transfer is a transfer: a failure of
 one does not stop the rest unless @option{--fail-early} says so, and the
 status is the last one's (with @option{-Z}, the most recent failure).  @option{-g} turns it all off.
+
+The file given to @option{-T} is a pattern in the same way:
+@samp{twist -T '@{a,b@}.txt' https://example.com/dir/} uploads @file{a.txt} and
+@file{b.txt}, each to the name it has under the URL (a URL that ends in a slash
+takes the file's name; @code{ftp}, @code{sftp}, @code{scp}, @code{http} and
+@code{https} do).  When the URL has globs as well, it is the outer loop, and
+the numbers go on from the URL's last glob to the file's: with
+@samp{-T '@{a,b@}.txt' 'https://h/@{x,y@}/f-#1-#2'}, @samp{#1} is @samp{x} or
+@samp{y} and @samp{#2} is @samp{a} or @samp{b}.  The numbers work in the URL
+(only when the file is a pattern, as a @samp{#} in a URL can be a fragment), in
+@option{-o} and in @option{--output-dir}.  A file of the set that is not there
+fails its own transfer and the rest are done.
 
 Over @code{sftp} the URLs for one server share a connection, so
 @samp{sftp://host/dir/f[1-100].txt} logs in once.  There is no wildcard

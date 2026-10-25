@@ -1119,6 +1119,34 @@ test_conn_pool (void)
   twist_loop_free (loop);
 }
 
+/* A parked connection that hears from its server (data, or its close) has its
+   discard posted to the loop.  If the pool is freed before the loop runs it,
+   the posted discard must not touch what the pool freed (a sanitizer build
+   is what sees it).  */
+static void
+test_pool_free_with_post (void)
+{
+  struct twist_loop *loop = twist_loop_new (1);
+  struct twist_pool *pool = twist_pool_new ();
+  struct twist_connection *c = twist_connection_new (loop);
+  int sv[2];
+
+  check (loop != NULL && pool != NULL && c != NULL, "alloc");
+  check (socketpair (AF_UNIX, SOCK_STREAM, 0, sv) == 0, "socketpair");
+  fcntl (sv[0], F_SETFL, O_NONBLOCK);
+  twist_connection_set_fd (c, sv[0]);
+  check (twist_pool_put_idle (pool, "h", c, 0) == TWIST_OK, "parked");
+  /* The server speaks: the connection is not one to keep.  */
+  check (write (sv[1], "x", 1) == 1, "the server writes");
+  /* Read at once, without running the loop: the discard is posted and waits.  */
+  twist_connection_on_readable (c);
+  twist_pool_free (pool);
+  /* As a runtime does when it is freed: what was posted is delivered.  */
+  twist_loop_drain (loop);
+  twist_loop_free (loop);
+  close (sv[1]);
+}
+
 /* What a runtime made for a program that polls tells it.  */
 struct hooks
 {
@@ -2362,6 +2390,7 @@ main (void)
   test_proxy_socks4 ();
   test_proxy_parse ();
   test_conn_pool ();
+  test_pool_free_with_post ();
   test_runtime_run_once ();
   test_release_transfer ();
   test_cancel ();
