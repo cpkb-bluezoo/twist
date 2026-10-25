@@ -819,9 +819,14 @@ and @samp{api.example.com} is not: each host sets its own.
 
 A cookie with a control character in it, or more than 4096 bytes of name and
 value, is refused.  The jar holds at most 50 cookies for a domain and 3000 in
-all, and the oldest go first.  @code{Expires} and @code{Max-Age} are not read:
-a cookie lives as long as the runtime does, and @code{Max-Age=0} does not delete
-it.  @code{SameSite} and @code{HttpOnly} are not looked at.  The command-line
+all, and the oldest go first.  A cookie lives until its @code{Expires} date or for
+its @code{Max-Age} seconds (@code{Max-Age} wins if both are there, and no cookie
+is kept more than 400 days); one with neither lives as long as the runtime
+does.  A cookie that has already expired, or has @code{Max-Age=0}, deletes the
+cookie of that name, domain and path, except that an insecure origin cannot
+delete a @code{Secure} one.  @code{SameSite} and @code{HttpOnly} are not looked
+at: they keep a script, and a request that a site did not start, from the
+cookie, and a command line has neither.  The command-line
 program keeps no jar.
 
 @heading Threads

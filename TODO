@@ -37,9 +37,6 @@ FTPS (src/ftp/ftp.c)
 
 HTTP
 
-  - Cookies (src/http/cookie.c): Expires and Max-Age are not read, so a cookie
-    lives as long as the jar and Max-Age=0 does not delete.  SameSite and
-    HttpOnly are not looked at.
   - A connection holds at most 256 MiB of output that has not been written, and
     a send over that fails the transfer (TWIST_ERR_NOMEM).  A body is streamed,
     so as not to meet the limit, for HTTP/1 (64 KiB and over) and for smtp.  A

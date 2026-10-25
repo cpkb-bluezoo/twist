@@ -27,6 +27,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <time.h>
 
 struct twist_cookie
 {
@@ -36,6 +37,12 @@ struct twist_cookie
   char *path;
   int secure;
   int host_only;
+  /* When it expires, in seconds since the epoch; none for a cookie that lasts
+     as long as the jar.  HttpOnly and SameSite are read by no one here: they
+     keep a script, and a request that a site did not start, from the cookie,
+     and a command line has neither.  */
+  int has_expiry;
+  int64_t expires;
   struct twist_cookie *next;
 };
 
@@ -43,7 +50,11 @@ struct twist_jar
 {
   pthread_mutex_t mu;           /* Loops on several threads share it.  */
   struct twist_cookie *head;
+  int64_t now;                  /* For tests; 0: the clock.  */
 };
+
+/* RFC 6265bis, 5.5: no cookie is kept longer than 400 days, whatever it asks.  */
+#define COOKIE_MAX_LIFE (400 * 86400LL)
 
 struct twist_jar *
 twist_jar_new (void)
@@ -77,6 +88,45 @@ twist_jar_free (struct twist_jar *jar)
   free (jar);
 }
 
+static int64_t
+jar_now (const struct twist_jar *jar)
+{
+  return jar->now != 0 ? jar->now : (int64_t) time (NULL);
+}
+
+static void cookie_free (struct twist_cookie *c);
+
+/* Forget the cookies that have expired.  */
+static void
+purge_expired (struct twist_jar *jar)
+{
+  int64_t now = jar_now (jar);
+  struct twist_cookie **link = &jar->head;
+
+  while (*link != NULL)
+    {
+      struct twist_cookie *c = *link;
+
+      if (c->has_expiry && c->expires <= now)
+        {
+          *link = c->next;
+          cookie_free (c);
+        }
+      else
+        link = &c->next;
+    }
+}
+
+void
+twist_jar_set_time (struct twist_jar *jar, int64_t now)
+{
+  if (jar == NULL)
+    return;
+  pthread_mutex_lock (&jar->mu);
+  jar->now = now;
+  pthread_mutex_unlock (&jar->mu);
+}
+
 size_t
 twist_jar_count (struct twist_jar *jar)
 {
@@ -86,6 +136,7 @@ twist_jar_count (struct twist_jar *jar)
   if (jar == NULL)
     return 0;
   pthread_mutex_lock (&jar->mu);
+  purge_expired (jar);
   for (c = jar->head; c != NULL; c = c->next)
     n++;
   pthread_mutex_unlock (&jar->mu);
@@ -192,6 +243,154 @@ evict_oldest (struct twist_jar *jar, const char *domain)
     }
 }
 
+/* Seconds since the epoch of the civil date, proleptic Gregorian.  */
+static int64_t
+days_from_civil (int64_t y, int m, int d)
+{
+  int64_t era, yoe, doy, doe;
+
+  y -= m <= 2;
+  era = (y >= 0 ? y : y - 399) / 400;
+  yoe = y - era * 400;
+  doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+  doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+  return era * 146097 + doe - 719468;
+}
+
+static int
+date_delim (unsigned char c)
+{
+  return c == 0x09 || (c >= 0x20 && c <= 0x2f) || (c >= 0x3b && c <= 0x40)
+         || (c >= 0x5b && c <= 0x60) || (c >= 0x7b && c <= 0x7e);
+}
+
+/* Up to MAX digits at P, as a number; the count in *N.  */
+static int
+digits (const char *p, int max, int *n)
+{
+  int v = 0, i;
+
+  for (i = 0; i < max && p[i] >= '0' && p[i] <= '9'; i++)
+    v = v * 10 + (p[i] - '0');
+  *n = i;
+  return v;
+}
+
+/* The date of an Expires attribute, read as RFC 6265, section 5.1.1 does, so
+   that the forms servers use are all understood.  Returns 1 and the time, or
+   0 for what is not a date.  */
+static int
+parse_cookie_date (const char *s, int64_t *out)
+{
+  static const char months[] = "janfebmaraprmayjunjulaugsepoctnovdec";
+  int hour = 0, min = 0, sec = 0, dom = 0, month = 0, year = 0;
+  int have_time = 0, have_dom = 0, have_month = 0, have_year = 0;
+  int64_t days;
+
+  while (*s != 0)
+    {
+      char tok[64];
+      size_t n = 0;
+      int a, b, c, na, nb, nc;
+
+      while (*s != 0 && date_delim ((unsigned char) *s))
+        s++;
+      while (*s != 0 && !date_delim ((unsigned char) *s))
+        {
+          if (n + 1 < sizeof tok)
+            tok[n++] = *s;
+          s++;
+        }
+      tok[n] = 0;
+      if (n == 0)
+        continue;
+      a = digits (tok, 2, &na);
+      if (!have_time && na > 0 && tok[na] == ':')
+        {
+          b = digits (tok + na + 1, 2, &nb);
+          if (nb > 0 && tok[na + 1 + nb] == ':')
+            {
+              c = digits (tok + na + 1 + nb + 1, 2, &nc);
+              if (nc > 0)
+                {
+                  hour = a;
+                  min = b;
+                  sec = c;
+                  have_time = 1;
+                  continue;
+                }
+            }
+        }
+      if (!have_dom && na > 0 && (tok[na] < '0' || tok[na] > '9'))
+        {
+          dom = a;
+          have_dom = 1;
+          continue;
+        }
+      if (!have_month && n >= 3)
+        {
+          size_t i;
+
+          for (i = 0; i < 12; i++)
+            if (strncasecmp (tok, months + i * 3, 3) == 0)
+              {
+                month = (int) i + 1;
+                have_month = 1;
+                break;
+              }
+          if (have_month)
+            continue;
+        }
+      if (!have_year)
+        {
+          int y = digits (tok, 4, &na);
+
+          if (na >= 2 && (tok[na] < '0' || tok[na] > '9'))
+            {
+              year = y;
+              have_year = 1;
+            }
+        }
+    }
+  if (!have_time || !have_dom || !have_month || !have_year)
+    return 0;
+  if (year >= 70 && year <= 99)
+    year += 1900;
+  else if (year >= 0 && year <= 69)
+    year += 2000;
+  if (dom < 1 || dom > 31 || year < 1601 || hour > 23 || min > 59 || sec > 59)
+    return 0;
+  days = days_from_civil (year, month, dom);
+  *out = days * 86400 + hour * 3600 + min * 60 + sec;
+  return 1;
+}
+
+/* Max-Age (RFC 6265, 5.2.2): a whole number, which may be negative; anything
+   else is no Max-Age.  */
+static int
+parse_max_age (const char *s, int64_t *out)
+{
+  int neg = 0;
+  int64_t v = 0;
+
+  if (*s == '-')
+    {
+      neg = 1;
+      s++;
+    }
+  if (*s == 0)
+    return 0;
+  for (; *s != 0; s++)
+    {
+      if (*s < '0' || *s > '9')
+        return 0;
+      if (v < COOKIE_MAX_LIFE * 4)
+        v = v * 10 + (*s - '0');
+    }
+  *out = neg ? -v : v;
+  return 1;
+}
+
 static int
 jar_store (struct twist_jar *jar, const char *set_cookie,
            const char *host, const char *path, int https)
@@ -204,9 +403,13 @@ jar_store (struct twist_jar *jar, const char *set_cookie,
   char *scan;
   size_t in_domain = 0;
   size_t total = 0;
+  int64_t now, max_age = 0, date = 0;
+  int have_max_age = 0, have_date = 0;
 
   if (jar == NULL || set_cookie == NULL || host == NULL)
     return TWIST_ERR_INVAL;
+  now = jar_now (jar);
+  purge_expired (jar);
   semi = strchr (set_cookie, ';');
   eq = strchr (set_cookie, '=');
   if (eq == NULL || (semi != NULL && eq > semi))
@@ -254,9 +457,26 @@ jar_store (struct twist_jar *jar, const char *set_cookie,
         }
       else if (strcasecmp (scan, "Secure") == 0)
         c->secure = 1;
+      else if (strncasecmp (scan, "Max-Age=", 8) == 0)
+        have_max_age = parse_max_age (scan + 8, &max_age);
+      else if (strncasecmp (scan, "Expires=", 8) == 0)
+        have_date = parse_cookie_date (scan + 8, &date);
       scan = attr;
     }
   free (pair);
+  /* Max-Age wins over Expires.  */
+  if (have_max_age)
+    {
+      c->has_expiry = 1;
+      c->expires = max_age <= 0 ? 0
+                   : now + (max_age > COOKIE_MAX_LIFE ? COOKIE_MAX_LIFE
+                                                      : max_age);
+    }
+  else if (have_date)
+    {
+      c->has_expiry = 1;
+      c->expires = date > now + COOKIE_MAX_LIFE ? now + COOKIE_MAX_LIFE : date;
+    }
   if (c->domain == NULL || c->path == NULL)
     {
       cookie_free (c);
@@ -304,7 +524,8 @@ jar_store (struct twist_jar *jar, const char *set_cookie,
     }
 
   /* The same cookie (name, domain and path) replaces the old one, which an
-     insecure origin may not do to a Secure one.  */
+     insecure origin may not do to a Secure one.  One that has already
+     expired replaces it with nothing: that is how a server deletes.  */
   for (link = &jar->head; *link != NULL; link = &(*link)->next)
     {
       struct twist_cookie *old = *link;
@@ -318,11 +539,23 @@ jar_store (struct twist_jar *jar, const char *set_cookie,
               cookie_free (c);
               return TWIST_ERR_PROTOCOL;
             }
+          if (c->has_expiry && c->expires <= now)
+            {
+              *link = old->next;
+              cookie_free (old);
+              cookie_free (c);
+              return TWIST_OK;
+            }
           c->next = old->next;
           *link = c;
           cookie_free (old);
           return TWIST_OK;
         }
+    }
+  if (c->has_expiry && c->expires <= now)
+    {
+      cookie_free (c);
+      return TWIST_OK;
     }
   {
     struct twist_cookie *k;
@@ -360,6 +593,7 @@ jar_header (struct twist_jar *jar, const char *host, const char *path,
   *out = NULL;
   if (jar == NULL)
     return TWIST_OK;
+  purge_expired (jar);
   buf = twist_xmalloc (cap);
   if (buf == NULL)
     return TWIST_ERR_NOMEM;

@@ -1405,6 +1405,9 @@ struct twist_jar *twist_jar_new (void);
 /* How many cookies the jar holds.  */
 size_t twist_jar_count (struct twist_jar *jar);
 void twist_jar_free (struct twist_jar *jar);
+/* For tests: the time the jar takes to be now, in seconds since the epoch
+   (0: the clock).  */
+void twist_jar_set_time (struct twist_jar *jar, int64_t now);
 int twist_jar_store (struct twist_jar *jar, const char *set_cookie,
                      const char *host, const char *path, int https);
 int twist_jar_header (struct twist_jar *jar, const char *host,

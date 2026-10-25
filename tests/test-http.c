@@ -1040,6 +1040,109 @@ test_cookie_limits (void)
   twist_jar_free (jar);
 }
 
+/* How long a cookie lives (RFC 6265, 5.2.1 and 5.2.2): to the Expires date or
+   for Max-Age seconds, Max-Age winning if both are there; one with neither
+   lasts as long as the jar; and one that has already expired, or has
+   Max-Age=0, is the server's way to delete what it set.  The jar's clock is
+   set, to 14 November 2023, 22:13:20 UTC.  */
+static void
+test_cookie_expiry (void)
+{
+  static const int64_t T0 = 1700000000;
+  struct twist_jar *jar = twist_jar_new ();
+
+  twist_jar_set_time (jar, T0);
+  check (twist_jar_store (jar, "m=1; Max-Age=100", "e.example", "/", 1)
+         == TWIST_OK && cookie_sent_to (jar, "e.example", "/", 1, "m=1"),
+         "Max-Age: sent");
+  twist_jar_set_time (jar, T0 + 99);
+  check (cookie_sent_to (jar, "e.example", "/", 1, "m=1"),
+         "Max-Age: still sent just before");
+  twist_jar_set_time (jar, T0 + 101);
+  check (!cookie_sent_to (jar, "e.example", "/", 1, "m=1"),
+         "Max-Age: not sent after");
+  check (twist_jar_count (jar) == 0, "and an expired cookie is not kept");
+
+  twist_jar_set_time (jar, T0);
+  check (twist_jar_store (jar, "x=1; Expires=Wed, 15 Nov 2023 00:00:00 GMT",
+                          "e.example", "/", 1) == TWIST_OK
+         && cookie_sent_to (jar, "e.example", "/", 1, "x=1"),
+         "Expires: sent");
+  twist_jar_set_time (jar, T0 + 6401);
+  check (!cookie_sent_to (jar, "e.example", "/", 1, "x=1"),
+         "Expires: not sent after");
+
+  /* A cookie with no lifetime lasts as long as the jar.  */
+  twist_jar_set_time (jar, T0);
+  twist_jar_store (jar, "s=1", "e.example", "/", 1);
+  twist_jar_set_time (jar, T0 + 400 * 86400LL);
+  check (cookie_sent_to (jar, "e.example", "/", 1, "s=1"),
+         "a session cookie stays");
+
+  /* Deleting.  */
+  twist_jar_set_time (jar, T0);
+  twist_jar_store (jar, "d=1", "e.example", "/", 1);
+  check (cookie_sent_to (jar, "e.example", "/", 1, "d=1"), "d is set");
+  check (twist_jar_store (jar, "d=; Max-Age=0", "e.example", "/", 1)
+         == TWIST_OK && !cookie_sent_to (jar, "e.example", "/", 1, "d="),
+         "Max-Age=0 deletes");
+  twist_jar_store (jar, "d=1", "e.example", "/", 1);
+  twist_jar_store (jar, "d=; Max-Age=-5", "e.example", "/", 1);
+  check (!cookie_sent_to (jar, "e.example", "/", 1, "d="),
+         "a negative Max-Age deletes");
+  twist_jar_store (jar, "d=1", "e.example", "/", 1);
+  twist_jar_store (jar, "d=; Expires=Tue, 14 Nov 2023 00:00:00 GMT",
+                   "e.example", "/", 1);
+  check (!cookie_sent_to (jar, "e.example", "/", 1, "d="),
+         "an Expires in the past deletes");
+  twist_jar_store (jar, "d=1; Path=/a", "e.example", "/", 1);
+  twist_jar_store (jar, "d=; Max-Age=0", "e.example", "/", 1);
+  check (cookie_sent_to (jar, "e.example", "/a", 1, "d=1"),
+         "and only the cookie of that path");
+  twist_jar_store (jar, "d=; Max-Age=0; Path=/a", "e.example", "/", 1);
+  check (!cookie_sent_to (jar, "e.example", "/a", 1, "d="), "whose path it is");
+
+  /* Max-Age wins.  */
+  twist_jar_store (jar, "w=1; Max-Age=100; Expires=Tue, 14 Nov 2023 00:00:00 GMT",
+                   "e.example", "/", 1);
+  check (cookie_sent_to (jar, "e.example", "/", 1, "w=1"),
+         "Max-Age over a past Expires");
+  twist_jar_store (jar, "w=2; Expires=Wed, 15 Nov 2023 00:00:00 GMT; Max-Age=0",
+                   "e.example", "/", 1);
+  check (!cookie_sent_to (jar, "e.example", "/", 1, "w="),
+         "Max-Age=0 over a future Expires");
+
+  /* The forms of date servers use (RFC 6265, 5.1.1 reads them all).  */
+  twist_jar_store (jar, "r=1; Expires=Tuesday, 14-Nov-23 22:13:30 GMT",
+                   "e.example", "/", 1);
+  check (cookie_sent_to (jar, "e.example", "/", 1, "r=1"), "an RFC 850 date");
+  twist_jar_store (jar, "a=1; Expires=Tue Nov 14 22:14:00 2023",
+                   "e.example", "/", 1);
+  check (cookie_sent_to (jar, "e.example", "/", 1, "a=1"), "an asctime date");
+  twist_jar_store (jar, "g=1; Expires=not a date at all", "e.example", "/", 1);
+  twist_jar_set_time (jar, T0 + 400 * 86400LL);
+  check (cookie_sent_to (jar, "e.example", "/", 1, "g=1"),
+         "a date that is not one is no expiry");
+  twist_jar_set_time (jar, T0);
+
+  /* A server cannot ask for more than 400 days.  */
+  twist_jar_store (jar, "l=1; Max-Age=99999999999", "e.example", "/", 1);
+  twist_jar_set_time (jar, T0 + 399 * 86400LL);
+  check (cookie_sent_to (jar, "e.example", "/", 1, "l=1"), "a long life");
+  twist_jar_set_time (jar, T0 + 401 * 86400LL);
+  check (!cookie_sent_to (jar, "e.example", "/", 1, "l=1"),
+         "is cut at 400 days");
+
+  /* An origin that is not secure cannot delete a Secure cookie.  */
+  twist_jar_set_time (jar, T0);
+  twist_jar_store (jar, "z=1; Secure", "e.example", "/", 1);
+  check (twist_jar_store (jar, "z=; Max-Age=0", "e.example", "/", 0)
+         == TWIST_ERR_PROTOCOL
+         && cookie_sent_to (jar, "e.example", "/", 1, "z=1"),
+         "http cannot delete a Secure cookie");
+  twist_jar_free (jar);
+}
+
 static void
 test_cookie (void)
 {
@@ -1480,6 +1583,7 @@ main (void)
   test_cookie_secure ();
   test_cookie_replace ();
   test_cookie_limits ();
+  test_cookie_expiry ();
   test_hpack_long ();
   test_hpack_lowercase_names ();
   test_connection_specific_headers ();

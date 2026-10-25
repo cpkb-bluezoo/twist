@@ -71,6 +71,8 @@ Version 0.1 - unreleased
   * a connection holds at most 256 MiB of output not yet written, and a
     request body of 64 KiB or more for HTTP/1 and the message of smtp are sent
     as the connection writes them, not copied into its queue whole
+  * cookies expire: Expires and Max-Age are read (Max-Age wins; no cookie lasts
+    more than 400 days), and an expired cookie or Max-Age=0 deletes
   * gzip and deflate request and response coding, via zlib
   * the progress meter and the bar (-#), and the library's
     TWISTOPT_XFERINFOFUNCTION
