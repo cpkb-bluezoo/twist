@@ -195,6 +195,7 @@ struct twist_transfer
   int doh_verifypeer;
   int nobody;
   int append;
+  int proxy_tunnel;
   int failonerror;
   twist_write_callback write_cb;
   void *write_data;
@@ -1911,6 +1912,84 @@ const char *twist_transfer_proxy (const struct twist_transfer *transfer);
 int twist_noproxy_match (const char *host, const char *list);
 /* Whether the URL's host is on the list of those that go direct.  */
 int twist_transfer_noproxy (const struct twist_transfer *transfer);
+
+/* ---- the route to the target ---- */
+
+/* How a transfer reaches its target, as three separate things.
+
+   ROLE is what the intermediary does for it:
+     DIRECT      there is none.
+     FORWARD     a proxy in the sense of RFC 9110, 3.7: the request, for an
+                 http:// target, is addressed to it and it acts on it (the
+                 absolute form on HTTP/1, :scheme and :authority on HTTP/2).
+     TCP_TUNNEL  an opaque pipe to host:port, for any protocol (CONNECT, or
+                 SOCKS), the target's own protocol running inside it.
+     UDP_TUNNEL  an opaque flow of datagrams, for QUIC (CONNECT-UDP, RFC 9298).
+   HOP is how the intermediary is reached: TCP, TLS (an https proxy, which
+   negotiates HTTP/2 or HTTP/1.1 with ALPN), or QUIC.
+   NEG is what is said to it to get the role: nothing for FORWARD, else CONNECT,
+   a version of SOCKS, or CONNECT-UDP.
+
+   A forward is chosen for an http:// (or ws://) target through an HTTP or https
+   proxy, and a tunnel for every other target, as curl does; the transfer's
+   TWISTOPT_HTTPPROXYTUNNEL makes it a tunnel for those too, and a proxy that
+   has been found not to forward (twist_route_remember) is tunnelled to.  */
+enum
+{
+  TWIST_ROUTE_DIRECT = 0,
+  TWIST_ROUTE_FORWARD,
+  TWIST_ROUTE_TCP_TUNNEL,
+  TWIST_ROUTE_UDP_TUNNEL
+};
+enum
+{
+  TWIST_HOP_TCP = 0,
+  TWIST_HOP_TLS,
+  TWIST_HOP_QUIC
+};
+enum
+{
+  TWIST_NEG_NONE = 0,
+  TWIST_NEG_CONNECT,
+  TWIST_NEG_SOCKS4,
+  TWIST_NEG_SOCKS4A,
+  TWIST_NEG_SOCKS5,
+  TWIST_NEG_SOCKS5H,
+  TWIST_NEG_CONNECT_UDP
+};
+struct twist_route
+{
+  int role;
+  int hop;
+  int neg;
+  int kind;			/* TWIST_PROXY_*, of the proxy URL.  */
+  char *host;			/* The intermediary, and its credentials from
+				   the proxy URL; NULL for DIRECT.  */
+  int port;
+  char *user;
+  char *pass;
+};
+/* Work out the route of TRANSFER to a target of SCHEME (the URL's scheme, in
+   lower case).  UDP is non-zero for a target reached over QUIC (HTTP/3).
+   TWIST_OK, or why there is none: TWIST_ERR_URL for a proxy URL that is not
+   one, TWIST_ERR_UNSUPPORTED for a kind of proxy that is not spoken or HTTP/3
+   through one that is not an https proxy.  OUT is to be freed with
+   twist_route_free, also after a failure.  */
+int twist_route_plan (struct twist_transfer *transfer, const char *scheme,
+                      int udp, struct twist_route *out);
+void twist_route_free (struct twist_route *route);
+/* Just the role: -1 if there is no route.  */
+int twist_route_role (struct twist_transfer *transfer, const char *scheme,
+                      int udp);
+/* The proxy of ROUTE was found not to forward: from now on, for as long as the
+   runtime lives, transfers through it are tunnelled.  */
+void twist_route_remember_no_forward (struct twist_transfer *transfer,
+                                      const struct twist_route *route);
+/* The runtime's memory of the proxies that do not forward, by a key made of
+   the proxy's host, port and hop.  */
+void twist_origintab_note_noforward (struct twist_origintab *tab,
+                                     const char *key);
+int twist_origintab_noforward (struct twist_origintab *tab, const char *key);
 
 /* ---- progress ---- */
 

@@ -99,6 +99,14 @@ struct twist_http
   int how;
   int have_peer;
   int falling;
+  /* The request was forwarded to a proxy (the route's role): a proxy that
+     answers 405 or 501 to it will not forward, and a request that is safe to
+     repeat goes again through a tunnel.  SWALLOW: that answer is being read
+     to be thrown away.  FELL_BACK: it has been done, once.  */
+  int fwd;
+  int tls_hop;			/* ... and over TLS to an https proxy.  */
+  int swallow;
+  int fell_back;
   /* Commands posted to the loop that hold this record (http_post).  The
      record outlives a free until they have run.  */
   int posted;
@@ -163,6 +171,8 @@ static void start_quic (struct twist_http *h, const struct twist_dns_addr *addr)
 static void http_connected (struct twist_endpoint *ep);
 static void http_fail (struct twist_http *h, int err);
 static void pump_stop (struct twist_http *h, int whole);
+static void proxy_fallback (void *user);
+static int http_post (struct twist_http *h, void (*fn) (void *));
 static void wspump_stop (struct twist_http *h);
 static void http_free_parsers (struct twist_http *h);
 static void on_version (void *user, int major, int minor);
@@ -851,6 +861,23 @@ on_switch (void *user)
   return 1;
 }
 
+/* Whether CODE, the answer to a request forwarded to a proxy, is the proxy
+   saying it does not forward (405 or 501), to a request that is safe to
+   repeat, which has not been repeated.  */
+static int
+forward_refused (const struct twist_http *h, int code)
+{
+  const struct twist_transfer *t = h->transfer;
+  const char *m = t->method;
+
+  if (!h->fwd || h->fell_back || h->ws || (code != 405 && code != 501))
+    return 0;
+  if (m == NULL)
+    return t->postfields == NULL && t->read_cb == NULL;
+  return strcmp (m, "GET") == 0 || strcmp (m, "HEAD") == 0
+         || strcmp (m, "OPTIONS") == 0;
+}
+
 static void
 on_status (void *user, int code, const char *reason, size_t n)
 {
@@ -858,6 +885,12 @@ on_status (void *user, int code, const char *reason, size_t n)
   char line[128];
   int wr;
 
+  if (forward_refused (h, code))
+    {
+      /* Not for the application: the request goes again, another way.  */
+      h->swallow = 1;
+      return;
+    }
   h->status = code;
   h->transfer->http_code = code;
   h->transfer->http_version_seen = h->peer_minor == 0
@@ -884,6 +917,8 @@ on_header (void *user, const char *name, size_t name_len, const char *value,
   char *line;
   size_t n;
 
+  if (h->swallow)
+    return;
   if (name_len == 7 && memcmp (name, ":status", 7) == 0)
     {
       int code = 0;
@@ -894,6 +929,11 @@ on_header (void *user, const char *name, size_t name_len, const char *value,
           if (value[i] < '0' || value[i] > '9')
             break;
           code = code * 10 + (value[i] - '0');
+        }
+      if (i == value_len && value_len > 0 && forward_refused (h, code))
+        {
+          h->swallow = 1;
+          return;
         }
       if (i == value_len && value_len > 0)
         {
@@ -1173,6 +1213,8 @@ on_body (void *user, const uint8_t *data, size_t len)
 {
   struct twist_http *h = user;
 
+  if (h->swallow)
+    return;
   if (h->ws_open)
     {
       twist_ws_receive (h->wsess, data, len);
@@ -2059,7 +2101,7 @@ send_request (struct twist_http *h)
   if (h->sent || h->conn == NULL)
     return TWIST_OK;
   path = url->path != NULL && url->path[0] != 0 ? url->path : "/";
-  if (h->proxy != NULL && !h->tunnel)
+  if (h->proxy != NULL && !h->tunnel && h->mode == HTTP_H1)
     {
       char whole[8192];
 
@@ -2287,6 +2329,26 @@ http_message_done (void *user)
   int redirect = 0;
   const char *host = transfer->url != NULL ? transfer->url->host : NULL;
 
+  if (h->swallow)
+    {
+      /* The proxy does not forward: remember that, and go again through a
+         tunnel to it.  Not from here, inside the parser of this
+         connection.  */
+      struct twist_route route;
+
+      h->swallow = 0;
+      h->fell_back = 1;
+      /* The proxy may close this connection now: that is not the end.  */
+      h->restarting = 1;
+      h->conn_lost = 0;
+      if (twist_route_plan (transfer, transfer->url->scheme, 0, &route)
+          == TWIST_OK)
+        twist_route_remember_no_forward (transfer, &route);
+      twist_route_free (&route);
+      if (http_post (h, proxy_fallback) != TWIST_OK)
+        http_complete (h, TWIST_ERR_NOMEM);
+      return;
+    }
   release_coding (h);
   if (h->decode_err != 0)
     {
@@ -2519,6 +2581,38 @@ h3_fallback (void *user)
   start_attempt (h);
 }
 
+/* From the loop: the request is made again, through a tunnel, on a connection
+   of its own; this one is let go.  */
+static void
+proxy_fallback (void *user)
+{
+  struct twist_http *h = user;
+  struct twist_connection *c;
+
+  if (http_posted_done (h))
+    return;
+  if (h->finished)
+    return;
+  c = h->conn;
+  h->conn = NULL;
+  h->restarting = 0;
+  h->conn_lost = 0;
+  h->tls_on = 0;
+  h->sent = 0;
+  h->preface_sent = 0;
+  h->status = 0;
+  h->swallow = 0;
+  if (c != NULL)
+    twist_connection_free (c);
+  http_slot_release (h);
+  if (arm_parsers (h) != TWIST_OK)
+    {
+      http_complete (h, TWIST_ERR_NOMEM);
+      return;
+    }
+  start_attempt (h);
+}
+
 static void
 http_fail (struct twist_http *h, int err)
 {
@@ -2576,6 +2670,31 @@ http_connected (struct twist_endpoint *ep)
   int http10;
   int rc;
 
+  if (h->tls_hop && !h->tls_on)
+    {
+      /* TLS to an https proxy that the request is forwarded to: the proxy is
+         the peer, under its own settings (as for a tunnel).  */
+      struct twist_transfer *e = h->transfer;
+
+      http10 = h->req_http10 || e->http_version == TWIST_HTTP_VERSION_1_0;
+      if (!http10 && h->how != TWIST_DISC_H1)
+        alpn[n++] = "h2";
+      if (h->how != TWIST_DISC_H2_PRIOR)
+        alpn[n++] = "http/1.1";
+      rc = twist_connection_start_tls (h->conn, h->dial_host, e->proxy_verifypeer,
+                                       alpn, n,
+                                       e->proxy_cainfo != NULL ? e->proxy_cainfo
+                                       : e->cainfo,
+                                       e->proxy_cainfo != NULL ? NULL : e->capath,
+                                       NULL, NULL);
+      if (rc != TWIST_OK)
+        {
+          http_fail (h, rc);
+          return;
+        }
+      h->tls_on = 1;
+      return;
+    }
   if (h->https && !h->tls_on)
     {
       http10 = h->req_http10
@@ -2771,6 +2890,8 @@ prepare_dial (struct twist_http *h)
   h->tunnel = 0;
   h->tls_tunnel = 0;
   h->masque = 0;
+  h->fwd = 0;
+  h->tls_hop = 0;
   free (h->tun_tmpl);
   h->tun_tmpl = NULL;
   free (h->tun_user);
@@ -2808,17 +2929,16 @@ prepare_dial (struct twist_http *h)
           puser = ppass = NULL;
         }
     }
-  else if (twist_transfer_proxy (transfer) != NULL
-           && transfer->unix_path == NULL)
+  else
     {
-      int prc = twist_proxy_parse (twist_transfer_proxy (transfer), &kind,
-                                   &phost,
-                                   &pport, &puser, &ppass);
+      /* How the target is reached: by whom, and in what role.  */
+      struct twist_route route;
+      int prc = twist_route_plan (transfer, url->scheme, 0, &route);
 
       if (prc != TWIST_OK)
         {
-          free (phost);
-          if (prc == TWIST_ERR_UNSUPPORTED)
+          if (prc == TWIST_ERR_UNSUPPORTED
+              && twist_transfer_error (transfer) == NULL)
             twist_transfer_set_error (transfer,
                                       twist_strdup (_("this kind of proxy "
                                                       "is not supported; "
@@ -2827,41 +2947,53 @@ prepare_dial (struct twist_http *h)
                                                       "socks5://")));
           return prc == TWIST_ERR_UNSUPPORTED ? prc : TWIST_ERR_URL;
         }
-      if (kind == TWIST_PROXY_HTTPS)
+      kind = route.kind;
+      /* A proxy that has refused to forward is not asked to again.  */
+      if (route.role == TWIST_ROUTE_FORWARD && h->fell_back)
         {
-          /* TLS to the proxy and CONNECT in it, for every target.  */
+          route.role = TWIST_ROUTE_TCP_TUNNEL;
+          route.neg = TWIST_NEG_CONNECT;
+        }
+      if (route.role == TWIST_ROUTE_TCP_TUNNEL && route.hop == TWIST_HOP_TLS)
+        {
+          /* TLS to the proxy and CONNECT in it (tunnel.c).  */
           h->tls_tunnel = 1;
-          dial = phost;
-          port = pport;
-          h->tun_user = puser;
-          h->tun_pass = ppass;
-          puser = ppass = NULL;
+          dial = route.host;
+          port = route.port;
+          h->tun_user = route.user;
+          h->tun_pass = route.pass;
+          route.user = route.pass = NULL;
         }
-      h->tunnel = h->https || TWIST_PROXY_IS_SOCKS (kind);
-      if (kind == TWIST_PROXY_HTTPS)
-        h->tunnel = 0;
-      if (h->tunnel || kind == TWIST_PROXY_HTTP)
+      else if (route.role == TWIST_ROUTE_TCP_TUNNEL)
         {
-          dial = phost;
-          port = pport;
-        }
-      if (kind == TWIST_PROXY_HTTPS)
-        ;
-      else if (h->tunnel)
-        {
-          h->proxy = twist_proxy_new (kind, phost, pport, &h->handler);
+          h->tunnel = 1;
+          dial = route.host;
+          port = route.port;
+          h->proxy = twist_proxy_new (kind, route.host, route.port,
+                                      &h->handler);
           if (h->proxy != NULL)
             {
               twist_proxy_set_target (h->proxy, url->host, url->port);
-              twist_proxy_configure (h->proxy, transfer, puser, ppass);
+              twist_proxy_configure (h->proxy, transfer, route.user, route.pass);
             }
         }
-      else if (kind == TWIST_PROXY_HTTP)
+      else if (route.role == TWIST_ROUTE_FORWARD)
         {
-          h->proxy = twist_proxy_new (kind, phost, pport, NULL);
-          /* Its credentials go in the requests to it.  */
-          twist_proxy_configure (h->proxy, transfer, puser, ppass);
+          /* The request is addressed to the proxy, which acts on it; its
+             credentials go in the requests to it.  */
+          h->fwd = 1;
+          h->tls_hop = route.hop == TWIST_HOP_TLS;
+          dial = route.host;
+          port = route.port;
+          /* An https proxy's credentials are written in the same header; the
+             proxy object only holds them.  */
+          h->proxy = twist_proxy_new (TWIST_PROXY_HTTP, route.host, route.port,
+                                      NULL);
+          twist_proxy_configure (h->proxy, transfer, route.user, route.pass);
         }
+      phost = route.host;
+      route.host = NULL;
+      twist_route_free (&route);
     }
   free (h->dial_host);
   h->dial_host = twist_strdup (dial != NULL ? dial : "");
@@ -2954,7 +3086,8 @@ session_wanted (const struct twist_http *h)
     return 0;
   if (h->mode == HTTP_H2 || h->mode == HTTP_H3)
     return 1;
-  return h->https && h->how == TWIST_DISC_ALPN && !h->req_http10;
+  return (h->https || h->tls_hop) && h->how == TWIST_DISC_ALPN
+         && !h->req_http10;
 }
 
 /* Whether the transfer may share a connection with others to its origin, from
@@ -3552,6 +3685,21 @@ start_attempt (struct twist_http *h)
     {
       http_complete (h, rc);
       return;
+    }
+  if (h->tls_hop)
+    {
+      /* Forwarded to an https proxy: the version is what the handshake with
+         the proxy settles (ALPN), not a cleartext upgrade.  */
+      int v = h->transfer->http_version;
+
+      h->offered_h2c = 0;
+      h->mode = HTTP_H1;
+      if (v == TWIST_HTTP_VERSION_1_0 || v == TWIST_HTTP_VERSION_1_1)
+        h->how = TWIST_DISC_H1;
+      else if (v == TWIST_HTTP_VERSION_2_PRIOR_KNOWLEDGE)
+        h->how = TWIST_DISC_H2_PRIOR;
+      else
+        h->how = TWIST_DISC_ALPN;
     }
   if ((h->masque || h->mode != HTTP_H3) && h->transfer->url->host != NULL
       && (h->masque || strcmp (h->dial_host, h->transfer->url->host) != 0))

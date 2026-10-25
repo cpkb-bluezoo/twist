@@ -50,18 +50,20 @@ https proxies (src/engine/tunnel.c, masque.c)
   - CONNECT-UDP (RFC 9298) has no end-to-end test: the only proxy to test
     against was a Go program, which has been removed.  The unit tests
     (tests/test-masque.c) remain.  HTTP/3 directly has none either.
-  - HTTP/3 under a proxy is chosen only by --http3-only (the target's HTTPS
-    record and Alt-Svc are not asked for, since the proxy does the lookup).
-  - DNS over QUIC does not use a proxy.
-  - The tunnel's packets are at most 1200 bytes (twist asks for that with
-    max_udp_payload_size, or a peer's path MTU probes could exceed what the
-    proxy's own datagrams hold, and some proxies then end the flow), so a
-    larger path MTU is not used.
   - Templated CONNECT-TCP (draft-ietf-httpbis-connect-tcp), and
     --proxy-template-tcp for it, when it is an RFC.
   - ftp and ftps through an https proxy (the data connection too).
-  - An http:// URL is tunnelled (CONNECT) and not sent in the proxy's absolute
-    form, which some proxies would rather have.
+  - twist_route_plan (src/engine/route.c) is used by the HTTP handler only: the
+    ftp and mail handlers decide for themselves, and use the old checks on the
+    proxy kind (an https proxy is refused for ftp).  Forwarding is for http://
+    and ws:// (ftp:// through an HTTP proxy, which curl can forward, is
+    tunnelled).
+  - A forward to an https proxy has a connection and an HTTP/2 session for each
+    target origin; one session could carry requests to many origins.  The
+    fallback to a tunnel is for a 405 or 501 to GET, HEAD or OPTIONS: a proxy
+    that sends one of those for another reason is tunnelled to afterwards; and a
+    CONNECT-only gateway that answers the forwarded request differently (a 400,
+    a closed connection) is not found out.
   - A tunnel has an HTTP/2 connection of its own; one connection could carry
     many.
   - quickstep's gq_tls_free does not free the selected transcript (t->tr), so

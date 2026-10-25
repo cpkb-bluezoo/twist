@@ -406,6 +406,9 @@ Without it the proxy is checked against those of the target.
 @item TWISTOPT_PROXY_SSL_VERIFYPEER
 A long: check the certificate of an @code{https} proxy.  1 by default.  It is
 not @code{TWISTOPT_SSL_VERIFYPEER}.
+@item TWISTOPT_HTTPPROXYTUNNEL
+A long: non-zero tunnels through an HTTP or https proxy for an @code{http://}
+URL as well, where it would be forwarded; @option{-p}.
 @item TWISTOPT_PROXY_TEMPLATE_UDP
 A string: the URI Template of a UDP proxy (RFC 9298), for HTTP/3 through it.
 @xref{Protocols}.  A template that is not one is refused with
@@ -1158,6 +1161,11 @@ the environment names and that cannot be read does not matter then.  For
 @code{sftp} and @code{scp} it skips the
 @file{known_hosts} check (@pxref{SFTP and SCP}); a fingerprint given with
 @option{--hostpubsha256} is still checked.
+@item -p
+@itemx --proxytunnel
+Tunnel (@code{CONNECT}) through an HTTP or https proxy for an @code{http://} URL
+too, and do not forward it.  Other URLs are tunnelled always (see @option{--proxy}).  If the
+proxy refuses the tunnel the transfer fails.
 @item -x @var{url}
 @itemx --proxy @var{url}
 Proxy.  Use @code{http://}, @code{https://}, @code{socks5://},
@@ -1176,15 +1184,29 @@ name is given with @option{-H}.  For @code{sftp} and
 uses no proxy, whatever the environment says.  A proxy is also taken from the
 environment (@pxref{Environment}).
 
+What an intermediary does for a transfer is one of three things, and how it is
+reached is another.  A @emph{proxy} forwards: the request for an @code{http://}
+URL is addressed to it and it acts on it, so it can cache, filter, log and
+require credentials.  A @emph{tunnel} is an opaque pipe to the target's host and
+port (@code{CONNECT}, or SOCKS), for any protocol and the only way for
+@code{https://}.  A UDP tunnel (@code{CONNECT-UDP}, below) carries QUIC.  An
+@code{http://} URL, and a WebSocket's @code{ws://}, are forwarded through an
+HTTP or https proxy, and every other URL is tunnelled, as curl does.  A SOCKS
+proxy is always a tunnel.  A proxy that answers 405 or 501 to the forwarded
+request is found not to forward: a request that is safe to repeat (GET, HEAD,
+OPTIONS) goes again through a tunnel, once, and from then on every request
+through that proxy does, for as long as the runtime lives.  @option{-p} is the
+tunnel from the start, and then a refusal is final.
+
 An @code{https://} proxy is spoken to in TLS, and its certificate is checked.
-The proxy is asked, in that TLS, to @code{CONNECT} to the target: in a stream
-of HTTP/2 if it speaks that, and on the connection if it speaks only
-HTTP/1.1, as ALPN says.  What the target's protocol sends, including its own
-TLS, goes through that tunnel, so the proxy sees where the transfer goes and
-how much, but not what.  Credentials go to it as Basic, in the TLS.  This works
-for every scheme that can use a proxy except @code{ftp} and @code{ftps}, and an
-@code{http://} URL is tunnelled too.  A tunnel has a connection to the proxy of
-its own.
+A forwarded request goes in that TLS, on the connection to the proxy, in HTTP/2
+or HTTP/1.1 (the absolute form) as ALPN says.  A tunnel is asked for in that TLS
+with @code{CONNECT}: in a stream of HTTP/2 if it speaks that, and on the
+connection if it speaks only HTTP/1.1.  What the target's protocol sends,
+including its own TLS, goes through the tunnel, so the proxy sees where the
+transfer goes and how much, but not what.  Credentials go to it as Basic, in the
+TLS.  This works for every scheme that can use a proxy except @code{ftp} and
+@code{ftps}.  A tunnel has a connection to the proxy of its own.
 
 HTTP/3 (@option{--http3-only}) goes through an @code{https://} proxy that
 speaks HTTP/3 and does @code{CONNECT-UDP} (RFC 9298): QUIC to the proxy, a

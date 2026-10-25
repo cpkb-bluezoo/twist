@@ -269,6 +269,9 @@ twist_transfer_setopt (twist_transfer *transfer, int opt, ...)
     case TWISTOPT_APPEND:
       transfer->append = va_arg (ap, long) != 0;
       break;
+    case TWISTOPT_HTTPPROXYTUNNEL:
+      transfer->proxy_tunnel = va_arg (ap, long) != 0;
+      break;
     case TWISTOPT_HEADERFUNCTION:
       transfer->header_cb = va_arg (ap, twist_write_callback);
       break;

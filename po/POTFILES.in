@@ -3,6 +3,7 @@ src/telnet/telnet.c
 src/main.c
 src/engine/glob.c
 src/engine/proxy.c
+src/engine/route.c
 src/engine/vars.c
 src/file/file.c
 src/ftp/ftp.c

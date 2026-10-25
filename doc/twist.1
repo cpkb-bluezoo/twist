@@ -682,6 +682,12 @@ check; a fingerprint given with
 .B \-\-hostpubsha256
 is still checked.
 .TP
+.BR \-p ", " \-\-proxytunnel
+Tunnel (CONNECT) through an HTTP or https proxy for an http URL too, and do not
+forward it.
+Other URLs are tunnelled always, and so is anything through a SOCKS proxy.
+If the proxy refuses the tunnel the transfer fails.
+.TP
 .BI \-x ", " \-\-proxy " url"
 Proxy.  Use
 .IR http:// ,
@@ -696,6 +702,8 @@ with
 before the host if the proxy wants them.
 With socks5h and socks4a the proxy is given the name to look up; with socks5 and socks4
 twist looks it up itself and gives the proxy an address (SOCKS4 has only IPv4 ones).
+An http URL (and ws) is forwarded through an http or https proxy, and every other URL is tunnelled.
+A proxy that answers 405 or 501 to the forwarded request is tunnelled to instead (a request that is safe to repeat is sent again, once), and remembered.
 A plain http URL through an http proxy is sent with the proxy's credentials as Proxy-Authorization.
 .B \-x ""
 uses no proxy, whatever the environment says.

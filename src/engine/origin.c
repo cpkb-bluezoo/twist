@@ -91,9 +91,17 @@ struct place_entry
   struct place_entry *next;
 };
 
+/* A proxy found not to forward.  */
+struct noforward_entry
+{
+  char *key;
+  struct noforward_entry *next;
+};
+
 struct twist_origintab
 {
   pthread_mutex_t mu;
+  struct noforward_entry *noforward;
   long cap;			/* Connections to one origin; 0: no limit.  */
   void (*evict) (void *user, struct twist_loop *loop, const char *key);
   void *evict_user;
@@ -218,6 +226,7 @@ twist_transfer_origin_okey (struct twist_transfer *transfer, char *buf,
   const char *proxy;
   char sock[160];
   int n;
+  int tunnelled;
 
   if (transfer == NULL || transfer->url == NULL)
     return TWIST_ERR_INVAL;
@@ -233,8 +242,17 @@ twist_transfer_origin_okey (struct twist_transfer *transfer, char *buf,
     }
   if (proxy == NULL)
     proxy = "-";
-  n = snprintf (buf, cap, "%s|%s|%d|%s", url->scheme != NULL ? url->scheme : "",
-                url->host != NULL ? url->host : "", port, proxy);
+  /* An http:// URL through an HTTP or https proxy is forwarded or tunnelled;
+     a connection of the one is not one for the other.  */
+  tunnelled = transfer->unix_path == NULL && url->scheme != NULL
+              && (strcmp (url->scheme, "http") == 0
+                  || strcmp (url->scheme, "ws") == 0)
+              && twist_route_role (transfer, url->scheme, 0)
+                 == TWIST_ROUTE_TCP_TUNNEL;
+  n = snprintf (buf, cap, "%s|%s|%d|%s%s",
+                url->scheme != NULL ? url->scheme : "",
+                url->host != NULL ? url->host : "", port, proxy,
+                tunnelled ? "|T" : "");
   if (n < 0 || (size_t) n >= cap)
     return TWIST_ERR_NOMEM;
   return tls_identity (transfer, buf + n, cap - (size_t) n);
@@ -254,6 +272,50 @@ twist_transfer_origin_key (struct twist_transfer *transfer, char *buf,
     return TWIST_ERR_NOMEM;
   rc = twist_transfer_origin_okey (transfer, buf + n, cap - (size_t) n);
   return rc;
+}
+
+void
+twist_origintab_note_noforward (struct twist_origintab *tab, const char *key)
+{
+  struct noforward_entry *e;
+
+  if (tab == NULL || key == NULL)
+    return;
+  pthread_mutex_lock (&tab->mu);
+  for (e = tab->noforward; e != NULL; e = e->next)
+    if (strcmp (e->key, key) == 0)
+      {
+        pthread_mutex_unlock (&tab->mu);
+        return;
+      }
+  e = calloc (1, sizeof *e);
+  if (e != NULL)
+    {
+      e->key = twist_strdup (key);
+      if (e->key == NULL)
+        free (e);
+      else
+        {
+          e->next = tab->noforward;
+          tab->noforward = e;
+        }
+    }
+  pthread_mutex_unlock (&tab->mu);
+}
+
+int
+twist_origintab_noforward (struct twist_origintab *tab, const char *key)
+{
+  struct noforward_entry *e;
+  int found = 0;
+
+  if (tab == NULL || key == NULL)
+    return 0;
+  pthread_mutex_lock (&tab->mu);
+  for (e = tab->noforward; e != NULL && !found; e = e->next)
+    found = strcmp (e->key, key) == 0;
+  pthread_mutex_unlock (&tab->mu);
+  return found;
 }
 
 struct twist_origintab *
@@ -288,6 +350,14 @@ twist_origintab_free (struct twist_origintab *tab)
 {
   if (tab == NULL)
     return;
+  while (tab->noforward != NULL)
+    {
+      struct noforward_entry *e = tab->noforward;
+
+      tab->noforward = e->next;
+      free (e->key);
+      free (e);
+    }
   while (tab->head != NULL)
     {
       struct origin_entry *e = tab->head;

@@ -68,6 +68,7 @@ libtwist_la_SOURCES = \
   engine/pool.c \
   engine/race.c \
   engine/masque.c \
+  engine/route.c \
   engine/noproxy.c \
   engine/origin.c \
   engine/progress.c \

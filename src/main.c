@@ -334,6 +334,8 @@ usage (void)
   fputs (_("  -e, --referer URL       Referer header\n"), stdout);
   fputs (_("  -r, --range RANGE       byte range\n"), stdout);
   fputs (_("  -a, --append            add to the remote file (ftp)\n"), stdout);
+  fputs (_("  -p, --proxytunnel       tunnel (CONNECT) through an HTTP proxy for http:// too\n"),
+         stdout);
   fputs (_("  -C, --continue-at N     resume at byte N, or - to find it (sftp, scp, ftp)\n"),
          stdout);
   fputs (_("  -l, --list-only         list names only, for a directory (sftp)\n"),
@@ -2510,6 +2512,8 @@ main (int argc, char **argv)
     { "no-get", no_argument, NULL, NEGATE_BIT | 'G' },
     { "upload-file", required_argument, NULL, 'T' },
     { "append", no_argument, NULL, 'a' },
+    { "proxytunnel", no_argument, NULL, 'p' },
+    { "no-proxytunnel", no_argument, NULL, NEGATE_BIT | 'p' },
     { "no-append", no_argument, NULL, NEGATE_BIT | 'a' },
     { "telnet-option", required_argument, NULL, 't' },
     { "head", no_argument, NULL, 'I' },
@@ -2673,7 +2677,7 @@ main (int argc, char **argv)
           continue;
         }
       c = getopt_long (argc, argv,
-                       "+:o:X:H:d:Lkx:A:u:Iw:fE:hm:e:r:b:sS#OT:t:GgiD:qC:lQ:U:Za",
+                       "+:o:X:H:d:Lkx:A:u:Iw:fE:hm:e:r:b:sS#OT:t:GgiD:qC:lQ:U:Zap",
                        expandable, NULL);
       if (c == -1)
         break;
@@ -2774,6 +2778,9 @@ main (int argc, char **argv)
           break;
         case 'a':
           op_set_long (op, TWISTOPT_APPEND, negate ? 0L : 1L);
+          break;
+        case 'p':
+          op_set_long (op, TWISTOPT_HTTPPROXYTUNNEL, negate ? 0L : 1L);
           break;
         case 't':
           op->telnet = twist_slist_append (op->telnet, optarg);

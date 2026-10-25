@@ -366,7 +366,12 @@ enum twist_opt
   TWISTOPT_SEEKDATA = 75,
   /* A long.  Non-zero has an upload add to the remote file (ftp: APPE) and
      not replace it.  */
-  TWISTOPT_APPEND = 76
+  TWISTOPT_APPEND = 76,
+  /* A long.  Non-zero has a transfer through an HTTP or https proxy use a
+     tunnel (CONNECT) for an http:// URL too, as curl's -p does; without it
+     such a URL is sent to the proxy to forward.  Other URLs, and SOCKS
+     proxies, are tunnelled always.  */
+  TWISTOPT_HTTPPROXYTUNNEL = 77
 };
 
 /* Options of a runtime (twist_runtime_setopt).  */
