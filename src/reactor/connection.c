@@ -83,6 +83,7 @@ struct twist_connection
   twist_stream_end_fn stream_end;
   void *stream_user;
   int filling;
+  int half_close;               /* Shut the write side when it is all written.  */
   int writing;                  /* In the loop that writes (see on_writable).  */
   struct twist_rate rrate;
   struct twist_rate wrate;
@@ -146,7 +147,8 @@ refresh_interest (struct twist_connection *c)
   if (!c->paused && !c->closing && !c->hold_read && c->rtimer == NULL
       && pending_in (c) < TWIST_IN_CEILING && c->fd >= 0)
     want |= TWIST_INTEREST_READ;
-  if ((c->out_len > 0 || c->connecting || c->force_write) && c->fd >= 0
+  if ((c->out_len > 0 || c->connecting || c->force_write
+       || c->half_close == 1) && c->fd >= 0
       && c->wtimer == NULL)
     want |= TWIST_INTEREST_WRITE;
   if (want != c->interest)
@@ -333,6 +335,29 @@ twist_connection_stream (struct twist_connection *c, twist_stream_read_fn read,
   c->stream_user = user;
   (void) stream_fill (c);
   return TWIST_OK;
+}
+
+/* Tell the peer there is no more: the write side is shut when what was queued
+   has been written, and the connection stays open to read what the peer says
+   (an FTP upload ends so).  */
+static void
+try_half_close (struct twist_connection *c)
+{
+  if (c->half_close == 1 && c->out_len == 0 && c->fd >= 0 && !c->failed)
+    {
+      shutdown (c->fd, SHUT_WR);
+      c->half_close = 2;
+    }
+}
+
+void
+twist_connection_half_close (struct twist_connection *c)
+{
+  if (c == NULL || c->half_close)
+    return;
+  c->half_close = 1;
+  try_half_close (c);
+  refresh_interest (c);
 }
 
 void
@@ -988,6 +1013,7 @@ twist_connection_on_writable (struct twist_connection *c)
   c->writing = 0;
   if (stream_fill (c))
     return;
+  try_half_close (c);
   if (c->out_len == 0 && c->ep.on_write_ready != NULL)
     c->ep.on_write_ready (&c->ep);
   refresh_interest (c);

@@ -192,6 +192,103 @@ feed_session (struct twist_ftp *f, const char *s, size_t split)
     }
 }
 
+static char hello_body[] = "hello";
+
+/* An upload is STOR, or APPE if it adds to the file or goes on at a byte of it
+   (and with -1 the size is asked of the server first); a download that goes
+   on at a byte says REST before RETR.  A server that says no to an upload is
+   status 25.  The session is run up to the data connection.  */
+static struct twist_ftp *
+upload_session (twist_transfer *transfer, const char *url, const char *tail)
+{
+  static const char talk[] =
+    "220 ready\r\n"
+    "331 Password required.\r\n"
+    "230 Logged in.\r\n"
+    "200 Type set.\r\n"
+    "229 Entering Extended Passive Mode (|||40000|)\r\n";
+  struct twist_ftp *f;
+
+  check (twist_url_parse_int (url, &transfer->url) == TWIST_OK, "upload url");
+  f = twist_ftp_new (transfer, 0);
+  feed_session (f, talk, 7);
+  if (tail != NULL)
+    feed_session (f, tail, 5);
+  return f;
+}
+
+static void
+test_ftp_upload (void)
+{
+  twist_transfer *t;
+  struct twist_ftp *f;
+
+  t = twist_transfer_new ();
+  t->postfields = hello_body;
+  f = upload_session (t, "ftp://127.0.0.1/pub/up.txt", NULL);
+  check (strcmp (twist_ftp_command (f), "STOR pub/up.txt\r\n") == 0, "STOR");
+  twist_transfer_free (t);
+
+  t = twist_transfer_new ();
+  t->postfields = hello_body;
+  t->append = 1;
+  f = upload_session (t, "ftp://127.0.0.1/up.txt", NULL);
+  check (strcmp (twist_ftp_command (f), "APPE up.txt\r\n") == 0,
+         "APPE for --append");
+  twist_transfer_free (t);
+
+  t = twist_transfer_new ();
+  t->postfields = hello_body;
+  t->resume_from = 3;
+  f = upload_session (t, "ftp://127.0.0.1/up.txt", NULL);
+  check (strcmp (twist_ftp_command (f), "APPE up.txt\r\n") == 0,
+         "APPE for an upload that goes on");
+  twist_transfer_free (t);
+
+  t = twist_transfer_new ();
+  t->postfields = hello_body;
+  t->resume_from = -1;
+  f = upload_session (t, "ftp://127.0.0.1/up.txt", NULL);
+  check (strcmp (twist_ftp_command (f), "SIZE up.txt\r\n") == 0,
+         "the size is asked of the server");
+  feed_session (f, "213 100\r\n", 5);
+  check (strcmp (twist_ftp_command (f), "APPE up.txt\r\n") == 0,
+         "and the upload goes on from it");
+  twist_transfer_free (t);
+
+  t = twist_transfer_new ();
+  t->postfields = hello_body;
+  t->resume_from = -1;
+  f = upload_session (t, "ftp://127.0.0.1/up.txt", "550 no such file\r\n");
+  check (strcmp (twist_ftp_command (f), "STOR up.txt\r\n") == 0,
+         "a file that is not there is STORed");
+  twist_transfer_free (t);
+
+  t = twist_transfer_new ();
+  t->postfields = hello_body;
+  f = upload_session (t, "ftp://127.0.0.1/up.txt", "553 Not allowed.\r\n");
+  check (t->done && t->result == TWIST_ERR_FILE && t->proto_status == 25,
+         "a server that says no: status 25");
+  twist_transfer_free (t);
+
+  t = twist_transfer_new ();
+  t->resume_from = 400;
+  f = upload_session (t, "ftp://127.0.0.1/file.bin", NULL);
+  check (strcmp (twist_ftp_command (f), "REST 400\r\n") == 0,
+         "a download goes on with REST");
+  feed_session (f, "350 Restarting at 400.\r\n", 5);
+  check (strcmp (twist_ftp_command (f), "RETR file.bin\r\n") == 0,
+         "and then RETR");
+  twist_transfer_free (t);
+
+  t = twist_transfer_new ();
+  t->resume_from = 400;
+  f = upload_session (t, "ftp://127.0.0.1/file.bin", "502 No REST.\r\n");
+  check (t->done && t->result == TWIST_ERR_RESUME,
+         "a server that cannot go on is a failed resume");
+  twist_transfer_free (t);
+}
+
 static void
 test_ftp_session (void)
 {
@@ -566,6 +663,7 @@ main (void)
 {
   test_ftp_parser ();
   test_ftp_session ();
+  test_ftp_upload ();
   test_ftps_session ();
   test_ftp_auth_tls ();
   test_ftp_partial ();

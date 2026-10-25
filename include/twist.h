@@ -228,11 +228,11 @@ enum twist_opt
   /* Passphrase for the private key file (TWISTOPT_SSLKEY serves sftp and
      scp too).  Empty clears it.  */
   TWISTOPT_KEYPASSWD = 48,
-  /* Where to continue, for sftp and scp; pass a long long.  A download
-     starts at this byte of the file (the caller appends to what it has).  An
-     upload skips this many bytes of its data and appends at this offset of
-     the remote file; -1 asks the server how much of the file it has.  0
-     starts at the beginning.  */
+  /* Where to continue, for sftp, scp and ftp; pass a long long.  A download
+     starts at this byte of the file (the caller appends to what it has; ftp
+     says REST).  An upload skips this many bytes of its data and appends at
+     this offset of the remote file (ftp: APPE); -1 asks the server how much
+     of the file it has (ftp: SIZE).  0 starts at the beginning.  */
   TWISTOPT_RESUME_FROM = 49,
   /* For sftp, list a directory by name only, one to a line, not in the
      server's long form.  */
@@ -363,7 +363,10 @@ enum twist_opt
   /* A twist_seek_callback: how to read the upload from its start again.  */
   TWISTOPT_SEEKFUNCTION = 74,
   /* The pointer that is passed to it.  */
-  TWISTOPT_SEEKDATA = 75
+  TWISTOPT_SEEKDATA = 75,
+  /* A long.  Non-zero has an upload add to the remote file (ftp: APPE) and
+     not replace it.  */
+  TWISTOPT_APPEND = 76
 };
 
 /* Options of a runtime (twist_runtime_setopt).  */

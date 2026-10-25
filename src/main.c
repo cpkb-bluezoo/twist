@@ -157,7 +157,8 @@ static int
 streams_upload (const char *url)
 {
   static const char *const schemes[] = {
-    "http:", "https:", "smtp:", "smtps:", "tftp:"
+    "http:", "https:", "smtp:", "smtps:", "tftp:", "ftp:", "ftps:",
+    "imap:", "imaps:"
   };
   size_t i;
 
@@ -332,7 +333,8 @@ usage (void)
   fputs (_("  -u, --user USER[:PASS]  user and password\n"), stdout);
   fputs (_("  -e, --referer URL       Referer header\n"), stdout);
   fputs (_("  -r, --range RANGE       byte range\n"), stdout);
-  fputs (_("  -C, --continue-at N     resume at byte N, or - to find it (sftp and scp)\n"),
+  fputs (_("  -a, --append            add to the remote file (ftp)\n"), stdout);
+  fputs (_("  -C, --continue-at N     resume at byte N, or - to find it (sftp, scp, ftp)\n"),
          stdout);
   fputs (_("  -l, --list-only         list names only, for a directory (sftp)\n"),
          stdout);
@@ -1126,6 +1128,13 @@ is_ssh_url (const char *url)
   return strncmp (url, "sftp://", 7) == 0 || strncmp (url, "scp://", 6) == 0;
 }
 
+static int
+is_ftp_url (const char *url)
+{
+  return strncasecmp (url, "ftp://", 6) == 0
+         || strncasecmp (url, "ftps://", 7) == 0;
+}
+
 /* A telnet session sends what is read from standard input, or from the file
    of -T, and nothing is a request: the data of -d is not sent, and the
    transfer is not a PUT.  */
@@ -1655,9 +1664,9 @@ job_prepare (struct cli_run *run, struct cli_next *next, struct cli_job **out)
     {
       int sends = upload != NULL || (op->has_data && !op->get);
 
-      if (!is_ssh_url (url))
+      if (!is_ssh_url (url) && !is_ftp_url (url))
         {
-          diag_code (2, _("--continue-at works for sftp and scp only"));
+          diag_code (2, _("--continue-at works for sftp, scp, ftp and ftps only"));
           rc = 2;
           goto fail;
         }
@@ -1792,7 +1801,7 @@ job_prepare (struct cli_run *run, struct cli_next *next, struct cli_job **out)
   job->hdrs.dump = job->dump;
   job->hdrs.include = op->include;
   /* An upload to a directory goes to the file with the name it has here.  */
-  if (upload != NULL && is_ssh_url (job->use_url))
+  if (upload != NULL && (is_ssh_url (job->use_url) || is_ftp_url (job->use_url)))
     {
       job->named_url = with_file_name (job->use_url, upload);
       if (job->named_url != NULL)
@@ -2382,6 +2391,8 @@ main (int argc, char **argv)
     { "get", no_argument, NULL, 'G' },
     { "no-get", no_argument, NULL, NEGATE_BIT | 'G' },
     { "upload-file", required_argument, NULL, 'T' },
+    { "append", no_argument, NULL, 'a' },
+    { "no-append", no_argument, NULL, NEGATE_BIT | 'a' },
     { "telnet-option", required_argument, NULL, 't' },
     { "head", no_argument, NULL, 'I' },
     { "no-head", no_argument, NULL, NEGATE_BIT | 'I' },
@@ -2544,7 +2555,7 @@ main (int argc, char **argv)
           continue;
         }
       c = getopt_long (argc, argv,
-                       "+:o:X:H:d:Lkx:A:u:Iw:fE:hm:e:r:b:sS#OT:t:GgiD:qC:lQ:U:Z",
+                       "+:o:X:H:d:Lkx:A:u:Iw:fE:hm:e:r:b:sS#OT:t:GgiD:qC:lQ:U:Za",
                        expandable, NULL);
       if (c == -1)
         break;
@@ -2642,6 +2653,9 @@ main (int argc, char **argv)
           break;
         case 'T':
           status = append_item (&op->uploads, &op->uploads_tail, optarg, 0);
+          break;
+        case 'a':
+          op_set_long (op, TWISTOPT_APPEND, negate ? 0L : 1L);
           break;
         case 't':
           op->telnet = twist_slist_append (op->telnet, optarg);

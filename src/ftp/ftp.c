@@ -66,7 +66,9 @@ enum
   FTP_RETR,
   FTP_WAIT,
   FTP_AUTHTLS,
-  FTP_TLSWAIT
+  FTP_TLSWAIT,
+  FTP_SIZE,
+  FTP_REST
 };
 
 struct twist_ftp
@@ -109,6 +111,17 @@ struct twist_ftp
      has come.  */
   long long expect;
   long long received;
+  /* An upload: STOR, or APPE if it adds to the file or resumes at RESUME
+     (REST for a download); -1 asks the server for the size first.  PREPARED:
+     the SIZE or the REST has been answered.  GOT_GO: the server said 150 and
+     the data may go; UP_STARTED: it does.  */
+  int upload;
+  int append;
+  long long resume;
+  int prepared;
+  int got_go;
+  int up_started;
+  struct twist_timer *close_timer;
   int data_port;
   char data_host[64];
   char arg[1024];
@@ -506,6 +519,27 @@ ftp_send_transfer (struct twist_ftp *f)
     return TWIST_OK;
   if (bad_token (f->arg))
     return TWIST_ERR_PROTOCOL;
+  if (f->upload)
+    {
+      if (f->list || f->arg[0] == 0)
+        return TWIST_ERR_URL;
+      /* Where the server is: the size it has of the file.  */
+      if (f->resume < 0 && !f->prepared)
+        {
+          f->state = FTP_SIZE;
+          return ftp_send (f, "SIZE %s\r\n", f->arg);
+        }
+      f->retr_sent = 1;
+      f->state = FTP_RETR;
+      return ftp_send (f, "%s %s\r\n",
+                       f->append || f->resume > 0 ? "APPE" : "STOR", f->arg);
+    }
+  /* A download goes on at a byte: REST before RETR (RFC 3659, 5.1).  */
+  if (!f->list && f->resume > 0 && !f->prepared)
+    {
+      f->state = FTP_REST;
+      return ftp_send (f, "REST %lld\r\n", f->resume);
+    }
   f->retr_sent = 1;
   f->state = FTP_RETR;
   if (f->list)
@@ -726,6 +760,172 @@ ftp_protect_refused (struct twist_ftp *f)
   ftp_complete (f, TWIST_ERR_TLS);
 }
 
+/* The data of an upload is sent as the data connection can take it
+   (twist_connection_stream): from memory, or from the application's read
+   callback, a chunk at a time, and the connection is closed, which is how an
+   FTP upload ends, when the last of it has been queued.  */
+struct ftp_up
+{
+  struct twist_ftp *ftp;
+  struct twist_transfer *transfer;
+  const uint8_t *mem;
+  size_t mem_left;
+  int from_cb;
+};
+
+static size_t
+ftp_up_read (void *user, uint8_t *buf, size_t cap)
+{
+  struct ftp_up *u = user;
+  struct twist_transfer *t = u->transfer;
+  size_t n;
+
+  if (u->from_cb)
+    {
+      n = t->read_cb ((char *) buf, 1, cap, t->read_data);
+      if (n == TWIST_READFUNC_ABORT || n > cap)
+        return (size_t) -1;
+    }
+  else
+    {
+      n = u->mem_left > cap ? cap : u->mem_left;
+      memcpy (buf, u->mem, n);
+      u->mem += n;
+      u->mem_left -= n;
+    }
+  if (n > 0)
+    twist_progress_uploaded (t, n);
+  return n;
+}
+
+static void
+ftp_close_data (void *user)
+{
+  struct twist_ftp *f = user;
+
+  f->close_timer = NULL;
+  if (f->data == NULL || f->finished)
+    return;
+  /* The end of the data is the end of the connection's side of it; the
+     server answers on the control connection when it has it all.  */
+  twist_connection_half_close (f->data);
+  f->data_eof = 1;
+  if (f->ctrl_done)
+    ftp_finish_ok (f);
+}
+
+/* All of it is queued: close after it, from the loop and not from inside the
+   stream.  If the connection went first, the transfer's own end is
+   what is waited for.  */
+static void
+ftp_up_end (void *user, int err)
+{
+  struct ftp_up *u = user;
+  struct twist_ftp *f = u->ftp;
+
+  if (err == TWIST_OK && !f->finished)
+    twist_loop_schedule (f->transfer->loop, twist_loop_now (f->transfer->loop),
+                         ftp_close_data, f, &f->close_timer);
+  free (u);
+}
+
+/* The server has said it will take the data and, on a protected connection,
+   the handshake is done: the data goes.  */
+static void
+ftp_start_upload (struct twist_ftp *f)
+{
+  struct twist_transfer *t = f->transfer;
+  struct ftp_up *u;
+  long long skip = f->resume > 0 ? f->resume : 0;
+  long long total = -1;
+  int rc;
+
+  if (!f->upload || f->up_started || !f->got_go || f->data == NULL
+      || (f->prot_p && !f->data_secure))
+    return;
+  f->up_started = 1;
+  u = calloc (1, sizeof *u);
+  if (u == NULL)
+    {
+      ftp_complete (f, TWIST_ERR_NOMEM);
+      return;
+    }
+  u->ftp = f;
+  u->transfer = t;
+  if (t->postfields != NULL)
+    {
+      size_t n = t->postfieldsize_set && t->postfieldsize >= 0
+                 ? (size_t) t->postfieldsize : strlen (t->postfields);
+
+      if ((unsigned long long) skip > n)
+        {
+          free (u);
+          twist_transfer_set_error
+            (t, twist_strdup (_("the data to upload is shorter than the "
+                                "offset to resume at")));
+          ftp_complete (f, TWIST_ERR_RESUME);
+          return;
+        }
+      u->mem = (const uint8_t *) t->postfields + skip;
+      u->mem_left = n - (size_t) skip;
+      total = (long long) u->mem_left;
+    }
+  else
+    {
+      u->from_cb = 1;
+      if (skip > 0 && !(t->seek_cb != NULL && t->seek_cb (t->seek_data, skip, 0) == 0))
+        {
+          /* Read and throw away what the server has.  */
+          uint8_t junk[4096];
+          long long left = skip;
+
+          while (left > 0)
+            {
+              size_t want = left > (long long) sizeof junk ? sizeof junk
+                                                          : (size_t) left;
+              size_t n = t->read_cb ((char *) junk, 1, want, t->read_data);
+
+              if (n == 0 || n > want)
+                {
+                  free (u);
+                  twist_transfer_set_error
+                    (t, twist_strdup (_("the data to upload is shorter than "
+                                        "the offset to resume at")));
+                  ftp_complete (f, TWIST_ERR_RESUME);
+                  return;
+                }
+              left -= (long long) n;
+            }
+        }
+      if (t->infilesize >= 0)
+        total = t->infilesize > skip ? t->infilesize - skip : 0;
+    }
+  if (total >= 0)
+    twist_progress_ul_size (t, total);
+  rc = twist_connection_stream (f->data, ftp_up_read, ftp_up_end, u);
+  if (rc != TWIST_OK)
+    {
+      free (u);
+      ftp_complete (f, rc);
+    }
+}
+
+/* The server turned the upload down (a 4xx or 5xx to STOR or APPE).  */
+static void
+ftp_upload_refused (struct twist_ftp *f, int code, const char *text,
+                    size_t len)
+{
+  char msg[400];
+  int n = snprintf (msg, sizeof msg, _("the server would not take the upload "
+                                       "(%d %.*s)"), code,
+                    (int) (len > 200 ? 200 : len), text != NULL ? text : "");
+
+  if (n > 0)
+    twist_transfer_set_error (f->transfer, twist_strdup (msg));
+  f->transfer->proto_status = 25;
+  ftp_complete (f, TWIST_ERR_FILE);
+}
+
 static void
 ftp_on_reply (void *user, int code, int final, const char *text, size_t len)
 {
@@ -871,8 +1071,47 @@ ftp_on_reply (void *user, int code, int final, const char *text, size_t len)
         }
       open_data (f, text, len, 0);
       return;
+    case FTP_SIZE:
+      /* The size of the file the server has, where the upload goes on.  */
+      f->resume = 0;
+      if (code == 213)
+        {
+          char *end = NULL;
+          long long n = strtoll (text, &end, 10);
+
+          if (end != text && n >= 0)
+            f->resume = n;
+        }
+      f->prepared = 1;
+      if (ftp_send_transfer (f) != TWIST_OK)
+        ftp_complete (f, TWIST_ERR_PROTOCOL);
+      return;
+    case FTP_REST:
+      if (code != 350)
+        {
+          twist_transfer_set_error
+            (f->transfer, twist_strdup (_("the server will not resume (REST)")));
+          ftp_complete (f, TWIST_ERR_RESUME);
+          return;
+        }
+      f->prepared = 1;
+      if (ftp_send_transfer (f) != TWIST_OK)
+        ftp_complete (f, TWIST_ERR_PROTOCOL);
+      return;
     case FTP_RETR:
     case FTP_WAIT:
+      if (f->upload && (code == 125 || code == 150))
+        {
+          f->state = FTP_WAIT;
+          f->got_go = 1;
+          ftp_start_upload (f);
+          return;
+        }
+      if (f->upload && code >= 400 && !f->ctrl_done && !f->data_eof)
+        {
+          ftp_upload_refused (f, code, text, len);
+          return;
+        }
       if (code == 125 || code == 150)
         {
           long long size = f->list ? -1 : reply_size (text, len);
@@ -1039,12 +1278,18 @@ ftp_data_secure (struct twist_endpoint *ep, const char *alpn, size_t alpn_len)
   (void) alpn;
   (void) alpn_len;
   f->data_secure = 1;
+  ftp_start_upload (f);
 }
 
 static size_t
 ftp_data_receive (struct twist_endpoint *ep, const uint8_t *data, size_t len)
 {
-  return twist_ftp_data (ep->user_data, data, len);
+  struct twist_ftp *f = ep->user_data;
+
+  /* An upload is not answered on the data connection.  */
+  if (f->upload)
+    return len;
+  return twist_ftp_data (f, data, len);
 }
 
 static void
@@ -1310,6 +1555,8 @@ twist_ftp_free (void *p)
     return;
   if (f->timer != NULL)
     twist_timer_cancel (f->timer);
+  if (f->close_timer != NULL)
+    twist_timer_cancel (f->close_timer);
   twist_phase_end (&f->phase);
   twist_race_free (f->race);
   twist_connection_free (f->ctrl);
@@ -1335,6 +1582,10 @@ twist_ftp_new (struct twist_transfer *transfer, int live)
   f->transfer = transfer;
   f->live = live;
   f->expect = -1;
+  f->upload = !transfer->nobody
+              && (transfer->postfields != NULL || transfer->read_cb != NULL);
+  f->append = transfer->append;
+  f->resume = transfer->resume_from;
   f->implicit_tls = transfer->url->scheme != NULL
                     && strcmp (transfer->url->scheme, "ftps") == 0;
   f->ctrl_tls = f->implicit_tls;

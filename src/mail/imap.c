@@ -42,7 +42,8 @@ enum
   I_BOX,
   I_FETCH,
   I_STARTTLS,
-  I_TLSWAIT
+  I_TLSWAIT,
+  I_APPEND
 };
 
 struct twist_imap
@@ -62,6 +63,10 @@ struct twist_imap
   int finished;
   int tag;
   int uid;
+  /* An upload is APPENDed to the mailbox: the message, UP_SIZE octets, is the
+     literal.  */
+  int upload;
+  long long up_size;
   int in_fetch;
   size_t literal;
   char auth_adv[96];
@@ -221,6 +226,121 @@ deliver (struct twist_imap *m, const uint8_t *data, size_t len)
   return TWIST_OK;
 }
 
+/* The message of an upload is sent as the connection can take it
+   (twist_connection_stream), from memory or from the application's read
+   callback, a chunk at a time.  Exactly UP_SIZE octets: the literal said how
+   many, so a source that has fewer is a failure and more is not read.  The
+   line that ends the command follows it.  */
+struct imap_up
+{
+  struct twist_imap *imap;
+  struct twist_transfer *transfer;
+  const uint8_t *mem;
+  long long left;
+  int from_cb;
+};
+
+static size_t
+imap_up_read (void *user, uint8_t *buf, size_t cap)
+{
+  struct imap_up *u = user;
+  struct twist_transfer *t = u->transfer;
+  size_t want = (long long) cap > u->left ? (size_t) u->left : cap;
+  size_t n;
+
+  if (want == 0)
+    return 0;
+  if (u->from_cb)
+    {
+      n = t->read_cb ((char *) buf, 1, want, t->read_data);
+      if (n == TWIST_READFUNC_ABORT || n > want || n == 0)
+        return (size_t) -1;	/* Or short of the size that was said.  */
+    }
+  else
+    {
+      n = want;
+      memcpy (buf, u->mem, n);
+      u->mem += n;
+    }
+  u->left -= (long long) n;
+  twist_progress_uploaded (t, n);
+  return n;
+}
+
+static void
+imap_up_end (void *user, int err)
+{
+  struct imap_up *u = user;
+
+  if (err == TWIST_OK && u->imap->ep != NULL)
+    twist_endpoint_send (u->imap->ep, (const uint8_t *) "\r\n", 2);
+  free (u);
+}
+
+/* The server has said to go on: the message.  */
+static int
+send_message (struct twist_imap *m)
+{
+  struct twist_transfer *t = m->transfer;
+  struct imap_up *u = calloc (1, sizeof *u);
+  int rc;
+
+  if (u == NULL)
+    return TWIST_ERR_NOMEM;
+  u->imap = m;
+  u->transfer = t;
+  u->left = m->up_size;
+  if (t->postfields != NULL)
+    u->mem = (const uint8_t *) t->postfields;
+  else
+    u->from_cb = 1;
+  if (m->link.conn == NULL)
+    {
+      /* Driven without a connection (the tests feed an endpoint).  */
+      uint8_t buf[4096];
+      size_t n;
+
+      rc = TWIST_OK;
+      while (rc == TWIST_OK && (n = imap_up_read (u, buf, sizeof buf)) != 0)
+        rc = n == (size_t) -1 ? TWIST_ERR_ABORTED
+             : m->ep == NULL ? TWIST_OK : twist_endpoint_send (m->ep, buf, n);
+      imap_up_end (u, rc);
+      return rc;
+    }
+  rc = twist_connection_stream (m->link.conn, imap_up_read, imap_up_end, u);
+  if (rc != TWIST_OK)
+    free (u);
+  return rc;
+}
+
+/* The upload to the mailbox: APPEND with the size of the message as a
+   literal (RFC 3501, 6.3.11).  The size has to be said first, so one that is
+   not known is not sent.  */
+static int
+start_append (struct twist_imap *m, const char *mailbox)
+{
+  struct twist_transfer *t = m->transfer;
+  long long size;
+
+  if (t->postfields != NULL)
+    size = t->postfieldsize_set && t->postfieldsize >= 0
+           ? (long long) t->postfieldsize : (long long) strlen (t->postfields);
+  else
+    size = t->infilesize;
+  if (size < 0)
+    {
+      twist_transfer_set_error
+        (t, twist_strdup (_("cannot APPEND with unknown input file size")));
+      t->proto_status = 25;
+      return TWIST_ERR_FILE;
+    }
+  m->up_size = size;
+  twist_progress_ul_size (t, size);
+  next_tag (m);
+  m->state = I_APPEND;
+  return imap_send (m, "%s APPEND %s {%lld}\r\n", m->expect, mailbox, size);
+}
+
 static int
 start_box (struct twist_imap *m)
 {
@@ -234,6 +354,8 @@ start_box (struct twist_imap *m)
   rc = twist_imap_mailbox (m->box, mailbox, sizeof mailbox);
   if (rc != TWIST_OK)
     return rc;
+  if (m->upload)
+    return start_append (m, mailbox);
   next_tag (m);
   m->state = I_BOX;
   if (m->uid > 0)
@@ -432,6 +554,13 @@ on_line (struct twist_imap *m, const uint8_t *line, size_t n)
         imap_complete (m, rc);
       return;
     }
+  if (m->state == I_APPEND && line[0] == '+')
+    {
+      rc = send_message (m);
+      if (rc != TWIST_OK)
+        imap_complete (m, rc);
+      return;
+    }
   if (literal_len (line, n, &lit))
     {
       m->literal = lit;
@@ -453,6 +582,18 @@ on_line (struct twist_imap *m, const uint8_t *line, size_t n)
       rc = start_auth (m);
       if (rc != TWIST_OK)
         imap_complete (m, rc);
+      return;
+    }
+  if (!ok && m->state == I_APPEND)
+    {
+      char msg[300];
+
+      snprintf (msg, sizeof msg, _("the server would not take the message "
+                                   "(%.*s)"), (int) (n > 200 ? 200 : n),
+                (const char *) line);
+      twist_transfer_set_error (m->transfer, twist_strdup (msg));
+      m->transfer->proto_status = 25;
+      imap_complete (m, TWIST_ERR_FILE);
       return;
     }
   if (!ok)
@@ -483,6 +624,7 @@ on_line (struct twist_imap *m, const uint8_t *line, size_t n)
       if (rc == TWIST_OK)
         imap_complete (m, TWIST_OK);
       return;
+    case I_APPEND:
     case I_FETCH:
       rc = imap_send (m, "A%d LOGOUT\r\n", m->tag + 1);
       if (rc == TWIST_OK)
@@ -655,6 +797,8 @@ twist_imap_new (struct twist_transfer *transfer, int live)
   m->implicit_tls = transfer->url->scheme != NULL
                     && strcmp (transfer->url->scheme, "imaps") == 0;
   m->use_ssl = m->implicit_tls ? TWIST_USE_SSL_NONE : transfer->use_ssl;
+  m->upload = !transfer->nobody
+              && (transfer->postfields != NULL || transfer->read_cb != NULL);
   twist_mail_sasl_init (&m->sasl);
   transfer->state = m;
   transfer->state_free = twist_imap_free;

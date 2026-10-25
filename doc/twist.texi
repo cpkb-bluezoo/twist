@@ -221,6 +221,12 @@ the body, a second request for authentication).  It returns 0 when done.  Withou
 it, or if it fails, such an upload fails with @code{TWIST_ERR_REWIND}.
 @item TWISTOPT_SEEKDATA
 A @code{void *}, passed to the seek callback.
+@item TWISTOPT_APPEND
+A long.  Non-zero has an upload add to the remote file and not replace it
+(@code{ftp}: APPE).  An upload to @code{ftp} and @code{ftps} is a transfer with
+data given by @code{TWISTOPT_POSTFIELDS} or @code{TWISTOPT_READFUNCTION}; one
+to @code{imap} appends a message to the mailbox, whose size must be known
+(@code{TWISTOPT_POSTFIELDS}, or @code{TWISTOPT_INFILESIZE}).
 @item TWISTOPT_HEADERFUNCTION
 A @code{twist_write_callback}: receives the status line and then each header
 line of an HTTP response, with its line ending, whichever version carried them.
@@ -335,11 +341,12 @@ program knows.  An HTTP/1 request carries it as its @code{Content-Length}
 (without it the body is chunked), and the progress meter uses it.  @minus{}1,
 the default, is not known.
 @item TWISTOPT_RESUME_FROM
-A @code{long long}, for @code{sftp} and @code{scp}.  A download starts at this
-byte of the file, and the caller appends to what it has.  An upload skips this
-many bytes of its data and appends at this offset of the remote file.
-@minus{}1 asks the server how much of the file it has.  0, the default, starts
-at the beginning.
+A @code{long long}, for @code{sftp}, @code{scp}, @code{ftp} and @code{ftps}.  A
+download starts at this byte of the file, and the caller appends to what it
+has (@code{ftp}: REST).  An upload skips this many bytes of its data and
+appends at this offset of the remote file (@code{ftp}: APPE).  @minus{}1 asks
+the server how much of the file it has (@code{ftp}: SIZE).  0, the default,
+starts at the beginning.
 @end table
 
 @subheading Credentials
@@ -1036,10 +1043,15 @@ Append @option{-d} to the query string instead of sending a request
 body.
 @item -T @var{file}
 @itemx --upload-file @var{file}
-Upload @var{file} with PUT.  @code{-} reads standard input.  For
-@code{sftp} and @code{scp} the file is sent as it is read, so a large file or
-a pipe is not held in memory.  For other schemes it is read before the
-transfer starts.  A @code{telnet} session is not a PUT: it sends the file as
+Upload @var{file} with PUT; to @code{ftp} and @code{ftps} with STOR (or APPE,
+see @option{--append} and @option{-C}), and to @code{imap} and @code{imaps} by
+appending it to the mailbox the URL names.  @code{-} reads standard input.
+The file is sent as it is read, a chunk at a time and as the connection takes
+it, so a large file or a pipe is not held in memory, for @code{http},
+@code{https}, @code{smtp}, @code{tftp}, @code{ftp}, @code{imap}, @code{sftp} and
+@code{scp}.  An IMAP message is sent as a literal, whose size is said first, so
+it has to be known: a pipe is refused (exit status 25).  For other schemes it
+is read before the transfer starts.  A @code{telnet} session is not a PUT: it sends the file as
 it is read, and @code{-} is what it reads without @option{-T}, standard input.
 @item -t @var{name}=@var{value}
 @itemx --telnet-option @var{name}=@var{value}
@@ -1273,15 +1285,20 @@ uses HTTP/2 or HTTP/1 instead, @option{--http3-only} fails, and a @code{tftp}
 URL is refused with status 2, rather than the limit being ignored.
 @item --ftp-create-dirs
 Make the directories an @code{sftp} upload needs, with mode 0755.
+@item -a
+@itemx --append
+An upload adds to the remote file and does not replace it (@code{ftp}: APPE).
 @item -C @var{offset}
 @itemx --continue-at @var{offset}
-Resume at byte @var{offset}, for @code{sftp} and @code{scp}.  Use @samp{-} to
-find the offset.  A download continues from the end of the file named by
+Resume at byte @var{offset}, for @code{sftp}, @code{scp}, @code{ftp} and
+@code{ftps}.  Use @samp{-} to find the offset.  A download continues from the end of the file named by
 @option{-o} or @option{-O}, which is opened to add to it; with a number the
 file is added to from that byte of the remote file.  An upload with
 @option{-T} skips that many bytes of the local file and adds to the remote
-one at that offset; with @samp{-} the server is asked how big the remote file
-is.  Exits 36 if the remote file is shorter than the offset.
+one at that offset (@code{ftp}: APPE; a download says REST first); with
+@samp{-} the server is asked how big the remote file is (@code{ftp}: SIZE).
+Exits 36 if the remote file is shorter than the offset, or the FTP server
+cannot go on at it.  A refused FTP or IMAP upload exits 25.
 @item -b @var{data}
 @itemx --cookie @var{data}
 Cookie request header.  This is not a cookie jar file.
@@ -1519,7 +1536,7 @@ A local file named by @option{-d}, @option{--data-binary},
 @item 27
 Out of memory.
 @item 25
-An @code{sftp} or @code{scp} upload failed.
+An @code{sftp}, @code{scp}, @code{ftp} or @code{imap} upload failed.
 @item 28
 The transfer timed out.
 @item 33

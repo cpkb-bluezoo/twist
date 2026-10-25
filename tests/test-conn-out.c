@@ -185,6 +185,65 @@ test_nested_write (struct twist_loop *loop)
   twist_connection_free (nest_c);
 }
 
+static size_t half_got;
+
+static size_t
+half_receive (struct twist_endpoint *ep, const uint8_t *data, size_t len)
+{
+  (void) ep;
+  (void) data;
+  half_got += len;
+  return len;
+}
+
+/* The end of what is sent is told to the peer (the write side is shut) once
+   all of it has been written, and the connection is still open for what the
+   peer says.  */
+static void
+test_half_close (struct twist_loop *loop)
+{
+  int sv[2];
+  uint8_t buf[50000];
+  uint8_t in[65536];
+  struct twist_connection *c;
+  size_t seen = 0;
+  int eof = 0;
+  double end;
+  struct twist_protocol_handler h;
+
+  if (pair (sv) != 0)
+    return;
+  memset (buf, 'h', sizeof buf);
+  half_got = 0;
+  c = make (loop, sv[0]);
+  memset (&h, 0, sizeof h);
+  h.receive = half_receive;
+  twist_connection_set_handler (c, &h);
+  twist_endpoint_send (twist_connection_endpoint (c), buf, sizeof buf);
+  twist_connection_half_close (c);
+  end = now_ms () + 2000;
+  while (!eof && now_ms () < end)
+    {
+      ssize_t n = read (sv[1], in, sizeof in);
+
+      if (n > 0)
+        seen += (size_t) n;
+      else if (n == 0)
+        eof = 1;
+      twist_loop_run_once_ms (loop, 1);
+    }
+  check (seen == sizeof buf && eof, "all of it, and then the end");
+  /* The peer can still be heard.  */
+  if (write (sv[1], "ok", 2) != 2)
+    check (0, "the peer writes");
+  end = now_ms () + 1000;
+  while (half_got < 2 && now_ms () < end)
+    twist_loop_run_once_ms (loop, 1);
+  check (half_got == 2, "and the connection reads on");
+  twist_connection_free (c);
+  close (sv[1]);
+}
+
 /* The most a connection has held is told (for tests).  */
 static void
 test_peak (struct twist_loop *loop)
@@ -330,6 +389,7 @@ main (void)
     return 77;
   test_backpressure (loop);
   test_peak (loop);
+  test_half_close (loop);
   test_nested_write (loop);
   test_stream (loop);
   test_stream_freed (loop);

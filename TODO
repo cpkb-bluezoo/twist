@@ -45,8 +45,15 @@ HTTP
     what goes through an https proxy's tunnel.  mqtt reads a message of at
     most 16 KiB.  A WebSocket over HTTP/2 does not keep to the server's
     windows (http_ws_send writes DATA frames of stream 1 directly).
-  - ftp has no upload (STOR, APPE, REST) and imap no APPEND; when they are
-    done they stream as above (and curl's -T for them, and --append).
+  - ftp upload (STOR, APPE, SIZE; REST for a download) and imap APPEND stream
+    as above.  Not done: ftps upload has no test that runs (the data
+    connection is started on TLS before the data goes, as for a download);
+    the end of an upload is a shut write side (the data connection of ftps is
+    not sent a close_notify, which a server that is strict about it, as
+    vsftpd can be, reports as a failed upload);
+    imap APPEND takes no flags or date and no unknown size (curl neither),
+    nor MULTIAPPEND or LITERAL+; -a/--append is for ftp only (sftp ignores
+    it).
   - HTTP/3 request bodies are sent the same way as HTTP/2's, but there is no
     HTTP/3 server to test with (nghttpx here is built without QUIC): only the
     DATA frame and the QUIC stream's own pieces are tested.  The QUIC

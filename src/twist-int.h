@@ -194,6 +194,7 @@ struct twist_transfer
   char *content_encoding;
   int doh_verifypeer;
   int nobody;
+  int append;
   int failonerror;
   twist_write_callback write_cb;
   void *write_data;
@@ -609,6 +610,10 @@ typedef void (*twist_stream_end_fn) (void *user, int err);
 int twist_connection_stream (struct twist_connection *conn,
                              twist_stream_read_fn read,
                              twist_stream_end_fn end, void *user);
+/* Tell the peer there is no more to come: the write side is shut once all that
+   was queued has been written, and the connection stays open for what the
+   peer still says.  */
+void twist_connection_half_close (struct twist_connection *conn);
 /* Whether a stream is under way on CONN: the body of a request is not all
    sent, so the connection is not one to keep for another request.  */
 int twist_connection_streaming (const struct twist_connection *conn);

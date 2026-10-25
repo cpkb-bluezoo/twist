@@ -266,6 +266,9 @@ twist_transfer_setopt (twist_transfer *transfer, int opt, ...)
     case TWISTOPT_SEEKDATA:
       transfer->seek_data = va_arg (ap, void *);
       break;
+    case TWISTOPT_APPEND:
+      transfer->append = va_arg (ap, long) != 0;
+      break;
     case TWISTOPT_HEADERFUNCTION:
       transfer->header_cb = va_arg (ap, twist_write_callback);
       break;

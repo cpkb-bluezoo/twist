@@ -65,6 +65,18 @@ imap_recv (void *obj, const uint8_t *data, size_t len)
   return twist_imap_receive (obj, data, len);
 }
 
+static char hello_body[] = "hello";
+
+static size_t
+mail_read_none (char *ptr, size_t size, size_t nmemb, void *user)
+{
+  (void) ptr;
+  (void) size;
+  (void) nmemb;
+  (void) user;
+  return 0;
+}
+
 static void
 test_imap_mailbox (void)
 {
@@ -274,6 +286,50 @@ test_mail (void)
     /* The size is the literal's.  */
     check (transfer->progress.dl_known && transfer->progress.size_dl == 5
            && transfer->progress.downloaded == 5, "imap progress");
+    twist_transfer_free (transfer);
+  }
+  /* An upload is APPENDed, with the size of the message as the literal, and
+     the message follows the server's go-ahead.  */
+  {
+    twist_transfer *transfer = twist_transfer_new ();
+    struct twist_imap *imap;
+
+    check (twist_url_parse_int ("imap://127.0.0.1/Sent", &transfer->url)
+           == TWIST_OK, "append url");
+    transfer->postfields = hello_body;
+    imap = twist_imap_new (transfer, 0);
+    feed_n (imap_recv, imap, "* OK ready\r\n", 1);
+    feed_n (imap_recv, imap, "* CAPABILITY IMAP4rev1\r\nA1 OK\r\n", 1);
+    check (strcmp (twist_imap_command (imap), "A2 APPEND Sent {5}\r\n") == 0,
+           "APPEND with the size");
+    feed_n (imap_recv, imap, "+ Ready for literal data\r\n", 1);
+    check (transfer->progress.uploaded == 5 && !transfer->done,
+           "the message is sent, and the answer awaited");
+    feed_n (imap_recv, imap, "A2 OK APPEND completed\r\n", 1);
+    check (transfer->done && transfer->result == TWIST_OK, "appended");
+    twist_transfer_free (transfer);
+
+    /* A mailbox the server will not take.  */
+    transfer = twist_transfer_new ();
+    twist_url_parse_int ("imap://127.0.0.1/Nope", &transfer->url);
+    transfer->postfields = hello_body;
+    imap = twist_imap_new (transfer, 0);
+    feed_n (imap_recv, imap, "* OK ready\r\n", 1);
+    feed_n (imap_recv, imap, "A1 OK\r\n", 1);
+    feed_n (imap_recv, imap, "A2 NO [TRYCREATE] no such mailbox\r\n", 1);
+    check (transfer->done && transfer->result == TWIST_ERR_FILE
+           && transfer->proto_status == 25, "a mailbox that is refused: 25");
+    twist_transfer_free (transfer);
+
+    /* A message of unknown size cannot be said in a literal.  */
+    transfer = twist_transfer_new ();
+    twist_url_parse_int ("imap://127.0.0.1/INBOX", &transfer->url);
+    transfer->read_cb = mail_read_none;
+    imap = twist_imap_new (transfer, 0);
+    feed_n (imap_recv, imap, "* OK ready\r\n", 1);
+    feed_n (imap_recv, imap, "A1 OK\r\n", 1);
+    check (transfer->done && transfer->result == TWIST_ERR_FILE
+           && transfer->proto_status == 25, "no size, no APPEND");
     twist_transfer_free (transfer);
   }
 }

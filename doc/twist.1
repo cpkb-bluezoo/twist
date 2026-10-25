@@ -509,9 +509,17 @@ Append
 to the query string instead of sending a request body.
 .TP
 .BI \-T ", " \-\-upload\-file " file"
-Upload \fIfile\fR with PUT.
+Upload \fIfile\fR with PUT; to ftp and ftps with STOR (or APPE, see
+.B \-\-append
+and
+.BR \-C ),
+and to imap and imaps by appending it to the mailbox the URL names.
 .B \-
-reads standard input.  The file is read before the transfer starts.  A telnet
+reads standard input.  The file is sent as it is read, a chunk at a time and
+as the connection takes it, and not held in memory, for http, https, smtp,
+tftp, ftp, imap, sftp and scp.  An IMAP message is sent as a literal whose size
+is said first, so a pipe is refused (status 25).  For other schemes the file
+is read before the transfer starts.  A telnet
 session is not a PUT: it sends the file as it is read, and
 .B \-
 is what it reads without
@@ -856,10 +864,13 @@ fails) or for tftp, which is refused.
 .B \-\-ftp\-create\-dirs
 Make the directories an sftp upload needs.
 .TP
+.BR \-a ", " \-\-append
+An upload adds to the remote file and does not replace it (ftp: APPE).
+.TP
 .BI \-C ", " \-\-continue\-at " offset"
 Resume at byte
 .IR offset ,
-for sftp and scp.
+for sftp, scp, ftp and ftps.
 Use
 .B \-
 to find the offset.
@@ -1362,7 +1373,7 @@ could not be read.
 Out of memory.
 .TP
 .B 25
-An sftp or scp upload failed.
+An sftp, scp, ftp or imap upload failed.
 .TP
 .B 28
 The transfer timed out.
