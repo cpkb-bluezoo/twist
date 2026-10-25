@@ -60,6 +60,20 @@ leaves the buffered tail in place, and lets the TCP window close.
 resume_read presents that tail again.  A zero return is not
 backpressure.
 
+Output has the same rule: an upload (or any body a handler sends from a
+source) is never queued whole.  A connection holds about a chunk of what was
+sent and not yet written (TWIST_OUT_HIGH, 16 KiB, a TLS record); after a send
+twist_endpoint_full says whether it does, and the producer then stops, holding
+only the chunk it has, and goes on from the endpoint's on_write_ready (set it
+with write_user, and guard against the callback arriving from inside the send
+that causes it).  A source that is one stream of bytes can use
+twist_connection_stream, which reads a chunk only when the connection has
+room.  A handler that sends frames of a protocol with its own flow control
+(HTTP/2's windows, QUIC's) stops for both.  The source is read as it is sent,
+never to its end first; if the data has to be sent again it is rewound
+(TWISTOPT_SEEKFUNCTION) or the transfer fails.  A new scheme with an upload
+does this from the start.
+
 Parsers do not copy the tail.  A field that must be remembered across
 calls is a fixed-size scratch with its own hard maximum (the HTTP/1
 line buffer is one).  Bytes copied into that scratch are counted as

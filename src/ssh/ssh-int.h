@@ -221,6 +221,9 @@ void twist_sftp_free (struct twist_sftp_xfer *state);
 /* Keeping the session for the next URL: forget the transfer and keep the
    channel; ask whether nothing is in it; start the next transfer on it.  */
 void twist_sftp_recycle (struct twist_sftp_xfer *state);
+/* The connection has written what was queued on it: an upload that stopped
+   for it goes on.  */
+void twist_sftp_drained (struct twist_sftp_xfer *state);
 int twist_sftp_idle (const struct twist_sftp_xfer *state);
 int twist_sftp_next (struct twist_ssh *s);
 

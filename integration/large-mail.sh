@@ -20,8 +20,9 @@
 # piece at a time and ended with the line with the dot, and arrives whole: a
 # message of 3 MiB, from a file (-T) and from standard input, with lines that
 # start with a dot, to an SMTP server of python's that waits before it reads
-# the message, and says what it got.  Skips, with status 77, without python3
-# or twist.
+# the message, and says what it got (the bytes as they were sent, compared with
+# the message dot-stuffed here); and a message of 100 MiB, with twist's memory
+# watched while it goes.  Skips, with status 77, without python3 or twist.
 
 TWIST=${TWIST:-../src/twist}
 skip ()
@@ -58,7 +59,6 @@ while True:
     c, _ = s.accept()
     f = c.makefile('rwb', buffering=0)
     f.write(b'220 hi\r\n')
-    msg = None
     while True:
         line = f.readline()
         if not line:
@@ -69,18 +69,17 @@ while True:
         elif cmd == b'DATA':
             f.write(b'354 go\r\n')
             time.sleep(0.5)
-            buf = b''
-            while not buf.endswith(b'\r\n.\r\n'):
-                d = c.recv(65536)
+            h = hashlib.sha256()
+            total = 0
+            tail = b''
+            while not tail.endswith(b'\r\n.\r\n'):
+                d = c.recv(1 << 20)
                 if not d:
                     break
-                buf += d
-            body = buf[:-3]
-            # Undo the dot-stuffing.
-            lines = body.split(b'\r\n')
-            lines = [l[1:] if l.startswith(b'..') else l for l in lines]
-            msg = b'\r\n'.join(lines)
-            open(sys.argv[2], 'w').write('%d %s' % (len(msg), hashlib.sha256(msg).hexdigest()))
+                h.update(d)
+                total += len(d)
+                tail = (tail + d)[-5:]
+            open(sys.argv[2], 'w').write('%d %s' % (total, h.hexdigest()))
             f.write(b'250 queued\r\n')
         elif cmd == b'QUIT':
             f.write(b'221 bye\r\n')
@@ -108,10 +107,14 @@ while n < 3 * 1024 * 1024:
     i += 1
 open(sys.argv[1], 'wb').write(('\r\n'.join(lines) + '\r\n').encode())
 PY
+# What goes on the wire: each line that starts with a dot has another, and the
+# line with the dot ends it.
 want=$(python3 -c "
-import hashlib, sys
+import hashlib
 d = open('$work/msg', 'rb').read()
-print(len(d), hashlib.sha256(d).hexdigest())")
+out = b''.join((b'.' + l if l.startswith(b'.') else l) for l in d.split(b'\r\n')[:-1] and [x + b'\r\n' for x in d.split(b'\r\n')[:-1]])
+out += b'.\r\n'
+print(len(out), hashlib.sha256(out).hexdigest())")
 
 "$TWIST" -s --mail-from a@example.org --mail-rcpt b@example.org -T "$work/msg" "$url" 2>/dev/null
 check "$([ $? -eq 0 ] && echo ok)" "a message from a file is sent"
@@ -121,5 +124,39 @@ rm -f "$work/got"
 "$TWIST" -s --mail-from a@example.org --mail-rcpt b@example.org -T - "$url" < "$work/msg" 2>/dev/null
 check "$([ $? -eq 0 ] && echo ok)" "a message from standard input is sent"
 check "$([ "$(cat "$work/got")" = "$want" ] && echo ok)" "and arrives whole ($(cat "$work/got" 2>/dev/null))"
+
+# 100 MiB: how much of it twist holds while it goes.  Lines of 1000 bytes and
+# no dots, so the wire is the file and a dot.
+rm -f "$work/got"
+python3 - "$work/big" <<'PY'
+import sys
+line = b'a' * 998 + b'\r\n'
+with open(sys.argv[1], 'wb') as f:
+    for _ in range(104858):
+        f.write(line)
+PY
+bigwant=$(python3 -c "
+import hashlib
+h = hashlib.sha256()
+n = 0
+with open('$work/big', 'rb') as f:
+    while True:
+        d = f.read(1 << 20)
+        if not d: break
+        h.update(d); n += len(d)
+h.update(b'.\r\n'); n += 3
+print(n, h.hexdigest())")
+"$TWIST" -s --mail-from a@example.org --mail-rcpt b@example.org -T "$work/big" "$url" 2>/dev/null &
+tp=$!
+max=0
+while kill -0 "$tp" 2>/dev/null; do
+  r=$(ps -o rss= -p "$tp" 2>/dev/null | tr -d ' ')
+  [ -n "$r" ] && [ "$r" -gt "$max" ] && max=$r
+  sleep 0.1
+done
+wait "$tp"
+check "$([ $? -eq 0 ] && [ "$(cat "$work/got" 2>/dev/null)" = "$bigwant" ] && echo ok)" \
+  "100 MiB arrive whole"
+check "$([ "$max" -lt 60000 ] && echo ok)" "twist held ${max} KiB, not the 100 MiB"
 
 exit $fail

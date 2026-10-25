@@ -758,6 +758,16 @@ ssh_fail (void *user, int err)
   ssh_complete (user, err);
 }
 
+/* The connection has written all that was queued on it.  */
+static void
+ssh_drained (struct twist_endpoint *ep)
+{
+  struct twist_ssh *s = ep->write_user;
+
+  if (s != NULL && s->sftp != NULL)
+    twist_sftp_drained (s->sftp);
+}
+
 static void
 ssh_connected (struct twist_endpoint *ep)
 {
@@ -765,6 +775,8 @@ ssh_connected (struct twist_endpoint *ep)
   int rc;
 
   s->ep = ep;
+  ep->on_write_ready = ssh_drained;
+  ep->write_user = s;
   rc = twist_ssh_start (s);
   if (rc != TWIST_OK)
     ssh_complete (s, rc);
@@ -910,6 +922,8 @@ ssh_resume (struct twist_transfer *transfer)
   s->recv_total = 0;
   s->body_read = 0;
   s->ep = twist_connection_endpoint (conn);
+  s->ep->on_write_ready = ssh_drained;
+  s->ep->write_user = s;
   twist_mail_link_attach (&s->link, transfer, conn);
   /* Back in the session as a callback is: what it asks of the session is
      done when it is back.  */

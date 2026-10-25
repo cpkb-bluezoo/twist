@@ -86,7 +86,6 @@
 /* What is read from the input at once, and how much the connection may be
    behind with before the input waits.  */
 #define IN_CHUNK 16384
-#define OUT_HIGH (64u * 1024u)
 #define OUT_CHUNK 4096
 
 enum rx_state
@@ -843,7 +842,7 @@ input_ended (struct twist_telnet *t)
 static int
 congested (const struct twist_telnet *t)
 {
-  return t->ep != NULL && twist_endpoint_pending (t->ep) >= OUT_HIGH;
+  return t->ep != NULL && twist_endpoint_full (t->ep);
 }
 
 static void

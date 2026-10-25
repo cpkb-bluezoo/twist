@@ -71,6 +71,9 @@ Version 0.1 - unreleased
   * a connection says when it holds a chunk that has not been written, and a
     request body of 64 KiB or more for HTTP/1 and the message of smtp are sent
     as the connection writes them, not copied into its queue whole
+  * smtp and tftp uploads with -T are read as they are sent, a chunk at a time,
+    and not held in memory; sftp stops for a connection that has not written
+    what it has, and so does what goes through an https proxy's tunnel
   * request bodies over HTTP/2 and HTTP/3, and the message of a WebSocket, are
     sent a chunk at a time as the connection (and the server's windows) can
     take them, and not queued whole; the compressed body of an HTTP/2 request

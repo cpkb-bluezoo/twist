@@ -254,6 +254,13 @@ inner_write (void *p, const uint8_t *buf, size_t len)
       errno = EAGAIN;
       return -1;
     }
+  /* What is written here goes into the proxy's connection: while that holds a
+     chunk it has not written, this waits (outer_drained says when it has).  */
+  if (twist_endpoint_full (twist_connection_endpoint (t->outer)))
+    {
+      errno = EAGAIN;
+      return -1;
+    }
   if (t->h2)
     {
       size_t n = twist_h2_send_data (t->h2c, t->stream, buf, len, 0);
@@ -272,6 +279,17 @@ inner_write (void *p, const uint8_t *buf, size_t len)
       return -1;
     }
   return (ssize_t) len;
+}
+
+/* The proxy's connection has written all that was queued on it: what is
+   inside the tunnel can go on.  */
+static void
+outer_drained (struct twist_endpoint *ep)
+{
+  struct twist_tunnel *t = ep->write_user;
+
+  if (t != NULL && t->state == T_UP && t->inner != NULL)
+    twist_connection_on_writable (t->inner);
 }
 
 /* The proxy said yes.  */
@@ -691,6 +709,8 @@ twist_tunnel_connect (struct twist_transfer *transfer,
   twist_connection_endpoint (t->inner)->user_data = user;
   twist_connection_set_handler (t->inner, handler);
   twist_connection_endpoint (t->outer)->user_data = t;
+  twist_connection_endpoint (t->outer)->on_write_ready = outer_drained;
+  twist_connection_endpoint (t->outer)->write_user = t;
   twist_connection_set_handler (t->outer, &outer_handler);
   if (proxy_addr->family == 6)
     {

@@ -150,13 +150,23 @@ suggest (void)
 }
 
 /* Whether an upload to URL is read as it is sent, and not first read whole
-   into memory: http and https read it from the descriptor in chunks.  */
+   into memory: the schemes that take their data from the read callback in
+   chunks (every one that has an upload but mqtt, whose message is one packet
+   of at most a few KiB, and ws).  */
 static int
 streams_upload (const char *url)
 {
-  return url != NULL
-         && (strncasecmp (url, "http:", 5) == 0
-             || strncasecmp (url, "https:", 6) == 0);
+  static const char *const schemes[] = {
+    "http:", "https:", "smtp:", "smtps:", "tftp:"
+  };
+  size_t i;
+
+  if (url == NULL)
+    return 0;
+  for (i = 0; i < sizeof schemes / sizeof schemes[0]; i++)
+    if (strncasecmp (url, schemes[i], strlen (schemes[i])) == 0)
+      return 1;
+  return 0;
 }
 
 static int

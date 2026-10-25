@@ -38,12 +38,15 @@ FTPS (src/ftp/ftp.c)
 HTTP
 
   - A connection says when it holds a chunk (16 KiB) that was not written
-    (twist_endpoint_full), and a producer is to stop until on_write_ready.
-    HTTP request bodies (HTTP/1, HTTP/2, HTTP/3), the message of smtp and the
-    message of a WebSocket do.  No other handler does: what each queues is
-    queued without being held back (the telnet and sftp handlers keep their
-    own limits).  A WebSocket over HTTP/2 does not keep to the server's
+    (twist_endpoint_full), and a producer stops until on_write_ready (HACKING).
+    Every upload there is does: HTTP request bodies (HTTP/1, HTTP/2, HTTP/3),
+    WebSocket messages, the message of smtp, tftp (a block at a time, as it
+    is acknowledged), telnet, sftp and scp (also held by the SFTP window), and
+    what goes through an https proxy's tunnel.  mqtt reads a message of at
+    most 16 KiB.  A WebSocket over HTTP/2 does not keep to the server's
     windows (http_ws_send writes DATA frames of stream 1 directly).
+  - ftp has no upload (STOR, APPE, REST) and imap no APPEND; when they are
+    done they stream as above (and curl's -T for them, and --append).
   - HTTP/3 request bodies are sent the same way as HTTP/2's, but there is no
     HTTP/3 server to test with (nghttpx here is built without QUIC): only the
     DATA frame and the QUIC stream's own pieces are tested.  The QUIC

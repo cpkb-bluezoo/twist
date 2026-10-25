@@ -83,6 +83,7 @@ struct twist_connection
   twist_stream_end_fn stream_end;
   void *stream_user;
   int filling;
+  int writing;                  /* In the loop that writes (see on_writable).  */
   struct twist_rate rrate;
   struct twist_rate wrate;
   struct twist_timer *rtimer;
@@ -97,6 +98,8 @@ int (*twist_tls_receive_fn) (struct twist_connection *, const uint8_t *,
                              size_t);
 int (*twist_quic_connect_fn) (struct twist_transfer *, const struct twist_dns_addr *,
                               int, struct twist_connection **);
+
+static void note_peak (const struct twist_connection *c);
 
 int twist_connection_send_plain (struct twist_connection *c,
                                 const uint8_t *data, size_t len);
@@ -721,6 +724,7 @@ twist_connection_send_parts (struct twist_connection *c, const uint8_t *a,
       && append_buf (&c->outbuf, &c->out_off, &c->out_len, &c->out_cap, b, bn)
          != TWIST_OK)
     return TWIST_ERR_NOMEM;
+  note_peak (c);
   refresh_interest (c);
   twist_connection_on_writable (c);
   return TWIST_OK;
@@ -736,6 +740,7 @@ twist_connection_queue_out (struct twist_connection *c, const uint8_t *data,
                        data, len);
   if (rc != TWIST_OK)
     return rc;
+  note_peak (c);
   /* A connection with an owner and no descriptor (a tunnel) has nothing that
      would tell the loop it can write: what TLS queues goes at once.  */
   if (c->fd < 0 && c->owner_free != NULL)
@@ -933,6 +938,11 @@ twist_connection_on_readable (struct twist_connection *c)
 void
 twist_connection_on_writable (struct twist_connection *c)
 {
+  /* A write that calls back (what it writes to is ready again at once, and
+     says so) does not begin another loop inside itself: the one that is
+     writing goes on with what has been queued meanwhile.  */
+  if (c->writing)
+    return;
   if (c->connecting)
     {
       int err = 0;
@@ -944,6 +954,7 @@ twist_connection_on_writable (struct twist_connection *c)
         }
       twist_connection_connected (c);
     }
+  c->writing = 1;
   while (c->out_len > 0)
     {
       ssize_t n;
@@ -969,10 +980,12 @@ twist_connection_on_writable (struct twist_connection *c)
         break;
       else
         {
+          c->writing = 0;
           twist_connection_fail (c, TWIST_ERR_CONNECT);
           return;
         }
     }
+  c->writing = 0;
   if (stream_fill (c))
     return;
   if (c->out_len == 0 && c->ep.on_write_ready != NULL)
@@ -989,6 +1002,31 @@ twist_endpoint_send (struct twist_endpoint *ep, const uint8_t *data,
   if (ep == NULL || ep->send == NULL)
     return TWIST_ERR_INVAL;
   return ep->send (ep, data, len);
+}
+
+static size_t peak_out;
+
+static void
+note_peak (const struct twist_connection *c)
+{
+  size_t seen = __atomic_load_n (&peak_out, __ATOMIC_RELAXED);
+
+  while (c->out_len > seen
+         && !__atomic_compare_exchange_n (&peak_out, &seen, c->out_len, 0,
+                                          __ATOMIC_RELAXED, __ATOMIC_RELAXED))
+    ;
+}
+
+size_t
+twist_connection_peak_out (void)
+{
+  return __atomic_load_n (&peak_out, __ATOMIC_RELAXED);
+}
+
+void
+twist_connection_peak_reset (void)
+{
+  __atomic_store_n (&peak_out, 0, __ATOMIC_RELAXED);
 }
 
 int

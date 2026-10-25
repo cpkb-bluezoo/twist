@@ -583,6 +583,10 @@ void twist_connection_set_tls (struct twist_connection *conn, void *tls,
 void *twist_connection_tls (struct twist_connection *conn);
 int twist_endpoint_send (struct twist_endpoint *ep, const uint8_t *data,
                          size_t len);
+/* For tests: the most any connection has held of what was sent on it and not
+   written, since the last reset.  */
+size_t twist_connection_peak_out (void);
+void twist_connection_peak_reset (void);
 /* Whether EP's connection holds as much as it should (TWIST_OUT_HIGH) of what
    was sent on it and has not been written: the producer waits for on_write_ready
    before it sends more.  */

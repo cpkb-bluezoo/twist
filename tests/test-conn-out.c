@@ -23,6 +23,7 @@
 #include "check.h"
 #include "twist-int.h"
 
+#include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -116,6 +117,93 @@ test_backpressure (struct twist_loop *loop)
     }
   check (seen == sent && drained > 0, "and when it has written it all");
   check (!twist_endpoint_full (ep), "and is not full then");
+  twist_connection_free (c);
+  close (sv[1]);
+}
+
+/* A connection whose write calls back into it (as a tunnel's does, when what
+   it writes to drains at once and says so): what was sent is written once,
+   and in order.  */
+static struct twist_connection *nest_c;
+static uint8_t nest_out[200000];
+static size_t nest_n;
+static int nest_depth, nest_max_depth;
+
+static ssize_t
+nest_write (void *user, const uint8_t *buf, size_t len)
+{
+  size_t take = len > 3000 ? 3000 : len;
+
+  (void) user;
+  nest_depth++;
+  if (nest_depth > nest_max_depth)
+    nest_max_depth = nest_depth;
+  /* The consumer is ready again as soon as it has taken this.  */
+  if (nest_n + take <= sizeof nest_out)
+    memcpy (nest_out + nest_n, buf, take);
+  nest_n += take;
+  twist_connection_on_writable (nest_c);
+  nest_depth--;
+  return (ssize_t) take;
+}
+
+static ssize_t
+nest_read (void *user, uint8_t *buf, size_t len)
+{
+  (void) user;
+  (void) buf;
+  (void) len;
+  errno = EAGAIN;
+  return -1;
+}
+
+static void
+nest_free (void *p)
+{
+  (void) p;
+}
+
+static void
+test_nested_write (struct twist_loop *loop)
+{
+  uint8_t in[60000];
+  size_t i;
+  int ok = 1;
+
+  for (i = 0; i < sizeof in; i++)
+    in[i] = (uint8_t) (i * 7 + i / 251);
+  nest_c = twist_connection_new (loop);
+  twist_connection_set_io (nest_c, nest_read, nest_write, NULL);
+  twist_connection_set_owner (nest_c, NULL, nest_free, NULL);
+  twist_endpoint_send (twist_connection_endpoint (nest_c), in, sizeof in);
+  check (nest_n == sizeof in, "all that was sent is written, no more");
+  for (i = 0; i < sizeof in && i < nest_n; i++)
+    if (nest_out[i] != in[i])
+      ok = 0;
+  check (ok, "and in order");
+  check (nest_max_depth == 1, "a write is not begun inside another");
+  twist_connection_free (nest_c);
+}
+
+/* The most a connection has held is told (for tests).  */
+static void
+test_peak (struct twist_loop *loop)
+{
+  int sv[2];
+  uint8_t buf[1000];
+  struct twist_connection *c;
+  int i;
+
+  if (pair (sv) != 0)
+    return;
+  memset (buf, 'p', sizeof buf);
+  c = make (loop, sv[0]);
+  twist_connection_peak_reset ();
+  for (i = 0; i < 40; i++)
+    twist_endpoint_send (twist_connection_endpoint (c), buf, sizeof buf);
+  check (twist_connection_peak_out () >= 1000, "the peak is kept");
+  twist_connection_peak_reset ();
+  check (twist_connection_peak_out () == 0, "and can be reset");
   twist_connection_free (c);
   close (sv[1]);
 }
@@ -241,6 +329,8 @@ main (void)
   if (loop == NULL)
     return 77;
   test_backpressure (loop);
+  test_peak (loop);
+  test_nested_write (loop);
   test_stream (loop);
   test_stream_freed (loop);
   twist_loop_free (loop);

@@ -144,6 +144,7 @@ struct twist_sftp_xfer
 
   /* Requests the client took and the server has not answered.  */
   unsigned inflight;
+  int pumping;			/* pump_writes is under way.  */
 
   /* The rate limit, if there is one: the pacer, how much to ask for or send
      at a time, and the timer that wakes the pump when the next chunk is
@@ -964,8 +965,22 @@ discard_source (struct twist_sftp_xfer *g)
   return 0;
 }
 
+static void pump_writes_run (struct twist_sftp_xfer *g);
+
+/* A write can leave the connection with nothing queued, and so call
+   twist_sftp_drained from inside itself: the pump that is writing goes on.  */
 static void
 pump_writes (struct twist_sftp_xfer *g)
+{
+  if (g->pumping)
+    return;
+  g->pumping = 1;
+  pump_writes_run (g);
+  g->pumping = 0;
+}
+
+static void
+pump_writes_run (struct twist_sftp_xfer *g)
 {
   int have;
 
@@ -975,6 +990,10 @@ pump_writes (struct twist_sftp_xfer *g)
     {
       int rc;
 
+      /* The connection has not written what it has: no more is made until it
+         has (twist_sftp_drained says when).  */
+      if (g->ssh->ep != NULL && twist_endpoint_full (g->ssh->ep))
+        return;
       /* Before the source is read: reading may wait, and a chunk that is
          not due is not wanted yet.  */
       if (g->chunk_len == 0 && !g->src_eof && pace (g, pump_writes))
@@ -1011,6 +1030,18 @@ pump_writes (struct twist_sftp_xfer *g)
     }
   if (g->src_eof && g->chunk_len == 0 && g->outstanding == 0)
     close_file (g);
+}
+
+/* The connection has written all that was queued on it.  */
+void
+twist_sftp_drained (struct twist_sftp_xfer *g)
+{
+  if (g == NULL || !g->put || !g->have_handle || g->closing
+      || twist_ssh_done (g->ssh))
+    return;
+  twist_ssh_enter (g->ssh);
+  pump_writes (g);
+  twist_ssh_leave (g->ssh);
 }
 
 /* The file is open for writing.  */

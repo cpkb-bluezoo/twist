@@ -3664,6 +3664,7 @@ struct tcp_server
   size_t up_len;		/* What was uploaded, on any of them.  */
   unsigned up_sum;
   int late_eof;			/* Set on each server it makes.  */
+  int read_delay_ms;		/* A server that reads slowly.  */
   uint32_t max_read;		/* The most a read asked for, on any.  */
   char urlhost[128];		/* The host as a URL writes it.  */
   char khost[128];		/* As known_hosts names it.  */
@@ -3806,6 +3807,12 @@ ts_serve (void *arg)
             {
               ts_close (c);
               continue;
+            }
+          if (ts->read_delay_ms > 0)
+            {
+              struct timespec slow = { 0, ts->read_delay_ms * 1000000L };
+
+              nanosleep (&slow, NULL);
             }
           pthread_mutex_lock (&ts->mu);
           drop = ts->drop_next;
@@ -4196,6 +4203,40 @@ test_reuse_mixed (void)
          && got_data (), "a download after all that");
   check (ts_accepted (&ts) == 1, "all of it on one connection");
   twist_transfer_free (down);
+  twist_transfer_free (up);
+  twist_runtime_free (runtime);
+  ts_stop (&ts);
+}
+
+/* An upload does not queue ahead of a server that reads slowly: the connection
+   holds a chunk or two of what the SFTP requests put on it, not the whole of
+   the window of requests that may be outstanding.  */
+static void
+test_upload_backpressure (void)
+{
+  struct tcp_server ts;
+  struct twist_runtime *runtime;
+  struct twist_transfer *up;
+  static uint8_t body[2 * 1024 * 1024];
+  size_t i, len;
+  unsigned sum;
+
+  check (ts_start (&ts) == 0, "server");
+  for (i = 0; i < sizeof body; i++)
+    body[i] = (uint8_t) (i * 5 + i / 1021);
+  ts.read_delay_ms = 4;
+  runtime = twist_runtime_new ();
+  up = tcp_transfer (0, "secret", NULL);
+  twist_transfer_setopt (up, TWISTOPT_POSTFIELDS, (char *) body);
+  twist_transfer_setopt (up, TWISTOPT_POSTFIELDSIZE, (long) sizeof body);
+  twist_connection_peak_reset ();
+  check (tcp_get (runtime, up, &ts, "sftp", "/up.bin") == TWIST_OK,
+         "an upload to a slow server");
+  ts_uploaded (&ts, &len, &sum);
+  check (len == sizeof body && sum == sum_of (body, sizeof body),
+         "arrives whole");
+  check (twist_connection_peak_out () < 100000,
+         "with little queued ahead of the server");
   twist_transfer_free (up);
   twist_runtime_free (runtime);
   ts_stop (&ts);
@@ -6010,6 +6051,7 @@ run_tests (void)
   test_reuse_farewell ();
   test_reuse_after_missing ();
   test_reuse_mixed ();
+  test_upload_backpressure ();
   test_reuse_terms ();
   test_reuse_hung_up ();
   test_reuse_closed_as_taken ();
