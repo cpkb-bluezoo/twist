@@ -553,6 +553,93 @@ test_h2_body (void)
   twist_h2_free (h);
 }
 
+/* How many WINDOW_UPDATE frames for stream ID are in the output from OFFSET.  */
+static int
+stream_updates (size_t offset, uint32_t id)
+{
+  int n = 0;
+
+  while (offset + 9 <= tun_out_n)
+    {
+      size_t len = ((size_t) tun_out[offset] << 16)
+                   | ((size_t) tun_out[offset + 1] << 8) | tun_out[offset + 2];
+      uint32_t sid = ((uint32_t) tun_out[offset + 5] << 24)
+                     | ((uint32_t) tun_out[offset + 6] << 16)
+                     | ((uint32_t) tun_out[offset + 7] << 8)
+                     | tun_out[offset + 8];
+
+      if (tun_out[offset + 3] == 8 && sid == id)
+        n++;
+      offset += 9 + len;
+    }
+  return n;
+}
+
+static void
+feed_data (struct twist_h2 *h, uint32_t id, size_t total)
+{
+  static uint8_t frame[9 + 16384];
+  size_t sent = 0;
+
+  while (sent < total)
+    {
+      size_t n = total - sent > 16384 ? 16384 : total - sent;
+
+      frame[0] = (uint8_t) (n >> 16);
+      frame[1] = (uint8_t) (n >> 8);
+      frame[2] = (uint8_t) n;
+      frame[3] = 0;
+      frame[4] = 0;
+      frame[5] = frame[6] = frame[7] = 0;
+      frame[8] = (uint8_t) id;
+      memset (frame + 9, 'd', n);
+      twist_h2_receive (h, frame, 9 + n);
+      sent += n;
+    }
+}
+
+/* The receive window of a stream is given back as the data is taken, and not
+   while the consumer holds it (twist_h2_hold_stream): the peer then stops, and
+   what the consumer has to buffer is bounded by the window.  */
+static void
+test_h2_hold_stream (void)
+{
+  static const uint8_t answer[] = { 0, 0, 1, 1, 4, 0, 0, 0, 1, 0x88 };
+  struct twist_h1_events ev;
+  struct twist_h2 *h;
+  uint8_t *out = NULL;
+  size_t n = 0, mark;
+
+  memset (&ev, 0, sizeof ev);
+  h = twist_h2_new (&ev);
+  twist_h2_set_emit (h, tun_emit, NULL);
+  tun_out_n = 0;
+  twist_h2_request (h, "CONNECT", NULL, "example.org:443", NULL, NULL, NULL, 0,
+                    1, &out, &n);
+  free (out);
+  twist_h2_receive (h, answer, sizeof answer);
+  mark = tun_out_n;
+  feed_data (h, 1, 200000);
+  check (stream_updates (mark, 1) >= 1, "a window is given back as data comes");
+  twist_h2_free (h);
+
+  h = twist_h2_new (&ev);
+  twist_h2_set_emit (h, tun_emit, NULL);
+  tun_out_n = 0;
+  twist_h2_request (h, "CONNECT", NULL, "example.org:443", NULL, NULL, NULL, 0,
+                    1, &out, &n);
+  free (out);
+  twist_h2_receive (h, answer, sizeof answer);
+  twist_h2_hold_stream (h, 1, 1);
+  mark = tun_out_n;
+  feed_data (h, 1, 200000);
+  check (stream_updates (mark, 1) == 0, "none while it is held");
+  mark = tun_out_n;
+  twist_h2_hold_stream (h, 1, 0);
+  check (stream_updates (mark, 1) == 1, "and what was withheld when it is let go");
+  twist_h2_free (h);
+}
+
 /* The HPACK dynamic table is a number of bytes (RFC 7541, 4.1): an entry is
    its name and value and 32, and the table is 4096 unless it is changed with
    a size update (6.3), which may not be more than we allow.  A server may
@@ -1654,6 +1741,7 @@ main (void)
   test_h2_windows ();
   test_h2_tunnel ();
   test_h2_body ();
+  test_h2_hold_stream ();
   test_hpack_table ();
   test_qpack_static_index ();
   test_qpack ();

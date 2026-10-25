@@ -53,21 +53,11 @@ https proxies (src/engine/tunnel.c, masque.c)
   - Templated CONNECT-TCP (draft-ietf-httpbis-connect-tcp), and
     --proxy-template-tcp for it, when it is an RFC.
   - ftp and ftps through an https proxy (the data connection too).
-  - twist_route_plan (src/engine/route.c) is used by the HTTP handler only: the
-    ftp and mail handlers decide for themselves, and use the old checks on the
-    proxy kind (an https proxy is refused for ftp).  Forwarding is for http://
-    and ws:// (ftp:// through an HTTP proxy, which curl can forward, is
-    tunnelled).
-  - A forward to an https proxy has a connection and an HTTP/2 session for each
-    target origin; one session could carry requests to many origins.  The
-    fallback to a tunnel is for a 405 or 501 to GET, HEAD or OPTIONS: a proxy
-    that sends one of those for another reason is tunnelled to afterwards; and a
-    CONNECT-only gateway that answers the forwarded request differently (a 400,
-    a closed connection) is not found out.
-  - A tunnel has an HTTP/2 connection of its own; one connection could carry
-    many.
-  - quickstep's gq_tls_free does not free the selected transcript (t->tr), so
-    each TLS connection leaks about 1.3 KB.
+  - The proxy's version is found by ALPN alone.  HTTPS RR, Alt-Svc and the
+    HTTP/1-only facts that origins use are not asked for the proxy, and there
+    is no HTTP/3 to a proxy for CONNECT or for a forwarded request; the
+    discovery for origins (http.c) and the hub for tunnels (tunnel.c) are two
+    pieces of code, and could be one peer layer.
 
 
 Progress meter (see HACKING)

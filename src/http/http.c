@@ -218,8 +218,8 @@ session_emit (void *user, const uint8_t *data, size_t len)
 }
 
 /* The lane of the runtime that has LOOP; the first if none has.  */
-static struct twist_lane *
-lane_of_loop (struct twist_runtime *runtime, struct twist_loop *loop)
+struct twist_lane *
+twist_lane_of_loop (struct twist_runtime *runtime, struct twist_loop *loop)
 {
   size_t i;
 
@@ -254,7 +254,7 @@ twist_session_add (struct twist_runtime *runtime, const char *key,
   s->h2 = h2;
   if (h2 != NULL)
     twist_h2_set_emit (h2, session_emit, s);
-  lane = lane_of_loop (runtime, loop);
+  lane = twist_lane_of_loop (runtime, loop);
   twist_origintab_session (runtime->origintab, key, 1);
   s->next = lane->sessions;
   lane->sessions = s;
@@ -269,7 +269,7 @@ twist_session_find (struct twist_runtime *runtime, const char *key,
 
   if (runtime == NULL || key == NULL)
     return NULL;
-  for (s = lane_of_loop (runtime, loop)->sessions; s != NULL; s = s->next)
+  for (s = twist_lane_of_loop (runtime, loop)->sessions; s != NULL; s = s->next)
     {
       if (s->loop != loop || s->closed || strcmp (s->key, key) != 0)
         continue;

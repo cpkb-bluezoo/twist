@@ -256,6 +256,7 @@ struct twist_transfer
 
 struct twist_cmd;
 struct twist_lane_live;
+struct tunnel_hub;
 
 /* One event loop of a runtime and what belongs to it alone: the connections it
    keeps and the sessions on them, which only its own thread touches.  The
@@ -268,6 +269,7 @@ struct twist_lane
   struct twist_loop *loop;
   struct twist_pool *pool;
   struct twist_session *sessions;
+  struct tunnel_hub *hubs;	/* Connections to https proxies (tunnel.c).  */
   int in_call;			/* Of a lane but the first.  */
   pthread_t thread;
   int threaded;
@@ -360,6 +362,11 @@ struct twist_session *twist_session_find (struct twist_runtime *runtime,
                                           struct twist_loop *loop);
 void twist_session_release (struct twist_session *session);
 void twist_session_free_all (struct twist_runtime *runtime);
+struct twist_lane *twist_lane_of_loop (struct twist_runtime *runtime,
+                                       struct twist_loop *loop);
+/* The connections to https proxies that tunnels share, at the end of the
+   runtime.  */
+void twist_tunnel_free_all (struct twist_runtime *runtime);
 
 /* ---- origins ---- */
 
@@ -1365,6 +1372,11 @@ void twist_h2_set_writable (struct twist_h2 *h2, void (*cb) (void *),
 size_t twist_h2_send_body (struct twist_h2 *h2, uint32_t id,
                            const uint8_t *data, size_t len, int end);
 void twist_h2_hold (struct twist_h2 *h2, int hold);
+/* While HOLD is non-zero the receive window of stream ID is not given back as
+   data arrives, so the peer stops when it has used it: a consumer that cannot
+   take more yet does not have to buffer without limit.  Letting go gives
+   back what was withheld.  */
+void twist_h2_hold_stream (struct twist_h2 *h2, uint32_t id, int hold);
 void twist_h2_cancel (struct twist_h2 *h2, uint32_t id);
 int twist_h2_request (struct twist_h2 *h2, const char *method,
                       const char *scheme, const char *authority,
@@ -1891,7 +1903,10 @@ struct twist_tunnel_spec
    protocol uses it as it would a socket to the target.  HANDLER and USER are
    its; HANDLER->connected is called when the proxy has said yes, and an error
    when it has not.  The connection is the caller's to free, which ends the
-   tunnel.  If this fails OUT is still set, and is to be freed.  */
+   tunnel.  If this fails OUT is still set, and is to be freed.
+
+   Tunnels to one proxy share a connection when it speaks HTTP/2: each is a
+   stream of it, and the connection is kept a while when the last has gone.  */
 int twist_tunnel_connect (struct twist_transfer *transfer,
                           const struct twist_tunnel_spec *spec,
                           const struct twist_dns_addr *proxy_addr,

@@ -57,6 +57,7 @@ struct twist_h2_stream
   size_t block_cap;
   int32_t recv_left;
   int32_t send_left;
+  int hold;			/* The window is not given back: see hold_stream.  */
   struct twist_h1_events ev;
   int have_ev;
   struct twist_h2_stream *next;
@@ -569,7 +570,25 @@ note_recv (struct twist_h2 *h, struct twist_h2_stream *s, size_t n)
   if (s == NULL)
     return;
   s->recv_left -= (int32_t) n;
-  if (s->recv_left <= half_s)
+  if (s->recv_left <= half_s && !s->hold)
+    {
+      uint32_t inc = (uint32_t) (H2_STREAM_TARGET - s->recv_left);
+
+      s->recv_left = H2_STREAM_TARGET;
+      emit_window (h, s->id, inc);
+    }
+}
+
+void
+twist_h2_hold_stream (struct twist_h2 *h, uint32_t id, int hold)
+{
+  struct twist_h2_stream *s = h != NULL ? find_stream (h, id) : NULL;
+
+  if (s == NULL || s->hold == hold)
+    return;
+  s->hold = hold;
+  /* Let go: what was withheld is given back.  */
+  if (!hold && !h->failed && s->recv_left <= H2_STREAM_TARGET / 2)
     {
       uint32_t inc = (uint32_t) (H2_STREAM_TARGET - s->recv_left);
 

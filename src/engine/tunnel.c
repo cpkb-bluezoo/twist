@@ -46,53 +46,241 @@
    the tunnel receives is ingested.  The tunnel is the inner connection's owner,
    so it goes with it.
 
-   Each tunnel has a connection of its own to the proxy.  One HTTP/2 connection
-   could carry many, and does not yet.  */
+   The connection to the proxy is a HUB, and is shared: tunnels to one proxy
+   (the same address, credentials and trust) are streams of one HTTP/2
+   connection, and a tunnel that finds the hub still being made waits for it.
+   A hub that turns out to speak only HTTP/1.1 carries a single tunnel, since
+   a CONNECT takes the connection; the others make hubs of their own, and the
+   next ones do not wait to be told again.  A hub with no tunnel is kept a
+   while, for the next.  */
 
 enum tunnel_state
 {
-  T_DIAL,			/* TCP to the proxy.  */
-  T_TLS,			/* TLS with the proxy.  */
+  T_WAIT,			/* On a hub that is not yet up.  */
   T_ASK,			/* CONNECT sent; the answer is awaited.  */
   T_UP,
   T_DEAD
 };
 
+enum hub_state
+{
+  H_DIAL,			/* TCP to the proxy.  */
+  H_TLS,			/* TLS with the proxy.  */
+  H_H2,
+  H_H1,
+  H_DEAD
+};
+
 #define HEAD_MAX 16384u
 #define HELD_MAX (1u << 20)
+#define HUB_LINGER_MS 30000
+
+struct tunnel_hub;
 
 struct twist_tunnel
 {
   struct twist_transfer *transfer;
   struct twist_loop *loop;
-  struct twist_connection *outer;
+  struct tunnel_hub *hub;
+  struct twist_tunnel *next;	/* On the hub.  */
   struct twist_connection *inner;	/* NULL once the protocol let go.  */
   enum tunnel_state state;
-  int h2;
-  struct twist_h2 *h2c;
   uint32_t stream;
   int status;			/* The proxy's answer.  */
+  struct twist_dns_addr addr;	/* The proxy, to go to another hub.  */
+  int proxy_port;
   char *proxy_host;
   char *authority;		/* host:port of the target.  */
   char *auth;			/* The Proxy-Authorization value, or NULL.  */
+  char *key;			/* Which hub it can be on.  */
   uint8_t *head;		/* HTTP/1.1: the answer so far.  */
   size_t head_len;
   uint8_t *held;		/* What the protocol was not ready to take.  */
   size_t held_len;
   size_t held_cap;
-  int in_cb;
   struct twist_timer *timer;
 };
+
+struct tunnel_hub
+{
+  struct twist_lane *lane;
+  struct twist_loop *loop;
+  struct twist_connection *outer;
+  struct twist_h2 *h2c;
+  enum hub_state state;
+  int exclusive;		/* Made for one tunnel: HTTP/1.1 is expected.  */
+  int freeing;
+  char *key;
+  char *proxy_host;
+  char *cainfo;
+  char *capath;
+  int verify;
+  struct twist_tunnel *tunnels;
+  size_t n;
+  struct twist_timer *idle;
+  struct tunnel_hub *next;
+};
+
+static void tunnel_fail (struct twist_tunnel *t, int err);
+static int tunnel_place (struct twist_tunnel *t);
+
+/* ---- hubs ---- */
+
+static void
+hub_free (struct tunnel_hub *hub)
+{
+  struct twist_tunnel *t;
+  struct tunnel_hub **pp;
+
+  if (hub->idle != NULL)
+    twist_timer_cancel (hub->idle);
+  for (pp = &hub->lane->hubs; *pp != NULL; pp = &(*pp)->next)
+    if (*pp == hub)
+      {
+        *pp = hub->next;
+        break;
+      }
+  for (t = hub->tunnels; t != NULL; t = t->next)
+    t->hub = NULL;
+  twist_h2_free (hub->h2c);
+  twist_connection_free (hub->outer);
+  if (hub->key != NULL)
+    {
+      memset (hub->key, 0, strlen (hub->key));
+      free (hub->key);
+    }
+  free (hub->proxy_host);
+  free (hub->cainfo);
+  free (hub->capath);
+  free (hub);
+}
+
+static void
+hub_free_posted (void *p)
+{
+  hub_free (p);
+}
+
+/* Free the hub a moment later: it may be in the middle of a call.  */
+static void
+hub_drop (struct tunnel_hub *hub)
+{
+  if (hub->freeing)
+    return;
+  hub->freeing = 1;
+  if (hub->idle != NULL)
+    {
+      twist_timer_cancel (hub->idle);
+      hub->idle = NULL;
+    }
+  if (twist_loop_post (hub->loop, hub_free_posted, hub) != TWIST_OK)
+    hub_free (hub);
+}
+
+static void
+hub_idle_expired (void *p)
+{
+  struct tunnel_hub *hub = p;
+
+  hub->idle = NULL;
+  if (hub->n == 0)
+    hub_drop (hub);
+}
+
+/* What is to be done with a hub that has no tunnel (or never had one).  */
+static void
+hub_release (struct tunnel_hub *hub)
+{
+  if (hub->n > 0 || hub->freeing)
+    return;
+  if (hub->state == H_DEAD || hub->state == H_H1)
+    hub_drop (hub);
+  else if (hub->state == H_H2 && hub->idle == NULL)
+    twist_loop_schedule (hub->loop,
+                         twist_loop_now (hub->loop) + HUB_LINGER_MS,
+                         hub_idle_expired, hub, &hub->idle);
+}
+
+static void
+hub_link (struct tunnel_hub *hub, struct twist_tunnel *t)
+{
+  struct twist_tunnel **pp = &hub->tunnels;
+
+  while (*pp != NULL)
+    pp = &(*pp)->next;
+  *pp = t;
+  t->next = NULL;
+  t->hub = hub;
+  hub->n++;
+  if (hub->idle != NULL)
+    {
+      twist_timer_cancel (hub->idle);
+      hub->idle = NULL;
+    }
+}
+
+static void
+hub_unlink (struct twist_tunnel *t)
+{
+  struct tunnel_hub *hub = t->hub;
+  struct twist_tunnel **pp;
+
+  if (hub == NULL)
+    return;
+  for (pp = &hub->tunnels; *pp != NULL; pp = &(*pp)->next)
+    if (*pp == t)
+      {
+        *pp = t->next;
+        hub->n--;
+        break;
+      }
+  t->hub = NULL;
+  t->next = NULL;
+}
+
+/* The connection to the proxy has failed, or the proxy has gone: every tunnel
+   on it has.  */
+static void
+hub_fail (struct tunnel_hub *hub, int err)
+{
+  struct twist_tunnel *t;
+
+  if (hub->state == H_DEAD)
+    return;
+  hub->state = H_DEAD;
+  if (hub->idle != NULL)
+    {
+      twist_timer_cancel (hub->idle);
+      hub->idle = NULL;
+    }
+  /* A tunnel that fails may let go of its connection, and a tunnel is
+     unlinked only a moment after, so the list stands while this goes
+     through it; a tunnel that has failed is passed.  */
+  for (t = hub->tunnels; t != NULL; t = t->next)
+    if (t->state != T_DEAD)
+      {
+        int e = err;
+
+        if (e == TWIST_OK)
+          e = t->state == T_UP ? TWIST_ERR_CLOSED : TWIST_ERR_CONNECT;
+        tunnel_fail (t, e);
+      }
+  hub_release (hub);
+}
+
+/* ---- a tunnel ---- */
 
 static void
 tunnel_reap (void *p)
 {
   struct twist_tunnel *t = p;
+  struct tunnel_hub *hub = t->hub;
 
+  hub_unlink (t);
+  if (hub != NULL)
+    hub_release (hub);
   if (t->timer != NULL)
     twist_timer_cancel (t->timer);
-  twist_h2_free (t->h2c);
-  twist_connection_free (t->outer);
   free (t->proxy_host);
   free (t->authority);
   if (t->auth != NULL)
@@ -100,22 +288,41 @@ tunnel_reap (void *p)
       memset (t->auth, 0, strlen (t->auth));
       free (t->auth);
     }
+  if (t->key != NULL)
+    {
+      memset (t->key, 0, strlen (t->key));
+      free (t->key);
+    }
   free (t->head);
   free (t->held);
   free (t);
 }
 
 /* The protocol let go of the inner connection.  The outer one may be in the
-   middle of a call that led here, so it goes a moment later.  */
+   middle of a call that led here, so the tunnel goes a moment later.  */
 static void
 inner_free (void *p)
 {
   struct twist_tunnel *t = p;
+  struct tunnel_hub *hub = t->hub;
 
   t->inner = NULL;
   t->state = T_DEAD;
-  if (t->outer != NULL)
-    twist_connection_set_handler (t->outer, NULL);
+  if (t->timer != NULL)
+    {
+      twist_timer_cancel (t->timer);
+      t->timer = NULL;
+    }
+  if (hub != NULL && hub->state == H_H2 && t->stream != 0)
+    {
+      twist_h2_drop_user (hub->h2c, t);
+      twist_h2_cancel (hub->h2c, t->stream);
+    }
+  else if (hub != NULL && hub->state == H_H1)
+    {
+      /* The proxy's connection is the tunnel's, and ends with it.  */
+      hub->state = H_DEAD;
+    }
   if (twist_loop_post (t->loop, tunnel_reap, t) != TWIST_OK)
     tunnel_reap (t);
 }
@@ -163,6 +370,25 @@ on_timeout (void *p)
   tunnel_fail (t, TWIST_ERR_TIMEOUT);
 }
 
+/* Stop what the proxy sends for this tunnel until the protocol takes what it
+   has: in HTTP/2 the stream's window is not given back, so that the proxy
+   stops by itself and the other tunnels go on; the HTTP/1.1 connection is
+   the tunnel's, and is not read.  */
+static void
+tunnel_hold (struct twist_tunnel *t, int hold)
+{
+  struct tunnel_hub *hub = t->hub;
+
+  if (hub == NULL || hub->outer == NULL)
+    return;
+  if (hub->state == H_H2)
+    twist_h2_hold_stream (hub->h2c, t->stream, hold);
+  else if (hold)
+    twist_endpoint_pause_read (twist_connection_endpoint (hub->outer));
+  else
+    twist_endpoint_resume_read (twist_connection_endpoint (hub->outer));
+}
+
 /* What the tunnel receives, for the protocol: it is held back while the
    protocol has paused, and given again when it resumes.  */
 static void
@@ -203,8 +429,7 @@ deliver (struct twist_tunnel *t, const uint8_t *data, size_t len)
     }
   memcpy (t->held + t->held_len, data, len);
   t->held_len += len;
-  if (t->outer != NULL)
-    twist_endpoint_pause_read (twist_connection_endpoint (t->outer));
+  tunnel_hold (t, 1);
 }
 
 static void
@@ -230,8 +455,8 @@ inner_resume (void *p)
       memmove (t->held, t->held + off, t->held_len - off);
       t->held_len -= off;
     }
-  if (t->held_len == 0 && t->outer != NULL)
-    twist_endpoint_resume_read (twist_connection_endpoint (t->outer));
+  if (t->held_len == 0)
+    tunnel_hold (t, 0);
 }
 
 static ssize_t
@@ -248,22 +473,23 @@ static ssize_t
 inner_write (void *p, const uint8_t *buf, size_t len)
 {
   struct twist_tunnel *t = p;
+  struct tunnel_hub *hub = t->hub;
 
-  if (t->state != T_UP || t->outer == NULL)
+  if (t->state != T_UP || hub == NULL || hub->outer == NULL)
     {
       errno = EAGAIN;
       return -1;
     }
   /* What is written here goes into the proxy's connection: while that holds a
-     chunk it has not written, this waits (outer_drained says when it has).  */
-  if (twist_endpoint_full (twist_connection_endpoint (t->outer)))
+     chunk it has not written, this waits (hub_drained says when it has).  */
+  if (twist_endpoint_full (twist_connection_endpoint (hub->outer)))
     {
       errno = EAGAIN;
       return -1;
     }
-  if (t->h2)
+  if (hub->state == H_H2)
     {
-      size_t n = twist_h2_send_data (t->h2c, t->stream, buf, len, 0);
+      size_t n = twist_h2_send_data (hub->h2c, t->stream, buf, len, 0);
 
       if (n == 0)
         {
@@ -272,7 +498,7 @@ inner_write (void *p, const uint8_t *buf, size_t len)
         }
       return (ssize_t) n;
     }
-  if (twist_endpoint_send (twist_connection_endpoint (t->outer), buf, len)
+  if (twist_endpoint_send (twist_connection_endpoint (hub->outer), buf, len)
       != TWIST_OK)
     {
       errno = EIO;
@@ -281,15 +507,37 @@ inner_write (void *p, const uint8_t *buf, size_t len)
   return (ssize_t) len;
 }
 
-/* The proxy's connection has written all that was queued on it: what is
-   inside the tunnel can go on.  */
+/* The tunnels on the hub can write, each to the protocol that has it.  A
+   protocol that lets go of its tunnel does not unlink it until later, so the
+   list stands.  */
 static void
-outer_drained (struct twist_endpoint *ep)
+hub_writable (struct tunnel_hub *hub)
 {
-  struct twist_tunnel *t = ep->write_user;
+  struct twist_tunnel *t;
 
-  if (t != NULL && t->state == T_UP && t->inner != NULL)
-    twist_connection_on_writable (t->inner);
+  for (t = hub->tunnels; t != NULL; t = t->next)
+    if (t->state == T_UP && t->inner != NULL)
+      twist_connection_on_writable (t->inner);
+}
+
+/* The proxy's connection has written all that was queued on it: what is
+   inside the tunnels can go on.  */
+static void
+hub_drained (struct twist_endpoint *ep)
+{
+  struct tunnel_hub *hub = ep->write_user;
+
+  if (hub != NULL && hub->state != H_DEAD)
+    hub_writable (hub);
+}
+
+static void
+h2_writable (void *user)
+{
+  struct tunnel_hub *hub = user;
+
+  if (hub->state == H_H2)
+    hub_writable (hub);
 }
 
 /* The proxy said yes.  */
@@ -366,36 +614,38 @@ h2_failure (void *user, int err)
   tunnel_fail (user, err == TWIST_OK ? TWIST_ERR_PROTOCOL : err);
 }
 
+/* The codec is the hub's, and its failure is the connection's.  */
+static void
+h2_hub_failure (void *user, int err)
+{
+  hub_fail (user, err == TWIST_OK ? TWIST_ERR_PROTOCOL : err);
+}
+
 static int
 h2_emit (void *user, const uint8_t *data, size_t len)
 {
-  struct twist_tunnel *t = user;
+  struct tunnel_hub *hub = user;
 
-  if (t->outer == NULL)
+  if (hub->outer == NULL)
     return TWIST_ERR_CLOSED;
-  return twist_endpoint_send (twist_connection_endpoint (t->outer), data, len);
+  return twist_endpoint_send (twist_connection_endpoint (hub->outer), data, len);
 }
 
-static void
-h2_writable (void *user)
-{
-  struct twist_tunnel *t = user;
-
-  if (t->state == T_UP && t->inner != NULL)
-    twist_connection_on_writable (t->inner);
-}
-
+/* CONNECT on a stream of its own.  TWIST_ERR_AGAIN: the connection has no
+   stream to give, and the tunnel is to go to another.  */
 static int
-start_h2 (struct twist_tunnel *t)
+open_stream (struct twist_tunnel *t)
 {
+  struct tunnel_hub *hub = t->hub;
   struct twist_h1_events ev;
   struct twist_slist *extra = NULL;
-  uint8_t *pre = NULL;
   uint8_t *req = NULL;
-  size_t pre_n = 0, req_n = 0;
+  size_t req_n = 0;
   char line[1100];
   int rc;
 
+  if (!twist_h2_can_open (hub->h2c))
+    return TWIST_ERR_AGAIN;
   memset (&ev, 0, sizeof ev);
   ev.user = t;
   ev.header = h2_header;
@@ -403,11 +653,6 @@ start_h2 (struct twist_tunnel *t)
   ev.message_done = h2_done;
   ev.failure = h2_failure;
   ev.switching = h2_switching;
-  t->h2c = twist_h2_new (&ev);
-  if (t->h2c == NULL)
-    return TWIST_ERR_NOMEM;
-  twist_h2_set_emit (t->h2c, h2_emit, t);
-  twist_h2_set_writable (t->h2c, h2_writable, t);
   if (t->auth != NULL)
     {
       snprintf (line, sizeof line, "proxy-authorization: Basic %s", t->auth);
@@ -416,10 +661,10 @@ start_h2 (struct twist_tunnel *t)
       if (extra == NULL)
         return TWIST_ERR_NOMEM;
     }
-  rc = twist_h2_preface (&pre, &pre_n);
-  if (rc == TWIST_OK)
-    rc = twist_h2_request (t->h2c, "CONNECT", NULL, t->authority, NULL, extra,
-                           NULL, 0, 1, &req, &req_n);
+  twist_h2_set_next_owner (hub->h2c, &ev);
+  rc = twist_h2_request (hub->h2c, "CONNECT", NULL, t->authority, NULL, extra,
+                         NULL, 0, 1, &req, &req_n);
+  twist_h2_set_next_owner (hub->h2c, NULL);
   if (extra != NULL)
     {
       memset (extra->data, 0, strlen (extra->data));
@@ -427,15 +672,11 @@ start_h2 (struct twist_tunnel *t)
     }
   if (rc == TWIST_OK)
     {
-      t->stream = twist_h2_last_stream (t->h2c);
-      t->h2 = 1;
-      rc = twist_endpoint_send (twist_connection_endpoint (t->outer), pre,
-                                pre_n);
-      if (rc == TWIST_OK)
-        rc = twist_endpoint_send (twist_connection_endpoint (t->outer), req,
-                                  req_n);
+      t->stream = twist_h2_last_stream (hub->h2c);
+      t->state = T_ASK;
+      rc = twist_endpoint_send (twist_connection_endpoint (hub->outer), req,
+                                req_n);
     }
-  free (pre);
   free (req);
   return rc;
 }
@@ -445,6 +686,7 @@ start_h2 (struct twist_tunnel *t)
 static int
 start_h1 (struct twist_tunnel *t)
 {
+  struct tunnel_hub *hub = t->hub;
   char line[1400];
   int n;
 
@@ -458,7 +700,8 @@ start_h1 (struct twist_tunnel *t)
                   t->authority, t->authority);
   if (n < 0 || (size_t) n >= sizeof line)
     return TWIST_ERR_URL;
-  n = twist_endpoint_send (twist_connection_endpoint (t->outer),
+  t->state = T_ASK;
+  n = twist_endpoint_send (twist_connection_endpoint (hub->outer),
                            (const uint8_t *) line, (size_t) n);
   memset (line, 0, sizeof line);
   return n;
@@ -527,83 +770,148 @@ h1_answer (struct twist_tunnel *t, const uint8_t *data, size_t len)
 /* ---- the connection to the proxy ---- */
 
 static void
-outer_connected (struct twist_endpoint *ep)
+hub_connected (struct twist_endpoint *ep)
 {
-  struct twist_tunnel *t = ep->user_data;
+  struct tunnel_hub *hub = ep->user_data;
   static const char *const alpn[] = { "h2", "http/1.1" };
-  struct twist_transfer *e = t->transfer;
   int rc;
 
-  if (t->state != T_DIAL)
+  if (hub->state != H_DIAL)
     return;
-  t->state = T_TLS;
-  rc = twist_connection_start_tls (t->outer, t->proxy_host, e->proxy_verifypeer,
-                                   alpn, 2,
-                                   e->proxy_cainfo != NULL ? e->proxy_cainfo
-                                   : e->cainfo,
-                                   e->proxy_cainfo != NULL ? NULL : e->capath,
-                                   NULL, NULL);
+  hub->state = H_TLS;
+  rc = twist_connection_start_tls (hub->outer, hub->proxy_host, hub->verify,
+                                   alpn, 2, hub->cainfo, hub->capath, NULL,
+                                   NULL);
   if (rc != TWIST_OK)
-    tunnel_fail (t, rc);
+    hub_fail (hub, rc);
+}
+
+/* The proxy speaks HTTP/2: the tunnels that wait are given streams.  */
+static int
+hub_start_h2 (struct tunnel_hub *hub)
+{
+  struct twist_h1_events ev;
+  struct twist_tunnel *t, *next;
+  uint8_t *pre = NULL;
+  size_t pre_n = 0;
+  int rc;
+
+  memset (&ev, 0, sizeof ev);
+  ev.user = hub;
+  ev.failure = h2_hub_failure;
+  hub->h2c = twist_h2_new (&ev);
+  if (hub->h2c == NULL)
+    return TWIST_ERR_NOMEM;
+  twist_h2_set_emit (hub->h2c, h2_emit, hub);
+  twist_h2_set_writable (hub->h2c, h2_writable, hub);
+  rc = twist_h2_preface (&pre, &pre_n);
+  if (rc == TWIST_OK)
+    rc = twist_endpoint_send (twist_connection_endpoint (hub->outer), pre,
+                              pre_n);
+  free (pre);
+  if (rc != TWIST_OK)
+    return rc;
+  hub->state = H_H2;
+  hub->exclusive = 0;
+  for (t = hub->tunnels; t != NULL; t = next)
+    {
+      next = t->next;
+      if (t->state != T_WAIT)
+        continue;
+      rc = open_stream (t);
+      if (rc == TWIST_ERR_AGAIN)
+        {
+          /* More waited than the proxy allows at once.  */
+          hub_unlink (t);
+          rc = tunnel_place (t);
+        }
+      if (rc != TWIST_OK)
+        tunnel_fail (t, rc);
+    }
+  hub_release (hub);
+  return TWIST_OK;
+}
+
+/* The proxy speaks HTTP/1.1: the first tunnel takes the connection, and the
+   others go to connections of their own.  */
+static int
+hub_start_h1 (struct tunnel_hub *hub)
+{
+  struct twist_tunnel *t, *next, *first = NULL;
+  int rc = TWIST_OK;
+
+  hub->state = H_H1;
+  hub->exclusive = 1;
+  for (t = hub->tunnels; t != NULL; t = next)
+    {
+      next = t->next;
+      if (t->state != T_WAIT)
+        continue;
+      if (first == NULL)
+        {
+          first = t;
+          continue;
+        }
+      hub_unlink (t);
+      rc = tunnel_place (t);
+      if (rc != TWIST_OK)
+        tunnel_fail (t, rc);
+    }
+  if (first != NULL)
+    {
+      rc = start_h1 (first);
+      if (rc != TWIST_OK)
+        tunnel_fail (first, rc);
+    }
+  hub_release (hub);
+  return TWIST_OK;
 }
 
 static void
-outer_secure (struct twist_endpoint *ep, const char *alpn, size_t len)
+hub_secure (struct twist_endpoint *ep, const char *alpn, size_t len)
 {
-  struct twist_tunnel *t = ep->user_data;
+  struct tunnel_hub *hub = ep->user_data;
   int rc;
 
-  if (t->state != T_TLS)
+  if (hub->state != H_TLS)
     return;
-  t->state = T_ASK;
   if (len == 2 && memcmp (alpn, "h2", 2) == 0)
-    rc = start_h2 (t);
+    rc = hub_start_h2 (hub);
   else
-    rc = start_h1 (t);
+    rc = hub_start_h1 (hub);
   if (rc != TWIST_OK)
-    tunnel_fail (t, rc);
+    hub_fail (hub, rc);
 }
 
 static size_t
-outer_receive (struct twist_endpoint *ep, const uint8_t *data, size_t len)
+hub_receive (struct twist_endpoint *ep, const uint8_t *data, size_t len)
 {
-  struct twist_tunnel *t = ep->user_data;
-  size_t used;
+  struct tunnel_hub *hub = ep->user_data;
+  struct twist_tunnel *t = hub->tunnels;
 
-  if (t->state == T_DEAD)
+  if (hub->state == H_H2)
+    return twist_h2_receive (hub->h2c, data, len);
+  if (hub->state != H_H1 || t == NULL || t->state == T_DEAD)
     return len;
-  t->in_cb++;
-  if (t->state == T_ASK && !t->h2)
-    used = h1_answer (t, data, len);
-  else if (t->h2)
-    used = twist_h2_receive (t->h2c, data, len);
-  else
-    {
-      deliver (t, data, len);
-      used = len;
-    }
-  t->in_cb--;
-  return used;
+  if (t->state == T_ASK)
+    return h1_answer (t, data, len);
+  deliver (t, data, len);
+  return len;
 }
 
 static void
-outer_disconnected (struct twist_endpoint *ep, int err)
+hub_disconnected (struct twist_endpoint *ep, int err)
 {
-  struct twist_tunnel *t = ep->user_data;
+  struct tunnel_hub *hub = ep->user_data;
 
-  if (t->state == T_DEAD)
-    return;
-  if (t->state == T_UP)
-    tunnel_fail (t, err == TWIST_OK ? TWIST_ERR_CLOSED : err);
-  else
-    tunnel_fail (t, err == TWIST_OK ? TWIST_ERR_CONNECT : err);
+  hub_fail (hub, err);
 }
 
-static const struct twist_protocol_handler outer_handler = {
-  outer_connected,
-  outer_receive,
-  outer_disconnected,
-  outer_secure,
+static const struct twist_protocol_handler hub_handler = {
+  hub_connected,
+  hub_receive,
+  hub_disconnected,
+  hub_secure,
   NULL,
   NULL,
   NULL
@@ -640,6 +948,160 @@ basic_of (const char *user, const char *pass)
   return enc;
 }
 
+/* Which connection a tunnel can share: the proxy's address and name, how it
+   is trusted and the credentials it is given.  */
+static char *
+key_of (const struct twist_transfer *e, const struct twist_dns_addr *a,
+        const char *host, int port, const char *auth)
+{
+  const char *ca = e->proxy_cainfo != NULL ? e->proxy_cainfo : e->cainfo;
+  const char *cp = e->proxy_cainfo != NULL ? NULL : e->capath;
+  char abuf[sizeof a->addr * 2 + 1];
+  size_t i, n;
+  char *k;
+
+  for (i = 0; i < sizeof a->addr; i++)
+    snprintf (abuf + i * 2, 3, "%02x", a->addr[i]);
+  n = strlen (abuf) + strlen (host) + strlen (auth != NULL ? auth : "")
+      + strlen (ca != NULL ? ca : "") + strlen (cp != NULL ? cp : "") + 64;
+  k = twist_xmalloc (n);
+  if (k == NULL)
+    return NULL;
+  snprintf (k, n, "%d|%s|%u|%d|%s|%d|%s|%s|%s", a->family, abuf,
+            (unsigned) a->scope_id, port, host, e->proxy_verifypeer != 0,
+            auth != NULL ? auth : "", ca != NULL ? ca : "",
+            cp != NULL ? cp : "");
+  return k;
+}
+
+static struct tunnel_hub *
+hub_new (struct twist_tunnel *t)
+{
+  struct twist_transfer *e = t->transfer;
+  struct tunnel_hub *hub = calloc (1, sizeof *hub);
+  const char *ca = e->proxy_cainfo != NULL ? e->proxy_cainfo : e->cainfo;
+  const char *cp = e->proxy_cainfo != NULL ? NULL : e->capath;
+
+  if (hub == NULL)
+    return NULL;
+  hub->lane = twist_lane_of_loop (twist_loop_runtime (t->loop), t->loop);
+  hub->loop = t->loop;
+  hub->key = twist_strdup (t->key);
+  hub->proxy_host = twist_strdup (t->proxy_host);
+  hub->cainfo = ca != NULL ? twist_strdup (ca) : NULL;
+  hub->capath = cp != NULL ? twist_strdup (cp) : NULL;
+  hub->verify = e->proxy_verifypeer;
+  hub->outer = twist_connection_new (t->loop);
+  if (hub->key == NULL || hub->proxy_host == NULL || hub->outer == NULL
+      || (ca != NULL && hub->cainfo == NULL)
+      || (cp != NULL && hub->capath == NULL))
+    {
+      hub_free (hub);
+      return NULL;
+    }
+  /* The proxy's own socket is the one that is kept to the limit.  */
+  twist_connection_limit (hub->outer, e);
+  twist_connection_endpoint (hub->outer)->user_data = hub;
+  twist_connection_endpoint (hub->outer)->on_write_ready = hub_drained;
+  twist_connection_endpoint (hub->outer)->write_user = hub;
+  twist_connection_set_handler (hub->outer, &hub_handler);
+  hub->state = H_DIAL;
+  return hub;
+}
+
+static int
+hub_dial (struct tunnel_hub *hub, const struct twist_tunnel *t)
+{
+  struct sockaddr_in sin;
+  struct sockaddr_in6 sin6;
+  const void *sa;
+  size_t salen;
+
+  if (t->addr.family == 6)
+    {
+      memset (&sin6, 0, sizeof sin6);
+      sin6.sin6_family = AF_INET6;
+      memcpy (&sin6.sin6_addr, t->addr.addr, 16);
+      sin6.sin6_scope_id = t->addr.scope_id;
+      sin6.sin6_port = htons ((uint16_t) t->proxy_port);
+      sa = &sin6;
+      salen = sizeof sin6;
+    }
+  else
+    {
+      memset (&sin, 0, sizeof sin);
+      sin.sin_family = AF_INET;
+      memcpy (&sin.sin_addr, t->addr.addr, 4);
+      sin.sin_port = htons ((uint16_t) t->proxy_port);
+      sa = &sin;
+      salen = sizeof sin;
+    }
+  return twist_connection_connect (hub->outer, sa, salen,
+                                   (uint64_t) t->transfer->connect_timeout_ms);
+}
+
+/* Put the tunnel on a hub: one that is up and has a stream to give, or is
+   being made, and else a new one.  A tunnel moved off an HTTP/1.1 hub does
+   not wait for another to find out, since this one has.  */
+static int
+tunnel_place (struct twist_tunnel *t)
+{
+  struct twist_lane *lane = twist_lane_of_loop (twist_loop_runtime (t->loop),
+                                                t->loop);
+  struct tunnel_hub *hub, *use = NULL;
+  int learned_h1 = 0;
+  int rc;
+
+  for (hub = lane->hubs; hub != NULL; hub = hub->next)
+    {
+      if (hub->freeing || hub->state == H_DEAD
+          || strcmp (hub->key, t->key) != 0)
+        continue;
+      if (hub->state == H_H1)
+        learned_h1 = 1;
+      else if (hub->exclusive)
+        continue;
+      else if (hub->state == H_H2 ? twist_h2_can_open (hub->h2c) : 1)
+        {
+          use = hub;
+          break;
+        }
+    }
+  if (use == NULL)
+    {
+      use = hub_new (t);
+      if (use == NULL)
+        return TWIST_ERR_NOMEM;
+      use->exclusive = learned_h1;
+      use->next = use->lane->hubs;
+      use->lane->hubs = use;
+      hub_link (use, t);
+      rc = hub_dial (use, t);
+      if (rc != TWIST_OK)
+        {
+          hub_unlink (t);
+          use->state = H_DEAD;
+          hub_drop (use);
+          return rc;
+        }
+      t->state = T_WAIT;
+      return TWIST_OK;
+    }
+  hub_link (use, t);
+  if (use->state == H_H2)
+    {
+      rc = open_stream (t);
+      if (rc == TWIST_ERR_AGAIN)
+        {
+          hub_unlink (t);
+          return tunnel_place (t);
+        }
+      return rc;
+    }
+  t->state = T_WAIT;
+  return TWIST_OK;
+}
+
 int
 twist_tunnel_connect (struct twist_transfer *transfer,
                       const struct twist_tunnel_spec *spec,
@@ -648,10 +1110,6 @@ twist_tunnel_connect (struct twist_transfer *transfer,
                       void *user, struct twist_connection **out)
 {
   struct twist_tunnel *t;
-  struct sockaddr_in sin;
-  struct sockaddr_in6 sin6;
-  const void *sa;
-  size_t salen;
   const char *u = spec->user;
   const char *pw = spec->pass;
   char *split = NULL;
@@ -663,6 +1121,8 @@ twist_tunnel_connect (struct twist_transfer *transfer,
     return TWIST_ERR_NOMEM;
   t->transfer = transfer;
   t->loop = transfer->loop;
+  t->addr = *proxy_addr;
+  t->proxy_port = spec->proxy_port;
   t->proxy_host = twist_strdup (spec->proxy_host);
   t->authority = authority_of (spec->host, spec->port);
   /* Credentials of the proxy's URL, or else -U, as given.  */
@@ -691,53 +1151,24 @@ twist_tunnel_connect (struct twist_transfer *transfer,
   if (u != NULL)
     t->auth = basic_of (u, pw);
   free (split);
-  t->outer = twist_connection_new (transfer->loop);
   t->inner = twist_connection_new (transfer->loop);
-  if (t->proxy_host == NULL || t->authority == NULL || t->outer == NULL
-      || t->inner == NULL || (u != NULL && t->auth == NULL))
+  if (t->proxy_host != NULL && (u == NULL || t->auth != NULL))
+    t->key = key_of (transfer, proxy_addr, spec->proxy_host, spec->proxy_port,
+                     t->auth);
+  if (t->proxy_host == NULL || t->authority == NULL || t->inner == NULL
+      || t->key == NULL || (u != NULL && t->auth == NULL))
     {
       twist_connection_free (t->inner);
       t->inner = NULL;
       tunnel_reap (t);
       return TWIST_ERR_NOMEM;
     }
-  t->state = T_DIAL;
-  /* The proxy's own socket is the one that is kept to the limit.  */
-  twist_connection_limit (t->outer, transfer);
+  t->state = T_WAIT;
   twist_connection_set_io (t->inner, inner_read, inner_write, t);
   twist_connection_set_owner (t->inner, t, inner_free, inner_resume);
   twist_connection_endpoint (t->inner)->user_data = user;
   twist_connection_set_handler (t->inner, handler);
-  twist_connection_endpoint (t->outer)->user_data = t;
-  twist_connection_endpoint (t->outer)->on_write_ready = outer_drained;
-  twist_connection_endpoint (t->outer)->write_user = t;
-  twist_connection_set_handler (t->outer, &outer_handler);
-  if (proxy_addr->family == 6)
-    {
-      memset (&sin6, 0, sizeof sin6);
-      sin6.sin6_family = AF_INET6;
-      memcpy (&sin6.sin6_addr, proxy_addr->addr, 16);
-      sin6.sin6_scope_id = proxy_addr->scope_id;
-      sin6.sin6_port = htons ((uint16_t) spec->proxy_port);
-      sa = &sin6;
-      salen = sizeof sin6;
-    }
-  else
-    {
-      memset (&sin, 0, sizeof sin);
-      sin.sin_family = AF_INET;
-      memcpy (&sin.sin_addr, proxy_addr->addr, 4);
-      sin.sin_port = htons ((uint16_t) spec->proxy_port);
-      sa = &sin;
-      salen = sizeof sin;
-    }
-  if (transfer->connect_timeout_ms > 0)
-    twist_loop_schedule (transfer->loop,
-                         twist_loop_now (transfer->loop)
-                         + (uint64_t) transfer->connect_timeout_ms,
-                         on_timeout, t, &t->timer);
-  rc = twist_connection_connect (t->outer, sa, salen,
-                                 (uint64_t) transfer->connect_timeout_ms);
+  rc = tunnel_place (t);
   if (rc != TWIST_OK)
     {
       /* The inner connection is the caller's to free, as it would be.  */
@@ -745,6 +1176,30 @@ twist_tunnel_connect (struct twist_transfer *transfer,
       *out = t->inner;
       return rc;
     }
+  if (transfer->connect_timeout_ms > 0 && t->state != T_UP)
+    twist_loop_schedule (transfer->loop,
+                         twist_loop_now (transfer->loop)
+                         + (uint64_t) transfer->connect_timeout_ms,
+                         on_timeout, t, &t->timer);
   *out = t->inner;
   return TWIST_OK;
+}
+
+/* The runtime is going: the hubs go with it, and the tunnels that are still
+   to be let go of no longer have one.  */
+void
+twist_tunnel_free_all (struct twist_runtime *runtime)
+{
+  size_t i;
+
+  if (runtime == NULL)
+    return;
+  for (i = 0; i < runtime->n_lanes; i++)
+    while (runtime->lanes[i]->hubs != NULL)
+      {
+        struct tunnel_hub *hub = runtime->lanes[i]->hubs;
+
+        hub->freeing = 1;
+        hub_free (hub);
+      }
 }

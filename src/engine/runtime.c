@@ -679,6 +679,7 @@ twist_runtime_free (twist_runtime *runtime)
   twist_jar_free (runtime->jar);
   twist_hsts_free (runtime->hsts);
   twist_altsvc_free (runtime->altsvc);
+  twist_tunnel_free_all (runtime);
   twist_session_free_all (runtime);
   twist_origintab_free (runtime->origintab);
   twist_storage_free (runtime->storage);

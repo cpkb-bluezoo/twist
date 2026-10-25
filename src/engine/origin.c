@@ -227,6 +227,7 @@ twist_transfer_origin_okey (struct twist_transfer *transfer, char *buf,
   char sock[160];
   int n;
   int tunnelled;
+  int forwarded;
 
   if (transfer == NULL || transfer->url == NULL)
     return TWIST_ERR_INVAL;
@@ -249,10 +250,20 @@ twist_transfer_origin_okey (struct twist_transfer *transfer, char *buf,
                   || strcmp (url->scheme, "ws") == 0)
               && twist_route_role (transfer, url->scheme, 0)
                  == TWIST_ROUTE_TCP_TUNNEL;
-  n = snprintf (buf, cap, "%s|%s|%d|%s%s",
-                url->scheme != NULL ? url->scheme : "",
-                url->host != NULL ? url->host : "", port, proxy,
-                tunnelled ? "|T" : "");
+  forwarded = transfer->unix_path == NULL && url->scheme != NULL
+              && (strcmp (url->scheme, "http") == 0
+                  || strcmp (url->scheme, "ws") == 0)
+              && twist_route_role (transfer, url->scheme, 0)
+                 == TWIST_ROUTE_FORWARD;
+  /* A request forwarded to a proxy names its origin itself, so what is kept
+     is the proxy's: one connection serves them all.  */
+  if (forwarded)
+    n = snprintf (buf, cap, "fwd|%s", proxy);
+  else
+    n = snprintf (buf, cap, "%s|%s|%d|%s%s",
+                  url->scheme != NULL ? url->scheme : "",
+                  url->host != NULL ? url->host : "", port, proxy,
+                  tunnelled ? "|T" : "");
   if (n < 0 || (size_t) n >= cap)
     return TWIST_ERR_NOMEM;
   return tls_identity (transfer, buf + n, cap - (size_t) n);

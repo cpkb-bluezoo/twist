@@ -77,6 +77,12 @@ Version 0.1 - unreleased
     URL is tunnelled, and -p/--proxytunnel (TWISTOPT_HTTPPROXYTUNNEL) tunnels
     the first too; a proxy that answers 405 or 501 to a forward is tunnelled
     to instead, once for a request that is safe to repeat, and remembered
+  * tunnels through an https proxy that speaks HTTP/2 are streams of one
+    connection to it, whichever protocol they carry, and the connection is
+    kept for 30 seconds after the last; an HTTP/1.1 proxy has a connection to
+    each, and is not waited for again once known
+  * requests forwarded to a proxy share its connection whatever their
+    origin, as the connection is kept for the proxy and not for the origin
   * the file given to -T is a glob pattern ({a,b}, [1-9]; -g turns it off): each
     file goes to the URL, and #N in the URL, in -o and in --output-dir is the
     Nth glob, the URL's first and the file's after them; a URL that ends in a
