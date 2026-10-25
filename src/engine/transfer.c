@@ -260,6 +260,12 @@ twist_transfer_setopt (twist_transfer *transfer, int opt, ...)
     case TWISTOPT_READDATA:
       transfer->read_data = va_arg (ap, void *);
       break;
+    case TWISTOPT_SEEKFUNCTION:
+      transfer->seek_cb = va_arg (ap, twist_seek_callback);
+      break;
+    case TWISTOPT_SEEKDATA:
+      transfer->seek_data = va_arg (ap, void *);
+      break;
     case TWISTOPT_HEADERFUNCTION:
       transfer->header_cb = va_arg (ap, twist_write_callback);
       break;

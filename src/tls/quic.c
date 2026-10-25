@@ -60,6 +60,10 @@ struct twist_quic
   char *server_name;
   int fd;
   int hold_stream;
+  /* Called when the current stream has written what was queued on it, for a
+     producer that stopped at twist_quic_stream_full.  */
+  void (*drained) (void *);
+  void *drained_user;
   gq_path path;
   uint8_t *dg;
   size_t dg_len[16];
@@ -293,6 +297,13 @@ ev_stream_writable (void *user, uint64_t id)
     }
   now = twist_loop_now (q->loop) * 1000u;
   quic_flush (q, now);
+  if (q->drained != NULL)
+    {
+      struct quic_stream *s = qs_find (q, id);
+
+      if (s != NULL && s->pend_len - s->pend_off < TWIST_OUT_HIGH)
+        q->drained (q->drained_user);
+    }
 }
 
 static void
@@ -1014,6 +1025,27 @@ twist_quic_bind (struct twist_connection *conn,
 }
 
 int
+twist_quic_stream_full (struct twist_connection *conn)
+{
+  struct twist_quic *q = conn != NULL ? twist_connection_tls (conn) : NULL;
+  struct quic_stream *s = q != NULL ? qs_cur (q) : NULL;
+
+  return s != NULL && s->pend_len - s->pend_off >= TWIST_OUT_HIGH;
+}
+
+void
+twist_quic_on_drained (struct twist_connection *conn, void (*cb) (void *),
+                       void *user)
+{
+  struct twist_quic *q = conn != NULL ? twist_connection_tls (conn) : NULL;
+
+  if (q == NULL)
+    return;
+  q->drained = cb;
+  q->drained_user = user;
+}
+
+int
 twist_quic_can_open (struct twist_connection *conn)
 {
   struct twist_quic *q;
@@ -1022,6 +1054,10 @@ twist_quic_can_open (struct twist_connection *conn)
     return 0;
   q = twist_connection_tls (conn);
   if (q == NULL || q->nst >= QUIC_STREAMS)
+    return 0;
+  /* A stream that is held (a WebSocket, a body being sent) is the one that
+     sends are for until it is let go.  */
+  if (q->hold_stream)
     return 0;
   if (q->conn != NULL && q->nst > 0
       && gq_conn_streams_available (q->conn, 1) == 0)

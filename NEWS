@@ -68,9 +68,17 @@ Version 0.1 - unreleased
     name
   * a plain http:// URL through an HTTP proxy sends the proxy's credentials
     as Proxy-Authorization
-  * a connection holds at most 256 MiB of output not yet written, and a
+  * a connection says when it holds a chunk that has not been written, and a
     request body of 64 KiB or more for HTTP/1 and the message of smtp are sent
     as the connection writes them, not copied into its queue whole
+  * request bodies over HTTP/2 and HTTP/3, and the message of a WebSocket, are
+    sent a chunk at a time as the connection (and the server's windows) can
+    take them, and not queued whole; the compressed body of an HTTP/2 request
+    (--content-encoding) is no longer freed while it is still being sent
+  * -T uploads to http and https are read as they are sent (Content-Length for
+    a file, chunked for a pipe) and not held in memory; a redirect or a second
+    request that has the data sent again starts a file over, and a pipe fails
+    with status 65
   * cookies expire: Expires and Max-Age are read (Max-Age wins; no cookie lasts
     more than 400 days), and an expired cookie or Max-Age=0 deletes
   * gzip and deflate request and response coding, via zlib

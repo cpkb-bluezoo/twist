@@ -1415,6 +1415,11 @@ TLS was asked for with
 .B \-\-ssl\-reqd
 and the server does not offer it or refuses it.
 .TP
+.B 65
+The data of an upload had to be sent again (a redirect that keeps the body, an
+authentication that needs a second request) and could not be read again from
+the start, as a pipe cannot.
+.TP
 .B 9
 The SFTP server would not let the user read the file.
 .TP

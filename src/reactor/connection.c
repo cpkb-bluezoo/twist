@@ -78,7 +78,6 @@ struct twist_connection
   /* The limits on what is read and written (twist_connection_set_rate), and
      the waits for the next chunk to be earned: while one is on, that
      direction is not watched.  */
-  size_t out_limit;             /* 0: TWIST_OUT_CEILING.  */
   /* A body being streamed (twist_connection_stream).  */
   twist_stream_read_fn stream_read;
   twist_stream_end_fn stream_end;
@@ -253,26 +252,8 @@ on_rate_write (void *user)
   twist_connection_on_writable (c);
 }
 
-void
-twist_connection_set_out_limit (struct twist_connection *c, size_t limit)
-{
-  if (c != NULL)
-    c->out_limit = limit;
-}
-
-/* Whether N more bytes would take the queue over its limit.  */
-static int
-over_limit (const struct twist_connection *c, size_t n)
-{
-  size_t limit = c->out_limit != 0 ? c->out_limit : TWIST_OUT_CEILING;
-
-  return n > limit || c->out_len > limit - n;
-}
-
-/* How little is queued before the stream is asked for more, and how much it
-   is asked for.  */
-#define STREAM_LOW (128u * 1024u)
-#define STREAM_CHUNK 16384u
+/* The stream is asked for a chunk when less than TWIST_OUT_HIGH is queued.  */
+#define STREAM_CHUNK TWIST_OUT_HIGH
 
 /* The stream is over, for ERR.  */
 static void
@@ -301,7 +282,7 @@ stream_fill (struct twist_connection *c)
     return 0;
   c->filling = 1;
   while (c->stream_read != NULL && !c->failed && !c->closing
-         && c->out_len < STREAM_LOW)
+         && c->out_len < TWIST_OUT_HIGH)
     {
       size_t n = c->stream_read (c->stream_user, buf, sizeof buf);
       int err = TWIST_OK;
@@ -732,8 +713,6 @@ twist_connection_send_parts (struct twist_connection *c, const uint8_t *a,
         return TWIST_ERR_NOMEM;
       return TWIST_OK;
     }
-  if (over_limit (c, an) || over_limit (c, an + bn))
-    return TWIST_ERR_NOMEM;
   if (an > 0
       && append_buf (&c->outbuf, &c->out_off, &c->out_len, &c->out_cap, a, an)
          != TWIST_OK)
@@ -753,8 +732,6 @@ twist_connection_queue_out (struct twist_connection *c, const uint8_t *data,
 {
   int rc;
 
-  if (over_limit (c, len))
-    return TWIST_ERR_NOMEM;
   rc = append_buf (&c->outbuf, &c->out_off, &c->out_len, &c->out_cap,
                        data, len);
   if (rc != TWIST_OK)
@@ -1012,6 +989,12 @@ twist_endpoint_send (struct twist_endpoint *ep, const uint8_t *data,
   if (ep == NULL || ep->send == NULL)
     return TWIST_ERR_INVAL;
   return ep->send (ep, data, len);
+}
+
+int
+twist_endpoint_full (const struct twist_endpoint *ep)
+{
+  return ep != NULL && ep->conn != NULL && ep->conn->out_len >= TWIST_OUT_HIGH;
 }
 
 size_t

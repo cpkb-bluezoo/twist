@@ -31,10 +31,10 @@
 #include <time.h>
 #include <unistd.h>
 
-/* What a connection holds that has not been written is limited: a send that
-   would take it over fails, and a body that is large is streamed, read only
-   as the connection writes, so that a peer that does not read does not make
-   it grow.  The far end is a socket pair.  */
+/* What a connection holds that has not been written is about a chunk: it says
+   when it is full, a producer stops, and a body that is large is streamed,
+   read only as the connection writes, so that a peer that does not read does
+   not make anything grow.  The far end is a socket pair.  */
 
 static double
 now_ms (void)
@@ -64,27 +64,58 @@ make (struct twist_loop *loop, int fd)
   return c;
 }
 
+static int drained;
+
 static void
-test_limit (struct twist_loop *loop)
+on_drained (struct twist_endpoint *ep)
+{
+  (void) ep;
+  drained++;
+}
+
+/* A producer is told when to stop: after a send the connection says it is full
+   once it holds a chunk that the peer has not taken, and says when it has
+   written it all.  Nothing else is queued.  */
+static void
+test_backpressure (struct twist_loop *loop)
 {
   int sv[2];
   uint8_t buf[1000];
   struct twist_connection *c;
   struct twist_endpoint *ep;
-  int i, rc = TWIST_OK;
+  size_t sent = 0, seen = 0;
+  double end;
 
   if (pair (sv) != 0)
     return;
   memset (buf, 'a', sizeof buf);
   c = make (loop, sv[0]);
   ep = twist_connection_endpoint (c);
-  twist_connection_set_out_limit (c, 200000);
-  /* The peer does not read.  The socket takes some, the rest is queued.  */
-  for (i = 0; i < 10000 && rc == TWIST_OK; i++)
-    rc = twist_endpoint_send (ep, buf, sizeof buf);
-  check (rc != TWIST_OK, "a send that goes over the limit fails");
-  check (twist_endpoint_pending (ep) <= 200000,
-         "and what is held stays under it");
+  ep->on_write_ready = on_drained;
+  check (!twist_endpoint_full (ep), "an idle connection is not full");
+  /* The peer does not read.  The socket takes some; then it is full.  */
+  while (!twist_endpoint_full (ep) && sent < 64u * 1024u * 1024u)
+    {
+      if (twist_endpoint_send (ep, buf, sizeof buf) != TWIST_OK)
+        break;
+      sent += sizeof buf;
+    }
+  check (twist_endpoint_full (ep), "it says when it is full");
+  check (twist_endpoint_pending (ep) < 2 * TWIST_OUT_HIGH,
+         "holding about a chunk, and not more");
+  drained = 0;
+  end = now_ms () + 3000;
+  while (now_ms () < end && !(drained > 0 && seen == sent))
+    {
+      uint8_t in[65536];
+      ssize_t n = read (sv[1], in, sizeof in);
+
+      if (n > 0)
+        seen += (size_t) n;
+      twist_loop_run_once_ms (loop, 1);
+    }
+  check (seen == sent && drained > 0, "and when it has written it all");
+  check (!twist_endpoint_full (ep), "and is not full then");
   twist_connection_free (c);
   close (sv[1]);
 }
@@ -147,7 +178,7 @@ test_stream (struct twist_loop *loop)
     twist_loop_run_once_ms (loop, 5);
   check (s.made < s.total / 2 && !s.ended,
          "a peer that does not read does not make it read ahead");
-  check (s.most_pending <= 1024u * 1024u, "and what is queued is small");
+  check (s.most_pending <= 2 * TWIST_OUT_HIGH, "and what is queued is a chunk");
   /* Now it reads everything.  */
   end = now_ms () + 8000;
   while (!s.ended && now_ms () < end)
@@ -209,7 +240,7 @@ main (void)
 
   if (loop == NULL)
     return 77;
-  test_limit (loop);
+  test_backpressure (loop);
   test_stream (loop);
   test_stream_freed (loop);
   twist_loop_free (loop);

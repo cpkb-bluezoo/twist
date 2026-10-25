@@ -32,11 +32,13 @@
 #include <sys/types.h>
 
 #define TWIST_IN_CEILING (256u * 1024u)
-/* The most a connection holds that has been sent on it and not yet written.
-   A send that would go over it fails (TWIST_ERR_NOMEM) and the handler, which
-   cannot be waited for in a call, ends its transfer.  A body that is large
-   is not sent at once but streamed (twist_connection_stream).  */
-#define TWIST_OUT_CEILING (256u * 1024u * 1024u)
+/* How much a connection is to hold that has been sent on it and not yet
+   written: about a chunk, which is a TLS record.  The kernel's send buffer
+   does the queuing; this holds only what it would not take.  A producer that
+   sees twist_endpoint_full after a send stops producing and holds nothing but
+   the chunk it has, and goes on from the endpoint's on_write_ready, which is
+   called when the queue has been written.  */
+#define TWIST_OUT_HIGH (16u * 1024u)
 
 struct twist_loop;
 struct twist_connection;
@@ -63,6 +65,7 @@ struct twist_endpoint
   void (*pause_read) (struct twist_endpoint *ep);
   void (*resume_read) (struct twist_endpoint *ep);
   void (*on_write_ready) (struct twist_endpoint *ep);
+  void *write_user;		/* Whose on_write_ready it is, if not user_data.  */
 };
 
 struct twist_protocol_handler
@@ -198,6 +201,8 @@ struct twist_transfer
   void *header_data;
   twist_read_callback read_cb;
   void *read_data;
+  twist_seek_callback seek_cb;
+  void *seek_data;
   /* Whether the transfer uses the runtime's cookie jar, HSTS list and Alt-Svc
      list (TWISTOPT_USE_COOKIES, _USE_HSTS and _USE_ALTSVC).  */
   int use_cookies;
@@ -578,19 +583,20 @@ void twist_connection_set_tls (struct twist_connection *conn, void *tls,
 void *twist_connection_tls (struct twist_connection *conn);
 int twist_endpoint_send (struct twist_endpoint *ep, const uint8_t *data,
                          size_t len);
-/* The limit on what is queued, in bytes (0: TWIST_OUT_CEILING).  For tests,
-   and for a handler that wants less.  */
-void twist_connection_set_out_limit (struct twist_connection *conn,
-                                     size_t limit);
-/* Send a body that is produced as it is wanted, and not all at once.  READ is
-   called for up to CAP bytes at a time, only when the connection has written
-   most of what it had (a peer that does not read does not make it read ahead),
-   and returns how many it put in BUF; 0 is the end, and (size_t) -1 is a
-   failure.  END is called exactly once when the stream is over: with
-   TWIST_OK after the last byte is queued (not written), or with why it did not
-   get that far (the connection failed, or was freed, first); if READ fails or
-   the connection's queue is full, END is called and then the connection is
-   failed (TWIST_ERR_ABORTED, TWIST_ERR_NOMEM), as for any error.  The handler
+/* Whether EP's connection holds as much as it should (TWIST_OUT_HIGH) of what
+   was sent on it and has not been written: the producer waits for on_write_ready
+   before it sends more.  */
+int twist_endpoint_full (const struct twist_endpoint *ep);
+/* Send a body that is produced as it is wanted, and not all at once: the
+   producer's side of the backpressure, for a source that is one stream of
+   bytes.  READ is called for up to CAP bytes (a chunk) only when less than
+   TWIST_OUT_HIGH is queued, so a peer that does not read does not make it
+   read ahead, and returns how many it put in BUF; 0 is the end, and
+   (size_t) -1 is a failure.  END is called exactly once when the stream is
+   over: with TWIST_OK after the last byte is queued (not written), or with why
+   it did not get that far (the connection failed, or was freed, first); if
+   READ fails, END is called and then the connection is failed
+   (TWIST_ERR_ABORTED), as for any error.  The handler
    sends nothing else on the connection meanwhile: what it has to send after
    the body it sends from END.  One stream at a time.  END must not free the
    connection.  */
@@ -748,6 +754,12 @@ void twist_quic_feed (struct twist_connection *conn, const uint8_t *data,
                       size_t len);
 int twist_quic_open_stream (struct twist_connection *conn);
 int twist_quic_can_open (struct twist_connection *conn);
+/* Whether the current stream holds as much as it should (TWIST_OUT_HIGH) of
+   what was sent on it and the flow control has not yet taken; and who to tell
+   (CB, once the stream has written it) so that the producer goes on.  */
+int twist_quic_stream_full (struct twist_connection *conn);
+void twist_quic_on_drained (struct twist_connection *conn, void (*cb) (void *),
+                            void *user);
 void twist_quic_bind (struct twist_connection *conn,
                       size_t (*on_data) (void *, const uint8_t *, size_t, int),
                       void *user);
@@ -1328,6 +1340,17 @@ size_t twist_h2_send_data (struct twist_h2 *h2, uint32_t id,
                            const uint8_t *data, size_t len, int end);
 void twist_h2_set_writable (struct twist_h2 *h2, void (*cb) (void *),
                             void *user);
+/* The body of a request is sent by the caller, a chunk at a time, on the
+   stream the request (with KEEP_OPEN, and no body) opened.  SEND_BODY is as
+   send_data, and the END of the request is the end of the stream, after which
+   the response is awaited; it returns (size_t) -1 if the stream is not there
+   (the server answered, or reset it) and no more is to be sent.  While it is
+   sent the session is HELD: no other request is begun on it.  CANCEL ends a
+   stream whose body will not be sent in full.  */
+size_t twist_h2_send_body (struct twist_h2 *h2, uint32_t id,
+                           const uint8_t *data, size_t len, int end);
+void twist_h2_hold (struct twist_h2 *h2, int hold);
+void twist_h2_cancel (struct twist_h2 *h2, uint32_t id);
 int twist_h2_request (struct twist_h2 *h2, const char *method,
                       const char *scheme, const char *authority,
                       const char *path, const struct twist_slist *extra,
@@ -1352,6 +1375,10 @@ int twist_ws_send (struct twist_ws *ws, int opcode, int fin,
 
 struct twist_h3;
 struct twist_h3 *twist_h3_new (const struct twist_h1_events *ev);
+/* A DATA frame (RFC 9114, 7.2.1) of N bytes of DATA, written to OUT, which
+   holds CAP; returns its size, or 0 if it does not fit.  */
+size_t twist_h3_data_frame (uint8_t *out, size_t cap, const uint8_t *data,
+                            size_t n);
 void twist_h3_free (struct twist_h3 *h3);
 size_t twist_h3_receive (struct twist_h3 *h3, const uint8_t *data, size_t len);
 int twist_h3_request (struct twist_h3 *h3, const char *method,

@@ -498,6 +498,61 @@ test_h2_tunnel (void)
   twist_slist_free_all (extra);
 }
 
+/* The body of a request is sent by the caller a chunk at a time
+   (twist_h2_send_body): as much as the windows allow, then the rest when the
+   writable callback says they have grown, and the end of the request
+   (END_STREAM) when all has gone.  While it is sent no other request is begun
+   on the session (twist_h2_hold), and a stream that has been closed meanwhile,
+   by the server's answer, is told as such.  */
+static void
+test_h2_body (void)
+{
+  struct twist_h2 *h;
+  struct twist_h1_events ev;
+  uint8_t *out = NULL;
+  size_t n = 0;
+  static uint8_t data[100000];
+  size_t sent;
+  size_t mark;
+  int ends;
+
+  memset (data, 'y', sizeof data);
+  memset (&ev, 0, sizeof ev);
+  h = twist_h2_new (&ev);
+  twist_h2_set_emit (h, tun_emit, NULL);
+  twist_h2_set_writable (h, tun_ready, NULL);
+  check (twist_h2_request (h, "PUT", "https", "example.org", "/u", NULL, NULL,
+                           0, 1, &out, &n) == TWIST_OK
+         && n > 9 && (out[4] & 1) == 0,
+         "a request whose body is to come leaves the stream open");
+  free (out);
+  twist_h2_hold (h, 1);
+  check (!twist_h2_can_open (h), "and nothing else is begun meanwhile");
+  check (twist_h2_request (h, "GET", "https", "example.org", "/", NULL, NULL, 0,
+                           0, &out, &n) == TWIST_ERR_AGAIN, "or asked for");
+
+  tun_out_n = 0;
+  sent = twist_h2_send_body (h, 1, data, sizeof data, 0);
+  check (sent == 65535 && tun_frames (0, 1, &ends) == 65535 && ends == 0,
+         "a body goes as far as the window");
+  check (twist_h2_send_body (h, 1, data + sent, sizeof data - sent, 0) == 0,
+         "and no further");
+  mark = tun_out_n;
+  tun_writable = 0;
+  h2_window_update (h, 0, 100000);
+  h2_window_update (h, 1, 100000);
+  check (tun_writable == 2, "the caller is told when the windows grow");
+  n = twist_h2_send_body (h, 1, data + sent, sizeof data - sent, 1);
+  check (n == sizeof data - sent && tun_frames (mark, 1, &ends) == (long) n
+         && ends == 1, "the rest goes, and the end of the request");
+  check (!twist_h2_can_open (h), "the session is still held");
+  twist_h2_hold (h, 0);
+  check (twist_h2_can_open (h), "until it is let go");
+  check (twist_h2_send_body (h, 1, data, 10, 0) == (size_t) -1,
+         "a stream that has ended takes no more");
+  twist_h2_free (h);
+}
+
 /* The HPACK dynamic table is a number of bytes (RFC 7541, 4.1): an entry is
    its name and value and 32, and the table is 4096 unless it is changed with
    a size update (6.3), which may not be more than we allow.  A server may
@@ -796,6 +851,28 @@ test_h3 (void)
          "h3 status");
   check (saw_done == 1, "h3 done");
   twist_h3_free (h);
+}
+
+/* A chunk of a request body is a DATA frame (RFC 9114, 7.2.1): the type 0,
+   the length as a variable-length integer, and the data.  */
+static void
+test_h3_data_frame (void)
+{
+  uint8_t out[16400];
+  static uint8_t data[16000];
+  size_t n;
+
+  n = twist_h3_data_frame (out, sizeof out, (const uint8_t *) "hello", 5);
+  check (n == 7 && out[0] == 0x00 && out[1] == 0x05
+         && memcmp (out + 2, "hello", 5) == 0, "a short frame");
+  memset (data, 'z', sizeof data);
+  n = twist_h3_data_frame (out, sizeof out, data, sizeof data);
+  check (n == 1 + 2 + sizeof data && out[0] == 0x00
+         && (out[1] & 0xc0) == 0x40
+         && ((((size_t) out[1] & 0x3f) << 8) | out[2]) == sizeof data
+         && out[3] == 'z', "a frame whose length takes two bytes");
+  check (twist_h3_data_frame (out, 6, (const uint8_t *) "hello", 5) == 0,
+         "one that does not fit is not written");
 }
 
 static size_t big_seen;
@@ -1573,8 +1650,10 @@ main (void)
   test_h2 ();
   test_h3 ();
   test_h3_long_frames ();
+  test_h3_data_frame ();
   test_h2_windows ();
   test_h2_tunnel ();
+  test_h2_body ();
   test_hpack_table ();
   test_qpack_static_index ();
   test_qpack ();

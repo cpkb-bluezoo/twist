@@ -37,12 +37,18 @@ FTPS (src/ftp/ftp.c)
 
 HTTP
 
-  - A connection holds at most 256 MiB of output that has not been written, and
-    a send over that fails the transfer (TWIST_ERR_NOMEM).  A body is streamed,
-    so as not to meet the limit, for HTTP/1 (64 KiB and over) and for smtp.  A
-    body over the limit still fails over HTTP/3 and in a WebSocket message
-    (both queue the whole of it), and the ws read callback is read to its end
-    at once.  HTTP/2 sends within the window the server gave.
+  - A connection says when it holds a chunk (16 KiB) that was not written
+    (twist_endpoint_full), and a producer is to stop until on_write_ready.
+    HTTP request bodies (HTTP/1, HTTP/2, HTTP/3), the message of smtp and the
+    message of a WebSocket do.  No other handler does: what each queues is
+    queued without being held back (the telnet and sftp handlers keep their
+    own limits).  A WebSocket over HTTP/2 does not keep to the server's
+    windows (http_ws_send writes DATA frames of stream 1 directly).
+  - HTTP/3 request bodies are sent the same way as HTTP/2's, but there is no
+    HTTP/3 server to test with (nghttpx here is built without QUIC): only the
+    DATA frame and the QUIC stream's own pieces are tested.  The QUIC
+    connection is given to one body at a time, and holds one stream open
+    (twist_quic_hold_stream) for it.
   - --connect-timeout for ldap covers the lookup and the TCP connect only; a
     server that takes the connection and does not answer the bind is waited for
     until --max-time.  What curl does for ldap is not known: the curl it was

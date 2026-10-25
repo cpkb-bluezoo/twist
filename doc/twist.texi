@@ -206,9 +206,21 @@ A @code{twist_read_callback}: supplies the data of an @code{sftp} or @code{scp}
 upload, the message of @code{smtp}, the messages of a WebSocket, and what a
 @code{telnet} session sends (without one that is what is read from
 @code{TWISTOPT_TELNET_INPUT_FD}).  An HTTP
-request body is given with @code{TWISTOPT_POSTFIELDS}.
+request body is given with @code{TWISTOPT_POSTFIELDS}, or, if that is not set
+and the method is not GET or HEAD, with this: it is read a chunk at a time as
+the connection can send it, with a @code{Content-Length} if
+@code{TWISTOPT_INFILESIZE} is known and chunked otherwise (HTTP/2 and HTTP/3 need no
+framing).  It is read only as the connection, and for HTTP/2 the server's
+windows, can take it.
 @item TWISTOPT_READDATA
 A @code{void *}, passed to the read callback.
+@item TWISTOPT_SEEKFUNCTION
+A @code{twist_seek_callback}: starts the data of the read callback again from
+the beginning, for an upload that has to be sent again (a redirect that keeps
+the body, a second request for authentication).  It returns 0 when done.  Without
+it, or if it fails, such an upload fails with @code{TWIST_ERR_REWIND}.
+@item TWISTOPT_SEEKDATA
+A @code{void *}, passed to the seek callback.
 @item TWISTOPT_HEADERFUNCTION
 A @code{twist_write_callback}: receives the status line and then each header
 line of an HTTP response, with its line ending, whichever version carried them.
@@ -319,8 +331,9 @@ A @code{uint64_t}: bytes a second for a download and an upload.  0 is no limit.
 Only @code{sftp} and @code{scp} keep them.
 @item TWISTOPT_INFILESIZE
 A @code{long long}: how many bytes the read callback will give, if the
-program knows, for the progress meter only.  @minus{}1, the default, is not
-known.
+program knows.  An HTTP/1 request carries it as its @code{Content-Length}
+(without it the body is chunked), and the progress meter uses it.  @minus{}1,
+the default, is not known.
 @item TWISTOPT_RESUME_FROM
 A @code{long long}, for @code{sftp} and @code{scp}.  A download starts at this
 byte of the file, and the caller appends to what it has.  An upload skips this
@@ -1540,6 +1553,10 @@ The content encoding could not be decoded.
 @item 64
 TLS was asked for with @option{--ssl-reqd} and the server does not offer it or
 refuses it.
+@item 65
+The data of an upload had to be sent again (a redirect that keeps the body, an
+authentication that needs a second request) and could not be read again from
+the start, as a pipe cannot.
 @item 9
 The SFTP server would not let the user read the file.
 @item 60

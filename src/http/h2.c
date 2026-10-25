@@ -94,6 +94,7 @@ struct twist_h2
   size_t pending_len;
   uint32_t pending_id;
   int pending_end;
+  int hold;			/* A body is being sent: nothing else begins.  */
   struct twist_h1_events next_ev;
   int have_next;
   void (*writable) (void *);
@@ -395,7 +396,7 @@ twist_h2_can_open (const struct twist_h2 *h)
   const struct twist_h2_stream *s;
   size_t live = 0;
 
-  if (h == NULL || h->failed || h->pending != NULL)
+  if (h == NULL || h->failed || h->pending != NULL || h->hold)
     return 0;
   for (s = h->active; s != NULL; s = s->next)
     if (s->live)
@@ -985,6 +986,66 @@ twist_h2_send_data (struct twist_h2 *h, uint32_t id, const uint8_t *data,
   return sent;
 }
 
+size_t
+twist_h2_send_body (struct twist_h2 *h, uint32_t id, const uint8_t *data,
+                    size_t len, int end)
+{
+  struct twist_h2_stream *s;
+  size_t sent;
+
+  if (h == NULL || h->failed)
+    return (size_t) -1;
+  s = find_stream (h, id);
+  if (s == NULL)
+    return (size_t) -1;
+  sent = twist_h2_send_data (h, id, data, len, 0);
+  if (h->failed)
+    return (size_t) -1;
+  if (end && sent == len)
+    {
+      uint8_t hdr[9];
+
+      /* The request is whole; the response is what is waited for.  */
+      frame_hdr (hdr, 0, H2_DATA, H2_END_STREAM, id);
+      if (emit_bytes (h, hdr, sizeof hdr) != TWIST_OK)
+        {
+          h2_fail (h, TWIST_ERR_CONNECT);
+          return (size_t) -1;
+        }
+      waiting_add (h, id, s);
+      release_stream (h, s);
+    }
+  return sent;
+}
+
+void
+twist_h2_hold (struct twist_h2 *h, int hold)
+{
+  if (h != NULL)
+    h->hold = hold;
+}
+
+void
+twist_h2_cancel (struct twist_h2 *h, uint32_t id)
+{
+  struct twist_h2_stream *s;
+  uint8_t buf[13];
+
+  if (h == NULL || h->failed)
+    return;
+  s = find_stream (h, id);
+  if (s == NULL && !waiting_has (h, id))
+    return;
+  /* CANCEL (8): the body is not going to be sent.  */
+  frame_hdr (buf, 4, H2_RST, 0, id);
+  buf[9] = buf[10] = buf[11] = 0;
+  buf[12] = 8;
+  if (emit_bytes (h, buf, sizeof buf) != TWIST_OK)
+    h2_fail (h, TWIST_ERR_CONNECT);
+  waiting_drop (h, id);
+  release_stream (h, s);
+}
+
 int
 twist_h2_request (struct twist_h2 *h, const char *method, const char *scheme,
                   const char *authority, const char *path,
@@ -1005,7 +1066,7 @@ twist_h2_request (struct twist_h2 *h, const char *method, const char *scheme,
 
   if (h == NULL)
     return TWIST_ERR_INVAL;
-  if (h->pending != NULL)
+  if (h->pending != NULL || h->hold)
     return TWIST_ERR_AGAIN;
   rc = twist_hpack_encode_request (h->hp, method, scheme, authority, path,
                                    extra, &block, &blen);

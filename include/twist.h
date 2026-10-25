@@ -81,7 +81,12 @@ enum twist_error
   TWIST_ERR_OPTION_SYNTAX = 27,
   /* The CSeq of an RTSP reply was not that of the request, or the caller
      tried to set CSeq as a header of its own.  */
-  TWIST_ERR_RTSP_CSEQ = 28
+  TWIST_ERR_RTSP_CSEQ = 28,
+  /* The data of an upload had to be sent again (a redirect that keeps the
+     body, an authentication that needs a second request, a connection that
+     was lost) and the read callback could not be made to start from the
+     beginning: there is no TWISTOPT_SEEKFUNCTION, or it failed.  */
+  TWIST_ERR_REWIND = 29
 };
 
 const char *twist_strerror (int err);
@@ -109,6 +114,11 @@ typedef size_t (*twist_read_callback) (char *ptr, size_t size, size_t nmemb,
    transfer fails, where 0 would be taken as the end and send a short file as
    if it were whole.  sftp and scp honour it.  */
 #define TWIST_READFUNC_ABORT ((size_t) 0x10000000)
+/* Makes the data that the read callback gives start again at OFFSET from the
+   beginning (ORIGIN is always SEEK_SET).  0 is done; anything else, it cannot.
+   An upload that has to be sent again needs it (TWIST_ERR_REWIND).  */
+typedef int (*twist_seek_callback) (void *userdata, long long offset,
+                                    int origin);
 
 /* The progress callback.  TOTAL is 0 where the size is not known.  Returning
    0 goes on and leaves the drawing to the callback; returning
@@ -349,7 +359,11 @@ enum twist_opt
      still being made and may turn out to carry several transfers (HTTP/2 or
      HTTP/3), wait for that one, and use it if it does.  Zero has it make a
      connection of its own at once.  Only HTTP uses it.  */
-  TWISTOPT_PIPEWAIT = 73
+  TWISTOPT_PIPEWAIT = 73,
+  /* A twist_seek_callback: how to read the upload from its start again.  */
+  TWISTOPT_SEEKFUNCTION = 74,
+  /* The pointer that is passed to it.  */
+  TWISTOPT_SEEKDATA = 75
 };
 
 /* Options of a runtime (twist_runtime_setopt).  */

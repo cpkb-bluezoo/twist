@@ -149,6 +149,16 @@ suggest (void)
   fprintf (err_fp, _("try '%s --help' for more information.\n"), PACKAGE);
 }
 
+/* Whether an upload to URL is read as it is sent, and not first read whole
+   into memory: http and https read it from the descriptor in chunks.  */
+static int
+streams_upload (const char *url)
+{
+  return url != NULL
+         && (strncasecmp (url, "http:", 5) == 0
+             || strncasecmp (url, "https:", 6) == 0);
+}
+
 static int
 cli_status (int err, const char *url)
 {
@@ -215,6 +225,8 @@ cli_status (int err, const char *url)
       return 81;
     case TWIST_ERR_RTSP_CSEQ:
       return 85;
+    case TWIST_ERR_REWIND:
+      return 65;
     default:
       return 2;
     }
@@ -1140,6 +1152,16 @@ read_upload (char *ptr, size_t size, size_t nmemb, void *user)
   return (size_t) n;
 }
 
+/* Start the data again from the beginning: for a file.  */
+static int
+seek_upload (void *user, long long offset, int origin)
+{
+  struct cli_upload *u = user;
+
+  return origin == SEEK_SET && lseek (u->fd, (off_t) offset, SEEK_SET)
+         == (off_t) offset ? 0 : 1;
+}
+
 /* One URL being fetched: the transfer made for it, and everything the tool
    holds for as long as it runs.  A job is made by job_prepare, handed to the
    runtime, and freed by job_finish once the transfer has ended.  */
@@ -1691,7 +1713,8 @@ job_prepare (struct cli_run *run, struct cli_next *next, struct cli_job **out)
       /* Standard input is what a telnet session reads when it is given
          nothing else, as it is watched and not read to its end first.  */
     }
-  else if (upload != NULL && (is_ssh_url (url) || is_telnet_url (url)))
+  else if (upload != NULL && (is_ssh_url (url) || is_telnet_url (url)
+                              || streams_upload (url)))
     {
       /* Sent as it is read, so that a large file, or a pipe, is not held in
          memory first.  */
@@ -1796,7 +1819,13 @@ job_prepare (struct cli_run *run, struct cli_next *next, struct cli_job **out)
 
     if (job->streaming && fstat (job->ustream.fd, &ust) == 0
         && S_ISREG (ust.st_mode))
-      usize = (long long) ust.st_size;
+      {
+        usize = (long long) ust.st_size;
+        /* A file can be read again from the start, as a redirect or a second
+           request for authentication needs; a pipe cannot.  */
+        twist_transfer_setopt (transfer, TWISTOPT_SEEKFUNCTION, seek_upload);
+        twist_transfer_setopt (transfer, TWISTOPT_SEEKDATA, &job->ustream);
+      }
     twist_transfer_setopt (transfer, TWISTOPT_INFILESIZE, usize);
   }
   /* The meter is drawn unless -s or --no-progress-meter says not, or the

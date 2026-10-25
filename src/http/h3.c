@@ -277,6 +277,21 @@ put_varint (uint8_t *buf, uint64_t v)
   return 4;
 }
 
+size_t
+twist_h3_data_frame (uint8_t *out, size_t cap, const uint8_t *data, size_t n)
+{
+  uint8_t head[9];
+  size_t hl = 1;
+
+  head[0] = H3_DATA;
+  hl += put_varint (head + 1, n);
+  if (hl > cap || n > cap - hl)
+    return 0;
+  memcpy (out, head, hl);
+  memcpy (out + hl, data, n);
+  return hl + n;
+}
+
 int
 twist_h3_request (struct twist_h3 *h, const char *method, const char *scheme,
                   const char *authority, const char *path,
