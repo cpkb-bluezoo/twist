@@ -336,9 +336,13 @@ usage (void)
   fputs (_("  -a, --append            add to the remote file (ftp)\n"), stdout);
   fputs (_("  -p, --proxytunnel       tunnel (CONNECT) through an HTTP proxy for http:// too\n"),
          stdout);
+  fputs (_("      --forbid-reuse      close the connection when done, do not keep it\n"),
+         stdout);
+  fputs (_("      --fresh-connect     make a new connection, do not take a kept one\n"),
+         stdout);
   fputs (_("  -C, --continue-at N     resume at byte N, or - to find it (sftp, scp, ftp)\n"),
          stdout);
-  fputs (_("  -l, --list-only         list names only, for a directory (sftp)\n"),
+  fputs (_("  -l, --list-only         list names only, for a directory (sftp, ftp)\n"),
          stdout);
   fputs (_("  -Q, --quote CMD         run an sftp command before the transfer, or after\n"
            "                          it with a - before it; a * lets it fail\n"),
@@ -2514,6 +2518,10 @@ main (int argc, char **argv)
     { "append", no_argument, NULL, 'a' },
     { "proxytunnel", no_argument, NULL, 'p' },
     { "no-proxytunnel", no_argument, NULL, NEGATE_BIT | 'p' },
+    { "forbid-reuse", no_argument, NULL, 61 },
+    { "no-forbid-reuse", no_argument, NULL, NEGATE_BIT | 61 },
+    { "fresh-connect", no_argument, NULL, 62 },
+    { "no-fresh-connect", no_argument, NULL, NEGATE_BIT | 62 },
     { "no-append", no_argument, NULL, NEGATE_BIT | 'a' },
     { "telnet-option", required_argument, NULL, 't' },
     { "head", no_argument, NULL, 'I' },
@@ -2941,6 +2949,12 @@ main (int argc, char **argv)
           break;
         case 47:
           op_set_long (op, TWISTOPT_PROXY_SSL_VERIFYPEER, negate ? 1L : 0L);
+          break;
+        case 61:
+          op_set_long (op, TWISTOPT_FORBID_REUSE, negate ? 0L : 1L);
+          break;
+        case 62:
+          op_set_long (op, TWISTOPT_FRESH_CONNECT, negate ? 0L : 1L);
           break;
         case 48:
           {

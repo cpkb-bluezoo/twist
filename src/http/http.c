@@ -449,7 +449,7 @@ http_park (struct twist_http *h)
 
   if (h->mode != HTTP_H1 || h->ws || h->conn == NULL || h->h1 == NULL)
     return;
-  if (!twist_h1_keep (h->h1))
+  if (!twist_h1_keep (h->h1) || h->transfer->forbid_reuse)
     return;
   if (via_tunnel (h))
     return;
@@ -3416,7 +3416,7 @@ http_reuse (struct twist_http *h)
   char key[1024];
   int held = 0;
 
-  if (h->mode != HTTP_H1 || via_tunnel (h))
+  if (h->mode != HTTP_H1 || via_tunnel (h) || h->transfer->fresh_connect)
     return 0;
   pool = http_pool (h);
   if (pool == NULL || http_pool_key (h, key, sizeof key) != TWIST_OK)

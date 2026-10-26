@@ -688,6 +688,14 @@ forward it.
 Other URLs are tunnelled always, and so is anything through a SOCKS proxy.
 If the proxy refuses the tunnel the transfer fails.
 .TP
+.B \-\-forbid\-reuse
+Close the connection when the transfer is done and do not keep it for the
+next: an HTTP/1.1 connection, an ssh session.
+HTTP/2 and HTTP/3 connections that transfers at the same time share are not affected.
+.TP
+.B \-\-fresh\-connect
+Make a connection of its own and do not take one that an earlier transfer kept.
+.TP
 .BI \-x ", " \-\-proxy " url"
 Proxy.  Use
 .IR http:// ,
@@ -845,7 +853,7 @@ bytes, one range only.  A range that starts beyond the end of the file exits 33.
 .B \-l, \-\-list\-only
 List the names only, one to a line, not the server's long form, when the URL
 names a directory.
-For sftp.
+For sftp, and for ftp and ftps, where it is NLST and not LIST.
 .TP
 .BI \-Q ", " \-\-quote " command"
 Run an SFTP command on the server before the transfer, or after a successful

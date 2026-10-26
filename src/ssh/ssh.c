@@ -268,7 +268,7 @@ ssh_park (struct twist_ssh *s)
   char key[1024];
 
   if (s->sink != NULL || s->ep == NULL || s->link.conn == NULL
-      || s->ending || s->session == NULL
+      || s->ending || s->session == NULL || e->forbid_reuse
       || gf_session_phase (s->session) != GF_PHASE_READY
       || !twist_sftp_idle (s->sftp))
     return 0;
@@ -906,7 +906,8 @@ ssh_resume (struct twist_transfer *transfer)
   char key[1024];
   int rc;
 
-  if (pool == NULL || ssh_pool_key (transfer, key, sizeof key) != TWIST_OK)
+  if (pool == NULL || transfer->fresh_connect
+      || ssh_pool_key (transfer, key, sizeof key) != TWIST_OK)
     return NULL;
   if (twist_pool_take_payload (pool, key, &conn, (void **) &s) != TWIST_OK
       || conn == NULL || s == NULL)

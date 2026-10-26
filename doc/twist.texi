@@ -409,6 +409,12 @@ not @code{TWISTOPT_SSL_VERIFYPEER}.
 @item TWISTOPT_HTTPPROXYTUNNEL
 A long: non-zero tunnels through an HTTP or https proxy for an @code{http://}
 URL as well, where it would be forwarded; @option{-p}.
+@item TWISTOPT_FORBID_REUSE
+A long: non-zero closes the connection when the transfer is done and does not
+keep it for the next (an HTTP/1.1 connection, an ssh session); @option{--forbid-reuse}.
+@item TWISTOPT_FRESH_CONNECT
+A long: non-zero makes a connection of its own and does not take one that an
+earlier transfer kept; @option{--fresh-connect}.
 @item TWISTOPT_PROXY_TEMPLATE_UDP
 A string: the URI Template of a UDP proxy (RFC 9298), for HTTP/3 through it.
 @xref{Protocols}.  A template that is not one is refused with
@@ -1166,6 +1172,13 @@ the environment names and that cannot be read does not matter then.  For
 Tunnel (@code{CONNECT}) through an HTTP or https proxy for an @code{http://} URL
 too, and do not forward it.  Other URLs are tunnelled always (see @option{--proxy}).  If the
 proxy refuses the tunnel the transfer fails.
+@item --forbid-reuse
+Close the connection when the transfer is done and do not keep it for the next:
+an HTTP/1.1 connection, an ssh session.  HTTP/2 and HTTP/3 connections that
+transfers at the same time share are not affected.
+@item --fresh-connect
+Make a connection of its own and do not take one that an earlier transfer kept
+(the same connections as @option{--forbid-reuse}).
 @item -x @var{url}
 @itemx --proxy @var{url}
 Proxy.  Use @code{http://}, @code{https://}, @code{socks5://},
@@ -1288,7 +1301,8 @@ that starts at or past the end of a file is exit status 33.
 @item -l
 @itemx --list-only
 List the names only, one to a line, not the server's long form, when the URL
-names a directory.  For @code{sftp} (@pxref{SFTP and SCP}).
+names a directory.  For @code{sftp} (@pxref{SFTP and SCP}), and for @code{ftp}
+and @code{ftps}, where it is NLST and not LIST.
 @item -Q @var{command}
 @itemx --quote @var{command}
 Run an SFTP command on the server before the transfer, or after a successful
@@ -1367,6 +1381,7 @@ line.  Every switch has one: @option{--no-remote-name},
 @option{--no-parallel-immediate}, @option{--no-compressed},
 @option{--no-insecure}, @option{--no-proxy-insecure}, @option{--no-ssl},
 @option{--no-ssl-reqd}, @option{--no-list-only}, @option{--no-ftp-create-dirs},
+@option{--no-forbid-reuse}, @option{--no-fresh-connect},
 @option{--no-silent}, @option{--no-show-error}, @option{--no-progress-bar},
 @option{--progress-meter}, @option{--no-globoff}, @option{--no-disable} and
 @option{--no-doh-insecure}.  One that is not a switch (@option{--next}, the

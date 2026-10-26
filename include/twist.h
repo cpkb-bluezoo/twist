@@ -235,7 +235,7 @@ enum twist_opt
      of the file it has (ftp: SIZE).  0 starts at the beginning.  */
   TWISTOPT_RESUME_FROM = 49,
   /* For sftp, list a directory by name only, one to a line, not in the
-     server's long form.  */
+     server's long form; for ftp and ftps, send NLST and not LIST.  */
   TWISTOPT_DIRLISTONLY = 50,
   /* The ssh-agent socket for sftp and scp.  Unset: the one named by the
      environment variable SSH_AUTH_SOCK.  An empty string: no agent.  An
@@ -371,7 +371,13 @@ enum twist_opt
      tunnel (CONNECT) for an http:// URL too, as curl's -p does; without it
      such a URL is sent to the proxy to forward.  Other URLs, and SOCKS
      proxies, are tunnelled always.  */
-  TWISTOPT_HTTPPROXYTUNNEL = 77
+  TWISTOPT_HTTPPROXYTUNNEL = 77,
+  /* A long.  Non-zero has the connection closed when the transfer is done,
+     and not kept for the next (an HTTP/1.1 connection, an ssh session).  */
+  TWISTOPT_FORBID_REUSE = 78,
+  /* A long.  Non-zero has the transfer make a connection of its own, and not
+     take one that an earlier transfer kept.  */
+  TWISTOPT_FRESH_CONNECT = 79
 };
 
 /* Options of a runtime (twist_runtime_setopt).  */

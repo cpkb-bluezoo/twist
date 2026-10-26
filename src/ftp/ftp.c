@@ -549,9 +549,12 @@ ftp_send_transfer (struct twist_ftp *f)
   f->state = FTP_RETR;
   if (f->list)
     {
+      /* -l: the names only.  */
+      const char *verb = f->transfer->dirlistonly ? "NLST" : "LIST";
+
       if (f->arg[0] == 0)
-        return ftp_send (f, "LIST\r\n");
-      return ftp_send (f, "LIST %s\r\n", f->arg);
+        return ftp_send (f, "%s\r\n", verb);
+      return ftp_send (f, "%s %s\r\n", verb, f->arg);
     }
   if (f->arg[0] == 0)
     return TWIST_ERR_URL;

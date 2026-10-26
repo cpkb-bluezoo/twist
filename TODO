@@ -3,7 +3,6 @@ Twist TODO List
 
 SCP/SFTP (src/ssh, over foxtrot)
 
-  - There is no way to forbid reuse, in the library or in the tool.
   - Ask foxtrot for the number of requests outstanding in an SFTP client.
     gf_sftp_client_pending is the bytes queued, so twist counts its own (sftp.c
     sent () and inflight).
@@ -12,7 +11,6 @@ SCP/SFTP (src/ssh, over foxtrot)
   - Quote commands for scp URLs.
   - Certificates are found only as KEY-cert.pub beside a key file; there is no
     option to name a certificate elsewhere (ssh's CertificateFile).
-  - -l for ftp URLs, which would send NLST; it only affects sftp now.
   - -C and -T completion of the URL for the schemes other than sftp and scp.
   - Keyboard-interactive questions that need a person, such as a one-time
     code: twist answers only a single hidden question with the password.  A

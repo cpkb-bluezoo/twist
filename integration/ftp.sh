@@ -126,6 +126,19 @@ def session(conn):
                              struct.pack("ii", 1, 0))
             d.close()
             say("226 done")
+        elif verb in ("LIST", "NLST"):
+            lst.settimeout(5)
+            try:
+                d, _ = lst.accept()
+            except OSError:
+                say("425 no data connection")
+                continue
+            note("list " + line)
+            say("150 Opening data connection.")
+            d.sendall(b"alpha\nbeta\n" if verb == "NLST"
+                      else b"-rw-r--r-- 1 u g 5 Jan 1 00:00 alpha\n")
+            d.close()
+            say("226 done")
         elif verb == "QUIT":
             say("221 bye")
             break
@@ -189,6 +202,15 @@ timeout 20 "$TWIST" -s -o "$work/t.out" "$direct/resetend" 2>/dev/null
 st=$?
 check "$(is "$st" 0)" "a reset after all of it is a success ($st)"
 check "$(is "$(wc -c < "$work/t.out" | tr -d ' ')" 20)" "with all 20 bytes"
+
+# -l asks for the names only (NLST); without it the listing is LIST's.
+: > "$work/ftpd.log"
+out=$(get -l "$direct/dir/")
+check "$(is "$out" "$(printf 'alpha\nbeta')")" "-l: the names only ($out)"
+check "$(grep -q '^list NLST' "$work/ftpd.log" && echo ok)" "-l sends NLST"
+: > "$work/ftpd.log"
+out=$(get "$direct/dir/")
+check "$(grep -q '^list LIST' "$work/ftpd.log" && echo ok)" "and without -l, LIST ($out)"
 
 for kind in http socks; do
   case $kind in

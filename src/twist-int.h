@@ -196,6 +196,8 @@ struct twist_transfer
   int nobody;
   int append;
   int proxy_tunnel;
+  int forbid_reuse;
+  int fresh_connect;
   int failonerror;
   twist_write_callback write_cb;
   void *write_data;

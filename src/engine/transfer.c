@@ -269,6 +269,12 @@ twist_transfer_setopt (twist_transfer *transfer, int opt, ...)
     case TWISTOPT_APPEND:
       transfer->append = va_arg (ap, long) != 0;
       break;
+    case TWISTOPT_FORBID_REUSE:
+      transfer->forbid_reuse = va_arg (ap, long) != 0;
+      break;
+    case TWISTOPT_FRESH_CONNECT:
+      transfer->fresh_connect = va_arg (ap, long) != 0;
+      break;
     case TWISTOPT_HTTPPROXYTUNNEL:
       transfer->proxy_tunnel = va_arg (ap, long) != 0;
       break;
