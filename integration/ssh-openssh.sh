@@ -522,10 +522,10 @@ if [ $rc -eq 0 ] && cmp -s "$work/o1" "$work/srv/data.bin" \
 fi
 check "$ok" "four URLs, one login (logins $n, exit $rc)"
 
-# A URL that fails in the middle: its connection is not kept, and the one
-# after it logs in again and works.
+# A URL that fails before its file is open (one that is not there): the
+# session is kept, and the next URL uses the same login.
 before=$(logins)
-rm -f "$work/o1" "$work/o2"
+rm -f "$work/o1" "$work/o2" "$work/o3"
 t --key "$work/userkey" \
   -o "$work/o1" "sftp://$user@$base$work/srv/small.txt" \
   -o "$work/o2" "sftp://$user@$base$work/srv/missing" \
@@ -534,10 +534,27 @@ rc=$?
 sleep 0.3
 n=$(( $(logins) - before ))
 ok=
+if [ "$(cat "$work/o3")" = small ] && [ $n -eq 1 ]; then
+  ok=ok
+fi
+check "$ok" "a URL that is not there keeps the login for the next (logins $n, exit $rc)"
+
+# One that fails after the file is open (a directory is opened and not read):
+# the connection is not kept, and the one after it logs in again and works.
+before=$(logins)
+rm -f "$work/o1" "$work/o2" "$work/o3"
+t --key "$work/userkey" \
+  -o "$work/o1" "sftp://$user@$base$work/srv/small.txt" \
+  -o "$work/o2" "sftp://$user@$base$work/srv/lsdir" \
+  -o "$work/o3" "sftp://$user@$base$work/srv/small.txt" 2>/dev/null
+rc=$?
+sleep 0.3
+n=$(( $(logins) - before ))
+ok=
 if [ "$(cat "$work/o3")" = small ] && [ $n -eq 2 ]; then
   ok=ok
 fi
-check "$ok" "a failed URL ends its connection, the next logs in again (logins $n, exit $rc)"
+check "$ok" "a URL that fails after its file is open ends its connection, the next logs in again (logins $n, exit $rc)"
 
 # 16. An upload is sent as it is read, not after all of it has been read: with
 # the input held open, the first of it is on the server already.  Input that
@@ -729,7 +746,7 @@ t0=$(ms)
 t -k --key "$work/userkey" --limit-rate 0 -o /dev/null "sftp://$user@$base$work/srv/data.bin"
 rc=$?
 check "$([ $rc -eq 0 ] && [ $(( $(ms) - t0 )) -lt 1000 ] && echo ok)" "--limit-rate 0 is no limit (exit $rc)"
-t -k --limit-rate 1M -o /dev/null "http://127.0.0.1:1/x" 2>/dev/null
+t -k --limit-rate 1M -o /dev/null "tftp://127.0.0.1:1/x" 2>/dev/null
 rc=$?
 check "$([ $rc -eq 2 ] && echo ok)" "a scheme that cannot keep to it is refused (exit $rc)"
 
@@ -924,8 +941,8 @@ if command -v python3 >/dev/null 2>&1; then
   fi
   t --key "$work/userkey" -x "socks4://127.0.0.1:1" -o /dev/null "$s1" 2> "$work/err"
   rc=$?
-  check "$([ $rc -ne 0 ] && grep -q 'not supported' "$work/err" && echo ok)" \
-    "a SOCKS4 proxy is refused with a reason (exit $rc)"
+  check "$([ $rc -eq 7 ] && echo ok)" \
+    "a SOCKS4 proxy is used, and not being there is exit 7 (exit $rc)"
   t -k --key "$work/userkey" -x "http://127.0.0.1:1" -o /dev/null "$s1" 2>/dev/null
   rc=$?
   check "$([ $rc -eq 7 ] && echo ok)" "no proxy there is 7 (exit $rc)"

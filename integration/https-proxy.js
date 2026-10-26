@@ -8,6 +8,14 @@
 const net = require('net');
 const fs = require('fs');
 const [mode, certFile, keyFile, credentials, refused] = process.argv.slice(2);
+/* A client that resets its connection (twist does, with data unread) is an
+   'error' on the socket, and node ends the process on one nobody listens for. */
+function quiet(server) {
+  server.on('secureConnection', (socket) => socket.on('error', () => {}));
+  server.on('tlsClientError', () => {});
+  server.on('clientError', () => {});
+}
+
 const options = { cert: fs.readFileSync(certFile), key: fs.readFileSync(keyFile) };
 const want = credentials ? 'Basic ' + Buffer.from(credentials).toString('base64') : null;
 
@@ -28,6 +36,8 @@ function target(authority) {
 if (mode === 'h2') {
   const http2 = require('http2');
   const server = http2.createSecureServer({ ...options, ALPNProtocols: ['h2'] });
+  quiet(server);
+  server.on('sessionError', () => {});
   server.on('stream', (stream, headers) => {
     if (headers[':method'] !== 'CONNECT') {
       stream.respond({ ':status': 405 }); stream.end(); return;
@@ -51,6 +61,12 @@ if (mode === 'h2') {
 } else {
   const https = require('https');
   const server = https.createServer({ ...options, ALPNProtocols: ['http/1.1'] });
+  quiet(server);
+  /* A proxy that only tunnels: a forwarded request is refused with 405, which
+     twist takes as the cue to tunnel instead.  */
+  server.on('request', (req, res) => {
+    res.writeHead(405, { 'Content-Length': 0 }); res.end();
+  });
   server.on('connect', (req, socket, head) => {
     const status = allowed(req.headers['proxy-authorization'], req.url);
     if (status !== 200) {

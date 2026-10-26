@@ -108,6 +108,12 @@ tls_ticket (void *user, const gq_tls_ticket *ticket)
     {
       gq_tls_session_wipe (&t->session);
       t->have_session = gq_tls_session_store (&t->session, ticket) == GQ_OK;
+      /* quickstep offers a session only to the name it was verified for, and
+         a session with none is never offered.  */
+      if (t->have_session && t->server_name != NULL
+          && gq_tls_session_bind_server_name (&t->session, t->server_name)
+             != GQ_OK)
+        t->have_session = 0;
     }
   return 0;
 }

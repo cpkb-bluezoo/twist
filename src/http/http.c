@@ -172,6 +172,7 @@ static void http_connected (struct twist_endpoint *ep);
 static void http_fail (struct twist_http *h, int err);
 static void pump_stop (struct twist_http *h, int whole);
 static void proxy_fallback (void *user);
+static void apply_how (struct twist_http *h);
 static int http_post (struct twist_http *h, void (*fn) (void *));
 static void wspump_stop (struct twist_http *h);
 static void http_free_parsers (struct twist_http *h);
@@ -2594,6 +2595,15 @@ proxy_fallback (void *user)
   if (h->finished)
     return;
   c = h->conn;
+  /* On a session, the connection and the HTTP/2 parser are the session's
+     (freed with the runtime) and not ours to free: the transfer leaves it,
+     which also lets go of the shared parser, and the tunnel is asked for on
+     the same connection.  */
+  if (h->sess != NULL)
+    {
+      http_leave_session (h);
+      c = NULL;
+    }
   h->conn = NULL;
   h->restarting = 0;
   h->conn_lost = 0;
@@ -2610,6 +2620,9 @@ proxy_fallback (void *user)
       http_complete (h, TWIST_ERR_NOMEM);
       return;
     }
+  /* The version was the proxy's (ALPN settled it); the origin, now reached
+     through a tunnel, is spoken to as it would have been direct.  */
+  apply_how (h);
   start_attempt (h);
 }
 

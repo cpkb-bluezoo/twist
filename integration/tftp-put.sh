@@ -46,7 +46,7 @@ check ()
 }
 
 cat > "$work/server.py" <<'PY'
-import hashlib, socket, struct, sys
+import hashlib, os, socket, struct, sys
 
 s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 s.bind(('127.0.0.1', 0))
@@ -76,7 +76,11 @@ while True:
         t.sendto(struct.pack('>HH', 4, n), p)
         if len(pkt) - 4 < 512:
             break
-    open(sys.argv[2] + name, 'w').write('%d %s' % (len(data), hashlib.sha256(data).hexdigest()))
+    # The result appears whole: a reader never sees the file made and not yet
+    # written, while the digest of a large upload is worked out.
+    result = '%d %s' % (len(data), hashlib.sha256(data).hexdigest())
+    open(sys.argv[2] + name + '.tmp', 'w').write(result)
+    os.rename(sys.argv[2] + name + '.tmp', sys.argv[2] + name)
     t.close()
 PY
 python3 "$work/server.py" "$work/port" "$work/got." &
@@ -86,6 +90,15 @@ while [ ! -s "$work/port" ] && [ $n -lt 50 ]; do sleep 0.1; n=$((n + 1)); done
 [ -s "$work/port" ] || skip "the server did not start"
 port=$(cat "$work/port")
 
+# got NAME: what the server made of NAME, which it writes after the last
+# acknowledgement and so may be a moment after twist is done.
+got ()
+{
+  n=0
+  while [ ! -s "$work/got.$1" ] && [ $n -lt 50 ]; do sleep 0.1; n=$((n + 1)); done
+  cat "$work/got.$1" 2>/dev/null
+}
+
 sha ()
 {
   python3 -c "import hashlib,sys; d=open(sys.argv[1],'rb').read(); print(len(d), hashlib.sha256(d).hexdigest())" "$1"
@@ -93,16 +106,16 @@ sha ()
 
 head -c 4194304 /dev/urandom > "$work/big"
 "$TWIST" -s -T "$work/big" "tftp://127.0.0.1:$port/big" 2>/dev/null
-check "$([ $? -eq 0 ] && [ "$(cat "$work/got.big" 2>/dev/null)" = "$(sha "$work/big")" ] && echo ok)" \
+check "$([ $? -eq 0 ] && [ "$(got big)" = "$(sha "$work/big")" ] && echo ok)" \
   "4 MiB arrive whole"
 
 head -c 5120 /dev/urandom > "$work/exact"
 "$TWIST" -s -T "$work/exact" "tftp://127.0.0.1:$port/exact" 2>/dev/null
-check "$([ $? -eq 0 ] && [ "$(cat "$work/got.exact" 2>/dev/null)" = "$(sha "$work/exact")" ] && echo ok)" \
+check "$([ $? -eq 0 ] && [ "$(got exact)" = "$(sha "$work/exact")" ] && echo ok)" \
   "a whole number of blocks, with the block of no data at the end"
 
 cat "$work/exact" | "$TWIST" -s -T - "tftp://127.0.0.1:$port/pipe" 2>/dev/null
-check "$([ $? -eq 0 ] && [ "$(cat "$work/got.pipe" 2>/dev/null)" = "$(sha "$work/exact")" ] && echo ok)" \
+check "$([ $? -eq 0 ] && [ "$(got pipe)" = "$(sha "$work/exact")" ] && echo ok)" \
   "a pipe"
 
 exit $fail

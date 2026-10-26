@@ -30,9 +30,14 @@ pkgconfig_DATA = twist.pc
 EXTRA_DIST = HACKING ARCHITECTURE.md TODO build-aux/config.rpath
 
 ## integration/ is distributed but not built by 'make check'.
-.PHONY: check-integration check-fuzz
+.PHONY: check-integration check-lab check-fuzz
 check-integration:
 	cd integration && $(MAKE) $(AM_MAKEFLAGS) check
+
+## The same tests in a podman container with every peer installed and no
+## network; a skip is a failure there.  See HACKING.
+check-lab:
+	$(top_srcdir)/integration/lab.sh
 
 ## fuzz/ is distributed too; this runs the inputs that once found a bug.
 check-fuzz:

@@ -24,9 +24,12 @@
 # connection to resume the control session is satisfied.  The server takes the data
 # connection when it is asked for the file, answers 150, and only then
 # starts TLS on it, as vsftpd does, and records what it saw in a log.
+# Through an http:// proxy and a socks5:// one (proxy-peer.py), the control
+# connection and the data connection are tunnels, and TLS runs on each.
 # Skips, with status 77, without python3, openssl or twist.
 
 TWIST=${TWIST:-../src/twist}
+here=$(cd "$(dirname "$0")" && pwd)
 skip ()
 {
   echo "ftps: $1; skipping" >&2
@@ -256,5 +259,29 @@ check "$(is "$out" "status 35")" "an untrusted data certificate is status 35 ($o
 # And -k turns that off, as it does for the control connection.
 check "$(is "$(get -k "ftps://u:p@127.0.0.1:$port/hello")" "hello over ftps")" \
   "-k accepts it"
+
+# Through a proxy: ftps is a tunnel to the control port and one to the data
+# port, and the proxy sees neither's TLS.
+for kind in http socks; do
+  : > "$work/$kind.log"
+  python3 -I "$here/proxy-peer.py" $kind ok "$work/$kind.port" "$work/$kind.log" \
+    >/dev/null 2>&1 &
+  pids="$pids $!"
+  i=0
+  while [ ! -s "$work/$kind.port" ] && [ $i -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
+  [ -s "$work/$kind.port" ] || skip "the $kind proxy did not start"
+  case $kind in
+    http) px="http://127.0.0.1:$(cat "$work/$kind.port")" ;;
+    socks) px="socks5h://127.0.0.1:$(cat "$work/$kind.port")" ;;
+  esac
+  start "via$kind" good good
+  check "$(is "$(get $ca -x "$px" "ftps://u:p@127.0.0.1:$port/hello")" "hello over ftps")" \
+    "ftps through a $kind proxy"
+  check "$(has "via$kind" "^data tls")" "$kind: the data connection ran TLS"
+  check "$(is "$(has "via$kind" "^data plain")" "")" "$kind: and was never plain"
+  n=$(grep -c . "$work/$kind.log")
+  check "$([ "$n" -ge 2 ] && grep -q ":$port\$" "$work/$kind.log" && echo ok)" \
+    "the $kind proxy was asked for the control connection and the data one ($(tr '\n' ';' < "$work/$kind.log"))"
+done
 
 [ $fail = 0 ]

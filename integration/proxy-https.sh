@@ -158,7 +158,8 @@ for mode in h2 h1; do
 
   # Large bodies, up and down.
   head -c 3000000 /dev/zero | tr '\0' 'z' > "$work/up.bin"
-  check "$(is "$(get -x "$px" $c -d @"$work/up.bin" "$u")" got3000000)" "$mode: 3 MB up through the tunnel"
+  # -p: the proxy only tunnels, and a POST is not tried on it first.
+  check "$(is "$(get -p -x "$px" $c -d @"$work/up.bin" "$u")" got3000000)" "$mode: 3 MB up through the tunnel"
   check "$(is "$(get -x "$px" $c --cacert "$work/origin-cert.pem" -d @"$work/up.bin" "$tu")" got3000000)" "$mode: 3 MB up, TLS inside"
   n=$(timeout 60 "$TWIST" -s -S -x "$px" $c "$(echo "$u" | sed 's|/x$|/big|')" 2>/dev/null | wc -c)
   check "$(is "$n" 4000000)" "$mode: 4 MB down (got $n)"

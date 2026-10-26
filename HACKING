@@ -112,14 +112,37 @@ Testing
 -------
 
   make check              # unit tests
-  make check-integration  # peers on the network
+  make check-integration  # peers on the network, with what the host has
+  make check-lab          # the same, in a podman container
   make distcheck          # before every release
 
-make check runs the programs in tests/, one per subsystem.  They are
-deterministic and in-process: no sockets, no files, no wall clock (pass
-a virtual clock into the loop).  Anything that dials a peer goes in
-integration/ and skips with exit 77 when the peer is absent.
-integration/ is not a subdirectory of 'make check'.
+make check runs the programs in tests/, one per subsystem.  It is for CI and
+it is the unit tests: a test feeds a handler or a state machine bytes and reads
+what it sends, through mocks, with a virtual clock, and does no I/O of its own,
+not even on loopback.  Anything that needs a peer to answer goes in
+integration/.  integration/ is not a subdirectory of 'make check'.  (The unit
+tests do not all keep to this yet: see "Tests" in TODO for those that still
+open a loopback socket.)
+
+Integration tests run against real peers (python, node, nghttpx, OpenSSH,
+vsftpd) and are never run automatically.  They skip with exit 77 when a peer is
+absent, so 'make check-integration' works on a machine that has some of them.
+The reference environment is a podman container:
+
+  make check-lab                         # build the image, run every test
+  integration/lab.sh TESTS="ftp.sh"      # some of them
+  integration/lab.sh --shell             # a shell in the lab
+
+It is the "integration" stage of ci/Dockerfile: the build of twist that CI
+makes, a clean Ubuntu with every peer installed, run as an ordinary user with
+no network but the container's own loopback.  Peers run inside it, so no test
+depends on the version of anything on the developer's machine.  In the lab a
+skip is a failure (integration/lab-run.sh), since every peer is there; a test
+that must skip there is named in LAB_ALLOW_SKIP.  Because the container is root
+of its own namespace, a test may do what a developer cannot: replace
+/etc/resolv.conf, or listen on a privileged port.  A new peer is a package in
+that stage, and a new test is a script in integration/ that starts it on a
+loopback port, as the others do.
 
 The progress meter and bar must match curl's output, since scripts may read
 it: the layout and the arithmetic are in tests/test-progress.c and
@@ -133,9 +156,13 @@ integration/proxy-https.sh (https proxies, of node's, in front of an origin of
 python's; the sftp case is in integration/ssh-openssh.sh; ftps, with a
 server of python's that takes the data connection at RETR and starts TLS on it
 after its 150 reply, as vsftpd does, is integration/ftps.sh).  HTTP/3, direct and
-through a CONNECT-UDP proxy, has unit tests only: tests/test-template.c and
-tests/test-masque.c, with the QUIC glue under tests/test-env.c.  No peer for
-it is in the tree, since the only one that exists is written in Go.  Tests and
+through a CONNECT-UDP proxy, is tests/test-template.c and tests/test-masque.c
+(units, with the QUIC glue under tests/test-env.c) and integration/h3-masque.sh,
+against a peer of aioquic's (h3-peer.py: an origin and a CONNECT-UDP proxy);
+that script also has the origin open a bidirectional stream, which ev_stream_data
+in quic.c must end the connection for.  Discovered resolvers (RFC 9462) are
+integration/dns-ddr.sh, with a nameserver of python's (dns-peer.py) on port 53,
+which only the lab can have.  Tests and
 their peers are written in C or Python, the languages the GNU Coding
 Standards name.  To
 compare with curl, run both on the same URL with COLUMNS set and 2>&1 >/dev/null,
@@ -147,7 +174,7 @@ Continuous integration
 
 .github/workflows/ci.yml runs "make check" on every push to a branch, built
 with gcc and -Werror, in the "check" stage of ci/Dockerfile.  The integration
-tests and the fuzzers are not run there.  The Dockerfile builds what twist
+tests (make check-lab) and the fuzzers are not run there.  The Dockerfile builds what twist
 needs and Ubuntu 24.04 does not have (libgcrypt 1.12.4, quickstep and
 foxtrot, the last two from the tip of their main branches), so the same build
 can be had anywhere with docker, with libbrotli and without it:

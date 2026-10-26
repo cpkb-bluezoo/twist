@@ -29,8 +29,6 @@ FTPS (src/ftp/ftp.c)
     the file, as it is for ftp, so a truncated transfer is not noticed (the
     size in the 150 reply is parsed and not used for this).
   - No CCC, and no PROT C or PROT S choice: PROT P or nothing.
-  - ftps through an http:// or socks5:// proxy, which runs TLS on the tunnel,
-    has not been run (integration/ftp-proxy.sh does plain ftp).
 
 
 Misc
@@ -45,9 +43,6 @@ Misc
 
 https proxies (src/engine/tunnel.c, masque.c)
 
-  - CONNECT-UDP (RFC 9298) has no end-to-end test: the only proxy to test
-    against was a Go program, which has been removed.  The unit tests
-    (tests/test-masque.c) remain.  HTTP/3 directly has none either.
   - Templated CONNECT-TCP (draft-ietf-httpbis-connect-tcp), and
     --proxy-template-tcp for it, when it is an RFC.
 
@@ -101,17 +96,6 @@ Environment
 
 Tests
 
-  - HTTP/3 closes the connection when the server opens a bidirectional stream
-    (twist_quic_stream_action, tested), but the callback that does it
-    (ev_stream_data in quic.c) is not run by any test: it needs a QUIC peer
-    that opens one, and there is none in the tree.
-  - Discovered resolvers (RFC 9462).  A DoT or DoQ resolver found with a
-    _dns.resolver.arpa query must have a certificate valid for the address that
-    was asked as well as for its own name (twist_verify_chain_names, tested
-    with a certificate in tests/test-tls.c).  The wiring from the resolver
-    through twist_connection_require_name and the quic option has no test that
-    runs it: the nameserver is read from /etc/resolv.conf, so a fake one cannot
-    be put in front of twist without root.
   - Fuzzing covers the parsers in the library (see HACKING).  Not reached: the
     command line's own parsing (main.c: options, the speed and time arguments,
     --write-out), which is static there; the DNS cache and resolver state
@@ -119,10 +103,13 @@ Tests
     fuzzed server session; the Set-Cookie/HSTS persistence; and the file
     scheme.  A fuzzer of a whole transfer, with a scripted peer on a
     socketpair, would reach the connection and handler glue.
-  - Decide how integration peers are provided.  make check stays in-process.
-    make check-integration dials a peer and skips with exit 77 when the peer is
-    absent.  A podman lab is one candidate and is not chosen yet.
-
+  - The unit tests are meant to do no I/O, not even loopback.  These still
+    open sockets of their own: test-env (a UDP socket), test-resolve (a fake
+    nameserver on UDP), test-race, test-origin and test-runtime-threads
+    (listening TCP servers on threads), and test-telnet.  Each should be
+    driven through a mock endpoint (as test-reactor does with socketpair, which
+    is still a kernel object, so a pure in-memory transport would be better) or
+    move to integration/.  cli-parallel.sh also runs servers.
 
 Runtime
 

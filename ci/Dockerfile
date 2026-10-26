@@ -109,3 +109,27 @@ RUN ./bootstrap \
 FROM build AS check
 RUN make check -j"$(nproc)" CFLAGS="-g -O2 -Werror" \
     || (cat tests/test-suite.log; exit 1)
+
+# ---- Integration: the lab ---------------------------------------------------
+# The peers the integration tests dial, installed beside twist in a clean
+# GNU userland, so that the result does not depend on what the host has.  Run
+# by integration/lab.sh with podman; see HACKING.  Not run by CI.
+#
+# sshd and the other servers run as the unprivileged user "lab", as they do on
+# a developer's machine, and the tests make their own keys and certificates.
+FROM build AS integration
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+         curl nghttp2 nghttp2-client nodejs openssh-client openssh-server \
+         openssl python3 python3-pip tftp-hpa vsftpd \
+    && rm -rf /var/lib/apt/lists/* \
+    && pip3 install --no-cache-dir --break-system-packages aioquic==1.2.0 \
+    && mkdir -p /run/sshd \
+    && useradd -m lab \
+    && chown -R lab /src
+WORKDIR /src
+# The container starts as root only to make /etc/resolv.conf writable
+# (integration/lab-init.sh), and the tests run as "lab".
+# A peer that is not installed makes a test skip (exit 77); in the lab that is
+# a failure, so the result is checked for skips.
+CMD ["integration/lab-init.sh"]

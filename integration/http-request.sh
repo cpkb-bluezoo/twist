@@ -197,11 +197,15 @@ check "$(is "$eff" "http://127.0.0.1:$port/q")" \
 # A redirect goes only where this transfer can go.  file:// has no host and
 # was waited on until the timeout, and another scheme was an HTTP request to
 # a host and port the server chose.  The exit is 1, as curl's is, at once.
+# (ftp and ftps are among the schemes an http redirect may reach: it is
+# followed, and the connection to port 1 is what fails, with status 7.)
 for loc in file%3A%2F%2F%2Fetc%2Fhostname sftp%3A%2F%2F127.0.0.1%3A1%2Fx \
-           ftp%3A%2F%2F127.0.0.1%3A1%2Fx; do
+           gopher%3A%2F%2F127.0.0.1%3A1%2Fx; do
   timeout 10 "$TWIST" -s -L -o /dev/null "$base/redir/$loc" 2>/dev/null
   check "$(is $? 1)" "a redirect to $(printf %s "$loc" | sed 's/%3A/:/g; s/%2F/\//g') is refused at once"
 done
+timeout 10 "$TWIST" -s -L -o /dev/null "$base/redir/ftp%3A%2F%2F127.0.0.1%3A1%2Fx" 2>/dev/null
+check "$(is $? 7)" "a redirect to ftp://127.0.0.1:1/x is followed, and not connected to"
 # A URL that names a host and has none is not a URL (status 3), at once.
 timeout 10 "$TWIST" -s -L -o /dev/null "$base/redir/http%3A%2F%2F" 2>/dev/null
 check "$(is $? 3)" "a redirect to http:// is a bad URL, at once"
