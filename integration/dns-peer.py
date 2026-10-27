@@ -114,6 +114,7 @@ def serve_dot(c):
 
 u = udp()
 ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+ctx.minimum_version = ssl.TLSVersion.TLSv1_2
 ctx.load_cert_chain(cert, key)
 t = socket.socket()
 t.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
