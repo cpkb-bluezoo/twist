@@ -318,6 +318,10 @@ struct twist_runtime
      touches only the transfer.  */
   int in_call;
   struct twist_storage *storage;
+  /* Reads and writes of regular files for transfers (twist_fio).  Apart from
+     STORAGE, which loads keys and known_hosts, so that a read that does not
+     return cannot hold up those loads.  Built as it is, and grown with it.  */
+  struct twist_storage *xfer;
   struct twist_pool *pool;	/* The first lane's.  */
   struct twist_dns_cache *dns;
   /* The lanes, the first of which is the one above, and how many threads were
@@ -863,6 +867,76 @@ int twist_storage_submit (struct twist_storage *st, void (*work) (void *),
                           void *arg, void (*done) (void *user, int err),
                           void *user, struct twist_loop *loop);
 size_t twist_storage_threads (const struct twist_storage *st);
+
+/* ---- regular files on the storage pool ----
+   A regular file cannot be polled (it is always ready, and O_NONBLOCK does
+   nothing), so its reads and writes are jobs on a pool.  One job is a worker
+   for the life of the transfer.  It moves chunks of TWIST_FIO_CHUNK with at
+   most TWIST_FIO_PIPELINE unacknowledged: a chunk is acknowledged when the
+   loop has finished with it, and a worker that has that many outstanding
+   waits.  Everything the worker has to say goes to the loop as a command.  A
+   twist_fio is used on the loop's thread only.
+
+   twist_fio_free returns at once and does not join the worker, whose read may
+   never return.  Nothing is called back after it.  The record is freed by
+   whichever of the loop and the worker is the last to be done with it.  There
+   is no cancellation of a read that is under way; it holds a worker of the
+   pool until it returns.  A full queue fails the submit at once.  */
+#define TWIST_FIO_CHUNK 16384
+#define TWIST_FIO_PIPELINE 4
+struct twist_fio;
+
+/* Reading.  OPEN runs on the worker, and gives the descriptor, the offset to
+   start at and how many bytes to read (-1: to the end); *OWN is set if the
+   reader is to close the descriptor; MSG may be set to a message for the
+   transfer (it is owned by the reader from then).  CHUNK, SIZE and END run
+   on the loop.  SIZE is called once, before the first chunk, if the length is
+   known.  DATA is the callee's to use for the call (it may be written to).  A CHUNK
+   that returns an error ends the read with it.  END is called
+   once, after the last chunk, with MSG owned by the callee (or NULL).  */
+struct twist_fio_read_ops
+{
+  int (*open) (void *user, int *fd, int *own, long long *start,
+               long long *length, char **msg);
+  void (*size) (void *user, long long size);
+  int (*chunk) (void *user, uint8_t *data, size_t len);
+  void (*end) (void *user, int err, char *msg);
+  /* The record is done with: called once, from whichever thread is last to
+     be, never when the read could not be begun.  USER is freed here.  */
+  void (*release) (void *user);
+};
+int twist_fio_read_new (struct twist_loop *loop, struct twist_storage *st,
+                        const struct twist_fio_read_ops *ops, void *user,
+                        struct twist_fio **out);
+/* Hold back chunks (they stay unacknowledged, so the worker stops after
+   TWIST_FIO_PIPELINE of them) and deliver them again on resume.  */
+void twist_fio_pause (struct twist_fio *f);
+void twist_fio_resume (struct twist_fio *f);
+
+/* Writing.  The file at PATH is created, and truncated or (APPEND) appended
+   to, on the worker.  CREDIT is called when a chunk has been written and
+   there is room for another.  END is called once, when the file is closed
+   after twist_fio_write_end or when the write has failed, with MSG owned by
+   the callee (or NULL).  */
+struct twist_fio_write_ops
+{
+  void (*credit) (void *user);
+  void (*end) (void *user, int err, char *msg);
+  void (*release) (void *user);	/* As for reading.  */
+};
+int twist_fio_write_new (struct twist_loop *loop, struct twist_storage *st,
+                         const char *path, int append,
+                         const struct twist_fio_write_ops *ops, void *user,
+                         struct twist_fio **out);
+/* Queue LEN (at most TWIST_FIO_CHUNK) bytes, copied: TWIST_OK, 1 if there is
+   no room (CREDIT says when there is), or why the write has failed.  */
+int twist_fio_write (struct twist_fio *f, const uint8_t *data, size_t len);
+/* No more will be written; the file is closed once what was queued is.  */
+void twist_fio_write_end (struct twist_fio *f);
+
+void twist_fio_free (struct twist_fio *f);
+/* For tests: how many chunks are unacknowledged.  */
+int twist_fio_inflight (struct twist_fio *f);
 
 /* ---- url, scheme, dns, cache, proxy ---- */
 

@@ -225,6 +225,27 @@ The loop drains the command queue at the top of every iteration.
 - **Submit when full**: Fails immediately
 - **The reactor thread never blocks**
 - Results come back through `Endpoint.execute()`
+- **Two pools**: one loads SSH keys and `known_hosts`; the other (`xfer`) is
+  for the reads and writes of regular files in transfers, so that a read that
+  does not return cannot hold up those loads. Both are two threads, or one for
+  each loop.
+
+### Regular-file Pipeline
+
+- A regular file cannot be polled, so its reads and writes are jobs on the
+  transfer pool (`reactor/fileio.c`). The job is a worker for the life of the
+  transfer.
+- Chunks are 16 KiB with four in flight. The worker posts each to the loop,
+  and the loop acknowledges it once it is done with it; a worker with four
+  unacknowledged chunks waits. A paused consumer holds chunks
+  unacknowledged, which stops the worker.
+- The same pipeline writes: the loop gives the worker chunks (`twist_fio_write`
+  says when there is no room), and the worker acknowledges each once written.
+- Letting go of a transfer does not join the worker. Whichever of the loop and
+  the worker is last to be done with the record frees it. There is no
+  cancellation; a read that never returns holds one worker until the process
+  exits.
+- `file://` is the first user.
 
 ### Push Sources and Sinks
 

@@ -113,13 +113,15 @@ Tests
 
 Runtime
 
-  - The storage pool has two threads, shared by the file handler's reads and
-    the SSH key and known_hosts loads.  Letting go of a file transfer no longer
-    waits for its worker, but a read that never comes back still holds one of
-    the two until the process ends, and two such reads hold up every file
-    transfer and SSH load behind them.  A larger pool only moves the limit; a
-    read that can be given up on would need a thread to be cancelled, or a
-    different way to read.
+  - Transfer file I/O (the file handler, and the pipeline of reactor/fileio.c)
+    has a storage pool of its own, apart from the one that loads SSH keys and
+    known_hosts, each with two threads or one for each loop.  A read that
+    never comes back is not cancelled (a thread cannot be): it holds one of
+    the transfer pool's threads until the process ends, and as many of those as
+    there are threads hold up every file transfer behind them, though not a key
+    load.  Letting go of a transfer does not wait for its worker.  Reading in a
+    way that can be given up on needs a different way to read, such as io_uring
+    on Linux.
   - An io_uring poll backend.
 
 

@@ -287,9 +287,9 @@ test_file_without_threads (void)
   int rc;
 
   check (runtime != NULL && transfer != NULL, "a runtime and a handle");
-  twist_storage_free (runtime->storage);
-  runtime->storage = twist_storage_new (0, 32);
-  check (runtime->storage != NULL, "a pool with no threads");
+  twist_storage_free (runtime->xfer);
+  runtime->xfer = twist_storage_new (0, 32);
+  check (runtime->xfer != NULL, "a pool with no threads");
   snprintf (url, sizeof url, "file://%s", big_path);
   twist_transfer_setopt (transfer, TWISTOPT_URL, url);
   transfer->write_cb = file_body;
