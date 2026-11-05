@@ -690,6 +690,61 @@ size_t twist_sink_feed (struct twist_sink *sink, struct twist_endpoint *ep,
                         const uint8_t *data, size_t len);
 void twist_sink_resume (struct twist_sink *sink);
 
+/* ---- descriptors that can be waited for ----
+   A pipe, a socket or a terminal can be polled; a regular file cannot, and
+   goes through the file pipeline (twist_fio) instead.  A descriptor that was
+   inherited is not twist's to make non-blocking, because it shares its open
+   file description with whoever else holds it.  So these watch a duplicate,
+   which freeing does not close the caller's descriptor with, and never
+   set O_NONBLOCK: a read is made only after poll has said, with a zero
+   timeout, that there is something to read, and a write only after it has said
+   there is room, and of no more than PIPE_BUF bytes, which POSIX guarantees
+   can be written without waiting.
+
+   None of these is to be freed from inside one of its own callbacks: pause it,
+   and free it after.  */
+
+/* One read of FD or one write to it that never waits: -1 with EAGAIN if
+   poll says it would (or EPIPE for a write when the other end has gone).  */
+ssize_t twist_fd_read_nowait (int fd, uint8_t *buf, size_t len);
+ssize_t twist_fd_write_nowait (int fd, const uint8_t *data, size_t len);
+
+/* A source: what arrives is given to CHUNK, which returns how many bytes it
+   used.  Fewer than LEN is a pause (as for twist_sink), and the source goes on
+   from twist_fd_source_resume.  END is called once: with TWIST_OK when the
+   descriptor reaches its end, and otherwise with why it failed.  */
+struct twist_fd_source;
+struct twist_fd_source_ops
+{
+  size_t (*chunk) (void *user, const uint8_t *data, size_t len);
+  void (*end) (void *user, int err);
+};
+int twist_fd_source_new (struct twist_loop *loop, int fd,
+                         const struct twist_fd_source_ops *ops, void *user,
+                         struct twist_fd_source **out);
+void twist_fd_source_pause (struct twist_fd_source *s);
+void twist_fd_source_resume (struct twist_fd_source *s);
+void twist_fd_source_free (struct twist_fd_source *s);
+
+/* A sink: bytes written are held and go out as the descriptor takes them.
+   twist_fd_sink_full says when about a chunk (TWIST_OUT_HIGH) is held, and
+   the writer waits for READY, which is called when all that was held has gone.
+   ERROR is called if the descriptor fails (such as the reader having gone).  */
+struct twist_fd_sink;
+struct twist_fd_sink_ops
+{
+  void (*ready) (void *user);
+  void (*error) (void *user, int err);
+};
+int twist_fd_sink_new (struct twist_loop *loop, int fd,
+                       const struct twist_fd_sink_ops *ops, void *user,
+                       struct twist_fd_sink **out);
+int twist_fd_sink_write (struct twist_fd_sink *s, const uint8_t *data,
+                         size_t len);
+int twist_fd_sink_full (const struct twist_fd_sink *s);
+size_t twist_fd_sink_pending (const struct twist_fd_sink *s);
+void twist_fd_sink_free (struct twist_fd_sink *s);
+
 /* Tell the peer there is no more to come: the write side is shut once all that
    was queued has been written, and the connection stays open for what the
    peer still says.  */

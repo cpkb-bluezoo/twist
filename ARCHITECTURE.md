@@ -265,6 +265,24 @@ The loop drains the command queue at the top of every iteration.
   the loop thread. Until the handlers have moved to push sources, the command
   line keeps its current behaviour.
 
+### Descriptor Sources and Sinks
+
+- A pipe, a socket or a terminal can be polled. A descriptor that was
+  inherited is not twist's to make non-blocking, because it shares its open
+  file description with the caller, so nothing here sets `O_NONBLOCK`.
+- Each watches a **duplicate** of the descriptor, so freeing it does not close
+  the caller's.
+- A **read** is made only after `poll` with a zero timeout has said there is
+  something to read; a **write** only after it has said there is room, and of
+  no more than `PIPE_BUF` bytes, which POSIX guarantees can be written without
+  waiting. A write to a pipe whose reader has gone fails with `EPIPE`, and
+  does not raise `SIGPIPE`.
+- A source whose consumer takes less than it was given is paused, and goes on
+  when resumed. A sink says when it holds about a chunk, and when it has
+  written what it held.
+- A regular file never takes this path: it is always ready, and goes through
+  the file pipeline.
+
 ### Timer Queue
 
 - **Binary heap** on the loop
@@ -452,13 +470,13 @@ in the poll backend.
 handler does not assume it is the process's standard input: the caller names it
 with `TWISTOPT_TELNET_INPUT_FD` (the tool names descriptor 0), and with that
 and no read callback there is no input at all. An input that can be polled (a
-terminal, a pipe) is watched as a connection of its own, on a duplicate of the
-descriptor so that freeing it does not close the caller's; it is read only when
-`poll` says it is ready, because the descriptor is not the transfer's to make
-non-blocking. One that cannot be polled (a regular file, the null device) and
-the read callback are read a chunk at a time from a timer on the loop, and the
-descriptor is looked at with `poll` before each read, with another look 20 ms
-later when it has nothing, so that it cannot hold up the loop. Either stops
+terminal, a pipe) is a descriptor source (`reactor/fdio.c`, below), which
+watches a duplicate of the descriptor so that freeing it does not close the
+caller's. One that cannot be polled (a regular file, the null device) and the
+read callback are read a chunk at a time from a timer on the loop, and the
+descriptor is looked at with `twist_fd_read_nowait` before each read, with
+another look 20 ms later when it has nothing, so that it cannot hold up the
+loop. Either stops
 when the connection is behind (`twist_endpoint_pending`) and goes on from the
 endpoint's `on_write_ready`, so a large input is not held in memory. The end of
 the input does not end the transfer; the server closing does.
