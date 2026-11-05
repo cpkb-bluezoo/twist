@@ -52,6 +52,7 @@ struct twist_smtp
   struct twist_mail_link link;
   struct twist_mail_sasl sasl;
   struct twist_endpoint *ep;
+  struct twist_upmeter meter;	/* What the connection has written of it.  */
   struct twist_slist *rcpt;
   int implicit_tls;
   /* TWISTOPT_USE_SSL, for a scheme that is not TLS already.  TLS_DONE: the
@@ -83,6 +84,7 @@ smtp_complete (struct twist_smtp *s, int err)
   if (s == NULL || s->finished)
     return;
   s->finished = 1;
+  twist_upmeter_sync (&s->meter);
   twist_transfer_finish (s->transfer, err);
 }
 
@@ -128,106 +130,76 @@ smtp_printf (struct twist_smtp *s, const char *fmt, ...)
   return smtp_send (s, buf, (size_t) n, 0);
 }
 
-/* The message goes out as the connection writes it (twist_connection_stream):
-   what the application gives (in memory or through its read callback) is
-   dot-stuffed a piece at a time into PEND, and the connection takes it from
-   there.  A message that is large, or a read callback that does not end,
-   does not fill the queue of a server that does not read.  */
+/* The message goes out as the connection writes it: what the application gives
+   (in memory, or the transfer's push source) is dot-stuffed a piece at a time
+   as it arrives (twist_relay), and the source is paused while the connection
+   holds what it has not written.  A message that is large, or a source that
+   does not end, does not fill the queue of a server that does not read.  */
 struct smtp_body
 {
-  struct twist_transfer *transfer;
+  struct twist_smtp *smtp;
+  struct twist_relay *relay;	/* While a chunk is being sent.  */
   struct twist_dotout dot;
-  const char *mem;		/* The message, if it is in memory.  */
-  size_t mem_left;
-  uint8_t *pend;		/* Dot-stuffed, not yet taken.  */
-  size_t pend_off, pend_len, pend_cap;
-  int source_done;		/* The source and the final dot are in PEND.  */
 };
 
+/* The dot-stuffed message, to the connection or (with none) to the command
+   the tests read.  */
 static int
-pend_sink (void *user, const uint8_t *data, size_t len)
+body_sink (void *user, const uint8_t *data, size_t len)
 {
   struct smtp_body *b = user;
 
-  if (b->pend_len + len > b->pend_cap)
-    {
-      size_t cap = (b->pend_len + len) * 2;
-      uint8_t *grown = realloc (b->pend, cap);
-
-      if (grown == NULL)
-        return 1;
-      b->pend = grown;
-      b->pend_cap = cap;
-    }
-  memcpy (b->pend + b->pend_len, data, len);
-  b->pend_len += len;
-  return 0;
+  if (b->smtp->link.conn == NULL)
+    return smtp_send (b->smtp, data, len, 1) == TWIST_OK ? 0 : 1;
+  return twist_relay_push (b->relay, data, len) == TWIST_OK ? 0 : 1;
 }
 
-static size_t
-body_read (void *user, uint8_t *buf, size_t cap)
+static int
+body_chunk (void *user, struct twist_relay *r, const uint8_t *data, size_t len)
 {
   struct smtp_body *b = user;
-  struct twist_transfer *transfer = b->transfer;
 
-  while (b->pend_off == b->pend_len && !b->source_done)
-    {
-      char piece[512];
-      const char *src = piece;
-      size_t n;
+  b->relay = r;
+  if (twist_dotout_write (&b->dot, data, len, body_sink, b) != 0)
+    return TWIST_ERR_ABORTED;
+  /* With no connection nothing is written for the meter to follow.  */
+  if (b->smtp->link.conn == NULL)
+    twist_progress_uploaded (b->smtp->transfer, len);
+  return TWIST_OK;
+}
 
-      b->pend_off = b->pend_len = 0;
-      if (b->mem != NULL)
-        {
-          n = b->mem_left > sizeof piece ? sizeof piece : b->mem_left;
-          src = b->mem;
-          b->mem += n;
-          b->mem_left -= n;
-        }
-      else if (transfer->read_cb != NULL)
-        {
-          n = transfer->read_cb (piece, 1, sizeof piece, transfer->read_data);
-          if (n > sizeof piece)
-            return (size_t) -1;
-        }
-      else
-        n = 0;
-      if (n == 0)
-        {
-          b->source_done = 1;
-          if (twist_dotout_finish (&b->dot, pend_sink, b) != 0)
-            return (size_t) -1;
-          break;
-        }
-      if (twist_dotout_write (&b->dot, (const uint8_t *) src, n, pend_sink, b)
-          != 0)
-        return (size_t) -1;
-      twist_progress_uploaded (transfer, n);
-    }
-  if (b->pend_off == b->pend_len)
-    return 0;
-  if (cap > b->pend_len - b->pend_off)
-    cap = b->pend_len - b->pend_off;
-  memcpy (buf, b->pend + b->pend_off, cap);
-  b->pend_off += cap;
-  return cap;
+static int
+body_finish (void *user, struct twist_relay *r)
+{
+  struct smtp_body *b = user;
+
+  b->relay = r;
+  return twist_dotout_finish (&b->dot, body_sink, b) == 0 ? TWIST_OK
+                                                          : TWIST_ERR_ABORTED;
 }
 
 static void
 body_end (void *user, int err)
 {
   struct smtp_body *b = user;
+  struct twist_smtp *s = b->smtp;
 
-  (void) err;
-  free (b->pend);
   free (b);
+  /* A failure ends the transfer (with a connection it also fails it).  */
+  if (err != TWIST_OK)
+    smtp_complete (s, err);
 }
+
+static const struct twist_relay_ops body_ops = { body_chunk, body_finish,
+                                                 body_end };
 
 static int
 send_body (struct twist_smtp *s)
 {
   struct twist_transfer *transfer = s->transfer;
   struct smtp_body *b;
+  struct twist_upload *up;
+  int own = 0;
   int rc;
 
   s->cmdlen = 0;
@@ -237,30 +209,30 @@ send_body (struct twist_smtp *s)
   b = calloc (1, sizeof *b);
   if (b == NULL)
     return TWIST_ERR_NOMEM;
-  b->transfer = transfer;
+  b->smtp = s;
   twist_dotout_init (&b->dot);
   if (transfer->postfields != NULL)
     {
-      b->mem = transfer->postfields;
-      b->mem_left = transfer->postfieldsize_set && transfer->postfieldsize >= 0
-                    ? (size_t) transfer->postfieldsize
-                    : strlen (transfer->postfields);
-    }
-  if (s->link.conn == NULL)
-    {
-      /* Driven without a connection (the tests feed an endpoint): all of it
-         at once.  */
-      uint8_t buf[4096];
-      size_t n;
+      size_t n = transfer->postfieldsize_set && transfer->postfieldsize >= 0
+                 ? (size_t) transfer->postfieldsize
+                 : strlen (transfer->postfields);
 
-      rc = TWIST_OK;
-      while (rc == TWIST_OK && (n = body_read (b, buf, sizeof buf)) != 0)
-        rc = n == (size_t) -1 ? TWIST_ERR_ABORTED
-                              : smtp_send (s, buf, n, 1);
-      body_end (b, rc);
-      return rc;
+      up = twist_upload_from_memory ((const uint8_t *) transfer->postfields, n);
+      own = 1;
     }
-  rc = twist_connection_stream (s->link.conn, body_read, body_end, b);
+  else
+    up = twist_transfer_upload (transfer);
+  if (up == NULL)
+    {
+      /* No message at all: the end of it is the final dot.  */
+      struct twist_upload *empty = twist_upload_from_memory ((const uint8_t *) "", 0);
+
+      up = empty;
+      own = 1;
+    }
+  twist_upmeter_start (&s->meter, transfer, s->link.conn);
+  rc = twist_relay_start (s->link.conn, s->ep, up, own, 512, &body_ops, b,
+                          &s->meter);
   if (rc != TWIST_OK)
     free (b);
   return rc;

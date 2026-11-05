@@ -97,7 +97,20 @@ struct twist_tftp
   uint8_t pkt[TFTP_PKT_MAX];
   size_t pkt_len;
   uint64_t retry_ms;
+  /* An upload from the transfer's push source: what has been pushed and not
+     put in a block, whether the source is over, and whether the next block is
+     waiting for it.  A block goes when the source has given a whole one, or
+     has ended (and then it is the short last block).  */
+  struct twist_upload *up;
+  uint8_t ubuf[2 * TFTP_BLKSIZE];
+  size_t ubuf_len;
+  int up_done;
+  int up_err;
+  int want_block;
+  int in_pump;
 };
+
+static const struct twist_upload_consumer up_ops;
 
 static void
 tftp_finish (struct twist_tftp *t, int err)
@@ -105,6 +118,8 @@ tftp_finish (struct twist_tftp *t, int err)
   if (t == NULL || t->finished)
     return;
   t->finished = 1;
+  if (t->up != NULL)
+    twist_upload_detach (t->up);
   if (t->timer != NULL)
     {
       twist_timer_cancel (t->timer);
@@ -264,7 +279,8 @@ build_request (struct twist_tftp *t)
     return rc;
   if (name_n == 0)
     return TWIST_ERR_URL;
-  t->upload = t->transfer->postfields != NULL || t->transfer->read_cb != NULL;
+  t->upload = t->transfer->postfields != NULL || t->transfer->read_cb != NULL
+              || t->transfer->upload != NULL;
   if (t->transfer->postfields != NULL)
     {
       t->upload_data = t->transfer->postfields;
@@ -272,6 +288,13 @@ build_request (struct twist_tftp *t)
                       && t->transfer->postfieldsize >= 0
                       ? (size_t) t->transfer->postfieldsize
                       : strlen (t->transfer->postfields);
+    }
+  if (t->upload && t->upload_data == NULL)
+    {
+      t->up = twist_transfer_upload (t->transfer);
+      if (t->up == NULL
+          || twist_upload_attach (t->up, &up_ops, t, TFTP_BLKSIZE) != TWIST_OK)
+        return TWIST_ERR_NOMEM;
     }
   if (t->upload && twist_transfer_upload_size (t->transfer) >= 0)
     twist_progress_ul_size (t->transfer,
@@ -356,31 +379,98 @@ fill_data (struct twist_tftp *t)
       t->upload_off += left;
       n = left;
     }
-  else if (t->transfer->read_cb != NULL)
+  else if (t->up != NULL)
     {
-      while (n < (size_t) t->blksize)
-        {
-          char buf[512];
-          size_t want = (size_t) t->blksize - n;
-          size_t got;
-
-          if (want > sizeof buf)
-            want = sizeof buf;
-          got = t->transfer->read_cb (buf, 1, want, t->transfer->read_data);
-          if (got == 0)
-            break;
-          if (got > want)
-            got = want;
-          memcpy (t->pkt + 4 + n, buf, got);
-          n += got;
-        }
+      /* A block from what the source has pushed: a whole one, or what there
+         is when it has ended.  */
+      n = t->ubuf_len > (size_t) t->blksize ? (size_t) t->blksize : t->ubuf_len;
+      memcpy (t->pkt + 4, t->ubuf, n);
+      t->ubuf_len -= n;
+      memmove (t->ubuf, t->ubuf + n, t->ubuf_len);
     }
   t->payload = n;
   t->pkt_len = 4 + n;
   t->kind = OP_DATA;
-  twist_progress_uploaded (t->transfer, n);
   return TWIST_OK;
 }
+
+/* Send the next block if the source has given it; if not, ask for more, and
+   the block goes when it arrives.  */
+static int
+tftp_pump (struct twist_tftp *t)
+{
+  int rc;
+
+  if (t->in_pump || !t->want_block || t->finished)
+    return TWIST_OK;
+  t->in_pump = 1;
+  while (t->want_block && !t->finished)
+    {
+      if (t->up != NULL && t->upload_data == NULL
+          && t->ubuf_len < (size_t) t->blksize && !t->up_done)
+        {
+          /* Nothing to retransmit while the block is awaited.  */
+          if (t->timer != NULL)
+            {
+              twist_timer_cancel (t->timer);
+              t->timer = NULL;
+            }
+          twist_upload_resume (t->up);
+          if (t->ubuf_len < (size_t) t->blksize && !t->up_done)
+            break;		/* Pushed later; the chunk calls this again.  */
+          continue;
+        }
+      t->want_block = 0;
+      fill_data (t);
+      rc = transmit (t);
+      if (rc != TWIST_OK)
+        {
+          t->in_pump = 0;
+          return rc;
+        }
+      arm_timer (t);
+    }
+  t->in_pump = 0;
+  return TWIST_OK;
+}
+
+static int
+up_chunk (void *user, const uint8_t *data, size_t len)
+{
+  struct twist_tftp *t = user;
+  int rc;
+
+  if (len > sizeof t->ubuf - t->ubuf_len)
+    return TWIST_ERR_ABORTED;
+  memcpy (t->ubuf + t->ubuf_len, data, len);
+  t->ubuf_len += len;
+  if (t->ubuf_len >= (size_t) t->blksize)
+    twist_upload_pause (t->up);
+  rc = tftp_pump (t);
+  if (rc != TWIST_OK)
+    tftp_finish (t, rc);
+  return TWIST_OK;
+}
+
+static void
+up_end (void *user, int err)
+{
+  struct twist_tftp *t = user;
+  int rc;
+
+  t->up_done = 1;
+  t->up_err = err;
+  if (err != TWIST_OK)
+    {
+      tftp_finish (t, err);
+      return;
+    }
+  rc = tftp_pump (t);
+  if (rc != TWIST_OK)
+    tftp_finish (t, rc);
+}
+
+static const struct twist_upload_consumer up_ops = { up_chunk, up_end };
 
 static int
 send_ack (struct twist_tftp *t, unsigned block)
@@ -528,18 +618,17 @@ handle_ack (struct twist_tftp *t, unsigned block)
       return TWIST_OK;
     }
   t->retries = 0;
+  /* A block is counted when the server has it.  */
+  if (t->block > 0)
+    twist_progress_uploaded (t->transfer, t->payload);
   if (t->block > 0 && t->payload < (size_t) t->blksize)
     {
       tftp_finish (t, TWIST_OK);
       return TWIST_OK;
     }
   t->block = (t->block + 1u) & 0xffffu;
-  fill_data (t);
-  rc = transmit (t);
-  if (rc != TWIST_OK)
-    return rc;
-  arm_timer (t);
-  return TWIST_OK;
+  t->want_block = 1;
+  return tftp_pump (t);
 }
 
 static int
@@ -893,6 +982,8 @@ twist_tftp_free (void *p)
   t->timer = NULL;
   t->deadline = NULL;
   t->fd = -1;
+  if (t->up != NULL)
+    twist_upload_detach (t->up);
   twist_connection_free (t->conn);
   free (t);
 }

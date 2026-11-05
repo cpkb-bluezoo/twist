@@ -58,6 +58,11 @@ struct twist_mqtt
   char topic[MQTT_TOPIC];
   uint8_t cmd[MQTT_CMD];
   size_t cmdlen;
+  /* The payload from the transfer's push source, being collected: the length
+     goes before it, so it is all had before any is sent.  */
+  struct twist_upload *up;
+  uint8_t *collected;
+  size_t collected_len;
 };
 
 static void mqtt_complete (struct twist_mqtt *m, int err);
@@ -279,60 +284,73 @@ deliver (struct twist_mqtt *m, const uint8_t *data, size_t len)
   return TWIST_OK;
 }
 
+/* Publish PAYLOAD (PLEN bytes) and say goodbye.  */
 static int
-body_len (struct twist_transfer *transfer, const uint8_t **ptr,
-          uint8_t **owned,
-          size_t *len)
+send_publish (struct twist_mqtt *m, const uint8_t *payload, size_t plen)
 {
-  *owned = NULL;
-  *ptr = NULL;
-  *len = 0;
-  if (transfer->postfields != NULL)
-    {
-      *ptr = (const uint8_t *) transfer->postfields;
-      if (transfer->postfieldsize_set && transfer->postfieldsize >= 0)
-        *len = (size_t) transfer->postfieldsize;
-      else
-        *len = strlen (transfer->postfields);
-      return TWIST_OK;
-    }
-  if (transfer->read_cb == NULL)
-    return TWIST_OK;
-  *owned = malloc (MQTT_BODY);
-  if (*owned == NULL)
-    return TWIST_ERR_NOMEM;
-  while (*len < MQTT_BODY)
-    {
-      size_t room = MQTT_BODY - *len;
-      size_t n = transfer->read_cb ((char *) (*owned + *len), 1,
-                                    room > 512 ? 512 : room,
-                                    transfer->read_data);
+  uint8_t hdr[8 + MQTT_TOPIC];
+  size_t n = 0;
+  size_t tlen = strlen (m->topic);
+  size_t off = 0;
+  static const uint8_t disc[] = { 0xe0, 0x00 };
+  int rc;
 
-      if (n == 0)
-        break;
-      if (n > room)
-        {
-          free (*owned);
-          *owned = NULL;
-          return TWIST_ERR_ABORTED;
-        }
-      *len += n;
-    }
-  if (*len == MQTT_BODY)
+  twist_progress_ul_size (m->transfer, (long long) plen);
+  hdr[n++] = 0x30;
+  rc = put_varint (hdr, sizeof hdr, &n, 2 + tlen + plen);
+  if (rc == TWIST_OK)
+    rc = put_str (hdr, sizeof hdr, &n, m->topic);
+  if (rc == TWIST_OK)
+    rc = mqtt_out (m, hdr, n, 1);
+  while (rc == TWIST_OK && off < plen)
     {
-      char extra;
-      size_t n = transfer->read_cb (&extra, 1, 1, transfer->read_data);
+      size_t chunk = plen - off;
 
-      if (n != 0)
-        {
-          free (*owned);
-          *owned = NULL;
-          return TWIST_ERR_PROTOCOL;
-        }
+      if (chunk > 512)
+        chunk = 512;
+      rc = mqtt_out (m, payload + off, chunk, 0);
+      off += chunk;
     }
-  *ptr = *owned;
+  if (rc != TWIST_OK)
+    return rc;
+  /* The transfer ends as the payload is handed over: there is no later moment
+     at which to count it.  */
+  twist_progress_uploaded (m->transfer, plen);
+  rc = mqtt_out (m, disc, sizeof disc, 0);
+  if (rc != TWIST_OK)
+    return rc;
+  mqtt_complete (m, TWIST_OK);
   return TWIST_OK;
 }
+
+/* A payload from the push source is collected up to MQTT_BODY, and one that is
+   longer is a protocol error.  */
+static int
+collect_chunk (void *user, const uint8_t *data, size_t len)
+{
+  struct twist_mqtt *m = user;
+
+  if (len > MQTT_BODY - m->collected_len)
+    return TWIST_ERR_PROTOCOL;
+  memcpy (m->collected + m->collected_len, data, len);
+  m->collected_len += len;
+  return TWIST_OK;
+}
+
+static void
+collect_end (void *user, int err)
+{
+  struct twist_mqtt *m = user;
+
+  m->up = NULL;
+  if (err == TWIST_OK)
+    err = send_publish (m, m->collected, m->collected_len);
+  if (err != TWIST_OK)
+    mqtt_complete (m, err);
+}
+
+static const struct twist_upload_consumer collect_ops = { collect_chunk,
+                                                          collect_end };
 
 static int
 after_connack (struct twist_mqtt *m)
@@ -342,41 +360,24 @@ after_connack (struct twist_mqtt *m)
   size_t tlen = strlen (m->topic);
   int rc;
 
-  if (m->transfer->postfields != NULL || m->transfer->read_cb != NULL)
+  if (m->transfer->postfields != NULL)
     {
-      const uint8_t *payload = NULL;
-      uint8_t *owned = NULL;
-      size_t plen = 0;
-      size_t off = 0;
-      static const uint8_t disc[] = { 0xe0, 0x00 };
+      struct twist_transfer *t = m->transfer;
+      size_t plen = t->postfieldsize_set && t->postfieldsize >= 0
+                    ? (size_t) t->postfieldsize : strlen (t->postfields);
 
-      rc = body_len (m->transfer, &payload, &owned, &plen);
+      return send_publish (m, (const uint8_t *) t->postfields, plen);
+    }
+  if (m->transfer->read_cb != NULL || m->transfer->upload != NULL)
+    {
+      m->up = twist_transfer_upload (m->transfer);
+      m->collected = malloc (MQTT_BODY);
+      if (m->up == NULL || m->collected == NULL)
+        return TWIST_ERR_NOMEM;
+      rc = twist_upload_attach (m->up, &collect_ops, m, 512);
       if (rc != TWIST_OK)
         return rc;
-      twist_progress_ul_size (m->transfer, (long long) plen);
-      hdr[n++] = 0x30;
-      rc = put_varint (hdr, sizeof hdr, &n, 2 + tlen + plen);
-      if (rc == TWIST_OK)
-        rc = put_str (hdr, sizeof hdr, &n, m->topic);
-      if (rc == TWIST_OK)
-        rc = mqtt_out (m, hdr, n, 1);
-      while (rc == TWIST_OK && off < plen)
-        {
-          size_t chunk = plen - off;
-
-          if (chunk > 512)
-            chunk = 512;
-          rc = mqtt_out (m, payload + off, chunk, 0);
-          off += chunk;
-        }
-      free (owned);
-      if (rc != TWIST_OK)
-        return rc;
-      twist_progress_uploaded (m->transfer, plen);
-      rc = mqtt_out (m, disc, sizeof disc, 0);
-      if (rc != TWIST_OK)
-        return rc;
-      mqtt_complete (m, TWIST_OK);
+      twist_upload_resume (m->up);
       return TWIST_OK;
     }
   hdr[n++] = 0x82;
@@ -719,7 +720,10 @@ twist_mqtt_free (void *p)
 
   if (m == NULL)
     return;
+  if (m->up != NULL)
+    twist_upload_detach (m->up);
   twist_mail_link_close (&m->link);
+  free (m->collected);
   free (m);
 }
 

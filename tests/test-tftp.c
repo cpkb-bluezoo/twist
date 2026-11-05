@@ -55,6 +55,74 @@ tftp_read (char *ptr, size_t size, size_t nmemb, void *user)
   return left;
 }
 
+struct tf_src
+{
+  size_t total, off, step, fail_at;
+};
+
+static size_t
+tf_read (char *ptr, size_t size, size_t nmemb, void *user)
+{
+  struct tf_src *c = user;
+  size_t n = size * nmemb;
+
+  if (c->fail_at != 0 && c->off >= c->fail_at)
+    return TWIST_READFUNC_ABORT;
+  if (c->step != 0 && n > c->step)
+    n = c->step;
+  if (n > c->total - c->off)
+    n = c->total - c->off;
+  memset (ptr, 't', n);
+  c->off += n;
+  return n;
+}
+
+/* An upload from a source that gives a byte at a time: a block is sent when
+   the source has given a whole one, the last is short, and a body that is a
+   multiple of the block size ends with an empty block.  */
+static void
+test_tftp_pushed (size_t total, size_t blocks, size_t last, int fail_at)
+{
+  struct tf_src src;
+  twist_transfer *transfer = twist_transfer_new ();
+  struct twist_tftp *t;
+  size_t i;
+  uint8_t ack[4] = { 0, 4, 0, 0 };
+  const uint8_t *pkt;
+  size_t len;
+
+  memset (&src, 0, sizeof src);
+  src.total = total;
+  src.step = 1;
+  src.fail_at = (size_t) fail_at;
+  twist_url_parse_int ("tftp://127.0.0.1/src", &transfer->url);
+  transfer->read_cb = tf_read;
+  transfer->read_data = &src;
+  t = twist_tftp_new (transfer, 0);
+  twist_tftp_receive (t, ack, sizeof ack);
+  if (fail_at != 0)
+    {
+      check (transfer->done && transfer->result == TWIST_ERR_ABORTED,
+             "a tftp source that fails fails the transfer");
+      twist_transfer_free (transfer);
+      return;
+    }
+  for (i = 1; i <= blocks; i++)
+    {
+      pkt = twist_tftp_packet (t, &len);
+      check (len >= 4 && pkt[1] == 3 && pkt[3] == (uint8_t) i
+             && len - 4 == (i < blocks ? 512 : last),
+             "tftp blocks of 512 and a short last");
+      ack[2] = (uint8_t) (i >> 8);
+      ack[3] = (uint8_t) i;
+      twist_tftp_receive (t, ack, sizeof ack);
+    }
+  check (transfer->done && transfer->result == TWIST_OK
+         && transfer->progress.uploaded == (long long) total,
+         "and it ends, with the meter at the acknowledged bytes");
+  twist_transfer_free (transfer);
+}
+
 static void
 test_tftp_is (struct twist_tftp *t, const uint8_t *expect, size_t n,
               const char *what)
@@ -379,5 +447,9 @@ main (void)
 {
   test_tftp ();
   test_tftp_source ();
+  test_tftp_pushed (1124, 3, 100, 0);
+  test_tftp_pushed (1024, 3, 0, 0);
+  test_tftp_pushed (700, 2, 188, 0);
+  test_tftp_pushed (100, 0, 0, 30);
   return tests_finish ();
 }

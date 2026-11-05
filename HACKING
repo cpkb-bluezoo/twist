@@ -93,7 +93,15 @@ only while the consumer has not paused it.  HTTP/1 frames what is pushed
 (chunked encoding, or a known length that is never sent past), and the
 connection pauses the producer at TWIST_OUT_HIGH.  The HTTP/2, HTTP/3 and
 WebSocket pumps keep one chunk, ask for the next when they can send it, and
-pause the producer between.  A handler never calls read_cb.
+pause the producer between.  A handler never calls read_cb.  FTP, SMTP and IMAP
+send the upload with twist_relay_start, which queues each chunk on the
+connection (through the handler's own chunk function if it has to transform
+it), pauses the producer while the connection is full, and ends once, with
+twist_upmeter following the body bytes the connection has written.  A handler
+that gets a source from memory uses twist_upload_from_memory, and one that
+resumes at an offset uses twist_upload_skip.  An operation that returns an
+error from a relay, or calls twist_relay_done or twist_relay_abort, leaves the
+relay gone and does not touch it again.
 
 Body bytes are sent with twist_connection_send_body (twist_connection_push
 does so) and framing with twist_endpoint_send.  twist_connection_body_written

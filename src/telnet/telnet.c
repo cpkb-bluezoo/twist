@@ -29,6 +29,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 /* Telnet (RFC 854) and its URL form.  The path of the URL is not used.  What
@@ -139,12 +140,15 @@ struct twist_telnet
   uint8_t *sent;
   size_t sent_len;
   size_t sent_cap;
-  /* The input.  IN watches a copy of the input descriptor; PUMP reads in steps,
-     the read callback or what cannot be watched.  */
+  /* The input is one of: IN, which watches a copy of the input descriptor;
+     FIO, which reads it where it is a regular file; or UP, the transfer's push
+     source (the read callback, or what the application pushes).  It is paused
+     while the connection is behind (STALLED).  */
   struct twist_fd_source *in;
+  struct twist_fio *fio;
+  struct twist_upload *up;
   int in_done;
   int stalled;
-  struct twist_timer *pump;
 };
 
 /* Nothing more is read from the input once the session is over: what is
@@ -154,13 +158,12 @@ static void
 input_stop (struct twist_telnet *t)
 {
   t->in_done = 1;
-  if (t->pump != NULL)
-    {
-      twist_timer_cancel (t->pump);
-      t->pump = NULL;
-    }
   if (t->in != NULL)
     twist_fd_source_pause (t->in);
+  if (t->fio != NULL)
+    twist_fio_pause (t->fio);
+  if (t->up != NULL)
+    twist_upload_detach (t->up);
 }
 
 static void
@@ -842,90 +845,29 @@ congested (const struct twist_telnet *t)
   return t->ep != NULL && twist_endpoint_full (t->ep);
 }
 
+/* Stop reading the input, or go on, as the connection is behind or has caught
+   up.  */
 static void
-pump_step (void *user);
-
-/* Read again in DELAY_MS, 0 being as soon as the loop has done what else it
-   has to.  */
-static void
-pump_schedule_after (struct twist_telnet *t, unsigned delay_ms)
+input_pause (struct twist_telnet *t)
 {
-  struct twist_loop *loop = t->transfer->loop;
-
-  if (t->pump != NULL || t->finished || t->in_done || t->stalled)
-    return;
-  if (twist_loop_schedule (loop, twist_loop_now (loop) + delay_ms, pump_step, t,
-                           &t->pump) != TWIST_OK)
-    telnet_complete (t, TWIST_ERR_NOMEM);
+  t->stalled = 1;
+  if (t->in != NULL)
+    twist_fd_source_pause (t->in);
+  else if (t->fio != NULL)
+    twist_fio_pause (t->fio);
+  else if (t->up != NULL)
+    twist_upload_pause (t->up);
 }
 
 static void
-pump_schedule (struct twist_telnet *t)
+input_resume (struct twist_telnet *t)
 {
-  pump_schedule_after (t, 0);
-}
-
-/* How long to wait before looking again at a descriptor that had nothing.  */
-#define POLL_RETRY_MS 20
-
-/* One chunk of the read callback, or of the input descriptor where it cannot
-   be watched.  */
-static void
-pump_step (void *user)
-{
-  struct twist_telnet *t = user;
-  struct twist_transfer *transfer = t->transfer;
-  uint8_t buf[IN_CHUNK];
-  ssize_t n;
-
-  t->pump = NULL;
-  if (t->finished || t->in_done)
-    return;
-  if (transfer->read_cb != NULL)
-    {
-      size_t got = transfer->read_cb ((char *) buf, 1, sizeof buf,
-                                      transfer->read_data);
-
-      /* The callback says it cannot read (TWIST_READFUNC_ABORT), or
-         it has given more than there was room for.  */
-      if (got > sizeof buf)
-        {
-          telnet_complete (t, TWIST_ERR_ABORTED);
-          return;
-        }
-      n = (ssize_t) got;
-    }
-  else
-    {
-      /* A descriptor that could not be watched is a file, which is always
-         ready, unless watching failed for another reason; one that is not
-         ready is not read, since the read would wait for the whole loop.  */
-      n = twist_fd_read_nowait (transfer->telnet_input_fd, buf, sizeof buf);
-      if (n < 0 && errno == EAGAIN)
-        {
-          pump_schedule_after (t, POLL_RETRY_MS);
-          return;
-        }
-      if (n < 0)
-        {
-          /* A read that fails ends the transfer, as it has been done.  */
-          input_ended (t);
-          telnet_complete (t, TWIST_OK);
-          return;
-        }
-    }
-  if (n == 0)
-    {
-      input_ended (t);
-      return;
-    }
-  twist_telnet_input (t, buf, (size_t) n);
-  if (t->finished)
-    return;
-  if (congested (t))
-    t->stalled = 1;
-  else
-    pump_schedule (t);
+  if (t->in != NULL)
+    twist_fd_source_resume (t->in);
+  else if (t->fio != NULL)
+    twist_fio_resume (t->fio);
+  else if (t->up != NULL)
+    twist_upload_resume (t->up);
 }
 
 /* The connection has written all it had.  */
@@ -937,25 +879,16 @@ telnet_drained (struct twist_endpoint *ep)
   if (t == NULL || !t->stalled || t->finished)
     return;
   t->stalled = 0;
-  if (t->in != NULL)
-    twist_fd_source_resume (t->in);
-  else
-    pump_schedule (t);
+  input_resume (t);
 }
 
-/* The watched input (twist_fd_source) gives what it reads.  */
-static size_t
-input_chunk (void *user, const uint8_t *data, size_t len)
+/* What the input gives, from whichever it is.  */
+static void
+input_data (struct twist_telnet *t, const uint8_t *data, size_t len)
 {
-  struct twist_telnet *t = user;
-
   twist_telnet_input (t, data, len);
   if (!t->finished && congested (t))
-    {
-      t->stalled = 1;
-      twist_fd_source_pause (t->in);
-    }
-  return len;
+    input_pause (t);
 }
 
 /* The input is over, or has failed.  The end of it does not end the
@@ -970,31 +903,158 @@ input_end (void *user, int err)
     telnet_complete (t, TWIST_OK);
 }
 
+/* The watched input (twist_fd_source).  */
+static size_t
+input_chunk (void *user, const uint8_t *data, size_t len)
+{
+  input_data (user, data, len);
+  return len;
+}
+
 static const struct twist_fd_source_ops input_ops = { input_chunk, input_end };
 
-/* Watch the input descriptor (a copy of it is: the caller's is not closed with
-   it, or made non-blocking).  Not every descriptor can be: a regular file and
-   the null device cannot, and are read in steps instead.  */
+/* The transfer's push source: the read callback, or what is pushed.  A source
+   that fails (TWIST_READFUNC_ABORT) ends the transfer with that error.  */
 static int
+up_chunk (void *user, const uint8_t *data, size_t len)
+{
+  input_data (user, data, len);
+  return TWIST_OK;
+}
+
+static void
+up_end (void *user, int err)
+{
+  struct twist_telnet *t = user;
+
+  input_ended (t);
+  if (err != TWIST_OK)
+    telnet_complete (t, err);
+}
+
+static const struct twist_upload_consumer up_ops = { up_chunk, up_end };
+
+/* A regular file is read by the file pipeline, from where the descriptor is
+   now.  The descriptor is a copy, and the caller's is not moved: the read is
+   at an offset.  The worker opens it, and may do so after the transfer is let
+   go of, so what it needs is a record of its own.  */
+struct fio_in
+{
+  struct twist_telnet *t;	/* The loop's thread only.  */
+  int fd;
+  long long start;
+};
+
+static int
+fio_open (void *user, int *fd, int *own, long long *start, long long *length,
+          char **msg)
+{
+  struct fio_in *in = user;
+
+  (void) msg;
+  *fd = in->fd;
+  *own = 1;
+  in->fd = -1;			/* The reader has it.  */
+  *start = in->start;
+  *length = -1;
+  return TWIST_OK;
+}
+
+static int
+fio_chunk (void *user, uint8_t *data, size_t len)
+{
+  struct fio_in *in = user;
+
+  input_data (in->t, data, len);
+  return TWIST_OK;
+}
+
+static void
+fio_end (void *user, int err, char *msg)
+{
+  struct fio_in *in = user;
+
+  free (msg);
+  input_end (in->t, err);
+}
+
+static void
+fio_release (void *user)
+{
+  struct fio_in *in = user;
+
+  if (in->fd >= 0)
+    close (in->fd);
+  free (in);
+}
+
+static const struct twist_fio_read_ops fio_ops = { fio_open, NULL, fio_chunk,
+                                                   fio_end, fio_release };
+
+/* Watch the input descriptor (a copy of it is: the caller's is not closed with
+   it, or made non-blocking).  A regular file cannot be watched and is read by
+   the file pipeline; the null device and the like have nothing to read.  */
+static void
 watch_input (struct twist_telnet *t)
 {
-  return twist_fd_source_new (t->transfer->loop, t->transfer->telnet_input_fd,
-                              &input_ops, t, &t->in);
+  struct stat st;
+  int fd = t->transfer->telnet_input_fd;
+
+  if (twist_fd_source_new (t->transfer->loop, fd, &input_ops, t, &t->in)
+      == TWIST_OK)
+    return;
+  t->in = NULL;
+  if (fstat (fd, &st) == 0 && S_ISREG (st.st_mode)
+      && t->transfer->runtime != NULL && t->transfer->runtime->xfer != NULL)
+    {
+      struct fio_in *in = calloc (1, sizeof *in);
+
+      if (in != NULL)
+        {
+          off_t at = lseek (fd, 0, SEEK_CUR);
+
+          in->t = t;
+          in->fd = at >= 0 ? dup (fd) : -1;
+          in->start = (long long) at;
+          if (in->fd >= 0
+              && twist_fio_read_new (t->transfer->loop,
+                                     t->transfer->runtime->xfer, &fio_ops, in,
+                                     &t->fio) == TWIST_OK)
+            return;
+          if (in->fd >= 0)
+            close (in->fd);
+          free (in);
+        }
+    }
+  input_ended (t);
 }
 
 static void
 input_start (struct twist_telnet *t)
 {
-  /* With neither a read callback nor a descriptor there is nothing to send;
+  struct twist_transfer *transfer = t->transfer;
+
+  /* With neither a push source nor a descriptor there is nothing to send;
      the session is the server's.  */
-  if (t->transfer->read_cb == NULL && t->transfer->telnet_input_fd < 0)
+  if (transfer->read_cb != NULL || transfer->upload != NULL)
+    {
+      t->up = twist_transfer_upload (transfer);
+      if (t->up == NULL
+          || twist_upload_attach (t->up, &up_ops, t, IN_CHUNK) != TWIST_OK)
+        {
+          t->up = NULL;
+          telnet_complete (t, TWIST_ERR_NOMEM);
+          return;
+        }
+      twist_upload_resume (t->up);
+      return;
+    }
+  if (transfer->telnet_input_fd < 0)
     {
       input_ended (t);
       return;
     }
-  if (t->transfer->read_cb == NULL && watch_input (t) == TWIST_OK)
-    return;
-  pump_schedule (t);
+  watch_input (t);
 }
 
 /* ---- the connection ---- */
@@ -1053,9 +1113,10 @@ twist_telnet_free (void *p)
 
   if (t == NULL)
     return;
-  if (t->pump != NULL)
-    twist_timer_cancel (t->pump);
+  if (t->up != NULL)
+    twist_upload_detach (t->up);
   twist_fd_source_free (t->in);
+  twist_fio_free (t->fio);
   twist_mail_link_close (&t->link);
   twist_slist_free_all (t->vars);
   free (t->sent);

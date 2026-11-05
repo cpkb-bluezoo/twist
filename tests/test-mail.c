@@ -47,6 +47,30 @@ mail_sink (void *user, const uint8_t *data, size_t len)
   return 0;
 }
 
+/* A source that gives a byte at a time from TEXT, and fails after FAIL_AT
+   bytes if that is set.  */
+struct mail_src
+{
+  const char *text;
+  size_t off, fail_at;
+};
+
+static size_t
+mail_src_read (char *ptr, size_t size, size_t nmemb, void *user)
+{
+  struct mail_src *c = user;
+  size_t left = strlen (c->text) - c->off;
+
+  (void) size;
+  (void) nmemb;
+  if (c->fail_at != 0 && c->off >= c->fail_at)
+    return TWIST_READFUNC_ABORT;
+  if (left == 0)
+    return 0;
+  ptr[0] = c->text[c->off++];
+  return 1;
+}
+
 static size_t
 smtp_recv (void *obj, const uint8_t *data, size_t len)
 {
@@ -225,6 +249,38 @@ test_mail (void)
         twist_transfer_free (transfer);
         transfer = twist_transfer_new ();
       }
+    /* The message from a source that gives a byte at a time is the same on
+       the wire, and one that fails ends the transfer.  */
+    {
+      int variant;
+
+      for (variant = 0; variant < 2; variant++)
+        {
+          struct mail_src src = { "Hi\r\n.x\r\n", 0, variant ? 3 : 0 };
+
+          transfer = twist_transfer_new ();
+          twist_url_parse_int ("smtp://127.0.0.1", &transfer->url);
+          transfer->mail_from = twist_strdup ("a@b");
+          transfer->mail_rcpt = rcpt;
+          transfer->read_cb = mail_src_read;
+          transfer->read_data = &src;
+          smtp = twist_smtp_new (transfer, 0);
+          feed_n (smtp_recv, smtp, "220 ready\r\n", 1);
+          feed_n (smtp_recv, smtp, "250 hello\r\n", 1);
+          feed_n (smtp_recv, smtp, "250 sender\r\n", 1);
+          feed_n (smtp_recv, smtp, "250 rcpt\r\n", 1);
+          feed_n (smtp_recv, smtp, "354 go\r\n", 1);
+          if (variant == 0)
+            check (strcmp (twist_smtp_command (smtp), stuffed) == 0
+                   && transfer->progress.uploaded == 8,
+                   "smtp body from a one-byte source");
+          else
+            check (transfer->done && transfer->result == TWIST_ERR_ABORTED,
+                   "smtp: a source that fails ends the transfer");
+          twist_transfer_free (transfer);
+        }
+      transfer = twist_transfer_new ();
+    }
     twist_slist_free_all (rcpt);
     twist_transfer_free (transfer);
   }
@@ -308,6 +364,43 @@ test_mail (void)
     feed_n (imap_recv, imap, "A2 OK APPEND completed\r\n", 1);
     check (transfer->done && transfer->result == TWIST_OK, "appended");
     twist_transfer_free (transfer);
+
+    /* The message from a source that gives a byte at a time; and one that
+       has less than the literal said.  */
+    {
+      struct mail_src src = { "hello", 0, 0 };
+
+      transfer = twist_transfer_new ();
+      twist_url_parse_int ("imap://127.0.0.1/Sent", &transfer->url);
+      transfer->read_cb = mail_src_read;
+      transfer->read_data = &src;
+      transfer->infilesize = 5;
+      imap = twist_imap_new (transfer, 0);
+      feed_n (imap_recv, imap, "* OK ready\r\n", 1);
+      feed_n (imap_recv, imap, "* CAPABILITY IMAP4rev1\r\nA1 OK\r\n", 1);
+      feed_n (imap_recv, imap, "+ Ready for literal data\r\n", 1);
+      check (transfer->progress.uploaded == 5 && !transfer->done,
+             "imap: a one-byte source is sent whole");
+      feed_n (imap_recv, imap, "A2 OK APPEND completed\r\n", 1);
+      check (transfer->done && transfer->result == TWIST_OK,
+             "imap: and appended");
+      twist_transfer_free (transfer);
+
+      src.off = 0;
+      src.text = "hello";
+      transfer = twist_transfer_new ();
+      twist_url_parse_int ("imap://127.0.0.1/Sent", &transfer->url);
+      transfer->read_cb = mail_src_read;
+      transfer->read_data = &src;
+      transfer->infilesize = 10;
+      imap = twist_imap_new (transfer, 0);
+      feed_n (imap_recv, imap, "* OK ready\r\n", 1);
+      feed_n (imap_recv, imap, "* CAPABILITY IMAP4rev1\r\nA1 OK\r\n", 1);
+      feed_n (imap_recv, imap, "+ Ready for literal data\r\n", 1);
+      check (transfer->done && transfer->result == TWIST_ERR_ABORTED,
+             "imap: a source shorter than the literal fails the transfer");
+      twist_transfer_free (transfer);
+    }
 
     /* A mailbox the server will not take.  */
     transfer = twist_transfer_new ();

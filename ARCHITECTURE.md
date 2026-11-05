@@ -244,6 +244,14 @@ The loop drains the command queue at the top of every iteration.
   the stream can send, and pause the producer between.
 - A restart goes to the producer; one that cannot restart fails the transfer
   with `TWIST_ERR_REWIND`.
+- FTP, SMTP and IMAP send the upload through a **relay** (`twist_relay_start`):
+  the producer's chunks are queued on the connection (SMTP dot-stuffs them on
+  the way, IMAP stops at the size the literal said) and the producer is paused
+  while the connection is full. The meter follows the body bytes written.
+- TFTP sends a block when the source has given a whole one, or has ended; a
+  block is counted when the server acknowledges it. MQTT collects the payload
+  up to 16 KiB, because the length goes first. SFTP keeps one chunk from the
+  source at a time and counts a write when the server acknowledges it.
 
 ### Pausing One Stream
 
@@ -500,17 +508,15 @@ in the poll backend.
 `telnet` is the one handler that reads a second descriptor, its input. The
 handler does not assume it is the process's standard input: the caller names it
 with `TWISTOPT_TELNET_INPUT_FD` (the tool names descriptor 0), and with that
-and no read callback there is no input at all. An input that can be polled (a
-terminal, a pipe) is a descriptor source (`reactor/fdio.c`, below), which
-watches a duplicate of the descriptor so that freeing it does not close the
-caller's. One that cannot be polled (a regular file, the null device) and the
-read callback are read a chunk at a time from a timer on the loop, and the
-descriptor is looked at with `twist_fd_read_nowait` before each read, with
-another look 20 ms later when it has nothing, so that it cannot hold up the
-loop. Either stops
-when the connection is behind (`twist_endpoint_pending`) and goes on from the
-endpoint's `on_write_ready`, so a large input is not held in memory. The end of
-the input does not end the transfer; the server closing does.
+and no read callback there is no input at all. The input is a push source: the
+transfer's upload where there is a read callback; a descriptor source
+(`reactor/fdio.c`, below) for a terminal or a pipe, which watches a duplicate so
+that freeing it does not close the caller's; or the file pipeline for a regular
+file, read at an offset from where the descriptor is. The null device and the
+like have nothing to read. The handler pauses the input when the connection is
+behind (`twist_endpoint_pending`) and resumes it from the endpoint's
+`on_write_ready`, so a large input is not held in memory. The end of the input
+does not end the transfer; the server closing does.
 
 ## Scheme table
 

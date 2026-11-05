@@ -52,6 +52,7 @@ struct twist_imap
   struct twist_mail_link link;
   struct twist_mail_sasl sasl;
   struct twist_endpoint *ep;
+  struct twist_upmeter meter;	/* What the connection has written of it.  */
   int implicit_tls;
   /* TWISTOPT_USE_SSL, for a scheme that is not TLS already.  TLS_DONE: the
      connection was upgraded.  STARTTLS_ADV: the server said it can, in its
@@ -89,6 +90,7 @@ imap_complete (struct twist_imap *m, int err)
   if (m == NULL || m->finished)
     return;
   m->finished = 1;
+  twist_upmeter_sync (&m->meter);
   twist_transfer_finish (m->transfer, err);
 }
 
@@ -226,88 +228,98 @@ deliver (struct twist_imap *m, const uint8_t *data, size_t len)
   return TWIST_OK;
 }
 
-/* The message of an upload is sent as the connection can take it
-   (twist_connection_stream), from memory or from the application's read
-   callback, a chunk at a time.  Exactly UP_SIZE octets: the literal said how
-   many, so a source that has fewer is a failure and more is not read.  The
-   line that ends the command follows it.  */
+/* The message of an upload is sent as the connection can take it, from
+   memory or from the transfer's push source (twist_relay).  Exactly UP_SIZE
+   octets: the literal said how many, so a source that has fewer is a failure
+   and more is not sent.  The line that ends the command follows it.  */
 struct imap_up
 {
   struct twist_imap *imap;
-  struct twist_transfer *transfer;
-  const uint8_t *mem;
   long long left;
-  int from_cb;
 };
 
-static size_t
-imap_up_read (void *user, uint8_t *buf, size_t cap)
+static int
+imap_up_chunk (void *user, struct twist_relay *r, const uint8_t *data,
+               size_t len)
 {
   struct imap_up *u = user;
-  struct twist_transfer *t = u->transfer;
-  size_t want = (long long) cap > u->left ? (size_t) u->left : cap;
-  size_t n;
+  int last;
+  int rc;
 
-  if (want == 0)
-    return 0;
-  if (u->from_cb)
+  if ((long long) len > u->left)
+    len = (size_t) u->left;
+  u->left -= (long long) len;
+  last = u->left == 0;
+  if (len > 0)
     {
-      n = t->read_cb ((char *) buf, 1, want, t->read_data);
-      if (n == TWIST_READFUNC_ABORT || n > want || n == 0)
-        return (size_t) -1;	/* Or short of the size that was said.  */
+      rc = twist_relay_push (r, data, len);
+      if (rc != TWIST_OK)
+        return rc;
     }
-  else
+  /* With no connection nothing is written for the meter to follow.  */
+  if (u->imap->link.conn == NULL)
+    twist_progress_uploaded (u->imap->transfer, len);
+  if (last)
+    twist_relay_done (r);
+  return TWIST_OK;
+}
+
+static int
+imap_up_finish (void *user, struct twist_relay *r)
+{
+  struct imap_up *u = user;
+
+  if (u->left > 0)
     {
-      n = want;
-      memcpy (buf, u->mem, n);
-      u->mem += n;
+      twist_relay_abort (r, TWIST_ERR_ABORTED);	/* Short of the size said.  */
+      return TWIST_ERR_ABORTED;
     }
-  u->left -= (long long) n;
-  twist_progress_uploaded (t, n);
-  return n;
+  return TWIST_OK;
 }
 
 static void
 imap_up_end (void *user, int err)
 {
   struct imap_up *u = user;
+  struct twist_imap *m = u->imap;
 
-  if (err == TWIST_OK && u->imap->ep != NULL)
-    twist_endpoint_send (u->imap->ep, (const uint8_t *) "\r\n", 2);
   free (u);
+  if (err == TWIST_OK && m->ep != NULL)
+    twist_endpoint_send (m->ep, (const uint8_t *) "\r\n", 2);
+  else if (err != TWIST_OK)
+    imap_complete (m, err);
 }
+
+static const struct twist_relay_ops imap_relay_ops = { imap_up_chunk,
+                                                       imap_up_finish,
+                                                       imap_up_end };
 
 /* The server has said to go on: the message.  */
 static int
 send_message (struct twist_imap *m)
 {
   struct twist_transfer *t = m->transfer;
-  struct imap_up *u = calloc (1, sizeof *u);
+  struct twist_upload *up;
+  struct imap_up *u;
+  int own = 0;
   int rc;
 
+  u = calloc (1, sizeof *u);
   if (u == NULL)
     return TWIST_ERR_NOMEM;
   u->imap = m;
-  u->transfer = t;
   u->left = m->up_size;
   if (t->postfields != NULL)
-    u->mem = (const uint8_t *) t->postfields;
-  else
-    u->from_cb = 1;
-  if (m->link.conn == NULL)
     {
-      /* Driven without a connection (the tests feed an endpoint).  */
-      uint8_t buf[4096];
-      size_t n;
-
-      rc = TWIST_OK;
-      while (rc == TWIST_OK && (n = imap_up_read (u, buf, sizeof buf)) != 0)
-        rc = n == (size_t) -1 ? TWIST_ERR_ABORTED
-             : m->ep == NULL ? TWIST_OK : twist_endpoint_send (m->ep, buf, n);
-      imap_up_end (u, rc);
-      return rc;
+      up = twist_upload_from_memory ((const uint8_t *) t->postfields,
+                                     (size_t) m->up_size);
+      own = 1;
     }
-  rc = twist_connection_stream (m->link.conn, imap_up_read, imap_up_end, u);
+  else
+    up = twist_transfer_upload (t);
+  twist_upmeter_start (&m->meter, t, m->link.conn);
+  rc = twist_relay_start (m->link.conn, m->ep, up, own, 16384,
+                          &imap_relay_ops, u, &m->meter);
   if (rc != TWIST_OK)
     free (u);
   return rc;

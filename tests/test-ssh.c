@@ -962,6 +962,7 @@ struct setup
    of an awkward size.  */
 static const uint8_t *feed_data;
 static size_t feed_len, feed_pos, feed_piece;
+static size_t feed_piece_default = 7001;
 
 static size_t
 feed (char *ptr, size_t size, size_t nmemb, void *user)
@@ -1003,7 +1004,7 @@ start (struct world *w, struct server *sv, const struct setup *su)
       feed_data = su->upload;
       feed_len = su->upload_len;
       feed_pos = 0;
-      feed_piece = 7001;
+      feed_piece = feed_piece_default;
       transfer->read_cb = feed;
     }
   else if (su->upload != NULL)
@@ -1610,6 +1611,33 @@ test_upload (size_t chunk, int streamed)
   check (sv.first_write == 0, "from the start");
   check (sv.writes >= 40, "in chunks");
   check (sv.closed_handle, "handle closed");
+  twist_transfer_free (transfer);
+  server_free (&sv);
+}
+
+/* A source that gives a byte at a time is sent, each byte in order, and the
+   progress is what the server has acknowledged.  */
+static void
+test_upload_one_byte (void)
+{
+  struct server sv;
+  struct world w;
+  struct twist_transfer *transfer;
+  struct setup su = SETUP ("sftp://alice@127.0.0.1/up.bin", 0, "secret");
+
+  check (server_new (&sv) == 0, "server");
+  su.upload = content;
+  su.upload_len = 300;
+  su.streamed = 1;
+  feed_piece_default = 1;
+  transfer = run (&w, &sv, &su);
+  feed_piece_default = 7001;
+  gf_session_receive (sv.s, now_us, w.c2s.data, w.c2s.len);
+  check (transfer->done && transfer->result == TWIST_OK,
+         "a source of one byte at a time: upload ends well");
+  check (uploaded_is (&sv, content, 300), "and the file is whole");
+  check (transfer->progress.uploaded == 300,
+         "with the progress at what was acknowledged");
   twist_transfer_free (transfer);
   server_free (&sv);
 }
@@ -6010,6 +6038,7 @@ run_tests (void)
   test_file_errors ();
   test_upload (65536, 0);
   test_upload (4096, 1);
+  test_upload_one_byte ();
   test_upload_empty_and_replace ();
   test_upload_resume ();
   test_upload_errors ();

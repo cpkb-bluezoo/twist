@@ -140,6 +140,12 @@ struct twist_sftp_xfer
   int src_eof;
   uint8_t chunk[SFTP_CHUNK];	/* Read from the source, not yet sent.  */
   size_t chunk_len;
+  /* The source, when it is the transfer's push source: a chunk is pushed while
+     the pump asks for one (IN_FILL), or when the producer has it, and the
+     source is paused while one is held.  */
+  struct twist_upload *up;
+  int in_fill;
+  int up_failed;
   unsigned outstanding;		/* Writes not yet answered.  */
 
   /* Requests the client took and the server has not answered.  */
@@ -184,6 +190,8 @@ twist_sftp_free (struct twist_sftp_xfer *g)
 {
   if (g == NULL)
     return;
+  if (g->up != NULL)
+    twist_upload_detach (g->up);
   while (g->slots != NULL)
     {
       struct slot *n = g->slots->next;
@@ -210,6 +218,8 @@ twist_sftp_recycle (struct twist_sftp_xfer *g)
   uint32_t chan = g->chan;
   int have_chan = g->have_chan;
 
+  if (g->up != NULL)
+    twist_upload_detach (g->up);
   while (g->slots != NULL)
     {
       struct slot *n = g->slots->next;
@@ -922,18 +932,62 @@ fill_chunk (struct twist_sftp_xfer *g)
       return 1;
     }
   g->ssh->body_read = 1;
-  n = e->read_cb ((char *) g->chunk, 1, g->chunk_max, e->read_data);
-  if (n == 0)
-    {
-      g->src_eof = 1;
-      return 0;
-    }
-  /* TWIST_READFUNC_ABORT, or more than was asked for.  */
-  if (n > g->chunk_max)
+  if (g->up_failed)
     return -1;
-  g->chunk_len = n;
-  return 1;
+  if (g->up == NULL)
+    return -1;
+  g->in_fill = 1;
+  twist_upload_resume (g->up);
+  g->in_fill = 0;
+  if (g->chunk_len > 0)
+    return 1;
+  if (g->up_failed)
+    return -1;
+  if (g->src_eof)
+    return 0;
+  return 2;			/* Not yet; the producer will push it.  */
 }
+
+static void pump_writes (struct twist_sftp_xfer *g);
+
+/* A chunk of the source, pushed.  */
+static int
+up_chunk (void *user, const uint8_t *data, size_t len)
+{
+  struct twist_sftp_xfer *g = user;
+
+  if (g->chunk_len != 0 || len > g->chunk_max)
+    return TWIST_ERR_ABORTED;
+  memcpy (g->chunk, data, len);
+  g->chunk_len = len;
+  twist_upload_pause (g->up);
+  if (!g->in_fill)
+    {
+      twist_ssh_enter (g->ssh);
+      pump_writes (g);
+      twist_ssh_leave (g->ssh);
+    }
+  return TWIST_OK;
+}
+
+static void
+up_end (void *user, int err)
+{
+  struct twist_sftp_xfer *g = user;
+
+  if (err == TWIST_OK)
+    g->src_eof = 1;
+  else
+    g->up_failed = 1;
+  if (!g->in_fill)
+    {
+      twist_ssh_enter (g->ssh);
+      pump_writes (g);
+      twist_ssh_leave (g->ssh);
+    }
+}
+
+static const struct twist_upload_consumer up_ops = { up_chunk, up_end };
 
 /* Throw away the first SKIP bytes of the source: they are on the server.  */
 static int
@@ -951,18 +1005,8 @@ discard_source (struct twist_sftp_xfer *g)
       g->src_pos = (size_t) left;
       return 0;
     }
-  while (left > 0)
-    {
-      size_t want = left < SFTP_CHUNK ? (size_t) left : SFTP_CHUNK;
-      size_t n;
-
-      g->ssh->body_read = 1;
-      n = e->read_cb ((char *) g->chunk, 1, want, e->read_data);
-      if (n == 0 || n > want)
-        return -1;
-      left -= n;
-    }
-  return 0;
+  g->ssh->body_read = 1;
+  return twist_upload_skip (g->up, (long long) left) == TWIST_OK ? 0 : -1;
 }
 
 static void pump_writes_run (struct twist_sftp_xfer *g);
@@ -1004,6 +1048,8 @@ pump_writes_run (struct twist_sftp_xfer *g)
           fail (g, TWIST_ERR_ABORTED, NULL);
           return;
         }
+      if (have == 2)
+        return;			/* The producer's chunk calls the pump again.  */
       if (have == 0)
         break;
       rc = sent (g, gf_sftp_client_write (g->client, g->handle, g->hlen, g->put_off,
@@ -1054,6 +1100,16 @@ begin_writes (struct twist_sftp_xfer *g)
     twist_progress_ul_size (g->ssh->transfer,
                             total > (long long) g->skip
                             ? total - (long long) g->skip : 0);
+  if (g->ssh->transfer->postfields == NULL)
+    {
+      g->up = twist_transfer_upload (g->ssh->transfer);
+      if (g->up == NULL
+          || twist_upload_attach (g->up, &up_ops, g, g->chunk_max) != TWIST_OK)
+        {
+          fail (g, TWIST_ERR_NOMEM, NULL);
+          return;
+        }
+    }
   if (discard_source (g) != 0)
     {
       fail (g, TWIST_ERR_RESUME,
@@ -1715,7 +1771,8 @@ begin (struct twist_sftp_xfer *g)
   struct twist_ssh *s = g->ssh;
   int rc;
 
-  g->put = s->transfer->postfields != NULL || s->transfer->read_cb != NULL;
+  g->put = s->transfer->postfields != NULL || s->transfer->read_cb != NULL
+           || s->transfer->upload != NULL;
   twist_rate_init (&g->rate, g->put ? s->transfer->max_send_speed
                                     : s->transfer->max_recv_speed);
   g->chunk_max = twist_rate_chunk (&g->rate, SFTP_CHUNK);

@@ -791,6 +791,9 @@ struct twist_upload_producer
   void (*pause) (void *user);
   int (*restart) (void *user);	/* From the first byte; 0 or an error.  */
   void (*release) (void *user);
+  /* Advance past the first N bytes without pushing them (to resume an upload
+     at an offset): 0, or an error if the source is shorter.  May be NULL.  */
+  int (*skip) (void *user, long long n);
 };
 struct twist_upload *twist_upload_new (const struct twist_upload_producer *p,
                                        void *user);
@@ -813,6 +816,54 @@ size_t twist_upload_max (const struct twist_upload *up);
 int twist_upload_active (const struct twist_upload *up);
 /* Begin the source again from the first byte: TWIST_ERR_REWIND if it cannot.  */
 int twist_upload_restart (struct twist_upload *up);
+/* Advance the upload past its first N bytes, before anything is pushed.  A
+   source that cannot do it, or is shorter, is TWIST_ERR_RESUME.  */
+int twist_upload_skip (struct twist_upload *up, long long n);
+/* A source over memory, which is not copied and is to outlive it.  */
+struct twist_upload *twist_upload_from_memory (const uint8_t *data, size_t len);
+
+/* What an upload to a connection has taken to the meter: the body bytes the
+   connection has written since the upload began, which is what the meter
+   shows, and not the framing or what is still queued.  */
+struct twist_upmeter
+{
+  struct twist_transfer *transfer;
+  struct twist_connection *conn;
+  uint64_t base;
+  uint64_t reported;
+};
+void twist_upmeter_start (struct twist_upmeter *m, struct twist_transfer *t,
+                        struct twist_connection *conn);
+void twist_upmeter_sync (struct twist_upmeter *m);
+
+/* An upload sent over a connection as it is pushed, with the source paused
+   while the connection is full.  CHUNK, if not NULL, replaces the plain
+   queueing of a chunk (a handler that transforms or frames it); it sends with
+   twist_relay_push.  FINISH is called after the last chunk, before the end is
+   queued (a trailer).  END is called once, with TWIST_OK when all was queued
+   and with why it did not, and the relay is gone after it.  A failure of the
+   connection ends the relay without notice to the caller beyond END.  With no
+   connection (a handler driven by a test) EP, if not NULL, is sent to.  */
+struct twist_relay;
+struct twist_relay_ops
+{
+  int (*chunk) (void *user, struct twist_relay *r, const uint8_t *data,
+                size_t len);
+  int (*finish) (void *user, struct twist_relay *r);
+  void (*end) (void *user, int err);
+};
+int twist_relay_start (struct twist_connection *conn, struct twist_endpoint *ep,
+                       struct twist_upload *up, int own_up, size_t max,
+                       const struct twist_relay_ops *ops, void *user,
+                       struct twist_upmeter *meter);
+int twist_relay_push (struct twist_relay *r, const uint8_t *data, size_t len);
+/* From CHUNK or FINISH: the upload is complete now (no more is wanted from the
+   source), or has failed for ERR.  The relay is gone after either, and the
+   operation returns at once.  An operation that returns an error, as when a
+   push has failed, also leaves the relay gone.  */
+void twist_relay_done (struct twist_relay *r);
+void twist_relay_abort (struct twist_relay *r, int err);
+
 /* The transfer's upload: the one set, or an adapter over its read callback
    (made once).  NULL if there is neither.  */
 struct twist_upload *twist_transfer_upload (struct twist_transfer *transfer);

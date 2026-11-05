@@ -35,6 +35,28 @@ mqtt_recv (void *obj, const uint8_t *data, size_t len)
   return twist_mqtt_receive (obj, data, len);
 }
 
+struct mq_src
+{
+  size_t total, off, step, fail_at;
+};
+
+static size_t
+mq_read (char *ptr, size_t size, size_t nmemb, void *user)
+{
+  struct mq_src *c = user;
+  size_t n = size * nmemb;
+
+  if (c->fail_at != 0 && c->off >= c->fail_at)
+    return TWIST_READFUNC_ABORT;
+  if (c->step != 0 && n > c->step)
+    n = c->step;
+  if (n > c->total - c->off)
+    n = c->total - c->off;
+  memset (ptr, 'q', n);
+  c->off += n;
+  return n;
+}
+
 static void
 test_mqtt (void)
 {
@@ -90,6 +112,55 @@ test_mqtt (void)
   check (has_bytes (cmd, n, "ping", 4)
          && n >= 2 && cmd[n - 2] == 0xe0 && cmd[n - 1] == 0x00, "pub bytes");
   twist_transfer_free (transfer);
+
+  /* The payload from a source that gives a byte at a time; at the cap
+     (16 KiB), and one byte past it; and a source that fails.  */
+  {
+    static const size_t sizes[] = { 5, 16384, 16385 };
+    size_t i;
+
+    for (i = 0; i < 3; i++)
+      {
+        struct mq_src src;
+
+        memset (&src, 0, sizeof src);
+        src.total = sizes[i];
+        src.step = 1;
+        transfer = twist_transfer_new ();
+        twist_url_parse_int ("mqtt://127.0.0.1/a", &transfer->url);
+        transfer->read_cb = mq_read;
+        transfer->read_data = &src;
+        mqtt = twist_mqtt_new (transfer, 0);
+        feed_bin (mqtt_recv, mqtt, connack, sizeof connack, 1);
+        cmd = twist_mqtt_command (mqtt, &n);
+        if (sizes[i] <= 16384)
+          check (transfer->done && transfer->result == TWIST_OK
+                 && transfer->progress.uploaded == (long long) sizes[i]
+                 && (sizes[i] > 100 || n >= sizes[i]),
+                 "a payload from a source is published");
+        else
+          check (transfer->done && transfer->result == TWIST_ERR_PROTOCOL,
+                 "a payload past the cap is a protocol error");
+        twist_transfer_free (transfer);
+      }
+    {
+      struct mq_src src;
+
+      memset (&src, 0, sizeof src);
+      src.total = 100;
+      src.step = 10;
+      src.fail_at = 30;
+      transfer = twist_transfer_new ();
+      twist_url_parse_int ("mqtt://127.0.0.1/a", &transfer->url);
+      transfer->read_cb = mq_read;
+      transfer->read_data = &src;
+      mqtt = twist_mqtt_new (transfer, 0);
+      feed_bin (mqtt_recv, mqtt, connack, sizeof connack, 1);
+      check (transfer->done && transfer->result == TWIST_ERR_ABORTED,
+             "a source that fails fails the transfer");
+      twist_transfer_free (transfer);
+    }
+  }
 
   transfer = twist_transfer_new ();
   check (twist_url_parse_int ("mqtt://127.0.0.1/a",
