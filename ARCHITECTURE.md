@@ -245,6 +245,22 @@ The loop drains the command queue at the top of every iteration.
 - A restart goes to the producer; one that cannot restart fails the transfer
   with `TWIST_ERR_REWIND`.
 
+### Pausing One Stream
+
+- A slow consumer of one HTTP/2 stream must not stop the others on the
+  connection, so the connection is not paused. The stream's `WINDOW_UPDATE` is
+  withheld (`twist_h2_hold_stream`), the server stops when it has used the
+  window, and what was already on its way is held by the handler, bounded, and
+  given on resume.
+- On HTTP/1 the connection belongs to the transfer, and the read is paused.
+- An HTTP/3 stream is paused the same way, by withholding the QUIC stream's
+  credit (`MAX_STREAM_DATA`) with `gq_conn_stream_hold`, which needs a quickstep
+  that has it. Without it, `twist_http_pause_body` reports
+  `TWIST_ERR_UNSUPPORTED` on HTTP/3.
+- An upload on HTTP/2 or HTTP/3 already waits for the stream's send window and
+  for room in the connection's queue, and pauses its source while it waits;
+  it never pauses the connection's read.
+
 ### Regular-file Pipeline
 
 - A regular file cannot be polled, so its reads and writes are jobs on the

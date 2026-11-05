@@ -363,6 +363,26 @@ twist_quic_stream_id (struct twist_connection *conn)
   return s != NULL ? s->id : UINT64_MAX;
 }
 
+/* Withhold (or give back) the receive credit of the stream ID, so that the peer
+   stops sending on it when it has used what it was granted, and the other
+   streams are not affected.  TWIST_ERR_UNSUPPORTED if the QUIC library cannot.  */
+int
+twist_quic_hold_recv (struct twist_connection *conn, uint64_t id, int hold)
+{
+  struct twist_quic *q = conn != NULL ? twist_connection_tls (conn) : NULL;
+
+  if (q == NULL || q->conn == NULL)
+    return TWIST_ERR_INVAL;
+#ifdef HAVE_GQ_CONN_STREAM_HOLD
+  return gq_conn_stream_hold (q->conn, id, hold) == GQ_OK ? TWIST_OK
+                                                           : TWIST_ERR_INVAL;
+#else
+  (void) id;
+  (void) hold;
+  return TWIST_ERR_UNSUPPORTED;
+#endif
+}
+
 /* The name the certificate of the server is checked against and that is sent
    as the server name: the host of the URL, never the address that was dialled.
    NULL if CONN is not a QUIC connection.  */

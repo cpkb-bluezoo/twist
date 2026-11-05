@@ -437,6 +437,15 @@ int twist_transfer_origin_okey (struct twist_transfer *transfer, char *buf,
 /* Whether the transfer may share a connection with others to its origin
    (HTTP/2 or HTTP/3 may be had), from its options and URL alone.  */
 int twist_http_may_multiplex (struct twist_transfer *transfer);
+/* Pause the delivery of the response body of an HTTP TRANSFER, and resume it.
+   On HTTP/1 the connection stops reading (it is the transfer's own).  On HTTP/2
+   only the stream is paused: its window is not given back, so the server stops
+   when it has used it, and the connection and its other streams go on.  What
+   was already on its way is held, no more than a window of it.  HTTP/3 pauses its stream by
+   withholding the QUIC stream's credit, where the QUIC library can
+   (otherwise TWIST_ERR_UNSUPPORTED).  */
+int twist_http_pause_body (struct twist_transfer *transfer);
+void twist_http_resume_body (struct twist_transfer *transfer);
 struct twist_origintab *twist_origintab_new (void);
 void twist_origintab_free (struct twist_origintab *tab);
 void twist_origintab_set_cap (struct twist_origintab *tab, long cap);
@@ -974,6 +983,10 @@ void twist_quic_bind (struct twist_connection *conn,
 int twist_tls_register (void);
 int twist_quic_register (void);
 void twist_quic_hold_stream (struct twist_connection *conn);
+/* Withhold the receive credit of one stream: the peer stops on it, and the
+   connection and its other streams go on.  TWIST_ERR_UNSUPPORTED if the QUIC
+   library has no way.  */
+int twist_quic_hold_recv (struct twist_connection *conn, uint64_t id, int hold);
 int twist_quic_finish_stream (struct twist_connection *conn);
 
 /* ---- storage ---- */

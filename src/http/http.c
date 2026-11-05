@@ -87,6 +87,16 @@ struct twist_http
   /* The meter of an HTTP/1 upload follows the body bytes that the connection
      has written: where it began, and how much of it has been reported.  */
   int up_tracked;
+  /* The response body, paused by the application (twist_http_pause_body): what
+     arrives meanwhile is held, no more than HELD_MAX, and given on resume.
+     STREAM is the HTTP/2 stream of the request.  */
+  int body_paused;
+  int flushing;
+  uint8_t *held;
+  size_t held_len;
+  size_t held_cap;
+  uint32_t stream;
+  uint64_t qstream;		/* The QUIC stream of an HTTP/3 request.  */
   uint64_t up_base;
   uint64_t up_reported;
   struct body_pump *pump;
@@ -1249,8 +1259,13 @@ accepts_coding (const char *accept, const char *name)
    the transfer ends there, with what was taken counted: the rest of the body
    is not read to be thrown away.  Ending it only queues its completion, so it
    is safe from inside the parser.  */
+/* No more than this is held for a paused body: a window's worth is what can
+   be on its way when an HTTP/2 stream is paused, and a read's worth on
+   HTTP/1.  */
+#define HELD_MAX (2u * 1024u * 1024u)
+
 static void
-deliver_body (struct twist_http *h, const uint8_t *data, size_t len)
+emit_body (struct twist_http *h, const uint8_t *data, size_t len)
 {
   size_t got = len;
 
@@ -1262,6 +1277,126 @@ deliver_body (struct twist_http *h, const uint8_t *data, size_t len)
   h->transfer->size_download += got;
   if (got < len)
     http_complete (h, TWIST_ERR_ABORTED);
+}
+
+static void
+deliver_body (struct twist_http *h, const uint8_t *data, size_t len)
+{
+  if (h->finished)
+    return;
+  if (!h->body_paused && h->held_len == 0)
+    {
+      emit_body (h, data, len);
+      return;
+    }
+  /* Paused (or still giving back what was held): this comes after it.  */
+  if (len > HELD_MAX - h->held_len)
+    {
+      http_complete (h, TWIST_ERR_PROTOCOL);
+      return;
+    }
+  if (h->held_len + len > h->held_cap)
+    {
+      size_t cap = h->held_cap == 0 ? 16384 : h->held_cap;
+      uint8_t *grown;
+
+      while (cap < h->held_len + len)
+        cap *= 2;
+      grown = realloc (h->held, cap);
+      if (grown == NULL)
+        {
+          http_complete (h, TWIST_ERR_NOMEM);
+          return;
+        }
+      h->held = grown;
+      h->held_cap = cap;
+    }
+  memcpy (h->held + h->held_len, data, len);
+  h->held_len += len;
+}
+
+/* Give back what was held, a piece at a time, until it is all given or the
+   application pauses again.  */
+static void
+flush_held (struct twist_http *h)
+{
+  size_t off = 0;
+
+  if (h->flushing)
+    return;
+  h->flushing = 1;
+  while (off < h->held_len && !h->body_paused && !h->finished)
+    {
+      size_t n = h->held_len - off;
+
+      if (n > 16384)
+        n = 16384;
+      /* The application may pause or end the transfer from here.  */
+      emit_body (h, h->held + off, n);
+      off += n;
+    }
+  if (off >= h->held_len)
+    h->held_len = 0;
+  else if (off > 0)
+    {
+      memmove (h->held, h->held + off, h->held_len - off);
+      h->held_len -= off;
+    }
+  h->flushing = 0;
+}
+
+static void http_free (void *p);
+
+static struct twist_http *
+transfer_http (struct twist_transfer *t)
+{
+  return t != NULL && t->state_free == http_free ? t->state : NULL;
+}
+
+int
+twist_http_pause_body (struct twist_transfer *t)
+{
+  struct twist_http *h = transfer_http (t);
+
+  if (h == NULL)
+    return TWIST_ERR_INVAL;
+  if (h->body_paused)
+    return TWIST_OK;
+  if (h->conn == NULL)
+    return TWIST_ERR_INVAL;
+  if (h->mode == HTTP_H3)
+    {
+      int rc = twist_quic_hold_recv (h->conn, h->qstream, 1);
+
+      if (rc != TWIST_OK)
+        return rc;
+      h->body_paused = 1;
+      return TWIST_OK;
+    }
+  h->body_paused = 1;
+  if (h->mode == HTTP_H2)
+    twist_h2_hold_stream (h->h2, h->stream, 1);
+  else
+    twist_endpoint_pause_read (twist_connection_endpoint (h->conn));
+  return TWIST_OK;
+}
+
+void
+twist_http_resume_body (struct twist_transfer *t)
+{
+  struct twist_http *h = transfer_http (t);
+
+  if (h == NULL || !h->body_paused)
+    return;
+  h->body_paused = 0;
+  if (h->mode == HTTP_H2)
+    twist_h2_hold_stream (h->h2, h->stream, 0);
+  else if (h->mode == HTTP_H3 && h->conn != NULL)
+    twist_quic_hold_recv (h->conn, h->qstream, 0);
+  flush_held (h);
+  if (h->mode == HTTP_H1 && h->conn != NULL && !h->body_paused
+      && !h->finished)
+    twist_endpoint_resume_read (twist_connection_endpoint (h->conn));
 }
 
 /* Decoded data, in pieces, from the coding; see twist_coding_sink.  */
@@ -2170,11 +2305,15 @@ send_request_target (struct twist_http *h, const char *target)
       rc = twist_h2_request (h->h2, method, scheme, authority, target, extra,
                              pump ? NULL : body, pump ? 0 : body_len,
                              pump ? 1 : keep_open, &out, &out_len);
+      h->stream = twist_h2_last_stream (h->h2);
     }
   else if (h->mode == HTTP_H3)
-    rc = twist_h3_request (h->h3, method, scheme, authority, target, extra,
-                           pump ? NULL : body, pump ? 0 : body_len, &out,
-                           &out_len);
+    {
+      h->qstream = twist_quic_stream_id (h->conn);
+      rc = twist_h3_request (h->h3, method, scheme, authority, target, extra,
+                             pump ? NULL : body, pump ? 0 : body_len, &out,
+                             &out_len);
+    }
   else
     {
       /* What answers a HEAD has no body, and the parser must know it before
@@ -4259,6 +4398,7 @@ http_free (void *p)
   free (h->ws_upgrade);
   free (h->ws_connection);
   free (h->ws_accept);
+  free (h->held);
   free (h->location);
   free (h->challenge);
   free (h->auth_line);

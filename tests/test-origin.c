@@ -73,6 +73,9 @@ struct srv
 };
 
 #define BIG 150000
+/* A response on /Z is larger than a stream's window, so a stream that is not
+   given its window back stalls the server.  */
+#define HUGE_BODY (2 * 1024 * 1024)
 
 static const char h1_reply[] =
   "HTTP/1.1 200 OK\r\nContent-Length: 6\r\n\r\nhello\n";
@@ -138,7 +141,7 @@ srv_pump (struct srv *s, int i)
       big[2] = (unsigned char) n;
       if (write (s->conns[i], big, (size_t) n + 9) < 0)
         return -1;
-      s->big_left[i] -= n;
+      __atomic_sub_fetch (&s->big_left[i], n, __ATOMIC_ACQ_REL);
       s->conn_win[i] -= n;
       s->big_win[i] -= n;
     }
@@ -228,6 +231,7 @@ srv_serve (struct srv *s, int i)
           size_t k;
           int redirect = 0;
           int big = 0;
+          int huge = 0;
           int ping = 0;
 
           /* A request for /r is sent to /1, one for /b is answered at length
@@ -238,15 +242,18 @@ srv_serve (struct srv *s, int i)
               {
                 redirect |= s->buf[i][k + 1] == 'r';
                 big |= s->buf[i][k + 1] == 'b';
+                huge |= s->buf[i][k + 1] == 'Z';
                 ping |= s->buf[i][k + 1] == 'p';
               }
           if (redirect)
             n += frame (out + n, 1, 5, stream, moved, sizeof moved);
-          else if (big)
+          else if (big || huge)
             {
               n += frame (out + n, 1, 4, stream, &status200, 1);
               s->big_stream[i] = stream;
-              s->big_left[i] = BIG;
+              __atomic_store_n (&s->big_left[i],
+                                huge ? (long) HUGE_BODY : (long) BIG,
+                                __ATOMIC_RELEASE);
               s->big_win[i] = s->stream_init[i];
             }
           else if (ping)
@@ -700,6 +707,89 @@ test_h2_window (void)
   srv_stop (&s);
 }
 
+struct pausing
+{
+  twist_transfer *transfer;
+  size_t got;
+  int pause_at;			/* Pause once this many bytes have come.  */
+  int paused;
+};
+
+static size_t
+pausing_body (char *ptr, size_t size, size_t nmemb, void *user)
+{
+  struct pausing *p = user;
+
+  (void) ptr;
+  p->got += size * nmemb;
+  if (!p->paused && p->got >= (size_t) p->pause_at)
+    {
+      p->paused = 1;
+      twist_http_pause_body (p->transfer);
+    }
+  return size * nmemb;
+}
+
+/* Pausing the body of one stream stops that stream only: its window is not
+   given back, so the server stops sending on it, and another stream on the
+   same connection is still answered.  Resumed, it goes on and ends.  */
+static void
+test_h2_pause_stream (void)
+{
+  struct srv s;
+  struct run r;
+  struct pausing p;
+  size_t at_pause;
+  struct timespec t0, t1;
+
+  check (srv_start (&s, 1, 0) == 0, "server");
+  check (run_open (&r), "runtime");
+  memset (&p, 0, sizeof p);
+  p.pause_at = 1000;
+  run_make (&r, 0, &s, 1, -1);
+  run_path (&r, 0, &s, "/Z");
+  p.transfer = r.t[0];
+  twist_transfer_setopt (r.t[0], TWISTOPT_WRITEFUNCTION, pausing_body);
+  twist_transfer_setopt (r.t[0], TWISTOPT_WRITEDATA, &p);
+  run_go (&r, 0);
+  clock_gettime (CLOCK_MONOTONIC, &t0);
+  do
+    {
+      twist_runtime_run_once (r.runtime, 10);
+      clock_gettime (CLOCK_MONOTONIC, &t1);
+    }
+  while (!p.paused && t1.tv_sec - t0.tv_sec < 3);
+  check (p.paused, "the first stream is paused");
+  /* Give the rest of what was in flight time to arrive.  */
+  for (int k = 0; k < 20; k++)
+    twist_runtime_run_once (r.runtime, 10);
+  at_pause = p.got;
+  check (!r.job[0].done, "and is not over");
+  /* Another stream on the same connection.  */
+  run_make (&r, 1, &s, 1, -1);
+  run_go (&r, 1);
+  {
+    int k;
+
+    for (k = 0; k < 200 && !r.job[1].done; k++)
+      twist_runtime_run_once (r.runtime, 10);
+  }
+  check (r.job[1].done && r.job[1].result == TWIST_OK && r.got[1] == 6,
+         "another stream on the connection is still answered");
+  check (ld (&s.accepts) == 1, "over the one connection");
+  check (!r.job[0].done && p.got <= at_pause + 4096
+         && p.got < (size_t) HUGE_BODY,
+         "the paused stream receives nothing more");
+  check (__atomic_load_n (&s.big_left[0], __ATOMIC_ACQUIRE) > 0,
+         "because the server has not been given its window back");
+  twist_http_resume_body (r.t[0]);
+  check (run_wait (&r, 2), "resumed, it ends");
+  check (r.job[0].result == TWIST_OK && p.got == (size_t) HUGE_BODY,
+         "with all of the body");
+  run_close (&r, 2);
+  srv_stop (&s);
+}
+
 /* The server pings after the first transfer has ended, while the second is
    waiting for its answer, which is not sent until the ping is.  */
 static void
@@ -997,6 +1087,8 @@ main (void)
   test_h2_redirect ();
   announce ("test_h2_window");
   test_h2_window ();
+  announce ("test_h2_pause_stream");
+  test_h2_pause_stream ();
   announce ("test_h2_ping");
   test_h2_ping ();
   announce ("test_leader_fails");

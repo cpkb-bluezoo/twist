@@ -76,6 +76,15 @@ AS_IF([test "x$with_quickstep" != xyes],
       export PKG_CONFIG_PATH])])
 PKG_CHECK_MODULES([QUICKSTEP], [quickstep], [],
   [AC_MSG_ERROR([quickstep is not installed.  pkg-config must see quickstep.pc])])
+dnl A QUIC stream can have its receive credit withheld in later quickstep
+dnl releases; without it an HTTP/3 response body cannot be paused.
+tw_save_LIBS=$LIBS
+tw_save_CFLAGS=$CFLAGS
+LIBS="$QUICKSTEP_LIBS $LIBS"
+CFLAGS="$QUICKSTEP_CFLAGS $CFLAGS"
+AC_CHECK_FUNCS([gq_conn_stream_hold])
+LIBS=$tw_save_LIBS
+CFLAGS=$tw_save_CFLAGS
 
 dnl foxtrot is the SSH engine under scp and sftp, installed beside quickstep.
 dnl It needs libgcrypt 1.12.4 or later and refuses to start with an older

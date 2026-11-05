@@ -106,7 +106,14 @@ A sink is the other direction.  A handler gives what it has received to
 twist_sink_feed and returns the count from receive; a sink that takes fewer
 bytes than it was given has paused, the connection pauses the read, and the
 tail is presented again when the sink calls twist_sink_resume.  HTTP/2 and
-HTTP/3 pause one stream and do not use the connection-level pause.
+HTTP/3 pause one stream and do not use the connection-level pause.  An HTTP response
+body is paused with twist_http_pause_body: on HTTP/1 the transfer's own
+connection stops reading, and on HTTP/2 only the stream is paused (its window
+is not given back, so the server stops when it has used it) while the
+connection and its other streams go on.  Data already on its way is held, no
+more than 2 MiB, and given on twist_http_resume_body.  Pausing a whole
+multiplexed connection because one stream's consumer is slow is the mistake
+this avoids.
 
 Parsers do not copy the tail.  A field that must be remembered across
 calls is a fixed-size scratch with its own hard maximum (the HTTP/1
