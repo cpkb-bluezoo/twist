@@ -66,7 +66,7 @@ header files are Twist's own.
 The schemes that are implemented are listed under @ref{Protocols}.
 Schemes that are not yet implemented have a row in the scheme table, so
 a handler can be added without changing the transfer engine.  TLS and QUIC come from
-GNU Quickstep.  The reactor starts a thread only when a runtime is asked to
+quickstep.  The reactor starts a thread only when a runtime is asked to
 run transfers on several loops (@pxref{Runtime}).  A
 transfer's sockets stay on one loop, and QUIC is one UDP socket on
 that same loop.
