@@ -375,7 +375,12 @@ srv_main (void *arg)
       }
     }
 reply:
-  (void) !write (fd, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok", 66);
+  {
+    static const char reply[] = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n"
+                                "Connection: close\r\n\r\nok";
+
+    (void) !write (fd, reply, sizeof reply - 1);
+  }
 out:
   close (fd);
   free (raw);
