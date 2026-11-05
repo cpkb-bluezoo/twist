@@ -66,13 +66,35 @@ sent and not yet written (TWIST_OUT_HIGH, 16 KiB, a TLS record); after a send
 twist_endpoint_full says whether it does, and the producer then stops, holding
 only the chunk it has, and goes on from the endpoint's on_write_ready (set it
 with write_user, and guard against the callback arriving from inside the send
-that causes it).  A source that is one stream of bytes can use
-twist_connection_stream, which reads a chunk only when the connection has
-room.  A handler that sends frames of a protocol with its own flow control
-(HTTP/2's windows, QUIC's) stops for both.  The source is read as it is sent,
-never to its end first; if the data has to be sent again it is rewound
-(TWISTOPT_SEEKFUNCTION) or the transfer fails.  A new scheme with an upload
-does this from the start.
+that causes it).  A source that is one stream of bytes is a push source
+(twist_connection_attach_source): the producer calls twist_connection_push
+for each chunk and push_end when it is over, and does not wait to be asked.
+The connection calls pause when it holds TWIST_OUT_HIGH and resume from the
+write path when it holds less; between the two the producer pushes nothing
+more, apart from a chunk already under way.  The chunk is released when the
+connection has no further use for it, and the producer reuses its buffer only
+after that.  The end callback is called exactly once, by whichever of the
+producer and the connection ends it first.  twist_connection_stream remains,
+as an adapter that pulls from a read callback on the loop thread, until the
+handlers have moved to push sources.  A handler that sends frames of a
+protocol with its own flow control (HTTP/2's windows, QUIC's) stops for both.
+The source is read as it is sent, never to its end first; if the data has to
+be sent again the source is restarted (twist_connection_source_restart,
+TWISTOPT_SEEKFUNCTION) or the transfer fails with TWIST_ERR_REWIND.  A new
+scheme with an upload does this from the start.
+
+Body bytes are sent with twist_connection_send_body (twist_connection_push
+does so) and framing with twist_endpoint_send.  twist_connection_body_written
+is how many body bytes the socket has accepted, which is what the progress
+meter shows for an upload: not those still queued, and not chunk headers or
+protocol commands.  sftp and SMB count a write when the server acknowledges
+it, and keep their own counts.
+
+A sink is the other direction.  A handler gives what it has received to
+twist_sink_feed and returns the count from receive; a sink that takes fewer
+bytes than it was given has paused, the connection pauses the read, and the
+tail is presented again when the sink calls twist_sink_resume.  HTTP/2 and
+HTTP/3 pause one stream and do not use the connection-level pause.
 
 Parsers do not copy the tail.  A field that must be remembered across
 calls is a fixed-size scratch with its own hard maximum (the HTTP/1

@@ -624,6 +624,68 @@ typedef void (*twist_stream_end_fn) (void *user, int err);
 int twist_connection_stream (struct twist_connection *conn,
                              twist_stream_read_fn read,
                              twist_stream_end_fn end, void *user);
+/* A source the producer pushes into.  The producer calls twist_connection_push
+   for each chunk and twist_connection_push_end when there is no more; it does
+   not wait to be asked.  The connection calls PAUSE when it holds
+   TWIST_OUT_HIGH of what has not been written, and RESUME from the write path
+   once it holds less; between the two the producer pushes nothing more (one
+   chunk that was already under way is taken, and the connection holds no more
+   than a chunk past TWIST_OUT_HIGH).  END is called exactly once, whoever
+   ends it: with TWIST_OK when the producer ended it after the last chunk was
+   queued (not written), or with why it did not get that far (the producer
+   failed, or the connection failed or was freed first).  END must not free the
+   connection.  RESTART begins the source again from the first byte; it may be
+   NULL, or fail, and then twist_connection_source_restart reports
+   TWIST_ERR_REWIND.  PAUSE and RESUME may push (RESUME usually does).  One
+   source, or one twist_connection_stream, at a time.  */
+struct twist_source_ops
+{
+  void (*pause) (void *user);
+  void (*resume) (void *user);
+  int (*restart) (void *user);
+  void (*end) (void *user, int err);
+};
+int twist_connection_attach_source (struct twist_connection *conn,
+                                    const struct twist_source_ops *ops,
+                                    void *user);
+/* Queue CHUNK as body.  RELEASE, if not NULL, is called with REL_USER once the
+   connection no longer needs CHUNK; the connection is free to call it before
+   this returns, and the producer reuses the buffer only after it.  */
+int twist_connection_push (struct twist_connection *conn, const uint8_t *chunk,
+                           size_t len, void (*release) (void *),
+                           void *rel_user);
+void twist_connection_push_end (struct twist_connection *conn, int err);
+/* Begin the attached source again.  TWIST_ERR_REWIND if it cannot.  */
+int twist_connection_source_restart (struct twist_connection *conn);
+/* Whether the attached source has been told to pause and not resumed.  */
+int twist_connection_source_paused (const struct twist_connection *conn);
+/* As twist_endpoint_send, for bytes that are body: the connection counts them
+   apart from framing (chunk headers, protocol commands), which are sent with
+   twist_endpoint_send.  */
+int twist_connection_send_body (struct twist_connection *conn,
+                                const uint8_t *data, size_t len);
+/* How many body bytes the socket has accepted: not those still queued, and no
+   framing.  On a connection that encrypts, a record that is partly written
+   counts in proportion.  */
+uint64_t twist_connection_body_written (const struct twist_connection *conn);
+
+/* A sink that takes a slice and may pause.  TAKE is given DATA and LEN and
+   returns how many bytes it used; fewer than LEN is a pause, and it calls
+   twist_sink_resume when it can take more.  A handler gives what it has
+   received to twist_sink_feed and returns that count from receive.  The
+   connection holds the tail and presents it again on resume.  HTTP/2 and
+   HTTP/3 pause one stream and do not use this.  */
+struct twist_sink
+{
+  size_t (*take) (void *user, const uint8_t *data, size_t len);
+  void *user;
+  struct twist_endpoint *ep;
+  int paused;
+};
+size_t twist_sink_feed (struct twist_sink *sink, struct twist_endpoint *ep,
+                        const uint8_t *data, size_t len);
+void twist_sink_resume (struct twist_sink *sink);
+
 /* Tell the peer there is no more to come: the write side is shut once all that
    was queued has been written, and the connection stays open for what the
    peer still says.  */

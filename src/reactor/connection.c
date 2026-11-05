@@ -33,6 +33,15 @@
 #include <sys/socket.h>
 #include <sys/types.h>
 
+/* A run of the output that is body: WIRE bytes of the stream, of which BODY
+   are body bytes (they differ where TLS adds to a record).  */
+struct body_ext
+{
+  uint64_t start;
+  size_t wire;
+  size_t body;
+};
+
 struct twist_connection
 {
   struct twist_endpoint ep;
@@ -83,6 +92,21 @@ struct twist_connection
   twist_stream_end_fn stream_end;
   void *stream_user;
   int filling;
+  /* A source pushed into (twist_connection_attach_source).  */
+  const struct twist_source_ops *src_ops;
+  void *src_user;
+  int src_paused;
+  int src_kicking;
+  /* What has been queued and written, in bytes of the stream the socket
+     takes, and which of it is body (twist_connection_body_written).  */
+  uint64_t out_queued;
+  uint64_t out_written;
+  uint64_t body_done;
+  size_t body_left;
+  struct body_ext *exts;
+  size_t ext_n;
+  size_t ext_off;
+  size_t ext_cap;
   void (*shutdown_fn) (void *);	/* Shuts the write side of one with no fd.  */
   int half_close;               /* Shut the write side when it is all written.  */
   int writing;                  /* In the loop that writes (see on_writable).  */
@@ -258,6 +282,230 @@ on_rate_write (void *user)
   twist_connection_on_writable (c);
 }
 
+static int append_buf (uint8_t **buf, size_t *off, size_t *len, size_t *cap,
+                       const uint8_t *data, size_t n);
+
+/* Append to the output, and note which of it is body.  */
+static int
+out_add (struct twist_connection *c, const uint8_t *data, size_t len)
+{
+  int rc;
+  uint64_t start = c->out_queued;
+  size_t body = len < c->body_left ? len : c->body_left;
+
+  if (len == 0)
+    return TWIST_OK;
+  rc = append_buf (&c->outbuf, &c->out_off, &c->out_len, &c->out_cap, data,
+                   len);
+  if (rc != TWIST_OK)
+    return rc;
+  c->out_queued += len;
+  c->body_left -= body;
+  if (body > 0)
+    {
+      struct body_ext *tail = c->ext_n > c->ext_off ? &c->exts[c->ext_n - 1]
+                                                   : NULL;
+
+      if (tail != NULL && tail->start + tail->wire == start
+          && tail->body == tail->wire && body == len)
+        {
+          tail->wire += len;
+          tail->body += body;
+        }
+      else
+        {
+          if (c->ext_n == c->ext_cap)
+            {
+              size_t ncap = c->ext_cap == 0 ? 16 : c->ext_cap * 2;
+              struct body_ext *ne = realloc (c->exts, ncap * sizeof *ne);
+
+              if (ne == NULL)
+                return TWIST_ERR_NOMEM;
+              c->exts = ne;
+              c->ext_cap = ncap;
+            }
+          c->exts[c->ext_n].start = start;
+          c->exts[c->ext_n].wire = len;
+          c->exts[c->ext_n].body = body;
+          c->ext_n++;
+        }
+    }
+  return TWIST_OK;
+}
+
+/* N bytes of the output have been written.  */
+static void
+out_written (struct twist_connection *c, size_t n)
+{
+  c->out_written += n;
+  while (c->ext_off < c->ext_n)
+    {
+      struct body_ext *e = &c->exts[c->ext_off];
+
+      if (e->start + e->wire > c->out_written)
+        break;
+      c->body_done += e->body;
+      c->ext_off++;
+    }
+  if (c->ext_off == c->ext_n)
+    c->ext_off = c->ext_n = 0;
+}
+
+uint64_t
+twist_connection_body_written (const struct twist_connection *c)
+{
+  uint64_t n;
+
+  if (c == NULL)
+    return 0;
+  n = c->body_done;
+  if (c->ext_off < c->ext_n)
+    {
+      const struct body_ext *e = &c->exts[c->ext_off];
+
+      if (e->start < c->out_written)
+        n += (uint64_t) e->body * (c->out_written - e->start) / e->wire;
+    }
+  return n;
+}
+
+int
+twist_connection_send_body (struct twist_connection *c, const uint8_t *data,
+                            size_t len)
+{
+  int rc;
+
+  if (c == NULL || c->ep.send == NULL)
+    return TWIST_ERR_INVAL;
+  c->body_left = len;
+  rc = c->ep.send (&c->ep, data, len);
+  c->body_left = 0;
+  return rc;
+}
+
+/* The source is over, for ERR.  */
+static void
+source_finish (struct twist_connection *c, int err)
+{
+  const struct twist_source_ops *ops = c->src_ops;
+  void *user = c->src_user;
+
+  c->src_ops = NULL;
+  c->src_user = NULL;
+  c->src_paused = 0;
+  if (ops != NULL && ops->end != NULL)
+    ops->end (user, err);
+}
+
+/* Resume the source while less than TWIST_OUT_HIGH is queued.  A resume that
+   pushes does not begin another inside itself: this loop goes on.  */
+static void
+source_kick (struct twist_connection *c)
+{
+  if (c->src_kicking)
+    return;
+  c->src_kicking = 1;
+  while (c->src_ops != NULL && c->src_paused && !c->failed && !c->closing
+         && c->out_len < TWIST_OUT_HIGH)
+    {
+      const struct twist_source_ops *ops = c->src_ops;
+      void *user = c->src_user;
+
+      c->src_paused = 0;
+      if (ops->resume != NULL)
+        ops->resume (user);
+    }
+  c->src_kicking = 0;
+}
+
+int
+twist_connection_attach_source (struct twist_connection *c,
+                                const struct twist_source_ops *ops, void *user)
+{
+  if (c == NULL || ops == NULL || c->src_ops != NULL || c->stream_read != NULL)
+    return TWIST_ERR_INVAL;
+  c->src_ops = ops;
+  c->src_user = user;
+  c->src_paused = 0;
+  return TWIST_OK;
+}
+
+int
+twist_connection_push (struct twist_connection *c, const uint8_t *chunk,
+                       size_t len, void (*release) (void *), void *rel_user)
+{
+  int rc;
+
+  if (c == NULL || c->src_ops == NULL || c->failed || c->closing)
+    return TWIST_ERR_INVAL;
+  rc = twist_connection_send_body (c, chunk, len);
+  /* The bytes are queued, or were refused; either way the chunk is done
+     with.  */
+  if (release != NULL)
+    release (rel_user);
+  if (rc != TWIST_OK)
+    {
+      twist_connection_fail (c, rc);
+      return rc;
+    }
+  if (c->src_ops != NULL && !c->src_paused && c->out_len >= TWIST_OUT_HIGH)
+    {
+      c->src_paused = 1;
+      if (c->src_ops->pause != NULL)
+        c->src_ops->pause (c->src_user);
+    }
+  return TWIST_OK;
+}
+
+void
+twist_connection_push_end (struct twist_connection *c, int err)
+{
+  if (c == NULL || c->src_ops == NULL)
+    return;
+  source_finish (c, err);
+}
+
+int
+twist_connection_source_restart (struct twist_connection *c)
+{
+  if (c == NULL || c->src_ops == NULL || c->src_ops->restart == NULL)
+    return TWIST_ERR_REWIND;
+  return c->src_ops->restart (c->src_user) == 0 ? TWIST_OK : TWIST_ERR_REWIND;
+}
+
+int
+twist_connection_source_paused (const struct twist_connection *c)
+{
+  return c != NULL && c->src_ops != NULL && c->src_paused;
+}
+
+size_t
+twist_sink_feed (struct twist_sink *sink, struct twist_endpoint *ep,
+                 const uint8_t *data, size_t len)
+{
+  size_t n;
+
+  sink->ep = ep;
+  n = sink->take (sink->user, data, len);
+  if (n > len)
+    n = len;
+  if (n < len)
+    {
+      sink->paused = 1;
+      twist_endpoint_pause_read (ep);
+    }
+  return n;
+}
+
+void
+twist_sink_resume (struct twist_sink *sink)
+{
+  if (sink == NULL || !sink->paused || sink->ep == NULL)
+    return;
+  sink->paused = 0;
+  twist_endpoint_resume_read (sink->ep);
+}
+
 /* The stream is asked for a chunk when less than TWIST_OUT_HIGH is queued.  */
 #define STREAM_CHUNK TWIST_OUT_HIGH
 
@@ -304,7 +552,7 @@ stream_fill (struct twist_connection *c)
         {
           if (n > sizeof buf)
             n = sizeof buf;
-          if (c->ep.send (&c->ep, buf, n) != TWIST_OK)
+          if (twist_connection_send_body (c, buf, n) != TWIST_OK)
             err = TWIST_ERR_NOMEM;
         }
       if (err != TWIST_OK)
@@ -322,14 +570,15 @@ stream_fill (struct twist_connection *c)
 int
 twist_connection_streaming (const struct twist_connection *c)
 {
-  return c != NULL && c->stream_read != NULL;
+  return c != NULL && (c->stream_read != NULL || c->src_ops != NULL);
 }
 
 int
 twist_connection_stream (struct twist_connection *c, twist_stream_read_fn read,
                          twist_stream_end_fn end, void *user)
 {
-  if (c == NULL || read == NULL || c->stream_read != NULL)
+  if (c == NULL || read == NULL || c->stream_read != NULL
+      || c->src_ops != NULL)
     return TWIST_ERR_INVAL;
   c->stream_read = read;
   c->stream_end = end;
@@ -611,6 +860,9 @@ twist_connection_free (struct twist_connection *c)
     return;
   if (c->stream_read != NULL)
     stream_finish (c, TWIST_ERR_CLOSED);
+  if (c->src_ops != NULL)
+    source_finish (c, TWIST_ERR_CLOSED);
+  free (c->exts);
   if (c->fd >= 0)
     {
       twist_loop_unwatch_fd (c->loop, c->fd);
@@ -754,13 +1006,9 @@ twist_connection_send_parts (struct twist_connection *c, const uint8_t *a,
         return TWIST_ERR_NOMEM;
       return TWIST_OK;
     }
-  if (an > 0
-      && append_buf (&c->outbuf, &c->out_off, &c->out_len, &c->out_cap, a, an)
-         != TWIST_OK)
+  if (an > 0 && out_add (c, a, an) != TWIST_OK)
     return TWIST_ERR_NOMEM;
-  if (bn > 0
-      && append_buf (&c->outbuf, &c->out_off, &c->out_len, &c->out_cap, b, bn)
-         != TWIST_OK)
+  if (bn > 0 && out_add (c, b, bn) != TWIST_OK)
     return TWIST_ERR_NOMEM;
   note_peak (c);
   refresh_interest (c);
@@ -774,8 +1022,7 @@ twist_connection_queue_out (struct twist_connection *c, const uint8_t *data,
 {
   int rc;
 
-  rc = append_buf (&c->outbuf, &c->out_off, &c->out_len, &c->out_cap,
-                       data, len);
+  rc = out_add (c, data, len);
   if (rc != TWIST_OK)
     return rc;
   note_peak (c);
@@ -819,6 +1066,8 @@ twist_connection_fail (struct twist_connection *c, int err)
   c->closing = 1;
   if (c->stream_read != NULL)
     stream_finish (c, err != TWIST_OK ? err : TWIST_ERR_CLOSED);
+  if (c->src_ops != NULL)
+    source_finish (c, err != TWIST_OK ? err : TWIST_ERR_CLOSED);
   if (err != TWIST_OK && c->handler.error != NULL)
     c->handler.error (&c->ep, err);
   if (c->handler.disconnected != NULL)
@@ -1007,6 +1256,7 @@ twist_connection_on_writable (struct twist_connection *c)
           /* Progress: the wait for a close to finish begins again.  */
           if (c->closing && c->close_timer != NULL)
             arm_close_timer (c);
+          out_written (c, (size_t) n);
           c->out_off += (size_t) n;
           c->out_len -= (size_t) n;
           if (c->out_len == 0)
@@ -1024,6 +1274,7 @@ twist_connection_on_writable (struct twist_connection *c)
         }
     }
   c->writing = 0;
+  source_kick (c);
   if (stream_fill (c))
     return;
   try_half_close (c);

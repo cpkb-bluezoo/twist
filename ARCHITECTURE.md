@@ -226,6 +226,24 @@ The loop drains the command queue at the top of every iteration.
 - **The reactor thread never blocks**
 - Results come back through `Endpoint.execute()`
 
+### Push Sources and Sinks
+
+- A **source** is pushed into the connection by its producer: `push` for each
+  chunk, `push_end` when it is over. The connection pauses it while
+  `TWIST_OUT_HIGH` (16 KiB) is queued and resumes it from the write path.
+- The end callback runs exactly once, whoever ends the source (the producer,
+  or the connection failing or being freed).
+- A source can be restarted; one that cannot fails the transfer with
+  `TWIST_ERR_REWIND`.
+- The connection counts the body bytes the socket has accepted, apart from
+  framing and from what is still queued (`twist_connection_body_written`).
+- A **sink** takes a slice and may take less. The connection then pauses the
+  read and presents the tail again on resume. HTTP/2 and HTTP/3 pause a
+  stream, not the connection.
+- `twist_connection_stream` is an adapter that pulls from a read callback on
+  the loop thread. Until the handlers have moved to push sources, the command
+  line keeps its current behaviour.
+
 ### Timer Queue
 
 - **Binary heap** on the loop
