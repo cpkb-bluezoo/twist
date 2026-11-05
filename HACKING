@@ -83,6 +83,18 @@ be sent again the source is restarted (twist_connection_source_restart,
 TWISTOPT_SEEKFUNCTION) or the transfer fails with TWIST_ERR_REWIND.  A new
 scheme with an upload does this from the start.
 
+The body of an upload that comes from the application is a push source on the
+transfer (twist_transfer_upload), not a read callback that a handler calls.
+A handler attaches as the consumer (twist_upload_attach): it is given each
+chunk, pauses the producer while it cannot send (twist_upload_pause), and
+resumes it (twist_upload_resume).  Where the application gave a
+TWISTOPT_READFUNCTION the producer is an adapter that calls it on the loop,
+only while the consumer has not paused it.  HTTP/1 frames what is pushed
+(chunked encoding, or a known length that is never sent past), and the
+connection pauses the producer at TWIST_OUT_HIGH.  The HTTP/2, HTTP/3 and
+WebSocket pumps keep one chunk, ask for the next when they can send it, and
+pause the producer between.  A handler never calls read_cb.
+
 Body bytes are sent with twist_connection_send_body (twist_connection_push
 does so) and framing with twist_endpoint_send.  twist_connection_body_written
 is how many body bytes the socket has accepted, which is what the progress

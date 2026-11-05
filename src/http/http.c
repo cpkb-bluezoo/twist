@@ -84,6 +84,11 @@ struct twist_http
      has been begun, so sending the request again means reading it again from
      the start.  */
   int body_started;
+  /* The meter of an HTTP/1 upload follows the body bytes that the connection
+     has written: where it began, and how much of it has been reported.  */
+  int up_tracked;
+  uint64_t up_base;
+  uint64_t up_reported;
   struct body_pump *pump;
   struct ws_pump *wspump;
   int pumping;			/* pump_run is under way (sends call it back).  */
@@ -500,12 +505,15 @@ http_park (struct twist_http *h)
   }
 }
 
+static void up_sync (struct twist_http *h);
+
 static void
 http_complete (struct twist_http *h, int err)
 {
   if (h->finished)
     return;
   h->finished = 1;
+  up_sync (h);
   pump_stop (h, 0);
   wspump_stop (h);
   http_settle (h, TWIST_SETTLE_UNKNOWN);
@@ -650,6 +658,14 @@ struct ws_pump
   int started;
   int running;
   int opcode;
+  /* The message from the transfer's upload: the next piece, which is pushed
+     while the pump asks for it (IN_FILL) or when the producer has it.  */
+  struct twist_upload *up;
+  uint8_t next[2048];
+  size_t next_n;
+  int up_done;
+  int up_err;
+  int in_fill;
 };
 
 static void wspump_run (struct ws_pump *w);
@@ -675,6 +691,8 @@ wspump_stop (struct twist_http *h)
   if (w == NULL)
     return;
   h->wspump = NULL;
+  if (w->up != NULL)
+    twist_upload_detach (w->up);
   if (h->conn != NULL)
     {
       if (h->mode == HTTP_H3)
@@ -693,11 +711,39 @@ wspump_stop (struct twist_http *h)
   free (w);
 }
 
+static int
+wspump_chunk (void *user, const uint8_t *data, size_t len)
+{
+  struct ws_pump *w = user;
+
+  if (len > sizeof w->next)
+    return TWIST_ERR_ABORTED;
+  memcpy (w->next, data, len);
+  w->next_n = len;
+  twist_upload_pause (w->up);
+  if (!w->in_fill)
+    wspump_run (w);
+  return TWIST_OK;
+}
+
+static void
+wspump_end (void *user, int err)
+{
+  struct ws_pump *w = user;
+
+  w->up_done = 1;
+  w->up_err = err;
+  if (!w->in_fill)
+    wspump_run (w);
+}
+
+static const struct twist_upload_consumer wspump_consumer = { wspump_chunk,
+                                                              wspump_end };
+
 static void
 wspump_run (struct ws_pump *w)
 {
   struct twist_http *h = w->h;
-  struct twist_transfer *t = h->transfer;
 
   if (w->running)
     return;
@@ -720,13 +766,30 @@ wspump_run (struct ws_pump *w)
         }
       else
         {
-          n = t->read_cb ((char *) next, 1, sizeof next, t->read_data);
-          if (n == TWIST_READFUNC_ABORT || n > sizeof next)
+          if (w->next_n == 0 && !w->up_done)
             {
-              wspump_stop (h);
-              http_complete (h, TWIST_ERR_ABORTED);
-              return;
+              w->in_fill = 1;
+              twist_upload_resume (w->up);
+              w->in_fill = 0;
             }
+          if (w->next_n > 0)
+            {
+              n = w->next_n;
+              memcpy (next, w->next, n);
+              w->next_n = 0;
+            }
+          else if (w->up_done)
+            {
+              if (w->up_err != TWIST_OK)
+                {
+                  wspump_stop (h);
+                  http_complete (h, TWIST_ERR_ABORTED);
+                  return;
+                }
+              n = 0;
+            }
+          else
+            break;		/* The producer has not pushed: it will.  */
         }
       if (n == 0)
         {
@@ -764,7 +827,7 @@ ws_write_body (struct twist_http *h)
   struct twist_transfer *transfer = h->transfer;
   struct ws_pump *w;
 
-  if (transfer->postfields == NULL && transfer->read_cb == NULL)
+  if (transfer->postfields == NULL && twist_transfer_upload (transfer) == NULL)
     return TWIST_OK;
   w = calloc (1, sizeof *w);
   if (w == NULL)
@@ -783,6 +846,17 @@ ws_write_body (struct twist_http *h)
 
           free (w);
           return rc;
+        }
+    }
+  if (transfer->postfields == NULL)
+    {
+      w->up = twist_transfer_upload (transfer);
+      if (w->up == NULL
+          || twist_upload_attach (w->up, &wspump_consumer, w, sizeof w->next)
+             != TWIST_OK)
+        {
+          free (w);
+          return TWIST_ERR_NOMEM;
         }
     }
   h->wspump = w;
@@ -874,7 +948,7 @@ forward_refused (const struct twist_http *h, int code)
   if (!h->fwd || h->fell_back || h->ws || (code != 405 && code != 501))
     return 0;
   if (m == NULL)
-    return t->postfields == NULL && t->read_cb == NULL;
+    return t->postfields == NULL && t->read_cb == NULL && t->upload == NULL;
   return strcmp (m, "GET") == 0 || strcmp (m, "HEAD") == 0
          || strcmp (m, "OPTIONS") == 0;
 }
@@ -1424,7 +1498,7 @@ has_source_body (const struct twist_http *h)
   const struct twist_transfer *t = h->transfer;
 
   if (h->ws || h->suppress_body || t->nobody || t->postfields != NULL
-      || t->read_cb == NULL)
+      || (t->read_cb == NULL && t->upload == NULL))
     return 0;
   return t->method == NULL
          || (strcmp (t->method, "GET") != 0 && strcmp (t->method, "HEAD") != 0);
@@ -1438,7 +1512,7 @@ rewind_source (struct twist_http *h)
 
   if (!h->body_started)
     return TWIST_OK;
-  if (t->seek_cb == NULL || t->seek_cb (t->seek_data, 0, 0) != 0)
+  if (twist_upload_restart (twist_transfer_upload (t)) != TWIST_OK)
     {
       twist_transfer_set_error (t, twist_strdup (_("the data to send could "
                                                    "not be read again from "
@@ -1449,70 +1523,178 @@ rewind_source (struct twist_http *h)
   return TWIST_OK;
 }
 
-/* The upload sent as it is read (twist_connection_stream): a chunk from the
-   application's callback, framed if the length was not known (chunked), and
-   the next not read until the connection has written this one.  */
+#define UP_HEAD 6		/* "%04x\r\n" */
+#define UP_MAX 16000		/* A chunk's size is four hex digits.  */
+
+/* The upload of an HTTP/1 request, from the transfer's push source to the
+   connection: a chunk pushed, framed if the length was not known (chunked),
+   and the source paused while the connection holds what it has not written.
+   The connection ends the source (a failure, or the end of the body), and
+   frees this when it does.  */
 struct up_src
 {
-  struct twist_transfer *transfer;
+  struct twist_http *h;
+  struct twist_connection *conn;
+  struct twist_upload *up;
   int chunked;
   long long left;		/* If not chunked: how much is still to come.  */
-  int done;
 };
 
-#define UP_HEAD 6		/* "%04x\r\n" */
+/* What the connection has written of the body, to the meter.  */
+static void
+up_sync (struct twist_http *h)
+{
+  uint64_t n;
 
-static size_t
-up_read (void *user, uint8_t *buf, size_t cap)
+  if (!h->up_tracked || h->conn == NULL)
+    return;
+  n = twist_connection_body_written (h->conn);
+  if (n < h->up_base)
+    return;
+  n -= h->up_base;
+  if (n > h->up_reported)
+    {
+      twist_progress_uploaded (h->transfer, (size_t) (n - h->up_reported));
+      h->up_reported = n;
+    }
+}
+
+static int
+up_chunk (void *user, const uint8_t *data, size_t len)
 {
   struct up_src *u = user;
-  struct twist_transfer *t = u->transfer;
-  size_t want, n;
+  struct twist_http *h = u->h;
+  struct twist_connection *conn = u->conn;
+  int last = 0;
+  int rc;
 
-  if (u->done)
-    return 0;
+  if (len == 0)
+    return TWIST_OK;
   if (u->chunked)
     {
-      want = cap - UP_HEAD - 2;
-      n = t->read_cb ((char *) buf + UP_HEAD, 1, want, t->read_data);
-      if (n == TWIST_READFUNC_ABORT || n > want || n > 0xffff)
-        return (size_t) -1;
-      if (n == 0)
-        {
-          u->done = 1;
-          memcpy (buf, "0\r\n\r\n", 5);
-          return 5;
-        }
-      {
-        char head[UP_HEAD + 1];
+      char head[UP_HEAD + 1];
 
-        /* The terminator snprintf writes would be the first data byte.  */
-        snprintf (head, sizeof head, "%04x\r\n", (unsigned) (n & 0xffff));
-        memcpy (buf, head, UP_HEAD);
-      }
-      memcpy (buf + UP_HEAD + n, "\r\n", 2);
-      twist_progress_uploaded (t, n);
-      return UP_HEAD + n + 2;
+      /* The terminator snprintf writes would be the first data byte.  */
+      snprintf (head, sizeof head, "%04x\r\n", (unsigned) (len & 0xffff));
+      rc = twist_connection_push_framed (conn, (const uint8_t *) head, UP_HEAD,
+                                         data, len, (const uint8_t *) "\r\n",
+                                         2);
     }
-  if (u->left <= 0)
+  else
     {
-      u->done = 1;
-      return 0;
+      /* Never past the length that was said.  */
+      if ((long long) len > u->left)
+        len = (size_t) u->left;
+      u->left -= (long long) len;
+      last = u->left == 0;
+      rc = twist_connection_push_framed (conn, NULL, 0, data, len, NULL, 0);
     }
-  want = (long long) cap > u->left ? (size_t) u->left : cap;
-  n = t->read_cb ((char *) buf, 1, want, t->read_data);
-  if (n == TWIST_READFUNC_ABORT || n > want || n == 0)
-    return (size_t) -1;		/* Or short of the length that was said.  */
-  u->left -= (long long) n;
-  twist_progress_uploaded (t, n);
-  return n;
+  if (rc != TWIST_OK)
+    return rc;			/* The connection has failed; U is gone.  */
+  up_sync (h);
+  if (last)
+    twist_connection_push_end (conn, TWIST_OK);	/* Frees U.  */
+  return TWIST_OK;
+}
+
+/* The source is over.  */
+static void
+up_finish (void *user, int err)
+{
+  struct up_src *u = user;
+  struct twist_connection *conn = u->conn;
+
+  if (err == TWIST_OK && !u->chunked && u->left > 0)
+    err = TWIST_ERR_ABORTED;	/* Short of the length that was said.  */
+  if (err == TWIST_OK)
+    {
+      if (u->chunked
+          && twist_endpoint_send (twist_connection_endpoint (conn),
+                                  (const uint8_t *) "0\r\n\r\n", 5)
+             != TWIST_OK)
+        err = TWIST_ERR_NOMEM;
+    }
+  twist_connection_push_end (conn, err);	/* Frees U.  */
+  if (err != TWIST_OK)
+    twist_connection_fail (conn, err);
+}
+
+static const struct twist_upload_consumer up_consumer = { up_chunk,
+                                                          up_finish };
+
+/* The connection's side: it pauses and resumes the source, and ends it.  */
+static void
+up_conn_pause (void *user)
+{
+  struct up_src *u = user;
+
+  twist_upload_pause (u->up);
 }
 
 static void
-up_end (void *user, int err)
+up_conn_resume (void *user)
 {
+  struct up_src *u = user;
+
+  twist_upload_resume (u->up);
+}
+
+static void
+up_conn_end (void *user, int err)
+{
+  struct up_src *u = user;
+
   (void) err;
-  free (user);
+  twist_upload_detach (u->up);
+  free (u);
+}
+
+static const struct twist_source_ops up_conn_ops = { up_conn_pause,
+                                                     up_conn_resume, NULL,
+                                                     up_conn_end };
+
+static int
+up_begin (struct twist_http *h, const uint8_t *head, size_t head_len)
+{
+  struct twist_transfer *t = h->transfer;
+  struct up_src *u;
+  int rc;
+
+  u = calloc (1, sizeof *u);
+  if (u == NULL)
+    return TWIST_ERR_NOMEM;
+  u->up = twist_transfer_upload (t);
+  if (u->up == NULL)
+    {
+      free (u);
+      return TWIST_ERR_NOMEM;
+    }
+  rc = twist_connection_send_parts (h->conn, head, head_len, NULL, 0);
+  if (rc != TWIST_OK)
+    {
+      free (u);
+      return rc;
+    }
+  u->h = h;
+  u->conn = h->conn;
+  u->chunked = t->infilesize < 0;
+  u->left = t->infilesize;
+  h->body_started = 1;
+  h->up_base = twist_connection_body_written (h->conn);
+  h->up_reported = 0;
+  h->up_tracked = 1;
+  if (t->infilesize >= 0)
+    twist_progress_ul_size (t, t->infilesize);
+  rc = twist_connection_attach_source (h->conn, &up_conn_ops, u);
+  if (rc == TWIST_OK)
+    rc = twist_upload_attach (u->up, &up_consumer, u, UP_MAX);
+  if (rc != TWIST_OK)
+    {
+      free (u);
+      return rc;
+    }
+  twist_upload_resume (u->up);
+  return TWIST_OK;
 }
 
 /* The body of an HTTP/2 or HTTP/3 request is sent a chunk at a time, by the
@@ -1535,6 +1717,12 @@ struct body_pump
   uint8_t chunk[16384];
   size_t have, off;		/* The chunk made, and how much has gone.  */
   int eof;			/* There is no more to make.  */
+  /* The body from the transfer's upload: a chunk is asked for when the pump
+     wants one, and the source is paused once it has pushed one.  */
+  struct twist_upload *up;
+  int up_done;
+  int up_err;
+  int in_fill;
 };
 
 static void pump_run (struct twist_http *h);
@@ -1574,6 +1762,8 @@ pump_stop (struct twist_http *h, int whole)
   if (p == NULL)
     return;
   h->pump = NULL;
+  if (p->up != NULL)
+    twist_upload_detach (p->up);
   if (h->mode == HTTP_H3)
     {
       /* The stream is let go: finished, as a request that is whole is.  */
@@ -1604,8 +1794,44 @@ pump_stop (struct twist_http *h, int whole)
   free (p);
 }
 
+static void pump_run (struct twist_http *h);
+
+/* A chunk of the upload, pushed: kept until the pump has sent it, and no more
+   is asked for until then.  */
+static int
+pump_chunk (void *user, const uint8_t *data, size_t len)
+{
+  struct body_pump *p = user;
+  struct twist_http *h = p->h;
+
+  if (len > sizeof p->chunk || p->have != p->off)
+    return TWIST_ERR_ABORTED;
+  memcpy (p->chunk, data, len);
+  p->off = 0;
+  p->have = len;
+  twist_progress_uploaded (h->transfer, len);
+  twist_upload_pause (p->up);
+  if (!p->in_fill)
+    pump_run (h);
+  return TWIST_OK;
+}
+
+static void
+pump_up_end (void *user, int err)
+{
+  struct body_pump *p = user;
+
+  p->up_done = 1;
+  p->up_err = err;
+  if (!p->in_fill)
+    pump_run (p->h);
+}
+
+static const struct twist_upload_consumer pump_consumer = { pump_chunk,
+                                                            pump_up_end };
+
 /* Make the next chunk.  Returns 1 if there is one, 0 at the end, -1 if the
-   application's callback failed.  */
+   source failed, 2 if the source has not pushed one yet (it will).  */
 static int
 pump_fill (struct body_pump *p)
 {
@@ -1615,9 +1841,17 @@ pump_fill (struct body_pump *p)
   p->off = p->have = 0;
   if (p->from_cb)
     {
-      n = t->read_cb ((char *) p->chunk, 1, p->limit, t->read_data);
-      if (n == TWIST_READFUNC_ABORT || n > p->limit)
-        return -1;
+      if (!p->up_done)
+        {
+          p->in_fill = 1;
+          twist_upload_resume (p->up);
+          p->in_fill = 0;
+        }
+      if (p->have > 0)
+        return 1;
+      if (p->up_done)
+        return p->up_err == TWIST_OK ? 0 : -1;
+      return 2;
     }
   else
     {
@@ -1668,6 +1902,8 @@ pump_loop (struct twist_http *h)
               http_fail (h, TWIST_ERR_ABORTED);
               return;
             }
+          if (r == 2)
+            return;		/* Its chunk calls this again.  */
           if (r == 0)
             p->eof = 1;
         }
@@ -1726,6 +1962,17 @@ pump_start (struct twist_http *h, const uint8_t *mem, size_t mem_len,
   p->mem = mem;
   p->mem_len = mem_len;
   p->from_cb = from_cb;
+  if (from_cb)
+    {
+      p->up = twist_transfer_upload (h->transfer);
+      if (p->up == NULL
+          || twist_upload_attach (p->up, &pump_consumer, p, p->limit)
+             != TWIST_OK)
+        {
+          free (p);
+          return TWIST_ERR_NOMEM;
+        }
+    }
   if (owned != NULL)
     {
       p->owned = *owned;
@@ -1959,23 +2206,7 @@ send_request_target (struct twist_http *h, const char *target)
     }
   else if (source && h->mode == HTTP_H1)
     {
-      struct up_src *u = calloc (1, sizeof *u);
-
-      rc = u != NULL ? twist_connection_send_parts (h->conn, out, out_len,
-                                                    NULL, 0)
-                     : TWIST_ERR_NOMEM;
-      if (rc == TWIST_OK)
-        {
-          u->transfer = transfer;
-          u->chunked = transfer->infilesize < 0;
-          u->left = transfer->infilesize;
-          h->body_started = 1;
-          if (transfer->infilesize >= 0)
-            twist_progress_ul_size (transfer, transfer->infilesize);
-          rc = twist_connection_stream (h->conn, up_read, up_end, u);
-        }
-      if (rc != TWIST_OK)
-        free (u);
+      rc = up_begin (h, out, out_len);
     }
   else if (h->mode == HTTP_H1 && body != NULL && body_len >= BODY_STREAM_MIN)
     rc = send_streamed (h, out, out_len, body, body_len, &owned);

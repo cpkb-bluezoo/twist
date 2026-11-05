@@ -48,6 +48,7 @@ struct twist_timer;
    minutes.  */
 #define TWIST_DEFAULT_CONNECT_TIMEOUT_MS 300000L
 struct twist_storage;
+struct twist_upload;
 struct twist_jar;
 struct twist_hsts;
 struct twist_altsvc;
@@ -207,6 +208,9 @@ struct twist_transfer
   void *read_data;
   twist_seek_callback seek_cb;
   void *seek_data;
+  /* The upload as a push source (twist_transfer_upload): made from read_cb
+     when a handler first needs it, or set by whoever pushes.  */
+  struct twist_upload *upload;
   /* Whether the transfer uses the runtime's cookie jar, HSTS list and Alt-Svc
      list (TWISTOPT_USE_COOKIES, _USE_HSTS and _USE_ALTSVC).  */
   int use_cookies;
@@ -658,6 +662,13 @@ int twist_connection_attach_source (struct twist_connection *conn,
 int twist_connection_push (struct twist_connection *conn, const uint8_t *chunk,
                            size_t len, void (*release) (void *),
                            void *rel_user);
+/* As twist_connection_push, with framing before and after CHUNK that is not
+   body (a chunk header and trailer): all of it is queued before the source is
+   paused or not.  */
+int twist_connection_push_framed (struct twist_connection *conn,
+                                  const uint8_t *head, size_t head_len,
+                                  const uint8_t *chunk, size_t len,
+                                  const uint8_t *tail, size_t tail_len);
 void twist_connection_push_end (struct twist_connection *conn, int err);
 /* Begin the attached source again.  TWIST_ERR_REWIND if it cannot.  */
 int twist_connection_source_restart (struct twist_connection *conn);
@@ -744,6 +755,58 @@ int twist_fd_sink_write (struct twist_fd_sink *s, const uint8_t *data,
 int twist_fd_sink_full (const struct twist_fd_sink *s);
 size_t twist_fd_sink_pending (const struct twist_fd_sink *s);
 void twist_fd_sink_free (struct twist_fd_sink *s);
+
+/* ---- the upload of a transfer ----
+   What a handler sends as the body of an upload comes from a push source:
+   the producer pushes chunks, the handler (the consumer) takes them and may
+   pause the producer while it cannot send, then resume it.  The handler never
+   calls the application's read callback itself.  Where the application gave a
+   read callback (TWISTOPT_READFUNCTION) the transfer's source is an adapter
+   that calls it, on the loop's thread, only while the consumer has not paused
+   it, so that a callback that returns at once behaves as it always has.
+
+   The consumer's CHUNK is given a slice that is valid for the call; it takes
+   it, or returns an error, which ends the source with it.  END is called once,
+   with TWIST_OK after the last chunk, or why the source failed (TWIST_ERR_ABORTED
+   where the read callback said to stop).  A chunk may arrive once after PAUSE,
+   if the producer was already under way.  The consumer sets the most it will
+   take at once (MAX) and the producer pushes no more than that.  */
+struct twist_upload_consumer
+{
+  int (*chunk) (void *user, const uint8_t *data, size_t len);
+  void (*end) (void *user, int err);
+};
+struct twist_upload_producer
+{
+  void (*resume) (void *user);	/* Push while not paused.  */
+  void (*pause) (void *user);
+  int (*restart) (void *user);	/* From the first byte; 0 or an error.  */
+  void (*release) (void *user);
+};
+struct twist_upload *twist_upload_new (const struct twist_upload_producer *p,
+                                       void *user);
+void twist_upload_free (struct twist_upload *up);
+/* The producer's calls.  */
+int twist_upload_push (struct twist_upload *up, const uint8_t *data,
+                       size_t len);
+void twist_upload_finish (struct twist_upload *up, int err);
+/* The consumer's calls.  attach fails if a consumer is attached; detach is
+   that consumer going, and nothing is called back after it.  */
+int twist_upload_attach (struct twist_upload *up,
+                         const struct twist_upload_consumer *c, void *user,
+                         size_t max);
+void twist_upload_detach (struct twist_upload *up);
+void twist_upload_pause (struct twist_upload *up);
+void twist_upload_resume (struct twist_upload *up);
+size_t twist_upload_max (const struct twist_upload *up);
+/* Whether a consumer is attached and has not paused the source or seen it
+   end: the producer may push.  */
+int twist_upload_active (const struct twist_upload *up);
+/* Begin the source again from the first byte: TWIST_ERR_REWIND if it cannot.  */
+int twist_upload_restart (struct twist_upload *up);
+/* The transfer's upload: the one set, or an adapter over its read callback
+   (made once).  NULL if there is neither.  */
+struct twist_upload *twist_transfer_upload (struct twist_transfer *transfer);
 
 /* Tell the peer there is no more to come: the write side is shut once all that
    was queued has been written, and the connection stays open for what the

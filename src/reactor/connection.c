@@ -103,6 +103,7 @@ struct twist_connection
   uint64_t out_written;
   uint64_t body_done;
   size_t body_left;
+  size_t body_skip;		/* Framing before the body, in the next add.  */
   struct body_ext *exts;
   size_t ext_n;
   size_t ext_off;
@@ -291,10 +292,13 @@ out_add (struct twist_connection *c, const uint8_t *data, size_t len)
 {
   int rc;
   uint64_t start = c->out_queued;
-  size_t body = len < c->body_left ? len : c->body_left;
+  size_t skip = len < c->body_skip ? len : c->body_skip;
+  size_t body;
 
   if (len == 0)
     return TWIST_OK;
+  c->body_skip -= skip;
+  body = len - skip < c->body_left ? len - skip : c->body_left;
   rc = append_buf (&c->outbuf, &c->out_off, &c->out_len, &c->out_cap, data,
                    len);
   if (rc != TWIST_OK)
@@ -427,6 +431,45 @@ twist_connection_attach_source (struct twist_connection *c,
   c->src_ops = ops;
   c->src_user = user;
   c->src_paused = 0;
+  return TWIST_OK;
+}
+
+/* Framing, body, framing: queued as one send (one TLS record), with only the
+   middle counted as body.  */
+#define PUSH_FRAMED_MAX 17000
+
+int
+twist_connection_push_framed (struct twist_connection *c, const uint8_t *head,
+                              size_t head_len, const uint8_t *chunk,
+                              size_t len, const uint8_t *tail, size_t tail_len)
+{
+  uint8_t buf[PUSH_FRAMED_MAX];
+  int rc;
+
+  if (c == NULL || c->src_ops == NULL || c->failed || c->closing
+      || head_len + len + tail_len > sizeof buf)
+    return TWIST_ERR_INVAL;
+  if (head_len > 0)
+    memcpy (buf, head, head_len);
+  memcpy (buf + head_len, chunk, len);
+  if (tail_len > 0)
+    memcpy (buf + head_len + len, tail, tail_len);
+  c->body_skip = head_len;
+  c->body_left = len;
+  rc = c->ep.send (&c->ep, buf, head_len + len + tail_len);
+  c->body_skip = 0;
+  c->body_left = 0;
+  if (rc != TWIST_OK)
+    {
+      twist_connection_fail (c, rc);
+      return rc;
+    }
+  if (c->src_ops != NULL && !c->src_paused && c->out_len >= TWIST_OUT_HIGH)
+    {
+      c->src_paused = 1;
+      if (c->src_ops->pause != NULL)
+        c->src_ops->pause (c->src_user);
+    }
   return TWIST_OK;
 }
 

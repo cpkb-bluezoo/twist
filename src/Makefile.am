@@ -62,6 +62,7 @@ libtwist_la_SOURCES = \
   reactor/storage.c \
   reactor/fileio.c \
   reactor/fdio.c \
+  reactor/upload.c \
   reactor/timer.c \
   reactor/timer.h \
   engine/transfer.c \

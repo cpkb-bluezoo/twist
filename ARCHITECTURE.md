@@ -230,6 +230,21 @@ The loop drains the command queue at the top of every iteration.
   does not return cannot hold up those loads. Both are two threads, or one for
   each loop.
 
+### Upload Sources
+
+- The upload of a transfer is a push source: `twist_transfer_upload` is the one
+  that was set, or an adapter over `TWISTOPT_READFUNCTION`.
+- The handler is the consumer. It takes a chunk, and pauses the producer while
+  it cannot send; it never calls the read callback itself.
+- HTTP/1 frames the chunks (chunked encoding, or a known length that is never
+  sent past) and pushes them into the connection, which pauses the producer at
+  `TWIST_OUT_HIGH` and resumes it from the write path. The meter follows the
+  body bytes the connection has written.
+- The HTTP/2, HTTP/3 and WebSocket pumps hold one chunk, ask for the next when
+  the stream can send, and pause the producer between.
+- A restart goes to the producer; one that cannot restart fails the transfer
+  with `TWIST_ERR_REWIND`.
+
 ### Regular-file Pipeline
 
 - A regular file cannot be polled, so its reads and writes are jobs on the

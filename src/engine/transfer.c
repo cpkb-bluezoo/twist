@@ -135,6 +135,8 @@ static void
 transfer_clear (struct twist_transfer *transfer)
 {
   twist_transfer_release (transfer);
+  twist_upload_free (transfer->upload);
+  transfer->upload = NULL;
   free (transfer->url_string);
   twist_url_free_int (transfer->url);
   free (transfer->method);
