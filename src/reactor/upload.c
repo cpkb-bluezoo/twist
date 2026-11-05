@@ -409,6 +409,8 @@ twist_upmeter_start (struct twist_upmeter *m, struct twist_transfer *t,
   m->conn = conn;
   m->base = conn != NULL ? twist_connection_body_written (conn) : 0;
   m->reported = 0;
+  if (conn != NULL)
+    twist_connection_set_meter (conn, m);
 }
 
 void

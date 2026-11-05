@@ -835,6 +835,9 @@ struct twist_upmeter
 void twist_upmeter_start (struct twist_upmeter *m, struct twist_transfer *t,
                         struct twist_connection *conn);
 void twist_upmeter_sync (struct twist_upmeter *m);
+/* For the connection: whom to tell the last count when it is freed.  */
+void twist_connection_set_meter (struct twist_connection *conn,
+                                 struct twist_upmeter *m);
 
 /* An upload sent over a connection as it is pushed, with the source paused
    while the connection is full.  CHUNK, if not NULL, replaces the plain

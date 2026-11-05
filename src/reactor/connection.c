@@ -104,6 +104,7 @@ struct twist_connection
   uint64_t body_done;
   size_t body_left;
   size_t body_skip;		/* Framing before the body, in the next add.  */
+  struct twist_upmeter *meter;	/* Told the last count when this is freed.  */
   struct body_ext *exts;
   size_t ext_n;
   size_t ext_off;
@@ -897,6 +898,14 @@ twist_connection_new (struct twist_loop *loop)
 }
 
 void
+twist_connection_set_meter (struct twist_connection *c, struct twist_upmeter *m)
+{
+  if (c->meter != NULL && c->meter != m)
+    c->meter->conn = NULL;
+  c->meter = m;
+}
+
+void
 twist_connection_free (struct twist_connection *c)
 {
   if (c == NULL)
@@ -905,6 +914,14 @@ twist_connection_free (struct twist_connection *c)
     stream_finish (c, TWIST_ERR_CLOSED);
   if (c->src_ops != NULL)
     source_finish (c, TWIST_ERR_CLOSED);
+  /* What was written is counted for whoever is counting, for the last time,
+     and they are not left with a connection that is gone.  */
+  if (c->meter != NULL)
+    {
+      twist_upmeter_sync (c->meter);
+      c->meter->conn = NULL;
+      c->meter = NULL;
+    }
   free (c->exts);
   if (c->fd >= 0)
     {

@@ -23,10 +23,14 @@
 #include "check.h"
 #include "twist-int.h"
 
+#include <fcntl.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
+#include <time.h>
+#include <unistd.h>
 
 /* The progress meter and the callback, on a clock the test sets.  The
    expected lines are those of curl 8.5 for the same numbers: the layout was
@@ -220,6 +224,135 @@ test_upload (void)
                  "0:00:02  0:00:01  0:00:01   500") != NULL,
          "half way up");
   rig_close (&r);
+}
+
+/* An upload on a connection whose peer reads slowly: the meter shows the body
+   bytes the socket has accepted, not those queued behind it, and the peer has
+   all of them (and the meter shows all of them) only after the rest has been
+   written.  A transfer that ends with body bytes still unwritten does not
+   report them as sent.  */
+static void
+drain_ms (struct twist_loop *loop, int fd, size_t limit, size_t *seen,
+          double ms)
+{
+  struct timespec t0, t1;
+
+  clock_gettime (CLOCK_MONOTONIC, &t0);
+  do
+    {
+      /* All that is there, up to the limit, so that the time is for the
+         connection to write and not for this to read.  */
+      while (*seen < limit)
+        {
+          uint8_t in[65536];
+          size_t room = limit - *seen;
+          ssize_t n = read (fd, in, room < sizeof in ? room : sizeof in);
+
+          if (n <= 0)
+            break;
+          *seen += (size_t) n;
+        }
+      twist_loop_run_once_ms (loop, 1);
+      clock_gettime (CLOCK_MONOTONIC, &t1);
+    }
+  while ((t1.tv_sec - t0.tv_sec) * 1000.0
+         + (t1.tv_nsec - t0.tv_nsec) / 1e6 < ms);
+}
+
+struct up_end
+{
+  int ends;
+  int err;
+};
+
+static void
+up_ended (void *user, int err)
+{
+  struct up_end *e = user;
+
+  e->ends++;
+  e->err = err;
+}
+
+static const struct twist_relay_ops up_plain = { NULL, NULL, up_ended };
+
+static void
+test_upload_follows_socket (void)
+{
+  enum { TOTAL = 8 * 1024 * 1024 };
+  int sv[2];
+  struct twist_loop *loop = twist_loop_new (0);
+  struct twist_transfer *transfer = twist_transfer_new ();
+  struct twist_connection *c;
+  struct twist_upmeter meter;
+  struct twist_upload *up;
+  struct up_end e = { 0, 0 };
+  uint8_t *body = calloc (1, TOTAL);
+  size_t seen = 0;
+  long long before;
+
+  if (loop == NULL || transfer == NULL || body == NULL
+      || socketpair (AF_UNIX, SOCK_STREAM, 0, sv) != 0)
+    return;
+  fcntl (sv[0], F_SETFL, O_NONBLOCK);
+  fcntl (sv[1], F_SETFL, O_NONBLOCK);
+  transfer->loop = loop;
+  c = twist_connection_new (loop);
+  twist_connection_set_fd (c, sv[0]);
+  up = twist_upload_from_memory (body, TOTAL);
+  twist_upmeter_start (&meter, transfer, c);
+  twist_relay_start (c, NULL, up, 1, 16384, &up_plain, &e, &meter);
+
+  /* The peer reads nothing: the socket takes what it will and the rest is
+     queued.  The meter shows what was taken, which is less than all.  */
+  drain_ms (loop, sv[1], 0, &seen, 100);
+  twist_upmeter_sync (&meter);
+  before = transfer->progress.uploaded;
+  check (before > 0 && before < TOTAL / 2,
+         "a body the socket has not taken is not shown as sent");
+  /* The peer reads half: what it has read was accepted, so the meter shows
+     at least that, and the rest is still on its way.  */
+  drain_ms (loop, sv[1], TOTAL / 2, &seen, 300);
+  twist_upmeter_sync (&meter);
+  check (seen == TOTAL / 2, "the peer has read half");
+  check (transfer->progress.uploaded >= (long long) seen
+         && transfer->progress.uploaded < TOTAL,
+         "half read: the meter is at least half, and short of all");
+  check (e.ends <= 1, "and the end is called at most once");
+  /* The rest.  */
+  drain_ms (loop, sv[1], TOTAL, &seen, 1500);
+  twist_upmeter_sync (&meter);
+  check (seen == TOTAL && transfer->progress.uploaded == TOTAL
+         && e.ends == 1 && e.err == TWIST_OK,
+         "all read: the meter shows all of it, only then");
+  twist_connection_free (c);
+
+  /* A connection that is lost with body unwritten: only what was written is
+     shown.  */
+  transfer->progress.uploaded = 0;
+  c = twist_connection_new (loop);
+  close (sv[1]);
+  if (socketpair (AF_UNIX, SOCK_STREAM, 0, sv) == 0)
+    {
+      fcntl (sv[0], F_SETFL, O_NONBLOCK);
+      fcntl (sv[1], F_SETFL, O_NONBLOCK);
+      twist_connection_set_fd (c, sv[0]);
+      up = twist_upload_from_memory (body, TOTAL);
+      e.ends = 0;
+      seen = 0;
+      twist_upmeter_start (&meter, transfer, c);
+      twist_relay_start (c, NULL, up, 1, 16384, &up_plain, &e, &meter);
+      drain_ms (loop, sv[1], 0, &seen, 50);
+      twist_connection_free (c);	/* The transfer ends with it queued.  */
+      twist_upmeter_sync (&meter);
+      check (e.ends == 1 && e.err != TWIST_OK && transfer->progress.uploaded
+             < TOTAL / 2,
+             "a transfer that ends with body unwritten does not report it");
+      close (sv[1]);
+    }
+  twist_transfer_free (transfer);
+  twist_loop_free (loop);
+  free (body);
 }
 
 /* The percentages are of whole numbers: a size above 10000 is
@@ -561,6 +694,7 @@ main (void)
   test_download ();
   test_unknown_size ();
   test_upload ();
+  test_upload_follows_socket ();
   test_percent ();
   test_huge_sizes ();
   test_current_speed ();
