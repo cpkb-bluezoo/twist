@@ -68,6 +68,17 @@ struct tx
   char cmds[256];
   char name[64];
   int saw_domain;
+  /* The server's side of a listing.  */
+  struct
+  {
+    uint16_t name[64];
+    unsigned nlen;
+    uint32_t attrs;
+    uint64_t size, mtime;
+  } ents[16];
+  unsigned nents, page, queries, qpos;
+  int empty_nosuch;
+  int restart_first;
   /* The server's side of an upload.  */
   uint8_t store[FILE_MAX + 16];
   size_t store_len;
@@ -317,6 +328,68 @@ handle (struct tx *z, const uint8_t *f, size_t n)
           p8 (&r, 0xc0 + i);
         p32 (&r, 0);
         p32 (&r, 0);
+        srv_seal (&z->srv, &r);
+        return;
+      }
+    case 14:			/* QUERY_DIRECTORY */
+      {
+        unsigned first = z->queries, k, sent = 0;
+        size_t lenpos, base, start, prev_start = 0;
+
+        note (z, 'Q');
+        z->queries++;
+        if (first == 0)
+          z->restart_first = plain.b[64 + 3] == 1;
+        if (z->qpos >= z->nents)
+          {
+            body_error (&r, 14, z->empty_nosuch && first == 0 ? 0xC000000Fu
+                                                              : 0x80000006u, id);
+            srv_seal (&z->srv, &r);
+            return;
+          }
+        header (&r, 14, 0, 0, id, SESSION_ID, 5);
+        p16 (&r, 9);
+        p16 (&r, 72);
+        lenpos = r.n;
+        p32 (&r, 0);
+        base = r.n;
+        for (k = z->qpos; k < z->nents && sent < z->page; k++, sent++)
+          {
+            start = r.n;
+            if (sent > 0)
+              {
+                uint32_t off = (uint32_t) (start - prev_start);
+
+                r.b[prev_start] = (uint8_t) off;
+                r.b[prev_start + 1] = (uint8_t) (off >> 8);
+              }
+            p32 (&r, 0);
+            p32 (&r, 0);
+            p64 (&r, z->ents[k].mtime);
+            p64 (&r, z->ents[k].mtime);
+            p64 (&r, z->ents[k].mtime);
+            p64 (&r, z->ents[k].mtime);
+            p64 (&r, z->ents[k].size);
+            p64 (&r, z->ents[k].size);
+            p32 (&r, z->ents[k].attrs);
+            p32 (&r, z->ents[k].nlen * 2);
+            p32 (&r, 0);
+            pz (&r, 2 + 24 + 2);
+            p64 (&r, k + 1);
+            for (i = 0; i < z->ents[k].nlen; i++)
+              p16 (&r, z->ents[k].name[i]);
+            while ((r.n - start) % 8)
+              p8 (&r, 0);
+            prev_start = start;
+          }
+        z->qpos = k;
+        {
+          uint32_t total = (uint32_t) (r.n - base);
+
+          r.b[lenpos] = (uint8_t) total;
+          r.b[lenpos + 1] = (uint8_t) (total >> 8);
+          r.b[lenpos + 2] = (uint8_t) (total >> 16);
+        }
         srv_seal (&z->srv, &r);
         return;
       }
@@ -695,9 +768,7 @@ test_urls (void)
     { "smb://server.example/sh%00are/f", TWIST_ERR_URL, "smb: a NUL in the share is malformed" },
     { "smb://server.example/share/f%00x", TWIST_ERR_URL, "smb: a NUL in the path is malformed" },
     { "smb://server.example/share/f:stream", TWIST_ERR_URL, "smb: a colon in the path is malformed" },
-    { "smb://server.example/share/f%3Astream", TWIST_ERR_URL, "smb: an encoded colon is too" },
-    { "smb://server.example/share/", TWIST_ERR_UNSUPPORTED, "smb: a directory is another issue" },
-    { "smb://server.example/share", TWIST_ERR_UNSUPPORTED, "smb: so is the share itself" }
+    { "smb://server.example/share/f%3Astream", TWIST_ERR_URL, "smb: an encoded colon is too" }
   };
   size_t i;
   struct scen sc = plain_scen ();
@@ -1027,6 +1098,191 @@ test_put_failures (void)
   free (data);
 }
 
+
+/* ---- Listings ---- */
+
+static void
+add_ent (struct tx *z, const char *ascii, uint32_t attrs, uint64_t size,
+         uint64_t mtime)
+{
+  unsigned i, n = z->nents++;
+
+  for (i = 0; ascii[i] != 0; i++)
+    z->ents[n].name[i] = (uint8_t) ascii[i];
+  z->ents[n].nlen = i;
+  z->ents[n].attrs = attrs;
+  z->ents[n].size = size;
+  z->ents[n].mtime = mtime;
+}
+
+static void
+add_raw (struct tx *z, const uint16_t *units, unsigned n, uint32_t attrs,
+         uint64_t size, uint64_t mtime)
+{
+  unsigned k = z->nents++, i;
+
+  for (i = 0; i < n; i++)
+    z->ents[k].name[i] = units[i];
+  z->ents[k].nlen = n;
+  z->ents[k].attrs = attrs;
+  z->ents[k].size = size;
+  z->ents[k].mtime = mtime;
+}
+
+#define FT_2001 126256467060000000ull
+#define FT_1999 125911583400000000ull
+#define FT_RECENT 134116128000000000ull
+#define NOW 1767225600
+
+static void
+fill_dir (struct tx *z)
+{
+  static const uint16_t cafe[] = { 'c', 'a', 'f', 0xe9, ' ', 0xd83d, 0xde00 };
+  static const uint16_t evil[] = { 'e', 'v', '\n', 'i', 'l' };
+
+  add_ent (z, "report.txt", 0x20, 1234, FT_2001);
+  add_ent (z, "photos", 0x10, 0, FT_1999);
+  add_ent (z, "locked.doc", 0x21, 99999999, FT_2001);
+  add_raw (z, cafe, 7, 0x20, 5, FT_2001);
+  add_raw (z, evil, 5, 0x20, 7, FT_2001);
+  z->page = 2;
+}
+
+static const char long_listing[] =
+  "-rw-r--r--   1 -        -            1234 Feb  3  2001 report.txt\n"
+  "drwxr-xr-x   1 -        -               0 Dec 31  1999 photos\n"
+  "-r--r--r--   1 -        -        99999999 Feb  3  2001 locked.doc\n"
+  "-rw-r--r--   1 -        -               5 Feb  3  2001 caf\xc3\xa9 \xf0\x9f\x98\x80\n"
+  "-rw-r--r--   1 -        -               7 Feb  3  2001 ev?il\n";
+
+static const char name_listing[] =
+  "report.txt\nphotos\nlocked.doc\ncaf\xc3\xa9 \xf0\x9f\x98\x80\nev?il\n";
+
+static int
+out_is (const struct tx *z, const char *want)
+{
+  return z->out_n == strlen (want) && memcmp (z->out, want, z->out_n) == 0;
+}
+
+static void
+test_listing (void)
+{
+  struct scen sc = plain_scen ();
+  struct tx *z;
+  size_t pieces[] = { 1 << 20, 997 }, k;
+
+  twist_smb_set_test_now (NOW);
+  for (k = 0; k < 2; k++)
+    {
+      z = begin ("smb://server.example/share/dir/", "Domain\\User", sc);
+      fill_dir (z);
+      z->piece = pieces[k];
+      launch (z);
+      check (z->t->done && z->t->result == TWIST_OK, "smb: a listing ends well");
+      check (out_is (z, long_listing), "smb: the entries are lines of the long form");
+      check (strcmp (z->name, "dir") == 0 && z->restart_first,
+             "smb: the directory is named without its slash, and the scan restarted");
+      check (z->queries == 4, "smb: three answers of two, two and one, and the end");
+      check (strlen (z->cmds) > 4 && strncmp (z->cmds, "MQQQQ", 5) == 0
+             && strcmp (z->cmds + strlen (z->cmds) - 3, "CDL") == 0,
+             "smb: opened, queried until no more files, then closed");
+      check (z->t->progress.downloaded == (long long) strlen (long_listing),
+             "smb: and the meter counts what was written");
+      finish (z);
+    }
+  z = begin ("smb://server.example/share/dir", "Domain\\User", sc);
+  fill_dir (z);
+  twist_transfer_setopt (z->t, TWISTOPT_DIRLISTONLY, 1L);
+  launch (z);
+  check (z->t->done && z->t->result == TWIST_OK && out_is (z, name_listing),
+         "smb: -l writes the names, one to a line, for a path with no slash");
+  finish (z);
+  z = begin ("smb://server.example/share/dir/", "Domain\\User", sc);
+  add_ent (z, "recent.txt", 0x20, 10, FT_RECENT);
+  z->page = 4;
+  launch (z);
+  check (out_is (z, "-rw-r--r--   1 -        -              10 Dec 31 00:00 recent.txt\n"),
+         "smb: a recent time is shown as the time of day");
+  finish (z);
+  z = begin ("smb://server.example/share", "Domain\\User", sc);
+  fill_dir (z);
+  launch (z);
+  check (z->t->done && z->t->result == TWIST_OK && z->name[0] == 0
+         && out_is (z, long_listing), "smb: the share alone is listed from its root");
+  finish (z);
+  /* Nothing in it.  */
+  z = begin ("smb://server.example/share/dir/", "Domain\\User", sc);
+  z->page = 3;
+  launch (z);
+  check (z->t->done && z->t->result == TWIST_OK && z->out_n == 0 && z->queries == 1,
+         "smb: an empty directory is an empty listing");
+  finish (z);
+  z = begin ("smb://server.example/share/dir/", "Domain\\User", sc);
+  z->empty_nosuch = 1;
+  launch (z);
+  check (z->t->done && z->t->result == TWIST_OK && z->out_n == 0,
+         "smb: so is one the server says has no such file in");
+  finish (z);
+  /* A name that is not UTF-16.  */
+  {
+    static const uint16_t bad[] = { 'a', 0xd800, 'b' };
+    static const uint16_t bad2[] = { 'a', 0xdc00 };
+
+    z = begin ("smb://server.example/share/dir/", "Domain\\User", sc);
+    add_raw (z, bad, 3, 0x20, 1, FT_2001);
+    z->page = 2;
+    launch (z);
+    check (z->t->done && z->t->result == TWIST_ERR_PROTOCOL && z->out_n == 0,
+           "smb: a name with an unpaired high surrogate is a protocol error");
+    finish (z);
+    z = begin ("smb://server.example/share/dir/", "Domain\\User", sc);
+    add_raw (z, bad2, 2, 0x20, 1, FT_2001);
+    z->page = 2;
+    launch (z);
+    check (z->t->done && z->t->result == TWIST_ERR_PROTOCOL,
+           "smb: so is one with a low surrogate on its own");
+    finish (z);
+  }
+  /* A directory that is not there.  */
+  sc.create_status = 0xC0000034u;
+  z = begin ("smb://server.example/share/nope/", "Domain\\User", sc);
+  launch (z);
+  check (z->t->done && z->t->result == TWIST_ERR_FILE && z->t->proto_status == 78,
+         "smb: a directory that is not there is exit 78");
+  finish (z);
+  sc = plain_scen ();
+  z = begin ("smb://server.example/share/dir/", "Domain\\User", sc);
+  twist_transfer_setopt (z->t, TWISTOPT_RANGE, "1-2");
+  launch (z);
+  check (z->t->done && z->t->result == TWIST_ERR_INVAL,
+         "smb: a range does not apply to a listing");
+  finish (z);
+  twist_smb_set_test_now (0);
+}
+
+static void
+test_listing_pause (void)
+{
+  struct scen sc = plain_scen ();
+  struct tx *z;
+
+  twist_smb_set_test_now (NOW);
+  z = begin ("smb://server.example/share/dir/", "Domain\\User", sc);
+  fill_dir (z);
+  z->pause_once = 1;
+  launch (z);
+  check (z->paused_seen && !z->t->done && z->queries == 1,
+         "smb: a full callback holds the next QUERY_DIRECTORY back");
+  serve (z);
+  check (z->queries == 1, "smb: and nothing more is asked while it waits");
+  twist_transfer_resume (z->t);
+  serve (z);
+  check (z->t->done && z->t->result == TWIST_OK && out_is (z, long_listing),
+         "smb: it goes on when resumed, and every line is there, in order");
+  finish (z);
+  twist_smb_set_test_now (0);
+}
+
 int
 main (void)
 {
@@ -1040,5 +1296,7 @@ main (void)
   test_dirs ();
   test_stall ();
   test_put_failures ();
+  test_listing ();
+  test_listing_pause ();
   return tests_finish ();
 }

@@ -436,29 +436,7 @@ ssh_password (const struct twist_transfer *transfer)
 size_t
 twist_ssh_sanitize (uint8_t *out, const uint8_t *in, size_t n)
 {
-  size_t i = 0, o = 0;
-
-  while (i < n)
-    {
-      uint8_t c = in[i];
-
-      if (c < 0x20 || c == 0x7f)
-        {
-          out[o++] = '?';
-          i++;
-        }
-      else if (c == 0xc2 && i + 1 < n && in[i + 1] >= 0x80 && in[i + 1] <= 0x9f)
-        {
-          out[o++] = '?';
-          i += 2;
-        }
-      else
-        {
-          out[o++] = c;
-          i++;
-        }
-    }
-  return o;
+  return twist_text_sanitize (out, in, n);
 }
 
 /* Keyboard-interactive: the server asks questions, and twist has a password.

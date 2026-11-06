@@ -212,6 +212,69 @@ twist_utf16le_from_utf8 (const char *s, size_t slen, int upper, uint8_t *out,
   return TWIST_OK;
 }
 
+int
+twist_utf8_from_utf16le (const uint8_t *in, size_t n, char *out, size_t cap,
+                         size_t *outlen)
+{
+  size_t i = 0, o = 0;
+
+  if (outlen == NULL || (in == NULL && n > 0) || (out == NULL && cap > 0)
+      || (n & 1) != 0)
+    return TWIST_ERR_INVAL;
+  while (i < n)
+    {
+      uint32_t c = (uint32_t) in[i] | ((uint32_t) in[i + 1] << 8);
+
+      i += 2;
+      if (c >= 0xd800 && c <= 0xdbff)
+        {
+          uint32_t d;
+
+          if (i >= n)
+            return TWIST_ERR_INVAL;
+          d = (uint32_t) in[i] | ((uint32_t) in[i + 1] << 8);
+          if (d < 0xdc00 || d > 0xdfff)
+            return TWIST_ERR_INVAL;
+          i += 2;
+          c = 0x10000 + ((c - 0xd800) << 10) + (d - 0xdc00);
+        }
+      else if (c >= 0xdc00 && c <= 0xdfff)
+        return TWIST_ERR_INVAL;
+      if (c < 0x80)
+        {
+          if (cap - o < 1)
+            return TWIST_ERR_INVAL;
+          out[o++] = (char) c;
+        }
+      else if (c < 0x800)
+        {
+          if (cap - o < 2)
+            return TWIST_ERR_INVAL;
+          out[o++] = (char) (0xc0 | (c >> 6));
+          out[o++] = (char) (0x80 | (c & 0x3f));
+        }
+      else if (c < 0x10000)
+        {
+          if (cap - o < 3)
+            return TWIST_ERR_INVAL;
+          out[o++] = (char) (0xe0 | (c >> 12));
+          out[o++] = (char) (0x80 | ((c >> 6) & 0x3f));
+          out[o++] = (char) (0x80 | (c & 0x3f));
+        }
+      else
+        {
+          if (cap - o < 4)
+            return TWIST_ERR_INVAL;
+          out[o++] = (char) (0xf0 | (c >> 18));
+          out[o++] = (char) (0x80 | ((c >> 12) & 0x3f));
+          out[o++] = (char) (0x80 | ((c >> 6) & 0x3f));
+          out[o++] = (char) (0x80 | (c & 0x3f));
+        }
+    }
+  *outlen = o;
+  return TWIST_OK;
+}
+
 /* ---- Keys ---- */
 
 /* HMAC-MD5 over two pieces, which are joined for the one-shot primitive.  */

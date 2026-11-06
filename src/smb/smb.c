@@ -26,6 +26,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 /* One file from an SMB share, over TCP port 445.
 
@@ -72,6 +73,12 @@
 #define FILE_APPEND_DATA 0x00000004u
 #define FILE_WRITE_ATTRIBUTES 0x00000100u
 #define FILE_ATTRIBUTE_DIRECTORY 0x00000010u
+#define FILE_ATTRIBUTE_READONLY 0x00000001u
+#define STATUS_NO_MORE_FILES 0x80000006u
+#define STATUS_NO_SUCH_FILE 0xC000000Fu
+#define INFO_FILE_ID_BOTH_DIR 0x25
+#define RESTART_SCANS 0x01
+#define DIR_ENTRY_FIXED 104u
 
 enum
 {
@@ -82,6 +89,7 @@ enum
   X_OPEN,
   X_READ,
   X_WRITE,
+  X_LIST,
   X_CLOSE,
   X_TREED,
   X_LOGOFF,
@@ -142,9 +150,21 @@ struct twist_smb
   unsigned nwr;
   int cur_w;			/* Index of the write being answered, or -1.  */
   int (*test_full) (void *user);
+
+  /* A listing.  */
+  int list, list_only;
+  int first_query, list_end, list_wait;
+  unsigned entries;		/* In the answer being read.  */
 };
 
 static const struct twist_ntlm_rand *test_rnd;
+static time_t test_now;
+
+void
+twist_smb_set_test_now (time_t now)
+{
+  test_now = now;
+}
 
 void
 twist_smb_set_test_rnd (const struct twist_ntlm_rand *rnd)
@@ -644,6 +664,13 @@ on_error (void *u, uint32_t status, unsigned ctx, uint32_t n)
   (void) n;
   if (x->finished)
     return TWIST_OK;
+  if (x->phase == X_LIST
+      && (status == STATUS_NO_MORE_FILES
+          || (status == STATUS_NO_SUCH_FILE && x->first_query)))
+    {
+      x->list_end = 1;		/* The end of the directory, or an empty one.  */
+      return TWIST_OK;
+    }
   /* The NT statuses that say what happened to the file.  */
   switch (status)
     {
@@ -701,6 +728,15 @@ on_write (void *u, uint32_t count, uint32_t rem)
     }
   twist_progress_uploaded (x->transfer, count);
   return TWIST_OK;
+}
+
+static int
+on_qdir (void *u, uint32_t len)
+{
+  struct twist_smb *x = u;
+
+  (void) len;
+  return x->phase == X_LIST ? TWIST_OK : TWIST_ERR_PROTOCOL;
 }
 
 static int
@@ -941,7 +977,11 @@ open_next (struct twist_smb *x)
   else
     {
       x->phase = X_OPEN;
-      if (x->put)
+      if (x->list)
+        rc = send_create (x, x->path, FILE_READ_DATA | FILE_READ_ATTRIBUTES
+                          | SYNCHRONIZE, FILE_SHARE_ALL, FILE_OPEN,
+                          FILE_DIRECTORY_FILE, 0);
+      else if (x->put)
         rc = send_create (x, x->path,
                           FILE_WRITE_DATA | FILE_APPEND_DATA
                           | FILE_WRITE_ATTRIBUTES | FILE_READ_ATTRIBUTES
@@ -955,6 +995,143 @@ open_next (struct twist_smb *x)
     }
   if (rc != TWIST_OK)
     smb_fail (x, rc);
+}
+
+/* ---- Listing ---- */
+
+static const char *const months[] = {
+  "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct",
+  "Nov", "Dec"
+};
+
+static uint32_t
+le32 (const uint8_t *p)
+{
+  return (uint32_t) p[0] | ((uint32_t) p[1] << 8) | ((uint32_t) p[2] << 16)
+    | ((uint32_t) p[3] << 24);
+}
+
+static uint64_t
+le64 (const uint8_t *p)
+{
+  return (uint64_t) le32 (p) | ((uint64_t) le32 (p + 4) << 32);
+}
+
+/* A time as ls shows it: month, day and the time of day for the last six
+   months, the year for anything older (or a little in the future).  */
+static void
+format_time (uint64_t filetime, char out[16])
+{
+  time_t t, now = test_now != 0 ? test_now : time (NULL);
+  struct tm tm;
+  uint64_t secs = filetime / 10000000u;
+
+  /* FILETIME counts from 1601.  */
+  t = secs >= 11644473600u ? (time_t) (secs - 11644473600u) : 0;
+  if (gmtime_r (&t, &tm) == NULL)
+    {
+      snprintf (out, 16, "Jan  1  1970");
+      return;
+    }
+  if (t > now - 15778476 && t < now + 3600)
+    snprintf (out, 16, "%s %2d %02d:%02d", months[tm.tm_mon], tm.tm_mday,
+              tm.tm_hour, tm.tm_min);
+  else
+    snprintf (out, 16, "%s %2d %5d", months[tm.tm_mon], tm.tm_mday,
+              tm.tm_year + 1900);
+}
+
+/* One entry (FileIdBothDirectoryInformation), as a line.  */
+static int
+list_entry (void *u, const uint8_t *p, size_t n)
+{
+  struct twist_smb *x = u;
+  uint8_t name16[TWIST_SMB_ENTRY_MAX];
+  char name[3 * TWIST_SMB_ENTRY_MAX / 2 + 8];
+  uint8_t line[3 * TWIST_SMB_ENTRY_MAX / 2 + 160];
+  size_t namelen, nn, ln = 0;
+  uint32_t attrs;
+  int dir;
+
+  if (x->finished)
+    return TWIST_OK;
+  if (x->phase != X_LIST || n < DIR_ENTRY_FIXED)
+    return TWIST_ERR_PROTOCOL;
+  namelen = le32 (p + 60);
+  if (namelen > n - DIR_ENTRY_FIXED)
+    return TWIST_ERR_PROTOCOL;
+  x->entries++;
+  memcpy (name16, p + DIR_ENTRY_FIXED, namelen);
+  if (twist_utf8_from_utf16le (name16, namelen, name, sizeof name, &nn)
+      != TWIST_OK)
+    return TWIST_ERR_PROTOCOL;
+  if (x->list_only)
+    ln = twist_text_sanitize (line, (const uint8_t *) name, nn);
+  else
+    {
+      char when[16], head[160];
+      uint64_t size = le64 (p + 40);
+
+      attrs = le32 (p + 56);
+      dir = (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0;
+      format_time (le64 (p + 24), when);
+      snprintf (head, sizeof head, "%c%s %3u %-8s %-8s %8llu %s ", dir ? 'd' : '-',
+                (attrs & FILE_ATTRIBUTE_READONLY) != 0
+                ? (dir ? "r-xr-xr-x" : "r--r--r--")
+                : (dir ? "rwxr-xr-x" : "rw-r--r--"), 1u, "-", "-",
+                (unsigned long long) size, when);
+      ln = strlen (head);
+      memcpy (line, head, ln);
+      ln += twist_text_sanitize (line + ln, (const uint8_t *) name, nn);
+    }
+  line[ln++] = '\n';
+  twist_deliver (x->transfer, line, ln);
+  twist_transfer_downloaded (x->transfer, ln);
+  return TWIST_OK;
+}
+
+static void
+send_query (struct twist_smb *x)
+{
+  struct twist_smb_req h;
+  uint8_t out[512];
+  size_t n;
+
+  x->entries = 0;
+  if (twist_smb_session_request (x->sess, 1, &h) != TWIST_OK
+      || twist_smb_w_query_directory (out, sizeof out, &n, &h, x->fid,
+                                      INFO_FILE_ID_BOTH_DIR,
+                                      x->first_query ? RESTART_SCANS : 0, "*",
+                                      65536) != TWIST_OK
+      || twist_smb_session_send (x->sess, out, n, NULL, 0) != TWIST_OK)
+    smb_fail (x, TWIST_ERR_PROTOCOL);
+}
+
+static void
+opened_list (struct twist_smb *x)
+{
+  x->phase = X_LIST;
+  x->first_query = 1;
+  send_query (x);
+}
+
+/* An answer is done: ask for the next, or close.  An answer with no entry in
+   it is not progress, and is taken as the end.  */
+static void
+list_next (struct twist_smb *x)
+{
+  if (x->list_end || x->entries == 0)
+    {
+      begin_close (x);
+      return;
+    }
+  x->first_query = 0;
+  if (x->transfer->sink_paused)
+    {
+      x->list_wait = 1;
+      return;
+    }
+  send_query (x);
 }
 
 /* The file is open: work out what to read.  */
@@ -1071,10 +1248,15 @@ on_end (void *u, uint64_t off)
           smb_fail (x, TWIST_ERR_PROTOCOL);
           return TWIST_OK;
         }
-      if (x->put)
+      if (x->list)
+        opened_list (x);
+      else if (x->put)
         opened_put (x);
       else
         opened (x);
+      break;
+    case X_LIST:
+      list_next (x);
       break;
     case X_WRITE:
       if (x->cur_w >= 0)
@@ -1251,6 +1433,12 @@ smb_resume_hook (struct twist_transfer *t)
     return;
   if (x->ep != NULL)
     twist_endpoint_resume_read (x->ep);
+  if (x->list_wait)
+    {
+      x->list_wait = 0;
+      send_query (x);
+      return;
+    }
   pump (x);
 }
 
@@ -1321,11 +1509,23 @@ twist_smb_new (struct twist_transfer *transfer, int live)
       rc = TWIST_ERR_URL;
       goto bad;
     }
-  if (dir || transfer->dirlistonly)
+  x->list = dir || transfer->dirlistonly;
+  if (x->list && x->put)
     {
-      detail (x, _("listing a directory over smb is not supported"));
-      rc = TWIST_ERR_UNSUPPORTED;
+      detail (x, _("a listing cannot be uploaded"));
+      rc = TWIST_ERR_INVAL;
       goto bad;
+    }
+  if (x->list)
+    {
+      if (transfer->range != NULL || transfer->resume_from != 0)
+        {
+          detail (x, _("a range or a resume does not apply to a directory "
+                       "listing"));
+          rc = TWIST_ERR_INVAL;
+          goto bad;
+        }
+      x->list_only = transfer->dirlistonly;
     }
   if (x->put)
     {
@@ -1337,6 +1537,14 @@ twist_smb_new (struct twist_transfer *transfer, int live)
         }
       x->append = transfer->append;
       x->make_dirs = transfer->create_missing_dirs;
+    }
+  if (x->list)
+    {
+      /* The directory, without the slash that ended its name.  */
+      size_t pl = strlen (x->path);
+
+      while (pl > 0 && x->path[pl - 1] == '\\')
+        x->path[--pl] = 0;
     }
   user = twist_mail_user (transfer);
   pass = twist_mail_pass (transfer);
@@ -1383,6 +1591,8 @@ twist_smb_new (struct twist_transfer *transfer, int live)
   up.close = on_close;
   up.read = on_read;
   up.write = on_write;
+  up.query_directory = on_qdir;
+  up.entry = list_entry;
   up.data = on_data;
   up.error = on_error;
   up.pending = on_pending;

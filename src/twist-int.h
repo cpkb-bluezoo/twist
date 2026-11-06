@@ -2610,6 +2610,8 @@ void twist_smb_drained (struct twist_smb *x);
 /* The random values of the next sessions made (the tests fix them); NULL for
    the system's.  */
 void twist_smb_set_test_rnd (const struct twist_ntlm_rand *rnd);
+/* The time listings are shown against (0: the clock's).  */
+void twist_smb_set_test_now (time_t now);
 int twist_smb_start (struct twist_smb *x);
 size_t twist_smb_receive (struct twist_smb *x, const uint8_t *data, size_t len);
 
@@ -2750,6 +2752,12 @@ int twist_altsvc_lookup (struct twist_altsvc *a, const char *origin, char *out,
                          size_t cap);
 
 char *twist_strdup (const char *s);
+size_t twist_text_sanitize (uint8_t *out, const uint8_t *in, size_t n);
+/* UTF-16LE to UTF-8 (src/auth/ntlm.c, with the other direction): an unpaired
+   surrogate or an odd length is TWIST_ERR_INVAL.  OUT has room for CAP bytes,
+   and 3 for each unit is enough.  */
+int twist_utf8_from_utf16le (const uint8_t *in, size_t n, char *out, size_t cap,
+                             size_t *outlen);
 /* The user's home directory: $HOME if it is set and not empty, else the one
    in the password file.  Copied to OUT (CAP bytes); returns 1, or 0 if there
    is none or it does not fit.  */

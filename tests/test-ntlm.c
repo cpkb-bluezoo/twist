@@ -173,6 +173,26 @@ test_text (void)
          == TWIST_ERR_INVAL, "utf-16: a cut-off sequence is refused");
   check (twist_utf16le_from_utf8 ("abcd", 4, 0, out, 7, &n) == TWIST_ERR_INVAL,
          "utf-16: output that does not fit is refused");
+
+  {
+    char u8[32];
+    static const uint8_t ok[] = { 'a', 0, 0xe9, 0, 0xac, 0x20, 0x3d, 0xd8, 0x00, 0xde };
+    static const uint8_t high[] = { 0x00, 0xd8, 'a', 0 };
+    static const uint8_t low[] = { 0x00, 0xdc };
+    static const uint8_t odd[] = { 'a', 0, 'b' };
+
+    check (twist_utf8_from_utf16le (ok, sizeof ok, u8, sizeof u8, &n) == TWIST_OK
+           && n == 10 && memcmp (u8, "a\xc3\xa9\xe2\x82\xac\xf0\x9f\x98\x80", 10) == 0,
+           "utf-8: ASCII, Latin-1, the BMP and a surrogate pair");
+    check (twist_utf8_from_utf16le (high, sizeof high, u8, sizeof u8, &n)
+           == TWIST_ERR_INVAL, "utf-8: a high surrogate with no low one is refused");
+    check (twist_utf8_from_utf16le (low, sizeof low, u8, sizeof u8, &n)
+           == TWIST_ERR_INVAL, "utf-8: a low surrogate on its own is refused");
+    check (twist_utf8_from_utf16le (odd, sizeof odd, u8, sizeof u8, &n)
+           == TWIST_ERR_INVAL, "utf-8: an odd length is refused");
+    check (twist_utf8_from_utf16le (ok, sizeof ok, u8, 4, &n) == TWIST_ERR_INVAL,
+           "utf-8: output that does not fit is refused");
+  }
 }
 
 static void
