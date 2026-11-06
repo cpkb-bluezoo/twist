@@ -59,6 +59,7 @@ libtwist_la_SOURCES = \
   auth/sasl.c \
   auth/sha256.c \
   auth/sha512.c \
+  auth/spnego.c \
   auth/smbkdf.c \
   reactor/atomic.h \
   reactor/cmdq.c \

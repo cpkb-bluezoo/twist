@@ -1982,6 +1982,31 @@ int twist_ntlm_sign (struct twist_ntlm *n, const void *msg, size_t len,
 int twist_ntlm_verify (struct twist_ntlm *n, const void *msg, size_t len,
                        const uint8_t signature[16]);
 
+/* A SPNEGO initiator (RFC 4178) with NTLMSSP as its only mechanism
+   (src/auth/spnego.c), for the GSS-API tokens of SMB2 SESSION_SETUP.  It owns
+   an NTLM client made from the same arguments as twist_ntlm_new.  twist_
+   spnego_start gives the first token.  Each token from the server is fed whole
+   or in pieces with twist_spnego_feed and ended with twist_spnego_finish,
+   which gives the token to send back, or sets *DONE when the server's last
+   token has been accepted; twist_spnego_step does both for a whole token.
+   Anything a server sends that is not the NTLMSSP exchange, a reject, or a
+   bad mechListMIC, is TWIST_ERR_AUTH and ends the exchange.  The exported
+   session key is there once the AUTHENTICATE has gone.  */
+struct twist_spnego;
+struct twist_spnego *twist_spnego_new (const char *domain, const char *user,
+                                       const char *password, const char *host,
+                                       const struct twist_ntlm_rand *rnd);
+void twist_spnego_free (struct twist_spnego *s);
+int twist_spnego_start (struct twist_spnego *s, uint8_t *out, size_t cap,
+                        size_t *len);
+int twist_spnego_feed (struct twist_spnego *s, const uint8_t *data,
+                       size_t len);
+int twist_spnego_finish (struct twist_spnego *s, uint8_t *out, size_t cap,
+                         size_t *outlen, int *done);
+int twist_spnego_step (struct twist_spnego *s, const uint8_t *in, size_t inlen,
+                       uint8_t *out, size_t cap, size_t *outlen, int *done);
+int twist_spnego_session_key (const struct twist_spnego *s, uint8_t key[16]);
+
 /* The pieces of NTLMv2 that MS-NLMP 4.2.4 gives worked examples of, and the
    text conversion SMB shares: UTF-8 to UTF-16LE, upper-casing Latin, Greek
    and Cyrillic letters if UPPER; invalid UTF-8 is TWIST_ERR_INVAL.  */
