@@ -121,7 +121,7 @@ FROM build AS integration
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
          curl nghttp2 nghttp2-client nodejs openssh-client openssh-server \
-         openssl python3 python3-pip tftp-hpa vsftpd \
+         openssl python3 python3-pip samba tftp-hpa vsftpd \
     && rm -rf /var/lib/apt/lists/* \
     && pip3 install --no-cache-dir --break-system-packages aioquic==1.2.0 \
     && mkdir -p /run/sshd \

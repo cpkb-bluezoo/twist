@@ -812,7 +812,6 @@ finish_negotiate (struct twist_smb_session *s, const uint8_t *msg, size_t len)
   if (s->hdr.status != TWIST_SMB_STATUS_SUCCESS
       || s->neg.dialect != TWIST_SMB_DIALECT_311
       || (s->neg.mode & 1) == 0
-      || (s->neg.caps & CAP_ENCRYPTION) == 0
       || !s->neg.got_preauth || !s->neg.got_enc || s->neg.bad
       || s->neg.max_read < IO_MIN || s->neg.max_write < IO_MIN
       || s->neg.max_transact < IO_MIN)

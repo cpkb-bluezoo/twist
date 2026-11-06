@@ -1418,6 +1418,12 @@ is_ssh_url (const char *url)
 }
 
 static int
+is_smb_url (const char *url)
+{
+  return strncasecmp (url, "smb://", 6) == 0 || strncasecmp (url, "smbs://", 7) == 0;
+}
+
+static int
 is_http_url (const char *url)
 {
   return strncasecmp (url, "http://", 7) == 0
@@ -2127,9 +2133,10 @@ job_prepare (struct cli_run *run, struct cli_next *next, struct cli_job **out)
     {
       int sends = upload != NULL || (op->has_data && !op->get);
 
-      if (!is_ssh_url (url) && !is_ftp_url (url))
+      if (!is_ssh_url (url) && !is_ftp_url (url) && !is_smb_url (url))
         {
-          diag_code (2, _("--continue-at works for sftp, scp, ftp and ftps only"));
+          diag_code (2, _("--continue-at works for sftp, scp, ftp, ftps and "
+                          "smb only"));
           rc = 2;
           goto fail;
         }

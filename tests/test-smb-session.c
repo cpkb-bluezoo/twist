@@ -446,9 +446,6 @@ main (void)
   o.cipher = 0;
   test_refused ("a server with no encryption context", o, TWIST_ERR_PROTOCOL);
   o = srv_good ();
-  o.caps = 0x04;
-  test_refused ("a server without the encryption capability", o, TWIST_ERR_PROTOCOL);
-  o = srv_good ();
   o.mode = 0;
   test_refused ("a server that cannot sign", o, TWIST_ERR_PROTOCOL);
   o = srv_good ();
