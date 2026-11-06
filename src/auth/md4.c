@@ -22,6 +22,8 @@
 
 #include "twist-int.h"
 
+#include <quickstep/crypto.h>
+
 #include <stdint.h>
 #include <string.h>
 
@@ -84,7 +86,7 @@ md4_block (uint32_t st[4], const uint8_t block[64])
   st[1] += b;
   st[2] += c;
   st[3] += d;
-  memset (X, 0, sizeof X);
+  gq_wipe (X, sizeof X);
 }
 
 int
@@ -123,7 +125,7 @@ twist_md4 (const void *data, size_t len, uint8_t out[16])
       out[i * 4 + 2] = (uint8_t) (st[i] >> 16);
       out[i * 4 + 3] = (uint8_t) (st[i] >> 24);
     }
-  memset (block, 0, sizeof block);
-  memset (st, 0, sizeof st);
+  gq_wipe (block, sizeof block);
+  gq_wipe (st, sizeof st);
   return TWIST_OK;
 }
