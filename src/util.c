@@ -223,3 +223,35 @@ twist_slist_free_all (struct twist_slist *list)
       list = next;
     }
 }
+
+/* Text a server sent, as it may be shown or written: the control characters,
+   and the C1 ones in UTF-8, are made "?", so that a name cannot move the
+   cursor, set the title of a terminal or end a line that is not its own.  OUT
+   has room for N bytes; the length is returned.  */
+size_t
+twist_text_sanitize (uint8_t *out, const uint8_t *in, size_t n)
+{
+  size_t i = 0, o = 0;
+
+  while (i < n)
+    {
+      uint8_t c = in[i];
+
+      if (c < 0x20 || c == 0x7f)
+        {
+          out[o++] = '?';
+          i++;
+        }
+      else if (c == 0xc2 && i + 1 < n && in[i + 1] >= 0x80 && in[i + 1] <= 0x9f)
+        {
+          out[o++] = '?';
+          i += 2;
+        }
+      else
+        {
+          out[o++] = c;
+          i++;
+        }
+    }
+  return o;
+}

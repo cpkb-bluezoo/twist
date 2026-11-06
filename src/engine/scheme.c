@@ -80,6 +80,18 @@ attach_ldap (struct twist_transfer *transfer)
 }
 
 static int
+attach_smb (struct twist_transfer *transfer)
+{
+  return twist_smb_attach (transfer);
+}
+
+static int
+attach_smbs (struct twist_transfer *transfer)
+{
+  return twist_smbs_attach (transfer);
+}
+
+static int
 attach_gopher (struct twist_transfer *transfer)
 {
   return twist_gopher_attach (transfer);
@@ -152,8 +164,8 @@ static const struct twist_scheme schemes[] = {
   { "file", 0, TWIST_SCHEME_READY, attach_file },
   { "scp", 22, TWIST_SCHEME_PROXY_OK | TWIST_SCHEME_READY, attach_ssh },
   { "sftp", 22, TWIST_SCHEME_PROXY_OK | TWIST_SCHEME_READY, attach_ssh },
-  { "smb", 445, TWIST_SCHEME_PROXY_OK, twist_scheme_unsupported },
-  { "smbs", 445, TWIST_SCHEME_TLS | TWIST_SCHEME_PROXY_OK, twist_scheme_unsupported },
+  { "smb", 445, TWIST_SCHEME_READY | TWIST_SCHEME_PROXY_OK, attach_smb },
+  { "smbs", 443, TWIST_SCHEME_TLS | TWIST_SCHEME_READY, attach_smbs },
   { "rtmp", 1935, TWIST_SCHEME_PROXY_OK, twist_scheme_unsupported },
   { "rtmps", 443, TWIST_SCHEME_TLS | TWIST_SCHEME_PROXY_OK, twist_scheme_unsupported }
 };

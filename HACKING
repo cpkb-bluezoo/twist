@@ -182,7 +182,7 @@ tests do not all keep to this yet: see "Tests" in TODO for those that still
 open a loopback socket.)
 
 Integration tests run against real peers (python, node, nghttpx, OpenSSH,
-vsftpd) and are never run automatically.  They skip with exit 77 when a peer is
+vsftpd, Samba) and are never run automatically.  They skip with exit 77 when a peer is
 absent, so 'make check-integration' works on a machine that has some of them.
 The reference environment is a podman container:
 

@@ -48,6 +48,7 @@ Documentation License''.
 * Variables::
 * URL globbing::
 * SFTP and SCP::
+* SMB and SMBS::
 * Telnet::
 * GNU Free Documentation License::
 @end menu
@@ -1307,21 +1308,24 @@ User-Agent header.
 @itemx --user @var{user[:password]}
 User and password.  Without a colon, the password is read from
 @file{/dev/tty} with echo disabled, so a piped standard input is left
-for @option{-d} or @option{-T}.
+for @option{-d} or @option{-T}.  For @code{smb} and @code{smbs} the user may
+be written @samp{DOMAIN\user} or @samp{DOMAIN/user} (@pxref{SMB and SMBS}).
 @item -e @var{url}
 @itemx --referer @var{url}
 Referer header.
 @item -r @var{range}
 @itemx --range @var{range}
-Byte range.  For @code{sftp}, @code{scp} and @code{file} it is
+Byte range.  For @code{sftp}, @code{scp}, @code{smb}, @code{smbs} and @code{file} it is
 @samp{@var{first}-@var{last}}, @samp{@var{first}-}, or @samp{-@var{count}} for
 the last @var{count} bytes, one range only (@pxref{SFTP and SCP}).  A range
 that starts at or past the end of a file is exit status 33.
 @item -l
 @itemx --list-only
 List the names only, one to a line, not the server's long form, when the URL
-names a directory.  For @code{sftp} (@pxref{SFTP and SCP}), and for @code{ftp}
-and @code{ftps}, where it is NLST and not LIST.
+names a directory.  For @code{sftp} (@pxref{SFTP and SCP}), for @code{smb} and
+@code{smbs} (@pxref{SMB and SMBS}), where it also takes a path with no slash
+at its end as the directory, and for @code{ftp} and @code{ftps}, where it is
+NLST and not LIST.
 @item -Q @var{command}
 @itemx --quote @var{command}
 Run an SFTP command on the server before the transfer, or after a successful
@@ -1340,14 +1344,16 @@ limit.  A limit cannot be kept over HTTP/3 or for @code{tftp}: an https URL
 uses HTTP/2 or HTTP/1 instead, @option{--http3-only} fails, and a @code{tftp}
 URL is refused with status 2, rather than the limit being ignored.
 @item --ftp-create-dirs
-Make the directories an @code{sftp} upload needs, with mode 0755.
+Make the directories an @code{sftp} or @code{smb} upload needs (with mode 0755
+for @code{sftp}).
 @item -a
 @itemx --append
-An upload adds to the remote file and does not replace it (@code{ftp}: APPE).
+An upload adds to the remote file and does not replace it (@code{ftp}: APPE;
+@code{smb}: the file is opened and written at its end).
 @item -C @var{offset}
 @itemx --continue-at @var{offset}
-Resume at byte @var{offset}, for @code{sftp}, @code{scp}, @code{ftp} and
-@code{ftps}.  Use @samp{-} to find the offset.  A download continues from the end of the file named by
+Resume at byte @var{offset}, for @code{sftp}, @code{scp}, @code{ftp},
+@code{ftps} and, for downloads only, @code{smb} and @code{smbs}.  Use @samp{-} to find the offset.  A download continues from the end of the file named by
 @option{-o} or @option{-O}, which is opened to add to it; with a number the
 file is added to from that byte of the remote file.  An upload with
 @option{-T} skips that many bytes of the local file and adds to the remote
@@ -1593,7 +1599,7 @@ A local file named by @option{-d}, @option{--data-binary},
 @item 27
 Out of memory.
 @item 25
-An @code{sftp}, @code{scp}, @code{ftp} or @code{imap} upload failed.
+An @code{sftp}, @code{scp}, @code{smb}, @code{ftp} or @code{imap} upload failed.
 @item 28
 The transfer timed out.
 @item 33
@@ -1632,13 +1638,15 @@ The data of an upload had to be sent again (a redirect that keeps the body, an
 authentication that needs a second request) and could not be read again from
 the start, as a pipe cannot.
 @item 9
-The SFTP server would not let the user read the file.
+The @code{sftp} or @code{smb} server would not let the user read the file, or
+write it or list the directory.
 @item 60
 The host key of an @code{sftp} or @code{scp} server is not trusted: it is
 not in @file{known_hosts}, it differs from the one there, or it does not
 match @option{--hostpubsha256}.
 @item 67
-Authentication failed.
+Authentication failed.  For @code{smb}, also when there is no user name, which
+is never taken as a guest.
 @item 68
 TFTP file not found.
 @item 69
@@ -1654,7 +1662,8 @@ TFTP file already exists.
 @item 74
 TFTP no such user.
 @item 78
-The file does not exist on the @code{sftp} or @code{scp} server.
+The file does not exist on the @code{sftp}, @code{scp} or @code{smb} server, or
+the share does not exist on the @code{smb} server.
 @item 79
 The @code{sftp} or @code{scp} server could not do what was asked.
 @item 81
@@ -1737,6 +1746,10 @@ Both run over SFTP on an SSH connection: a file up or down and, for
 @code{sftp}, a directory listing.  There is no SCP wire protocol.  SSH
 provides the encryption, so there is no TLS variant.  See @ref{SFTP and
 SCP}.
+@item smb, smbs
+A file from a share, up or down, and a directory listing.  @code{smb} is SMB
+3.1.1 over TCP port 445 and @code{smbs} is SMB over QUIC; both sign in with
+NTLMv2 and encrypt every message.  See @ref{SMB and SMBS}.
 @item smtp, smtps
 Sends a message to the server, from @option{--mail-from} to each
 @option{--mail-rcpt}.
@@ -1753,7 +1766,8 @@ written.
 
 The schemes with a trailing @code{s} (@code{imaps}, @code{ldaps},
 @code{mqtts}, @code{pop3s}, @code{smtps}, @code{https}, @code{ftps},
-@code{wss}) are TLS from the first byte.  The ones without are not upgraded
+@code{wss}) are TLS from the first byte.  (@code{smbs} is not TLS on the SMB
+port: it is SMB over QUIC, whose handshake is TLS 1.3.)  The ones without are not upgraded
 unless asked: only @code{ftp}, @code{imap}, @code{pop3} and @code{smtp} can
 be, with @option{--ssl} or @option{--ssl-reqd} (@pxref{Explicit TLS}).
 @code{ldap} and @code{mqtt} cannot.  A user name and password given for any
@@ -1795,7 +1809,7 @@ it is not taken as part of the encrypted session: the transfer ends with exit
 status 8.
 
 These schemes are recognised, but are not implemented, and exit 1:
-@code{rtmp}, @code{rtmps}, @code{smb} and @code{smbs}.
+@code{rtmp} and @code{rtmps}.
 
 @heading URLs
 
@@ -2371,6 +2385,187 @@ run on, for the next transfer started on it.
 @subheading Requirements
 
 SSH comes from the foxtrot library, which needs libgcrypt 1.12.4 or later.
+
+@node SMB and SMBS
+@chapter SMB and SMBS
+
+@example
+twist -u 'DOMAIN\user:password' smb://server/share/dir/file
+twist -u user smb://server/share/dir/
+twist -T report.pdf -u user smb://server/share/reports/report.pdf
+twist -u user smbs://server/share/file
+@end example
+
+twist fetches a file from an SMB share, writes a file to one, or lists a
+directory.  @code{smb} is SMB 3.1.1 over TCP port 445.  @code{smbs} is SMB over
+QUIC, on UDP port 443.  The URL is
+@samp{smb://[user[:password]@@]host[:port]/share/path}.  The share is the first
+segment of the path; the rest is the path in the share, percent-decoded and
+sent as UTF-8 with backslashes for the separators.  An empty share, a NUL, or a
+colon in the path (which would name an alternate data stream) is a malformed
+URL, exit status 3.  Several URLs on a command line are several transfers, each
+on a connection of its own.
+
+@subheading What twist signs in with, and what it will not do
+
+twist signs in with NTLMv2, as a local user of the server.  That is what a
+standalone Samba server and a home NAS check.  There is no Kerberos.  The user
+is the one in the URL or given with @option{-u}, and may be written
+@samp{DOMAIN\user} or @samp{DOMAIN/user}, as @command{curl} takes it; a name
+with no domain is a user of the server.  There is no anonymous login: a transfer
+with no user name exits 67 without a connection having been made, and a guest or
+a null session that a server offers is refused.  A share that is open to
+everyone, a guest or public share, cannot be read with twist.
+
+twist asks for no more than SMB 3.1.1 with AES encryption and signing, and
+refuses a server that gives less.  The transfer ends with exit status 8 if the
+server
+
+@itemize @bullet
+@item
+speaks a dialect other than 3.1.1;
+@item
+does not agree to pre-authentication integrity with SHA-512, which is what
+makes the negotiation and the login tamper-proof;
+@item
+chooses a cipher other than AES-256-GCM or AES-128-GCM, which are the ones
+twist offers (AES-CCM is not offered, and a server that picks it is refused);
+@item
+chooses a signing algorithm other than AES-GMAC or AES-CMAC (a server that
+sends none signs with AES-CMAC);
+@item
+sends a compression context, which twist does not ask for;
+@item
+does not support signing or encryption; or
+@item
+does not sign the last answer of the login, or signs it wrongly, which is how a
+change to the negotiation on the way would show.
+@end itemize
+
+A server with SMB encryption switched off is refused.  The usual setting, that
+the server encrypts when the client asks (Samba's @samp{server smb encrypt =
+desired}), is enough, because twist asks.  After the login every message is
+encrypted, and an answer that is not, one that fails its authentication tag,
+or one with a nonce the server used just before, is refused with status 8.  A
+refused login is 67.
+
+Over TCP port 445 the NTLM exchange is in the clear, because encryption
+starts only once the session is up.  Someone who records the exchange can guess
+the password offline, and a weak one will be found.  Use a long password, or a
+transport that protects the login: @code{smbs}, or a tunnel.  Likewise the
+password of a user in a stolen Samba password database is a stolen password,
+since NTLMv2 is made from it directly.
+
+@subheading Downloads
+
+A file is read in requests of up to 64 KiB, as many at a time as the server's
+credits allow (at most eight), and written in the order of the file however the
+answers arrive.  When the program writing the output cannot keep up, no more
+is asked for.  The size the server gives is used for the progress meter.
+
+@option{-r} downloads part of a file: @samp{100-199} (both ends included),
+@samp{100-} or @samp{-50} (the last 50 bytes); a range that starts beyond the
+end of the file exits 33.  @option{-C @var{offset}} continues at that byte,
+and @option{-C -} at the end of the output file; an offset beyond the end of the
+remote file exits 36, and one at the end fetches nothing.  A range and
+@option{-C} cannot be used together.
+
+@subheading Listings
+
+A URL that ends in @samp{/}, or names a share alone, or any URL with
+@option{-l}, is a directory.  Each entry is a line, written as it arrives.
+Without @option{-l} a line is in the long form that an @code{sftp} listing has,
+like @command{ls -l}: the mode, a link count, an owner and a group, the size,
+the date and the name.  SMB has no owner or group to show, so those are
+@samp{-}; the mode is @samp{rwxr-xr-x} for a directory, @samp{rw-r--r--} for a
+file, and without the write bits if the file is read-only.  The date is in UTC:
+month, day and time of day for the last six months, and the year for anything
+older.  @option{-l} gives the names alone.  The entries are in the order the
+server sends them, with @file{.} and @file{..} among them if it sends those.
+
+A name is converted from UTF-16 to UTF-8, and a name that is not valid UTF-16
+ends the transfer with exit status 8.  As in an @code{sftp} listing, control
+characters in a name, and the UTF-8 form of the C1 ones, are replaced with
+@samp{?}, so that a name cannot move the cursor of a terminal or make a line
+that is not an entry.  A range or @option{-C} means nothing for a listing and
+is refused (status 43).
+
+@subheading Uploads
+
+@option{-T @var{file}} (or @option{-T -} for standard input) and
+@option{-d} upload a file.  The remote file is created, or replaced if it is
+there.  @option{-a} opens an existing file and writes at its end, and creates
+it if it is not there.  @option{--ftp-create-dirs} makes the directories above
+the file that are not there.  The URL has to name the file: one that ends in
+@samp{/} is a malformed URL.  A range or @option{-C} means nothing for an
+upload and is refused (status 43).
+
+What is read from the file or the pipe is gathered into writes of up to 64 KiB.
+twist reads no more while the connection holds as much as it should of what it
+has not yet written, and the progress meter counts what the server has said it
+has written, which is later than what has been sent.  If the server does not
+write all that it was sent the transfer ends with exit status 18; if it cannot
+write the file at all it is 25, or 9 if the user may not.
+
+@subheading Exit statuses
+
+@table @asis
+@item 3
+The URL is malformed: no share, an empty share, a NUL, a colon in the path, or
+a path that ends in a slash for an upload.
+@item 8
+The server does not meet the requirements above, an answer is damaged, or a
+file name is not valid UTF-16.
+@item 9
+The server would not let the user read, write or list.
+@item 25
+An upload failed.
+@item 33
+The range starts beyond the end of the file.
+@item 36
+The offset to resume at is beyond the end of the file.
+@item 43
+A range or a resume was asked of an upload or a listing, or a range and a
+resume together.
+@item 67
+The login was refused, or there is no user name.
+@item 78
+The file, the directory or the share is not there.
+@end table
+
+A connection that could not be made is 7, and one that took too long is 28
+(@option{--connect-timeout} covers the lookup, the connection and the login).
+The NT status the server answered with is in the text of the error.
+
+@subheading SMB over QUIC
+
+@code{smbs} is SMB over QUIC.  It is not TLS on port 445, which SMB does not
+have.  twist connects over UDP, to port 443 unless the URL gives one, with the
+application protocol @samp{smb}, checks the certificate as for @code{https}
+(@option{--cacert}, @option{--capath}, @option{-k}; the host of the URL is the
+name it must be valid for) and presents no client certificate.  The whole SMB
+session, the login included, then runs inside QUIC, so the NTLM exchange cannot
+be recorded by someone on the path.  SMB's own encryption is kept as well, so
+that twist makes the same demands of a server on either transport.
+
+@code{smbs} never falls back to TCP port 445.  Through a proxy it goes as
+HTTP/3 does, by CONNECT-UDP (RFC 9298): with @option{--proxy-template-udp}, or
+an @code{https} proxy.  A proxy of any other kind cannot carry QUIC, and the
+transfer exits with status 1 instead of going round it.
+
+The messages are carried as on TCP: with the four-byte length header, on the
+one bidirectional stream a QUIC connection starts with.  This is how SMB over
+QUIC is understood to work, but twist's implementation has not been checked
+against a Windows Server or a Samba server that speaks it, and the transport
+capabilities that let a server and client agree to drop SMB's own encryption
+inside QUIC are not used.  If a server will not talk to @code{smbs} that
+otherwise works with a client that does, that is where to look.
+
+@subheading Not done
+
+SMB 1 and 2, anything earlier than 3.1.1, NetBIOS, Kerberos, multichannel,
+compression, DFS referrals, oplocks and leases, alternate data streams, and
+reuse of a connection for the next URL.
 
 @node Telnet
 @chapter Telnet

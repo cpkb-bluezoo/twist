@@ -1864,6 +1864,523 @@ int twist_auth_digest (const char *challenge, const char *method,
                        unsigned nc, const char *cnonce, char **out);
 int twist_md5 (const void *data, size_t len, uint8_t out[16]);
 int twist_sha256 (const void *data, size_t len, uint8_t out[32]);
+int twist_sha512 (const void *data, size_t len, uint8_t out[64]);
+int twist_cmac_aes128 (const uint8_t key[16], const void *data, size_t len,
+                       uint8_t out[16]);
+
+/* The key derivation of MS-SMB2 3.1.4.2 (SP800-108, counter mode, HMAC-SHA256).
+   LABEL and CONTEXT are given as SMB defines them, with the label's NUL; BITS
+   is 128 or 256 and OUT holds that many bits.  */
+int twist_smb_kdf (const uint8_t *key, size_t keylen,
+                   const void *label, size_t labellen,
+                   const void *context, size_t contextlen,
+                   unsigned bits, uint8_t *out);
+
+/* BER and DER (src/asn1/asn1.c), shared by LDAP and SPNEGO.  Tags are one
+   byte; lengths are definite, in at most three bytes.  */
+
+/* The writer encodes into BUF, which the caller owns.  An element that does
+   not fit sets err and nothing more is written.  A constructed element is
+   opened with twist_der_begin and closed with twist_der_end on its mark.  In
+   BER mode (DER 0) its length takes three bytes whatever it is; in DER mode
+   it takes the fewest, as DER requires.  */
+struct twist_der_writer
+{
+  uint8_t *buf;
+  size_t cap, n;
+  int err;
+  int der;
+};
+void twist_der_writer_init (struct twist_der_writer *w, uint8_t *buf,
+                            size_t cap, int der);
+void twist_der_put (struct twist_der_writer *w, uint8_t tag,
+                    const void *data, size_t n);
+void twist_der_put_int (struct twist_der_writer *w, uint8_t tag, int v);
+size_t twist_der_begin (struct twist_der_writer *w, uint8_t tag);
+void twist_der_end (struct twist_der_writer *w, size_t mark);
+
+/* The reader.  start and end bracket a constructed element and prim carries
+   a primitive one, whole: val is a slice of the scratch buffer given to
+   twist_der_reader_init (its size is the longest primitive taken) and is not
+   kept after the call.  A callback returns TWIST_OK, an error, or
+   TWIST_DER_STOP, after which the reader consumes nothing more.  An error
+   from a callback, or from the encoding, is reported once through failure,
+   and receive then takes all it is given.  */
+#define TWIST_DER_DEPTH 12
+#define TWIST_DER_STOP (-1)
+
+struct twist_der_events
+{
+  void *user;
+  int (*start) (void *user, uint8_t tag, size_t len);
+  int (*end) (void *user, uint8_t tag);
+  int (*prim) (void *user, uint8_t tag, const uint8_t *val, size_t len);
+  void (*failure) (void *user, int err);
+};
+
+/* Strict is DER: a tag is a single byte, and a length is in the short form
+   below 128 and otherwise the fewest bytes.  Indefinite lengths, lengths of
+   more than three bytes, nesting deeper than TWIST_DER_DEPTH and an element
+   longer than max_len are errors in both modes.  max_len is 1 MiB unless
+   the caller changes it.  */
+struct twist_der_reader
+{
+  const struct twist_der_events *ev;
+  uint8_t *val;
+  size_t cap, max_len;
+  int strict;
+  int st;
+  uint8_t tag;
+  size_t len, got;
+  int len_left, len_first;
+  struct
+  {
+    uint8_t tag;
+    size_t left;
+  } stk[TWIST_DER_DEPTH];
+  int depth;
+  int failed, stopped;
+};
+void twist_der_reader_init (struct twist_der_reader *r,
+                            const struct twist_der_events *ev, uint8_t *val,
+                            size_t cap, int strict);
+size_t twist_der_receive (struct twist_der_reader *r, const uint8_t *data,
+                          size_t len);
+/* Between top-level elements, with nothing open and nothing half read.  */
+int twist_der_idle (const struct twist_der_reader *r);
+
+/* NTLMv2 (src/auth/ntlm.c) for SMB, a codec with no I/O.  The caller makes
+   the client, gets the NEGOTIATE bytes, feeds the server's CHALLENGE (whole
+   or in pieces, then twist_ntlm_challenge_end; twist_ntlm_challenge does both),
+   and gets the AUTHENTICATE bytes and the exported session key.  The
+   signature calls make and check the message signature of the session, which
+   SPNEGO uses for mechListMIC.  Every error is TWIST_ERR_AUTH, or
+   TWIST_ERR_INVAL for a call made out of order.  RAND is a hook for the two
+   random values, the client challenge and then the exported session key; with
+   none, gq_random is used.  */
+struct twist_ntlm;
+struct twist_ntlm_rand
+{
+  int (*fill) (void *user, void *buf, size_t len);	/* 0 or an error.  */
+  void *user;
+};
+struct twist_ntlm *twist_ntlm_new (const char *domain, const char *user,
+                                   const char *password, const char *host,
+                                   const struct twist_ntlm_rand *rnd);
+void twist_ntlm_free (struct twist_ntlm *n);
+int twist_ntlm_negotiate (struct twist_ntlm *n, uint8_t *out, size_t cap,
+                          size_t *len);
+int twist_ntlm_feed (struct twist_ntlm *n, const uint8_t *data, size_t len);
+int twist_ntlm_challenge_end (struct twist_ntlm *n);
+int twist_ntlm_challenge (struct twist_ntlm *n, const uint8_t *data,
+                          size_t len);
+int twist_ntlm_authenticate (struct twist_ntlm *n, uint8_t *out, size_t cap,
+                             size_t *len);
+int twist_ntlm_session_key (const struct twist_ntlm *n, uint8_t key[16]);
+int twist_ntlm_sign (struct twist_ntlm *n, const void *msg, size_t len,
+                     uint8_t out[16]);
+int twist_ntlm_verify (struct twist_ntlm *n, const void *msg, size_t len,
+                       const uint8_t signature[16]);
+
+/* A SPNEGO initiator (RFC 4178) with NTLMSSP as its only mechanism
+   (src/auth/spnego.c), for the GSS-API tokens of SMB2 SESSION_SETUP.  It owns
+   an NTLM client made from the same arguments as twist_ntlm_new.  twist_
+   spnego_start gives the first token.  Each token from the server is fed whole
+   or in pieces with twist_spnego_feed and ended with twist_spnego_finish,
+   which gives the token to send back, or sets *DONE when the server's last
+   token has been accepted; twist_spnego_step does both for a whole token.
+   Anything a server sends that is not the NTLMSSP exchange, a reject, or a
+   bad mechListMIC, is TWIST_ERR_AUTH and ends the exchange.  The exported
+   session key is there once the AUTHENTICATE has gone.  */
+struct twist_spnego;
+struct twist_spnego *twist_spnego_new (const char *domain, const char *user,
+                                       const char *password, const char *host,
+                                       const struct twist_ntlm_rand *rnd);
+void twist_spnego_free (struct twist_spnego *s);
+int twist_spnego_start (struct twist_spnego *s, uint8_t *out, size_t cap,
+                        size_t *len);
+int twist_spnego_feed (struct twist_spnego *s, const uint8_t *data,
+                       size_t len);
+int twist_spnego_finish (struct twist_spnego *s, uint8_t *out, size_t cap,
+                         size_t *outlen, int *done);
+int twist_spnego_step (struct twist_spnego *s, const uint8_t *in, size_t inlen,
+                       uint8_t *out, size_t cap, size_t *outlen, int *done);
+int twist_spnego_session_key (const struct twist_spnego *s, uint8_t key[16]);
+
+/* SMB2 (src/smb/), as the client speaks it over a direct TCP connection or a
+   QUIC stream.  The parser takes the server's bytes and returns how many it
+   consumed; it builds no message and keeps nothing it delivers.  What it
+   keeps across calls is a fixed scratch (the 64-byte header, a fixed body, one
+   negotiate context or one directory entry) with a hard maximum, and those
+   bytes are counted as consumed.  Offsets are forward only: a buffer may
+   start after the fixed part, past a few bytes of padding, and may not
+   overlap or leave the message.  A length above the limit, a compound
+   response, a structure of the wrong size, an offset that goes back or out,
+   a response that does not say it is from the server: all are
+   TWIST_ERR_PROTOCOL, reported once through failure.
+
+   Offsets in the events are positions in the stream the parser has been
+   given, so that the session layer can keep or hash exactly the bytes it
+   chose to.  A message that is encrypted is reported by its transform header
+   with the extent of its ciphertext, which is skipped; the session layer
+   decrypts it and gives the plaintext to twist_smb_parser_message.  */
+#define TWIST_SMB_HEADER 64
+#define TWIST_SMB_TRANSFORM_HEADER 52
+#define TWIST_SMB_ENTRY_MAX 1024	/* One directory entry.  */
+#define TWIST_SMB_CTX_MAX 512		/* The data of one negotiate context.  */
+
+enum twist_smb_command
+{
+  TWIST_SMB_NEGOTIATE = 0,
+  TWIST_SMB_SESSION_SETUP = 1,
+  TWIST_SMB_LOGOFF = 2,
+  TWIST_SMB_TREE_CONNECT = 3,
+  TWIST_SMB_TREE_DISCONNECT = 4,
+  TWIST_SMB_CREATE = 5,
+  TWIST_SMB_CLOSE = 6,
+  TWIST_SMB_READ = 8,
+  TWIST_SMB_WRITE = 9,
+  TWIST_SMB_QUERY_DIRECTORY = 14,
+  TWIST_SMB_QUERY_INFO = 16
+};
+
+#define TWIST_SMB_FLAG_SERVER_TO_REDIR 0x00000001u
+#define TWIST_SMB_FLAG_ASYNC 0x00000002u
+#define TWIST_SMB_FLAG_SIGNED 0x00000008u
+
+#define TWIST_SMB_STATUS_SUCCESS 0x00000000u
+#define TWIST_SMB_STATUS_PENDING 0x00000103u
+#define TWIST_SMB_STATUS_BUFFER_OVERFLOW 0x80000005u
+#define TWIST_SMB_STATUS_NO_MORE_FILES 0x80000006u
+#define TWIST_SMB_STATUS_MORE_PROCESSING 0xC0000016u
+
+/* Negotiate contexts.  */
+#define TWIST_SMB_CTX_PREAUTH 1
+#define TWIST_SMB_CTX_ENCRYPTION 2
+#define TWIST_SMB_CTX_COMPRESSION 3
+#define TWIST_SMB_CTX_SIGNING 8
+#define TWIST_SMB_HASH_SHA512 1
+#define TWIST_SMB_CIPHER_AES128_CCM 1
+#define TWIST_SMB_CIPHER_AES128_GCM 2
+#define TWIST_SMB_CIPHER_AES256_CCM 3
+#define TWIST_SMB_CIPHER_AES256_GCM 4
+#define TWIST_SMB_SIGN_HMAC_SHA256 0
+#define TWIST_SMB_SIGN_AES_CMAC 1
+#define TWIST_SMB_SIGN_AES_GMAC 2
+#define TWIST_SMB_DIALECT_311 0x0311
+
+struct twist_smb_header
+{
+  uint16_t credit_charge, command, credits;
+  uint32_t status, flags, next_command;
+  uint64_t message_id, async_id, session_id;
+  uint32_t tree_id;
+  uint8_t signature[16];
+};
+
+struct twist_smb_transform
+{
+  uint8_t signature[16], nonce[16];
+  uint32_t original_size;
+  uint16_t flags;
+  uint64_t session_id;
+  uint64_t ciphertext_offset;	/* In the stream.  */
+  size_t ciphertext_len;
+};
+
+struct twist_smb_negotiate
+{
+  uint16_t security_mode, dialect, context_count;
+  uint8_t server_guid[16];
+  uint32_t capabilities, max_transact, max_read, max_write;
+  uint64_t system_time, server_start_time;
+};
+
+/* One negotiate context.  For the pre-authentication, encryption and signing
+   contexts, count and algs are the identifiers the context lists (at most
+   eight) and, for the first, salt is its salt; data is the whole of it.  */
+struct twist_smb_context
+{
+  uint16_t type;
+  const uint8_t *data;
+  size_t len;
+  unsigned count;
+  uint16_t algs[8];
+  const uint8_t *salt;
+  size_t salt_len;
+};
+
+struct twist_smb_tree_connect
+{
+  uint8_t share_type;
+  uint32_t share_flags, capabilities, maximal_access;
+};
+
+struct twist_smb_create
+{
+  uint8_t oplock_level, flags;
+  uint32_t action;
+  uint64_t creation_time, last_access_time, last_write_time, change_time;
+  uint64_t allocation_size, end_of_file;
+  uint32_t attributes;
+  uint8_t file_id[16];
+  uint32_t contexts_len;
+};
+
+struct twist_smb_close
+{
+  uint16_t flags;
+  uint64_t creation_time, last_access_time, last_write_time, change_time;
+  uint64_t allocation_size, end_of_file;
+  uint32_t attributes;
+};
+
+/* The variable data that is delivered in slices as it arrives.  */
+enum twist_smb_data
+{
+  TWIST_SMB_DATA_SECURITY = 1,
+  TWIST_SMB_DATA_READ,
+  TWIST_SMB_DATA_INFO,
+  TWIST_SMB_DATA_CREATE_CONTEXTS,
+  TWIST_SMB_DATA_ERROR
+};
+
+/* The events return TWIST_OK, or an error that ends the parse.  data returns
+   how much of the slice it took: a short count stops the parser there, the
+   rest is presented again by the caller's next call to receive, and nothing
+   further is delivered until then.  Slices point into the bytes given to
+   receive (or into the parser's scratch for entry and context) and are not
+   kept.  */
+struct twist_smb_events
+{
+  void *user;
+  int (*message_begin) (void *user, uint64_t offset, size_t len);
+  int (*header) (void *user, const struct twist_smb_header *h);
+  int (*transform) (void *user, const struct twist_smb_transform *t);
+  int (*negotiate) (void *user, const struct twist_smb_negotiate *r);
+  int (*context) (void *user, const struct twist_smb_context *c);
+  int (*session_setup) (void *user, uint16_t session_flags);
+  int (*tree_connect) (void *user, const struct twist_smb_tree_connect *r);
+  int (*create) (void *user, const struct twist_smb_create *r);
+  int (*close) (void *user, const struct twist_smb_close *r);
+  int (*read) (void *user, uint32_t data_length, uint32_t data_remaining);
+  int (*write) (void *user, uint32_t count, uint32_t remaining);
+  int (*query_info) (void *user, uint32_t output_len);
+  int (*query_directory) (void *user, uint32_t output_len);
+  int (*empty) (void *user, uint16_t command);	/* LOGOFF, TREE_DISCONNECT.  */
+  int (*error) (void *user, uint32_t status, unsigned context_count,
+                uint32_t byte_count);
+  int (*pending) (void *user, uint64_t async_id);
+  size_t (*data) (void *user, enum twist_smb_data kind, const uint8_t *p,
+                  size_t n);
+  int (*entry) (void *user, const uint8_t *p, size_t n);
+  int (*message_end) (void *user, uint64_t offset);
+  void (*failure) (void *user, int err);
+};
+
+struct twist_smb_parser;
+struct twist_smb_parser *twist_smb_parser_new (const struct twist_smb_events *ev);
+void twist_smb_parser_free (struct twist_smb_parser *p);
+/* The largest frame (the SMB2 message or its transform) accepted; 128 KiB until
+   set from what was negotiated.  */
+void twist_smb_parser_set_limit (struct twist_smb_parser *p, size_t max_frame);
+size_t twist_smb_parser_receive (struct twist_smb_parser *p,
+                                 const uint8_t *data, size_t len);
+/* One whole message with no framing, such as the plaintext of one that was
+   encrypted.  TWIST_OK, or the error also given to failure.  */
+int twist_smb_parser_message (struct twist_smb_parser *p, const uint8_t *msg,
+                              size_t len);
+/* The same with the message fed by receive, which may stop and be offered
+   the rest again; twist_smb_parser_done says the message has ended.  */
+int twist_smb_parser_begin_message (struct twist_smb_parser *p, size_t len);
+int twist_smb_parser_done (const struct twist_smb_parser *p);
+int twist_smb_parser_failed (const struct twist_smb_parser *p);
+
+/* The requests a client sends (src/smb/writer.c), each made into OUT as a
+   whole frame: the four-byte direct TCP header, the 64-byte header and the
+   body.  The header is as the caller sets it; the signature is zero.  A buffer
+   too small is TWIST_ERR_INVAL.  Strings are UTF-8 and go out as UTF-16LE.
+   For a WRITE the data stays with the caller: the frame made covers the
+   header and fixed body, its length field counts the DATA_LEN bytes that
+   follow, and the data is sent after it.  */
+struct twist_smb_req
+{
+  uint16_t credit_charge, credits;
+  uint32_t flags;
+  uint64_t message_id, session_id;
+  uint32_t tree_id;
+};
+
+struct twist_smb_negotiate_req
+{
+  uint16_t security_mode;
+  uint32_t capabilities;
+  uint8_t client_guid[16];
+  unsigned n_dialects;
+  uint16_t dialects[8];
+  unsigned n_hashes;		/* Pre-authentication integrity, if any.  */
+  uint16_t hashes[4];
+  uint8_t salt[64];
+  unsigned salt_len;
+  unsigned n_ciphers;
+  uint16_t ciphers[4];
+  unsigned n_signing;
+  uint16_t signing[4];
+};
+
+int twist_smb_w_negotiate (uint8_t *out, size_t cap, size_t *len,
+                           const struct twist_smb_req *h,
+                           const struct twist_smb_negotiate_req *r);
+int twist_smb_w_session_setup (uint8_t *out, size_t cap, size_t *len,
+                               const struct twist_smb_req *h,
+                               uint8_t security_mode, uint64_t previous_session,
+                               const uint8_t *blob, size_t blob_len);
+int twist_smb_w_logoff (uint8_t *out, size_t cap, size_t *len,
+                        const struct twist_smb_req *h);
+int twist_smb_w_tree_connect (uint8_t *out, size_t cap, size_t *len,
+                              const struct twist_smb_req *h, const char *path);
+int twist_smb_w_tree_disconnect (uint8_t *out, size_t cap, size_t *len,
+                                 const struct twist_smb_req *h);
+
+struct twist_smb_create_req
+{
+  uint32_t desired_access, file_attributes, share_access, disposition, options;
+  const char *name;		/* Below the share, with backslashes.  */
+};
+
+int twist_smb_w_create (uint8_t *out, size_t cap, size_t *len,
+                        const struct twist_smb_req *h,
+                        const struct twist_smb_create_req *r);
+int twist_smb_w_close (uint8_t *out, size_t cap, size_t *len,
+                       const struct twist_smb_req *h, const uint8_t file_id[16]);
+int twist_smb_w_read (uint8_t *out, size_t cap, size_t *len,
+                      const struct twist_smb_req *h, const uint8_t file_id[16],
+                      uint32_t length, uint64_t offset);
+int twist_smb_w_write (uint8_t *out, size_t cap, size_t *len,
+                       const struct twist_smb_req *h, const uint8_t file_id[16],
+                       uint32_t data_len, uint64_t offset);
+int twist_smb_w_query_info (uint8_t *out, size_t cap, size_t *len,
+                            const struct twist_smb_req *h,
+                            const uint8_t file_id[16], uint8_t info_type,
+                            uint8_t info_class, uint32_t output_len);
+int twist_smb_w_query_directory (uint8_t *out, size_t cap, size_t *len,
+                                 const struct twist_smb_req *h,
+                                 const uint8_t file_id[16], uint8_t info_class,
+                                 uint8_t flags, const char *pattern,
+                                 uint32_t output_len);
+
+/* The SMB 3.1.1 session layer (src/smb/session.c): the state machine that takes
+   a connection from NEGOTIATE through authentication and key derivation to an
+   encrypted tree connect, and that seals and opens every message after it.  It
+   is the only place that holds a message whole.
+
+   The profile is narrow.  Dialect 0x0311 only; pre-authentication integrity
+   with SHA-512; AES-256-GCM or AES-128-GCM, as offered in that order, and no
+   other cipher; AES-GMAC or AES-CMAC for signing, with CMAC when the server
+   sends no signing context; no compression; signing and encryption both
+   required; a guest or null session refused.  The final SESSION_SETUP response
+   must be signed, and its signature is the check on the negotiate exchange.
+   After setup every request is encrypted and a response that is not is
+   refused.  A server whose answer breaks the profile, or whose message fails
+   its tag, is TWIST_ERR_PROTOCOL; a refused login is TWIST_ERR_AUTH.  An
+   error here ends the session, and the failure operation is called once.
+
+   The caller feeds the connection's bytes to twist_smb_session_receive.  An
+   encrypted message is received whole (up to the negotiated size, with the
+   limit of TWIST_SMB_FRAME_MAX), its tag is checked before any of it is
+   read, and the plaintext is then given to the parser; events reach the
+   caller's twist_smb_events.  If its data operation takes less than it is
+   offered, the session keeps the message and receive takes nothing more until
+   twist_smb_session_resume.  Requests are made with the twist_smb_w_
+   functions from a header given by twist_smb_session_request, which counts the
+   credits, and sent with twist_smb_session_send.  The random values (client
+   GUID, salt, nonce start, and the NTLM client challenge and session key, in
+   that order) come from RND, or gq_random.  */
+#define TWIST_SMB_FRAME_MAX (65536 + 4096)
+
+struct twist_smb_session;
+
+struct twist_smb_session_ops
+{
+  void *user;
+  /* One whole frame, with its four-byte header, to write to the connection.  */
+  int (*send) (void *user, const uint8_t *data, size_t len);
+  /* The tree is connected; requests may be made.  */
+  void (*established) (void *user, uint32_t tree_id);
+  void (*failure) (void *user, int err);
+};
+
+struct twist_smb_session_config
+{
+  const char *domain, *user, *password;
+  const char *host;		/* The name in the target and the share path.  */
+  const char *share;
+  const struct twist_ntlm_rand *rnd;
+};
+
+struct twist_smb_session_info
+{
+  uint16_t cipher, signing;
+  uint32_t max_read, max_write, max_transact;
+  uint64_t session_id;
+  uint32_t tree_id;
+  /* The NT status of the last error response the server sent, or 0.  */
+  uint32_t status;
+};
+
+struct twist_smb_session *
+twist_smb_session_new (const struct twist_smb_session_config *cfg,
+                       const struct twist_smb_session_ops *ops,
+                       const struct twist_smb_events *up);
+void twist_smb_session_free (struct twist_smb_session *s);
+int twist_smb_session_start (struct twist_smb_session *s);
+size_t twist_smb_session_receive (struct twist_smb_session *s,
+                                  const uint8_t *data, size_t len);
+void twist_smb_session_resume (struct twist_smb_session *s);
+const struct twist_smb_session_info *
+twist_smb_session_info (const struct twist_smb_session *s);
+/* Credits and message ids: a header for a request of CHARGE credits, or
+   TWIST_ERR_AGAIN when there are not that many.  */
+int twist_smb_session_request (struct twist_smb_session *s, unsigned charge,
+                               struct twist_smb_req *h);
+unsigned twist_smb_session_credits (const struct twist_smb_session *s);
+/* Seal and send a request made by a twist_smb_w_ function (FRAME, with its
+   four-byte header) and the data of a WRITE that goes with it, if any.  */
+int twist_smb_session_send (struct twist_smb_session *s, const uint8_t *frame,
+                            size_t len, const uint8_t *data, size_t data_len);
+/* Send LOGOFF; the keys are wiped when its response arrives.  */
+int twist_smb_session_logoff (struct twist_smb_session *s);
+
+/* The pieces of NTLMv2 that MS-NLMP 4.2.4 gives worked examples of, and the
+   text conversion SMB shares: UTF-8 to UTF-16LE, upper-casing Latin, Greek
+   and Cyrillic letters if UPPER; invalid UTF-8 is TWIST_ERR_INVAL.  */
+int twist_ntlm_ntowfv2 (const char *user, const char *domain,
+                        const char *password, uint8_t key[16]);
+int twist_ntlm_v2_response (const uint8_t respkey[16],
+                            const uint8_t server_chal[8], const uint8_t *temp,
+                            size_t templen, uint8_t proof[16],
+                            uint8_t base_key[16]);
+int twist_ntlm_session_keys (const uint8_t session_key[16], uint8_t sign_c[16],
+                             uint8_t seal_c[16], uint8_t sign_s[16],
+                             uint8_t seal_s[16]);
+int twist_utf16le_from_utf8 (const char *s, size_t slen, int upper,
+                             uint8_t *out, size_t cap, size_t *outlen);
+
+/* For NTLM (src/auth/ntlm.c) and nothing else.  MD4 makes the NT hash of a
+   password, RC4 carries the exported session key and seals a signature's
+   checksum, and HMAC-MD5 does the rest.  They are not part of twist.h.  */
+int twist_md4 (const void *data, size_t len, uint8_t out[16]);
+int twist_hmac_md5 (const void *key, size_t keylen, const void *data,
+                    size_t len, uint8_t out[16]);
+struct twist_rc4
+{
+  uint8_t s[256];
+  uint8_t i, j;
+};
+int twist_rc4_init (struct twist_rc4 *c, const uint8_t *key, size_t keylen);
+void twist_rc4_crypt (struct twist_rc4 *c, const uint8_t *in, uint8_t *out,
+                      size_t len);
+void twist_rc4_wipe (struct twist_rc4 *c);
 int twist_b64_encode (const uint8_t *in, size_t len, char **out);
 
 /* Client SASL.  Responses are raw bytes; the protocol encodes them.  */
@@ -2077,6 +2594,32 @@ size_t twist_ldap_receive (struct twist_ldap *ldap, const uint8_t *data,
 const uint8_t *twist_ldap_command (const struct twist_ldap *ldap, size_t *len);
 int twist_ldap_attach (struct twist_transfer *transfer);
 
+/* smb:// (src/smb/smb.c): one file from a share, over the session layer.  The
+   test seam: with no connection the frames the handler sends go to SEND
+   instead, and twist_smb_receive is what the connection would call.  */
+struct twist_smb;
+struct twist_smb *twist_smb_new (struct twist_transfer *transfer, int live);
+void twist_smb_free (void *smb);
+int twist_smb_attach (struct twist_transfer *transfer);
+/* smbs://: the same over QUIC.  */
+int twist_smbs_attach (struct twist_transfer *transfer);
+/* The QUIC handshake is done, with ALPN (for the tests).  */
+void twist_smb_test_secure (struct twist_smb *x, struct twist_endpoint *ep,
+                            const char *alpn, size_t alpn_len);
+void twist_smb_test_seam (struct twist_smb *x,
+                          int (*send) (void *user, const uint8_t *data,
+                                       size_t len),
+                          int (*full) (void *user), void *user);
+/* The connection has written what it held (its on_write_ready).  */
+void twist_smb_drained (struct twist_smb *x);
+/* The random values of the next sessions made (the tests fix them); NULL for
+   the system's.  */
+void twist_smb_set_test_rnd (const struct twist_ntlm_rand *rnd);
+/* The time listings are shown against (0: the clock's).  */
+void twist_smb_set_test_now (time_t now);
+int twist_smb_start (struct twist_smb *x);
+size_t twist_smb_receive (struct twist_smb *x, const uint8_t *data, size_t len);
+
 struct twist_gopher;
 struct twist_gopher *twist_gopher_new (struct twist_transfer *transfer,
                                        int live);
@@ -2214,6 +2757,12 @@ int twist_altsvc_lookup (struct twist_altsvc *a, const char *origin, char *out,
                          size_t cap);
 
 char *twist_strdup (const char *s);
+size_t twist_text_sanitize (uint8_t *out, const uint8_t *in, size_t n);
+/* UTF-16LE to UTF-8 (src/auth/ntlm.c, with the other direction): an unpaired
+   surrogate or an odd length is TWIST_ERR_INVAL.  OUT has room for CAP bytes,
+   and 3 for each unit is enough.  */
+int twist_utf8_from_utf16le (const uint8_t *in, size_t n, char *out, size_t cap,
+                             size_t *outlen);
 /* The user's home directory: $HOME if it is set and not empty, else the one
    in the password file.  Copied to OUT (CAP bytes); returns 1, or 0 if there
    is none or it does not fit.  */
@@ -2336,7 +2885,14 @@ struct twist_masque_spec
   const char *tmpl;		/* NULL: the default for the proxy.  */
   const char *host;		/* The target: its name and port.  */
   int port;
+  const char *alpn;		/* To the target; NULL is h3.  */
+  int no_cert;			/* Present no client certificate to it.  */
 };
+
+/* The plan for a transfer over QUIC: see engine/masque.c.  */
+int twist_masque_plan (struct twist_transfer *transfer, const char *what,
+                       char **phost, int *pport, char **puser, char **ppass,
+                       char **tmpl);
 
 /* An HTTP/3 connection to the target through an HTTP/3 proxy that does
    CONNECT-UDP (RFC 9298): QUIC to the proxy at PROXY_ADDR, an extended CONNECT

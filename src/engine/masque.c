@@ -527,6 +527,109 @@ split_uri (const char *uri, char **authority, char **path)
   return TWIST_OK;
 }
 
+/* Whether a transfer over QUIC (HTTP/3, SMB over QUIC) goes through a
+   CONNECT-UDP proxy (RFC 9298), and if so which: 1 with the proxy's host and
+   port, the credentials from its URL and the template (NULL for the default);
+   0 with no proxy; -1 if there is a proxy and it cannot carry UDP, which is an
+   error, since QUIC may not go round it.  WHAT names the protocol in the
+   message.  A template names the proxy, with its authority; otherwise it is
+   the https proxy.  */
+int
+twist_masque_plan (struct twist_transfer *transfer, const char *what,
+                   char **phost, int *pport, char **puser, char **ppass,
+                   char **tmpl)
+{
+  const char *px = twist_transfer_proxy (transfer);
+  const char *tp = transfer->proxy_template_udp;
+  int kind = TWIST_PROXY_NONE;
+
+  *phost = *puser = *ppass = *tmpl = NULL;
+  *pport = 0;
+  if (twist_transfer_noproxy (transfer))
+    return 0;
+  if (px != NULL
+      && twist_proxy_parse (px, &kind, phost, pport, puser, ppass) != TWIST_OK)
+    return -1;
+  if (tp == NULL)
+    {
+      if (px == NULL)
+        return 0;
+      if (kind != TWIST_PROXY_HTTPS)
+        {
+          char msg[160];
+
+          snprintf (msg, sizeof msg, _("%s through a proxy needs an https:// "
+                                       "proxy (CONNECT-UDP)"), what);
+          twist_transfer_set_error (transfer, twist_strdup (msg));
+          return -1;
+        }
+      return 1;
+    }
+  /* The template's authority is the proxy.  */
+  {
+    char *uri = NULL;
+    char *url = NULL;
+    size_t al;
+    int rc;
+
+    free (*phost);
+    *phost = NULL;
+    if (twist_template_expand (tp, "x", 1, &uri) != TWIST_OK)
+      return -1;
+    al = strcspn (uri + 8, "/?");
+    url = twist_xmalloc (al + 9);
+    if (url == NULL)
+      {
+        free (uri);
+        return -1;
+      }
+    memcpy (url, "https://", 8);
+    memcpy (url + 8, uri + 8, al);
+    url[8 + al] = 0;
+    free (uri);
+    {
+      char *tu = NULL, *tpw = NULL;
+      int tk = 0;
+
+      rc = twist_proxy_parse (url, &tk, phost, pport, &tu, &tpw);
+      free (url);
+      if (rc != TWIST_OK)
+        return -1;
+      /* Credentials written into the template's authority win; else the
+         proxy URL's, if that is an https one.  */
+      if (tu != NULL)
+        {
+          free (*puser);
+          if (*ppass != NULL)
+            {
+              memset (*ppass, 0, strlen (*ppass));
+              free (*ppass);
+            }
+          *puser = tu;
+          *ppass = tpw;
+        }
+      else
+        {
+          free (tpw);
+          if (kind != TWIST_PROXY_HTTPS)
+            {
+              free (*puser);
+              *puser = NULL;
+              if (*ppass != NULL)
+                {
+                  memset (*ppass, 0, strlen (*ppass));
+                  free (*ppass);
+                  *ppass = NULL;
+                }
+            }
+        }
+    }
+    *tmpl = twist_strdup (tp);
+    return *tmpl != NULL ? 1 : -1;
+  }
+}
+
+
 int
 twist_masque_connect (struct twist_transfer *transfer,
                       const struct twist_masque_spec *spec,
@@ -659,11 +762,12 @@ twist_masque_connect (struct twist_transfer *transfer,
 
     memset (&none, 0, sizeof none);
     none.family = 4;
-    rc = twist_quic_dial (transfer->loop, spec->host, "h3", &none, spec->port,
-                          transfer->cainfo, transfer->capath,
-                          transfer->sslcert,
-                          transfer->sslkey, transfer->verifypeer, &io,
-                          &m->inner);
+    rc = twist_quic_dial (transfer->loop, spec->host,
+                          spec->alpn != NULL ? spec->alpn : "h3", &none,
+                          spec->port, transfer->cainfo, transfer->capath,
+                          spec->no_cert ? NULL : transfer->sslcert,
+                          spec->no_cert ? NULL : transfer->sslkey,
+                          transfer->verifypeer, &io, &m->inner);
   }
   if (rc != TWIST_OK)
     {

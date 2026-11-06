@@ -100,6 +100,9 @@ Sends one OPTIONS request, as the curl tool does, whatever the path of the URL s
 .B scp, sftp
 Both run over SFTP on an SSH connection: a file up or down, and, for \fBsftp\fR, a directory listing.  There is no SCP wire protocol.  SSH provides the encryption, so there is no TLS variant.
 .TP
+.B smb, smbs
+A file from a share, up or down, and a directory listing.  \fBsmb\fR is SMB 3.1.1 over TCP port 445 and \fBsmbs\fR is SMB over QUIC; both sign in with NTLMv2 and encrypt every message.  See SMB.
+.TP
 .B smtp, smtps
 Sends a message to the server, from \fB\-\-mail\-from\fR to each \fB\-\-mail\-rcpt\fR.
 .TP
@@ -159,8 +162,89 @@ it is not taken as part of the encrypted session: the transfer ends with exit
 status 8.
 .PP
 These schemes are recognised, but are not implemented, and exit 1:
-.B rtmp, rtmps,
-.B smb, smbs.
+.B rtmp, rtmps.
+.SH SMB
+.B smb://[user[:password]@]host[:port]/share/path
+(port 445) fetches a file from a share, writes one, or lists a directory.
+The share is the first segment of the path and the rest is the path in the
+share, percent-decoded and sent as UTF-8 with backslashes.  An empty share, a
+NUL or a colon in the path is a malformed URL (exit 3).
+.PP
+twist signs in with NTLMv2, as a local user of the server: that is what a
+standalone Samba server and a home NAS check.  There is no Kerberos.  The user
+is the URL's or that of
+.BR \-u ,
+and may be
+.I DOMAIN\euser
+or
+.IR DOMAIN/user .
+There is no anonymous login: with no user name the transfer exits 67 before a
+connection is made, and a guest or null session that a server offers is
+refused, so a share that is open to everyone cannot be read.
+.PP
+twist asks for SMB 3.1.1 with encryption and signing, and exits 8 if the
+server gives less: another dialect, no pre-authentication integrity with
+SHA-512, a cipher other than AES-256-GCM or AES-128-GCM (AES-CCM is not
+offered), a signing algorithm other than AES-GMAC or AES-CMAC, a compression
+context, no signing or encryption, or a last answer to the login that is not
+signed.  A server with encryption switched off is refused; the usual setting,
+that it encrypts when the client asks, is enough.  After the login every
+message is encrypted; an answer that is not, or that fails its tag, is refused.
+.PP
+Over TCP the NTLM exchange is in the clear, because encryption starts only once
+the session is up, and can be recorded and the password guessed offline.  Use a
+long password, or
+.BR smbs ,
+or a tunnel.  A stolen Samba password database is a stolen password.
+.PP
+A download reads up to eight requests of 64 KiB at a time and writes them in
+order.
+.B \-r
+takes part of a file and
+.B \-C
+continues at an offset, or with
+.B \-
+at the end of the output file.  A URL that ends in
+.RB ` / ',
+or names a share alone, or any URL with
+.BR \-l ,
+lists a directory, a line for each entry as it arrives: the long form of an
+.B sftp
+listing (mode, link count, \fB\-\fR for the owner and group, size, date in UTC,
+name) or, with
+.BR \-l ,
+the name.  A name that is not valid UTF-16 ends the transfer with 8, and control
+characters in a name are shown as
+.BR ? .
+.PP
+.B \-T
+or
+.B \-d
+uploads: the file is created, or replaced; with
+.B \-a
+it is written at its end; with
+.B \-\-ftp\-create\-dirs
+the directories above it are made.  A URL for a directory is malformed.  A range
+or a resume of an upload or a listing exits 43.
+.PP
+Exit statuses are 3 for a malformed URL, 8 for a server that breaks the
+requirements, 9 when the user may not, 25 for an upload that failed, 33 and 36
+for a range or an offset beyond the end, 67 for a refused login or no user, and
+78 for a file, a directory or a share that is not there.
+.PP
+.B smbs://
+is SMB over QUIC (UDP port 443, application protocol
+.IR smb ),
+not TLS on port 445.  The certificate is checked as for https and no client
+certificate is presented; the whole session runs inside QUIC, and SMB's own
+encryption is kept as well.  It never falls back to TCP.  Through a proxy it
+goes by CONNECT-UDP (\fB\-\-proxy\-template\-udp\fR, or an https proxy); a proxy
+of any other kind exits 1.  The mapping of SMB onto the QUIC stream is as it is
+understood to be and has not been checked against a server that speaks it.
+.PP
+Not done: SMB 1 and 2, dialects before 3.1.1, NetBIOS, Kerberos, multichannel,
+compression, DFS referrals, oplocks and leases, alternate data streams, and
+reuse of a connection.
 .SH TELNET
 .B telnet://host[:port]/
 (port 23) opens a connection and runs a telnet session on it (RFC 854): what the
@@ -841,7 +925,7 @@ or
 Referer header.
 .TP
 .BI \-r ", " \-\-range " range"
-Byte range.  For sftp, scp and file it is
+Byte range.  For sftp, scp, smb, smbs and file it is
 .IR first\-last ,
 .IR first\- ,
 or
@@ -853,7 +937,7 @@ bytes, one range only.  A range that starts beyond the end of the file exits 33.
 .B \-l, \-\-list\-only
 List the names only, one to a line, not the server's long form, when the URL
 names a directory.
-For sftp, and for ftp and ftps, where it is NLST and not LIST.
+For sftp, for smb and smbs (where a path with no slash at its end is taken as the directory), and for ftp and ftps, where it is NLST and not LIST.
 .TP
 .BI \-Q ", " \-\-quote " command"
 Run an SFTP command on the server before the transfer, or after a successful
@@ -878,15 +962,15 @@ It cannot be kept over HTTP/3 (an https URL uses HTTP/2 or HTTP/1 instead, and
 fails) or for tftp, which is refused.
 .TP
 .B \-\-ftp\-create\-dirs
-Make the directories an sftp upload needs.
+Make the directories an sftp or smb upload needs.
 .TP
 .BR \-a ", " \-\-append
-An upload adds to the remote file and does not replace it (ftp: APPE).
+An upload adds to the remote file and does not replace it (ftp: APPE; smb: written at its end).
 .TP
 .BI \-C ", " \-\-continue\-at " offset"
 Resume at byte
 .IR offset ,
-for sftp, scp, ftp and ftps.
+for sftp, scp, ftp and ftps, and for smb and smbs downloads.
 Use
 .B \-
 to find the offset.
@@ -1389,7 +1473,7 @@ could not be read.
 Out of memory.
 .TP
 .B 25
-An sftp, scp, ftp or imap upload failed.
+An sftp, scp, smb, ftp or imap upload failed.
 .TP
 .B 28
 The transfer timed out.
@@ -1448,7 +1532,7 @@ authentication that needs a second request) and could not be read again from
 the start, as a pipe cannot.
 .TP
 .B 9
-The SFTP server would not let the user read the file.
+The sftp or smb server would not let the user read the file, or write it or list the directory.
 .TP
 .B 60
 The host key of an sftp or scp server is not trusted: it is not in
@@ -1481,7 +1565,7 @@ TFTP file already exists.
 TFTP no such user.
 .TP
 .B 78
-The file does not exist on the sftp or scp server.
+The file does not exist on the sftp, scp or smb server, or the share on the smb server.
 .TQ
 .B 79
 The sftp or scp server could not do what was asked.

@@ -465,6 +465,8 @@ twist_url_default_port (const char *scheme)
     return 554;
   if (strcmp (scheme, "smb") == 0)
     return 445;
+  if (strcmp (scheme, "smbs") == 0)
+    return 443;
   if (strcmp (scheme, "ssh") == 0 || strcmp (scheme, "scp") == 0
       || strcmp (scheme, "sftp") == 0)
     return 22;

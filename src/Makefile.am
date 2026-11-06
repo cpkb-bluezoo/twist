@@ -33,10 +33,12 @@ libtwist_la_LIBADD = $(QUICKSTEP_LIBS) $(FOXTROT_LIBS) $(ZLIB_LIBS) \
 ##   reactor/  loop, connection, poll, timers, runtime, storage
 ##   engine/   url, transfer/runtime, proxy, scheme table
 ##   dns/      DNS client: message parser, transport order, resolver
-##   auth/     SASL clients, HTTP Basic and Digest, MD5, SHA-256
+##   asn1/     BER and DER writer and reader
+##   auth/     SASL clients, HTTP Basic and Digest, hashes and ciphers
 ##   http/     HTTP/1, HTTP/2, HTTP/3 and cookies
 ##   ftp/ file/ mail/ mqtt/ ldap/ ws/ gopher/ rtsp/ dict/ telnet/ tftp/ ssh/  scheme handlers
 ##   mime/     streaming MIME writer
+##   smb/      SMB2 parser and request writer
 ##   tls/      quickstep TLS and QUIC under the connection
 
 libtwist_la_SOURCES = \
@@ -46,12 +48,20 @@ libtwist_la_SOURCES = \
   strerror.c \
   twist-int.h \
   util.c \
+  asn1/asn1.c \
   auth/b64.c \
   auth/basic.c \
   auth/digest.c \
+  auth/hmacmd5.c \
+  auth/md4.c \
   auth/md5.c \
+  auth/ntlm.c \
+  auth/rc4.c \
   auth/sasl.c \
   auth/sha256.c \
+  auth/sha512.c \
+  auth/spnego.c \
+  auth/smbkdf.c \
   reactor/atomic.h \
   reactor/cmdq.c \
   reactor/cmdq.h \
@@ -114,6 +124,10 @@ libtwist_la_SOURCES = \
   mail/smtp.c \
   mail/wire.c \
   mime/writer.c \
+  smb/parser.c \
+  smb/session.c \
+  smb/smb.c \
+  smb/writer.c \
   mqtt/mqtt.c \
   ldap/ldap.c \
   ws/ws.c \

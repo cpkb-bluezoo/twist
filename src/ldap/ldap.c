@@ -37,21 +37,6 @@
 #define LDAP_NAME 128
 #define LDAP_DN 512
 
-enum
-{
-  B_TAG = 0,
-  B_LEN,
-  B_LLEN,
-  B_VAL
-};
-
-struct bout
-{
-  uint8_t b[LDAP_CMD];
-  size_t n;
-  int err;
-};
-
 struct twist_ldap
 {
   struct twist_transfer *transfer;
@@ -70,18 +55,9 @@ struct twist_ldap
   char filter[LDAP_DN];
   char attrs[8][64];
   char attr[LDAP_NAME];
-  int bst;
-  uint8_t btag;
-  size_t blen;
-  int blen_left;
-  size_t bval_got;
+  struct twist_der_events ev;
+  struct twist_der_reader rd;
   uint8_t bval[LDAP_VAL];
-  struct
-  {
-    uint8_t tag;
-    size_t left;
-  } stk[12];
-  int depth;
   int in_entry;
   int in_vals;
   int in_bind;
@@ -135,91 +111,6 @@ flush_bind (struct twist_ldap *l)
   return twist_endpoint_send (l->ep, l->cmd, l->cmdlen);
 }
 
-static void
-put (struct bout *o, unsigned c)
-{
-  if (o->err || o->n >= sizeof o->b)
-    {
-      o->err = 1;
-      return;
-    }
-  o->b[o->n++] = (uint8_t) c;
-}
-
-static void
-put_len (struct bout *o, size_t len)
-{
-  if (len < 128)
-    put (o, len);
-  else if (len < 256)
-    {
-      put (o, 0x81);
-      put (o, len);
-    }
-  else
-    {
-      put (o, 0x82);
-      put (o, len >> 8);
-      put (o, len);
-    }
-}
-
-static void
-put_raw (struct bout *o, uint8_t tag, const void *data, size_t n)
-{
-  const uint8_t *p = data;
-  size_t i;
-
-  put (o, tag);
-  put_len (o, n);
-  for (i = 0; i < n; i++)
-    put (o, p[i]);
-}
-
-static void
-put_int (struct bout *o, uint8_t tag, int v)
-{
-  unsigned u = (unsigned) v;
-  uint8_t tmp[4];
-  int start = 0;
-
-  tmp[0] = (uint8_t) (u >> 24);
-  tmp[1] = (uint8_t) (u >> 16);
-  tmp[2] = (uint8_t) (u >> 8);
-  tmp[3] = (uint8_t) u;
-  while (start < 3 && tmp[start] == 0 && (tmp[start + 1] & 0x80) == 0)
-    start++;
-  put_raw (o, tag, tmp + start, (size_t) (4 - start));
-}
-
-static size_t
-begin (struct bout *o, uint8_t tag)
-{
-  size_t mark;
-
-  put (o, tag);
-  mark = o->n;
-  put (o, 0x82);
-  put (o, 0);
-  put (o, 0);
-  return mark;
-}
-
-static void
-end (struct bout *o, size_t mark)
-{
-  size_t len;
-
-  if (o->err || mark + 3 > o->n)
-    {
-      o->err = 1;
-      return;
-    }
-  len = o->n - (mark + 3);
-  o->b[mark + 1] = (uint8_t) (len >> 8);
-  o->b[mark + 2] = (uint8_t) len;
-}
-
 static int
 percent (const char *in, char *out, size_t cap)
 {
@@ -253,10 +144,10 @@ percent (const char *in, char *out, size_t cap)
 }
 
 static int
-encode_filter (struct bout *o, const char *s, size_t n);
+encode_filter (struct twist_der_writer *o, const char *s, size_t n);
 
 static int
-encode_list (struct bout *o, const char *s, size_t n)
+encode_list (struct twist_der_writer *o, const char *s, size_t n)
 {
   size_t i = 0;
 
@@ -293,10 +184,10 @@ encode_list (struct bout *o, const char *s, size_t n)
 }
 
 static int
-encode_ava (struct bout *o, uint8_t tag, const char *s, size_t n,
+encode_ava (struct twist_der_writer *o, uint8_t tag, const char *s, size_t n,
             size_t eq, size_t op)
 {
-  size_t mark = begin (o, tag);
+  size_t mark = twist_der_begin (o, tag);
   size_t alen = eq;
   size_t vpos = eq + op;
 
@@ -306,14 +197,14 @@ encode_ava (struct bout *o, uint8_t tag, const char *s, size_t n,
     vpos++;
   if (alen == 0 || vpos > n)
     return TWIST_ERR_URL;
-  put_raw (o, 0x04, s, alen);
-  put_raw (o, 0x04, s + vpos, n - vpos);
-  end (o, mark);
+  twist_der_put (o, 0x04, s, alen);
+  twist_der_put (o, 0x04, s + vpos, n - vpos);
+  twist_der_end (o, mark);
   return o->err ? TWIST_ERR_URL : TWIST_OK;
 }
 
 static int
-encode_filter (struct bout *o, const char *s, size_t n)
+encode_filter (struct twist_der_writer *o, const char *s, size_t n)
 {
   size_t i;
 
@@ -333,11 +224,11 @@ encode_filter (struct bout *o, const char *s, size_t n)
     return TWIST_ERR_URL;
   if (s[0] == '&' || s[0] == '|' || s[0] == '!')
     {
-      size_t mark = begin (o, s[0] == '&' ? 0xa0 : s[0] == '|' ? 0xa1 : 0xa2);
+      size_t mark = twist_der_begin (o, s[0] == '&' ? 0xa0 : s[0] == '|' ? 0xa1 : 0xa2);
       int rc = s[0] == '!' ? encode_filter (o, s + 1, n - 1)
                            : encode_list (o, s + 1, n - 1);
 
-      end (o, mark);
+      twist_der_end (o, mark);
       return rc != TWIST_OK || o->err ? TWIST_ERR_URL : TWIST_OK;
     }
   for (i = 0; i + 1 < n; i++)
@@ -360,7 +251,7 @@ encode_filter (struct bout *o, const char *s, size_t n)
         alen--;
       if (alen == 0)
         return TWIST_ERR_URL;
-      put_raw (o, 0x87, s, alen);
+      twist_der_put (o, 0x87, s, alen);
       return o->err ? TWIST_ERR_URL : TWIST_OK;
     }
   if (memchr (s + i + 1, '*', n - (i + 1)) != NULL)
@@ -469,27 +360,28 @@ static int
 send_bind (struct twist_ldap *l, const char *mech, const uint8_t *cred,
            size_t credlen)
 {
-  struct bout o;
+  struct twist_der_writer o;
+  uint8_t obuf[LDAP_CMD];
   size_t msg;
   size_t op;
   size_t sasl;
   const char *user = twist_mail_user (l->transfer);
   const char *pass = twist_mail_pass (l->transfer);
 
-  memset (&o, 0, sizeof o);
-  msg = begin (&o, 0x30);
-  put_int (&o, 0x02, l->next_id);
+  twist_der_writer_init (&o, obuf, sizeof obuf, 0);
+  msg = twist_der_begin (&o, 0x30);
+  twist_der_put_int (&o, 0x02, l->next_id);
   l->expect_id = l->next_id++;
-  op = begin (&o, 0x60);
-  put_int (&o, 0x02, 3);
+  op = twist_der_begin (&o, 0x60);
+  twist_der_put_int (&o, 0x02, 3);
   if (mech != NULL)
     {
-      put_raw (&o, 0x04, "", 0);
-      sasl = begin (&o, 0xa3);
-      put_raw (&o, 0x04, mech, strlen (mech));
+      twist_der_put (&o, 0x04, "", 0);
+      sasl = twist_der_begin (&o, 0xa3);
+      twist_der_put (&o, 0x04, mech, strlen (mech));
       if (cred != NULL)
-        put_raw (&o, 0x04, cred, credlen);
-      end (&o, sasl);
+        twist_der_put (&o, 0x04, cred, credlen);
+      twist_der_end (&o, sasl);
     }
   else
     {
@@ -497,69 +389,71 @@ send_bind (struct twist_ldap *l, const char *mech, const uint8_t *cred,
         user = "";
       if (pass == NULL)
         pass = "";
-      put_raw (&o, 0x04, user, strlen (user));
-      put_raw (&o, 0x80, pass, strlen (pass));
+      twist_der_put (&o, 0x04, user, strlen (user));
+      twist_der_put (&o, 0x80, pass, strlen (pass));
     }
-  end (&o, op);
-  end (&o, msg);
+  twist_der_end (&o, op);
+  twist_der_end (&o, msg);
   if (o.err)
     return TWIST_ERR_PROTOCOL;
-  return ldap_out (l, o.b, o.n, 1);
+  return ldap_out (l, o.buf, o.n, 1);
 }
 
 static int
 send_search (struct twist_ldap *l)
 {
-  struct bout o;
+  struct twist_der_writer o;
+  uint8_t obuf[LDAP_CMD];
   size_t msg;
   size_t op;
   size_t alist;
   int i;
   int rc;
 
-  memset (&o, 0, sizeof o);
-  msg = begin (&o, 0x30);
-  put_int (&o, 0x02, l->next_id);
+  twist_der_writer_init (&o, obuf, sizeof obuf, 0);
+  msg = twist_der_begin (&o, 0x30);
+  twist_der_put_int (&o, 0x02, l->next_id);
   l->expect_id = l->next_id++;
-  op = begin (&o, 0x63);
-  put_raw (&o, 0x04, l->dn, strlen (l->dn));
-  put_int (&o, 0x0a, l->scope);
-  put_int (&o, 0x0a, 0);
-  put_int (&o, 0x02, 0);
-  put_int (&o, 0x02, 0);
+  op = twist_der_begin (&o, 0x63);
+  twist_der_put (&o, 0x04, l->dn, strlen (l->dn));
+  twist_der_put_int (&o, 0x0a, l->scope);
+  twist_der_put_int (&o, 0x0a, 0);
+  twist_der_put_int (&o, 0x02, 0);
+  twist_der_put_int (&o, 0x02, 0);
   {
     static const uint8_t no = 0;
 
-    put_raw (&o, 0x01, &no, 1);
+    twist_der_put (&o, 0x01, &no, 1);
   }
   rc = encode_filter (&o, l->filter, strlen (l->filter));
   if (rc != TWIST_OK)
     return rc;
-  alist = begin (&o, 0x30);
+  alist = twist_der_begin (&o, 0x30);
   for (i = 0; i < l->nattrs; i++)
-    put_raw (&o, 0x04, l->attrs[i], strlen (l->attrs[i]));
-  end (&o, alist);
-  end (&o, op);
-  end (&o, msg);
+    twist_der_put (&o, 0x04, l->attrs[i], strlen (l->attrs[i]));
+  twist_der_end (&o, alist);
+  twist_der_end (&o, op);
+  twist_der_end (&o, msg);
   if (o.err)
     return TWIST_ERR_PROTOCOL;
-  return ldap_out (l, o.b, o.n, 1);
+  return ldap_out (l, o.buf, o.n, 1);
 }
 
 static int
 send_unbind (struct twist_ldap *l)
 {
-  struct bout o;
+  struct twist_der_writer o;
+  uint8_t obuf[LDAP_CMD];
   size_t msg;
 
-  memset (&o, 0, sizeof o);
-  msg = begin (&o, 0x30);
-  put_int (&o, 0x02, l->next_id++);
-  put_raw (&o, 0x42, "", 0);
-  end (&o, msg);
+  twist_der_writer_init (&o, obuf, sizeof obuf, 0);
+  msg = twist_der_begin (&o, 0x30);
+  twist_der_put_int (&o, 0x02, l->next_id++);
+  twist_der_put (&o, 0x42, "", 0);
+  twist_der_end (&o, msg);
   if (o.err)
     return TWIST_ERR_PROTOCOL;
-  return ldap_out (l, o.b, o.n, 1);
+  return ldap_out (l, o.buf, o.n, 1);
 }
 
 static int
@@ -749,9 +643,9 @@ on_end (struct twist_ldap *l, uint8_t tag)
 static int
 on_prim (struct twist_ldap *l, uint8_t tag, const uint8_t *p, size_t n)
 {
-  uint8_t parent = l->depth > 0 ? l->stk[l->depth - 1].tag : 0;
+  uint8_t parent = l->rd.depth > 0 ? l->rd.stk[l->rd.depth - 1].tag : 0;
 
-  if (tag == 0x02 && l->depth == 1 && parent == 0x30)
+  if (tag == 0x02 && l->rd.depth == 1 && parent == 0x30)
     return ber_int (p, n, &l->msg_id);
   if (tag == 0x0a && (l->in_bind || l->in_done))
     {
@@ -834,141 +728,57 @@ finish_search (struct twist_ldap *l)
   return TWIST_OK;
 }
 
+/* The BER reader (src/asn1/asn1.c) calls these.  A call that finishes the
+   transfer stops the reader, so what follows the reply is left unconsumed.  */
 static int
-open_value (struct twist_ldap *l)
+der_stop (struct twist_ldap *l, int rc)
 {
-  int constructed = (l->btag & 0x20) != 0;
-  int rc;
-
-  if (l->blen > 1024u * 1024u)
-    return TWIST_ERR_PROTOCOL;
-  if (constructed)
-    {
-      if (l->depth >= (int) (sizeof l->stk / sizeof l->stk[0]))
-        return TWIST_ERR_PROTOCOL;
-      l->stk[l->depth].tag = l->btag;
-      l->stk[l->depth].left = l->blen;
-      l->depth++;
-      rc = on_start (l, l->btag);
-      l->bst = B_TAG;
-      return rc;
-    }
-  if (l->blen > sizeof l->bval)
-    return TWIST_ERR_PROTOCOL;
-  l->bval_got = 0;
-  if (l->blen == 0)
-    {
-      l->bst = B_TAG;
-      return on_prim (l, l->btag, l->bval, 0);
-    }
-  l->bst = B_VAL;
-  return TWIST_OK;
+  return rc == TWIST_OK && l->finished ? TWIST_DER_STOP : rc;
 }
 
 static int
-pop_done (struct twist_ldap *l)
+der_start (void *user, uint8_t tag, size_t len)
 {
-  while (l->depth > 0 && l->stk[l->depth - 1].left == 0)
-    {
-      uint8_t tag;
-      int rc;
+  struct twist_ldap *l = user;
 
-      if (l->bst != B_TAG)
-        return TWIST_ERR_PROTOCOL;
-      tag = l->stk[l->depth - 1].tag;
-      l->depth--;
-      rc = on_end (l, tag);
-      if (rc != TWIST_OK)
-        return rc;
-    }
-  return TWIST_OK;
+  (void) len;
+  return der_stop (l, on_start (l, tag));
 }
 
 static int
-feed_byte (struct twist_ldap *l, uint8_t c)
+der_end (void *user, uint8_t tag)
 {
-  int i;
-  int rc;
+  struct twist_ldap *l = user;
 
-  if (l->depth > 0)
-    {
-      for (i = 0; i < l->depth; i++)
-        {
-          if (l->stk[i].left == 0)
-            return TWIST_ERR_PROTOCOL;
-          l->stk[i].left--;
-        }
-    }
-  switch (l->bst)
-    {
-    case B_TAG:
-      l->btag = c;
-      l->bst = B_LEN;
-      break;
-    case B_LEN:
-      if ((c & 0x80) != 0)
-        {
-          l->blen_left = c & 0x7f;
-          if (l->blen_left == 0 || l->blen_left > 3)
-            return TWIST_ERR_PROTOCOL;
-          l->blen = 0;
-          l->bst = B_LLEN;
-          break;
-        }
-      l->blen = c;
-      rc = open_value (l);
-      if (rc != TWIST_OK)
-        return rc;
-      break;
-    case B_LLEN:
-      l->blen = (l->blen << 8) | c;
-      l->blen_left--;
-      if (l->blen_left == 0)
-        {
-          rc = open_value (l);
-          if (rc != TWIST_OK)
-            return rc;
-        }
-      break;
-    case B_VAL:
-      l->bval[l->bval_got++] = c;
-      if (l->bval_got == l->blen)
-        {
-          l->bst = B_TAG;
-          rc = on_prim (l, l->btag, l->bval, l->bval_got);
-          if (rc != TWIST_OK)
-            return rc;
-        }
-      break;
-    default:
-      return TWIST_ERR_PROTOCOL;
-    }
-  return pop_done (l);
+  return der_stop (l, on_end (l, tag));
 }
+
+static int
+der_prim (void *user, uint8_t tag, const uint8_t *val, size_t len)
+{
+  struct twist_ldap *l = user;
+
+  return der_stop (l, on_prim (l, tag, val, len));
+}
+
+static void
+der_failure (void *user, int err)
+{
+  ldap_complete (user, err);
+}
+
+static const struct twist_der_events der_events = {
+  NULL, der_start, der_end, der_prim, der_failure
+};
 
 size_t
 twist_ldap_receive (struct twist_ldap *l, const uint8_t *data, size_t len)
 {
-  size_t off = 0;
-
   if (l == NULL)
     return 0;
   if (l->finished)
     return len;
-  while (off < len && !l->finished)
-    {
-      {
-        int rc = feed_byte (l, data[off]);
-
-        if (rc != TWIST_OK)
-          {
-            ldap_complete (l, rc);
-            return len;
-          }
-      }
-      off++;
-    }
-  return off;
+  return twist_der_receive (&l->rd, data, len);
 }
 
 const uint8_t *
@@ -1084,6 +894,9 @@ twist_ldap_new (struct twist_transfer *transfer, int live)
     return NULL;
   l->transfer = transfer;
   l->next_id = 1;
+  l->ev = der_events;
+  l->ev.user = l;
+  twist_der_reader_init (&l->rd, &l->ev, l->bval, sizeof l->bval, 0);
   l->implicit_tls = transfer->url->scheme != NULL
                     && strcmp (transfer->url->scheme, "ldaps") == 0;
   transfer->state = l;

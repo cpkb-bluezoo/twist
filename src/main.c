@@ -341,7 +341,7 @@ usage (void)
   fputs (_("  -u, --user USER[:PASS]  user and password\n"), stdout);
   fputs (_("  -e, --referer URL       Referer header\n"), stdout);
   fputs (_("  -r, --range RANGE       byte range\n"), stdout);
-  fputs (_("  -a, --append            add to the remote file (ftp)\n"), stdout);
+  fputs (_("  -a, --append            add to the remote file (ftp, smb)\n"), stdout);
   fputs (_("  -p, --proxytunnel       tunnel (CONNECT) through an HTTP proxy for http:// too\n"),
          stdout);
   fputs (_("      --forbid-reuse      close the connection when done, do not keep it\n"),
@@ -355,7 +355,7 @@ usage (void)
   fputs (_("  -Q, --quote CMD         run an sftp command before the transfer, or after\n"
            "                          it with a - before it; a * lets it fail\n"),
          stdout);
-  fputs (_("      --ftp-create-dirs   make the directories of an sftp upload\n"),
+  fputs (_("      --ftp-create-dirs   make the directories of an sftp or smb upload\n"),
          stdout);
   fputs (_("      --limit-rate SPEED  keep to SPEED bytes a second, with k, M, G\n"),
          stdout);
@@ -1418,6 +1418,12 @@ is_ssh_url (const char *url)
 }
 
 static int
+is_smb_url (const char *url)
+{
+  return strncasecmp (url, "smb://", 6) == 0 || strncasecmp (url, "smbs://", 7) == 0;
+}
+
+static int
 is_http_url (const char *url)
 {
   return strncasecmp (url, "http://", 7) == 0
@@ -2127,9 +2133,10 @@ job_prepare (struct cli_run *run, struct cli_next *next, struct cli_job **out)
     {
       int sends = upload != NULL || (op->has_data && !op->get);
 
-      if (!is_ssh_url (url) && !is_ftp_url (url))
+      if (!is_ssh_url (url) && !is_ftp_url (url) && !is_smb_url (url))
         {
-          diag_code (2, _("--continue-at works for sftp, scp, ftp and ftps only"));
+          diag_code (2, _("--continue-at works for sftp, scp, ftp, ftps and "
+                          "smb only"));
           rc = 2;
           goto fail;
         }
@@ -2381,7 +2388,8 @@ job_prepare (struct cli_run *run, struct cli_next *next, struct cli_job **out)
                          ? op->postquote : NULL);
   twist_transfer_setopt (transfer, TWISTOPT_CREATE_MISSING_DIRS,
                          op->ftp_create_dirs
-                         && strncmp (job->use_url, "sftp://", 7) == 0
+                         && (strncmp (job->use_url, "sftp://", 7) == 0
+                             || strncmp (job->use_url, "smb://", 6) == 0)
                          ? 1L : 0L);
   if (job->wfd >= 0)
     twist_transfer_setopt (transfer, TWISTOPT_WRITEFD, (long) job->wfd);
