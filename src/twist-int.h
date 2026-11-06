@@ -2601,6 +2601,11 @@ struct twist_smb;
 struct twist_smb *twist_smb_new (struct twist_transfer *transfer, int live);
 void twist_smb_free (void *smb);
 int twist_smb_attach (struct twist_transfer *transfer);
+/* smbs://: the same over QUIC.  */
+int twist_smbs_attach (struct twist_transfer *transfer);
+/* The QUIC handshake is done, with ALPN (for the tests).  */
+void twist_smb_test_secure (struct twist_smb *x, struct twist_endpoint *ep,
+                            const char *alpn, size_t alpn_len);
 void twist_smb_test_seam (struct twist_smb *x,
                           int (*send) (void *user, const uint8_t *data,
                                        size_t len),
@@ -2880,7 +2885,14 @@ struct twist_masque_spec
   const char *tmpl;		/* NULL: the default for the proxy.  */
   const char *host;		/* The target: its name and port.  */
   int port;
+  const char *alpn;		/* To the target; NULL is h3.  */
+  int no_cert;			/* Present no client certificate to it.  */
 };
+
+/* The plan for a transfer over QUIC: see engine/masque.c.  */
+int twist_masque_plan (struct twist_transfer *transfer, const char *what,
+                       char **phost, int *pport, char **puser, char **ppass,
+                       char **tmpl);
 
 /* An HTTP/3 connection to the target through an HTTP/3 proxy that does
    CONNECT-UDP (RFC 9298): QUIC to the proxy at PROXY_ADDR, an extended CONNECT

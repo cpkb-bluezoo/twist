@@ -1283,6 +1283,68 @@ test_listing_pause (void)
   twist_smb_set_test_now (0);
 }
 
+
+/* ---- smbs: the same over a QUIC stream ---- */
+
+static void
+test_quic (void)
+{
+  struct scen sc = plain_scen ();
+  struct tx *z;
+  struct twist_endpoint ep;
+
+  /* The handshake agrees to smb: the session starts on the stream and the
+     file comes as it does over TCP.  */
+  z = begin ("smbs://server.example/share/dir/file.bin", "Domain\\User", sc);
+  z->x = twist_smb_new (z->t, 0);
+  srv_init (&z->srv, z->sc.o, to_client, z);
+  twist_smb_test_seam (z->x, to_server, is_full, z);
+  memset (&ep, 0, sizeof ep);
+  twist_smb_test_secure (z->x, &ep, "smb", 3);
+  serve (z);
+  check (z->t->done && z->t->result == TWIST_OK && same (z, 0, FILE_SIZE),
+         "smbs: a download over a QUIC stream is the same as over TCP");
+  check (strcmp (z->name, "dir\\file.bin") == 0, "smbs: with the same names");
+  finish (z);
+  /* A server that does not say smb is not spoken to.  */
+  z = begin ("smbs://server.example/share/dir/file.bin", "Domain\\User", sc);
+  z->x = twist_smb_new (z->t, 0);
+  srv_init (&z->srv, z->sc.o, to_client, z);
+  twist_smb_test_seam (z->x, to_server, is_full, z);
+  memset (&ep, 0, sizeof ep);
+  twist_smb_test_secure (z->x, &ep, "h3", 2);
+  check (z->t->done && z->t->result == TWIST_ERR_PROTOCOL && z->qtail == 0,
+         "smbs: another protocol in ALPN is refused before anything is sent");
+  finish (z);
+  z = begin ("smbs://server.example/share/dir/file.bin", "Domain\\User", sc);
+  z->x = twist_smb_new (z->t, 0);
+  srv_init (&z->srv, z->sc.o, to_client, z);
+  twist_smb_test_seam (z->x, to_server, is_full, z);
+  memset (&ep, 0, sizeof ep);
+  twist_smb_test_secure (z->x, &ep, NULL, 0);
+  check (z->t->done && z->t->result == TWIST_ERR_PROTOCOL && z->qtail == 0,
+         "smbs: and so is no ALPN at all");
+  finish (z);
+  /* Uploads go the same way.  */
+  {
+    uint8_t *data = pattern (70000);
+
+    z = begin_put ("smbs://server.example/share/dir/up.bin", sc, data, 70000);
+    z->x = twist_smb_new (z->t, 0);
+    srv_init (&z->srv, z->sc.o, to_client, z);
+    twist_smb_test_seam (z->x, to_server, is_full, z);
+    memset (&ep, 0, sizeof ep);
+    twist_smb_test_secure (z->x, &ep, "smb", 3);
+    serve (z);
+    run_put (z, 5000);
+    check (z->t->done && z->t->result == TWIST_OK && z->store_len == 70000
+           && memcmp (z->store, data, 70000) == 0,
+           "smbs: an upload over a QUIC stream is the same too");
+    finish (z);
+    free (data);
+  }
+}
+
 int
 main (void)
 {
@@ -1298,5 +1360,6 @@ main (void)
   test_put_failures ();
   test_listing ();
   test_listing_pause ();
+  test_quic ();
   return tests_finish ();
 }

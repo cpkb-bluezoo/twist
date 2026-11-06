@@ -109,6 +109,11 @@ struct twist_smb
 {
   struct twist_transfer *transfer;
   struct twist_mail_link link;
+  struct twist_phase phase_q;	/* The time to be connected in, over QUIC.  */
+  int quic;			/* smbs: SMB over QUIC, one stream.  */
+  struct twist_connection *qconn;
+  char *qhost, *quser, *qpass, *qtmpl;	/* A CONNECT-UDP proxy.  */
+  int qport;
   struct twist_endpoint *ep;
   struct twist_smb_session *sess;
   int (*test_send) (void *user, const uint8_t *data, size_t len);
@@ -349,7 +354,19 @@ conn_full (struct twist_smb *x)
 {
   if (x->test_full != NULL)
     return x->test_full (x->test_user);
+  if (x->quic)
+    return x->qconn != NULL && twist_quic_stream_full (x->qconn);
   return x->ep != NULL && twist_endpoint_full (x->ep);
+}
+
+/* The time to be connected in ends when the tree is.  */
+static void
+phase_end (struct twist_smb *x)
+{
+  if (x->quic)
+    twist_phase_end (&x->phase_q);
+  else
+    twist_mail_link_phase_end (&x->link);
 }
 
 /* ---- The range ---- */
@@ -1310,7 +1327,7 @@ ops_established (void *u, uint32_t tree)
   struct twist_smb *x = u;
 
   (void) tree;
-  twist_mail_link_phase_end (&x->link);
+  phase_end (x);
   open_next (x);
 }
 
@@ -1420,7 +1437,7 @@ smb_pause_hook (struct twist_transfer *t)
 {
   struct twist_smb *x = t->state;
 
-  if (x != NULL && x->ep != NULL)
+  if (x != NULL && x->ep != NULL && !x->quic)
     twist_endpoint_pause_read (x->ep);
 }
 
@@ -1431,7 +1448,7 @@ smb_resume_hook (struct twist_transfer *t)
 
   if (x == NULL)
     return;
-  if (x->ep != NULL)
+  if (x->ep != NULL && !x->quic)
     twist_endpoint_resume_read (x->ep);
   if (x->list_wait)
     {
@@ -1471,6 +1488,20 @@ twist_smb_free (void *p)
   free (x->wbuf);
   twist_smb_session_free (x->sess);
   twist_mail_link_close (&x->link);
+  if (x->quic)
+    {
+      twist_phase_end (&x->phase_q);
+      if (x->qconn != NULL)
+        twist_connection_free (x->qconn);
+    }
+  free (x->qhost);
+  free (x->quser);
+  if (x->qpass != NULL)
+    {
+      memset (x->qpass, 0, strlen (x->qpass));
+      free (x->qpass);
+    }
+  free (x->qtmpl);
   free (x->path);
   free (x);
 }
@@ -1614,6 +1645,160 @@ bad:
   free (login);
   smb_complete (x, rc);
   return x;
+}
+
+/* ---- smbs: SMB over QUIC ----
+
+   The session, the messages and the keys are as over TCP: the same 4-byte
+   header and SMB2 messages on the one bidirectional stream a QUIC connection
+   starts with, ALPN smb, UDP port 443 unless the URL says otherwise.  The
+   whole session, NTLM included, runs inside QUIC.  The certificate is checked
+   as for https (--cacert, --capath, -k, the host of the URL as the name), no
+   client certificate is presented, and SMB's own encryption stays on inside it.
+   There is no other way to the server: not TCP on port 445, and a proxy that
+   cannot carry UDP is an error.  Through a CONNECT-UDP proxy it goes as
+   HTTP/3 does.  (How the messages map onto the stream is as it is assumed to
+   be from SMB's use of QUIC; it has not been confirmed against a server.)  */
+
+static void
+quic_fail (void *user, int err)
+{
+  smb_fail (user, err);
+}
+
+static void
+quic_drained (void *u)
+{
+  twist_smb_drained (u);
+}
+
+/* The handshake is done: the session starts on the stream.  */
+static void
+smbs_secure (struct twist_endpoint *ep, const char *alpn, size_t alpn_len)
+{
+  struct twist_smb *x = ep->user_data;
+
+  x->ep = ep;
+  if (alpn == NULL || alpn_len != 3 || memcmp (alpn, "smb", 3) != 0)
+    {
+      detail (x, _("the server did not agree to smb"));
+      smb_fail (x, TWIST_ERR_PROTOCOL);
+      return;
+    }
+  twist_quic_on_drained (x->qconn, quic_drained, x);
+  twist_smb_start (x);
+}
+
+/* For the tests: the handshake is done, as the connection would say.  */
+void
+twist_smb_test_secure (struct twist_smb *x, struct twist_endpoint *ep,
+                       const char *alpn, size_t alpn_len)
+{
+  x->quic = 1;
+  ep->user_data = x;
+  smbs_secure (ep, alpn, alpn_len);
+}
+
+static const struct twist_protocol_handler smbs_handler = {
+  NULL,
+  smb_on_recv,
+  smb_disconnected,
+  smbs_secure,
+  smb_error,
+  NULL,
+  NULL
+};
+
+static void
+smbs_dial (struct twist_smb *x, const struct twist_dns_addr *addr)
+{
+  struct twist_transfer *t = x->transfer;
+  struct twist_url *u = t->url;
+  int rc;
+
+  if (x->qhost != NULL)
+    {
+      struct twist_masque_spec spec;
+
+      memset (&spec, 0, sizeof spec);
+      spec.proxy_host = x->qhost;
+      spec.proxy_port = x->qport;
+      spec.user = x->quser;
+      spec.pass = x->qpass;
+      spec.tmpl = x->qtmpl;
+      spec.host = u->host;
+      spec.port = u->port;
+      spec.alpn = "smb";
+      spec.no_cert = 1;
+      rc = twist_masque_connect (t, &spec, addr, &smbs_handler, x, &x->qconn);
+    }
+  else
+    {
+      rc = twist_quic_dial (t->loop, u->host, "smb", addr, u->port, t->cainfo,
+                            t->capath, NULL, NULL, t->verifypeer, NULL,
+                            &x->qconn);
+      if (rc == TWIST_OK)
+        {
+          twist_connection_endpoint (x->qconn)->user_data = x;
+          twist_connection_set_handler (x->qconn, &smbs_handler);
+        }
+    }
+  if (rc != TWIST_OK)
+    smb_fail (x, rc);
+}
+
+static void
+smbs_resolved (void *user, int err, const struct twist_dns_addr *addr)
+{
+  struct twist_smb *x = user;
+
+  if (x->finished)
+    return;
+  if (err != TWIST_OK || addr == NULL)
+    {
+      smb_fail (x, err != TWIST_OK ? err : TWIST_ERR_RESOLVE);
+      return;
+    }
+  smbs_dial (x, addr);
+}
+
+int
+twist_smbs_attach (struct twist_transfer *transfer)
+{
+  struct twist_smb *x;
+  const char *name;
+  int plan, rc;
+
+  x = twist_smb_new (transfer, 1);
+  if (x == NULL)
+    return TWIST_ERR_NOMEM;
+  if (x->finished)
+    return transfer->result;
+  if (twist_quic_connect_fn == NULL)
+    {
+      smb_complete (x, TWIST_ERR_UNSUPPORTED);
+      return transfer->result;
+    }
+  x->quic = 1;
+  plan = twist_masque_plan (transfer, "SMB over QUIC", &x->qhost, &x->qport,
+                            &x->quser, &x->qpass, &x->qtmpl);
+  if (plan < 0)
+    {
+      smb_complete (x, TWIST_ERR_UNSUPPORTED);
+      return transfer->result;
+    }
+  if (plan == 0)
+    {
+      free (x->qhost);
+      x->qhost = NULL;
+    }
+  twist_phase_begin (&x->phase_q, transfer, quic_fail, x);
+  /* The proxy is looked up, if there is one, and otherwise the server.  */
+  name = x->qhost != NULL ? x->qhost : transfer->url->host;
+  rc = twist_dns_resolve_transfer (transfer, name, smbs_resolved, x);
+  if (rc != TWIST_OK)
+    smb_complete (x, rc);
+  return transfer->done ? transfer->result : TWIST_OK;
 }
 
 int

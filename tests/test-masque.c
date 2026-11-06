@@ -23,6 +23,7 @@
 #include "check.h"
 #include "twist-int.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 /* HTTP Datagrams of a CONNECT-UDP stream (RFC 9298 section 5): the stream's
@@ -95,11 +96,65 @@ test_round_trip (void)
          && memcmp (pl, pay, n) == 0, "and comes out the same");
 }
 
+
+/* Whether SMB over QUIC goes through a CONNECT-UDP proxy: the same plan as
+   HTTP/3, in the words of its own protocol.  */
+static void
+test_plan (void)
+{
+  twist_transfer *t;
+  char *host = NULL, *user = NULL, *pass = NULL, *tmpl = NULL;
+  int port = 0;
+  const char *err;
+
+  t = twist_transfer_new ();
+  twist_url_parse_int ("smbs://server.example/share/f", &t->url);
+  check (t->url->port == 443, "smbs: the port is 443 unless the URL says");
+  check (twist_masque_plan (t, "SMB over QUIC", &host, &port, &user, &pass, &tmpl)
+         == 0 && host == NULL && tmpl == NULL, "smbs: no proxy is none");
+  twist_transfer_free (t);
+
+  t = twist_transfer_new ();
+  twist_url_parse_int ("smbs://server.example/share/f", &t->url);
+  twist_transfer_setopt (t, TWISTOPT_PROXY, "http://p.example:3128");
+  check (twist_masque_plan (t, "SMB over QUIC", &host, &port, &user, &pass, &tmpl)
+         == -1, "smbs: a proxy that cannot carry UDP is an error");
+  err = twist_transfer_error (t);
+  check (err != NULL && strstr (err, "SMB over QUIC") != NULL
+         && strstr (err, "CONNECT-UDP") != NULL,
+         "smbs: and the error names the protocol");
+  twist_transfer_free (t);
+
+  t = twist_transfer_new ();
+  twist_url_parse_int ("smbs://server.example/share/f", &t->url);
+  twist_transfer_setopt (t, TWISTOPT_PROXY, "https://px.example:8443");
+  check (twist_masque_plan (t, "SMB over QUIC", &host, &port, &user, &pass, &tmpl)
+         == 1 && host != NULL && strcmp (host, "px.example") == 0
+         && port == 8443 && tmpl == NULL,
+         "smbs: an https proxy is a CONNECT-UDP proxy");
+  free (host);
+  host = NULL;
+  twist_transfer_free (t);
+
+  t = twist_transfer_new ();
+  twist_url_parse_int ("smbs://server.example/share/f", &t->url);
+  twist_transfer_setopt (t, TWISTOPT_PROXY_TEMPLATE_UDP,
+                         "https://tp.example:4433/masque/{target_host}/{target_port}/");
+  check (twist_masque_plan (t, "SMB over QUIC", &host, &port, &user, &pass, &tmpl)
+         == 1 && host != NULL && strcmp (host, "tp.example") == 0
+         && port == 4433 && tmpl != NULL,
+         "smbs: a template names the proxy");
+  free (host);
+  free (tmpl);
+  twist_transfer_free (t);
+}
+
 int
 main (void)
 {
   test_wrap ();
   test_unwrap ();
   test_round_trip ();
+  test_plan ();
   return tests_finish ();
 }
