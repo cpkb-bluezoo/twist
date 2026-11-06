@@ -45,6 +45,7 @@ struct twist_tls
      it).  Both are secrets.  */
   gq_tls_session session;
   int have_session;
+  int session_tls12;		/* The session is of a TLS 1.2 connection.  */
   gq_tls_session offered;
   /* A second name the certificate must be valid for, or NULL.  */
   char *also_name;
@@ -108,6 +109,9 @@ tls_ticket (void *user, const gq_tls_ticket *ticket)
     {
       gq_tls_session_wipe (&t->session);
       t->have_session = gq_tls_session_store (&t->session, ticket) == GQ_OK;
+      /* TLS 1.3 names its suites 0x13xx.  A session of any other is of TLS
+         1.2, which only the TLS 1.2 engine can resume.  */
+      t->session_tls12 = (ticket->cipher_suite & 0xff00) != 0x1300;
       /* quickstep offers a session only to the name it was verified for, and
          a session with none is never offered.  */
       if (t->have_session && t->server_name != NULL
@@ -165,6 +169,7 @@ tls_start (struct twist_connection *conn, const struct twist_tls_want *want)
   gq_tls_config cfg;
   gq_tlsconn_events ev;
   size_t i;
+  unsigned versions = 0;	/* Both, unless a session says otherwise.  */
   int rc;
 
   if (conn == NULL || want == NULL)
@@ -227,6 +232,13 @@ tls_start (struct twist_connection *conn, const struct twist_tls_want *want)
         {
           t->offered = from->session;
           cfg.resume = &t->offered;
+          /* The client that offers both versions in one hello can offer a
+             TLS 1.3 ticket in it, and no TLS 1.2 one: the engine it hands over
+             to starts again with none.  So a connection that resumes a TLS 1.2
+             session speaks TLS 1.2 from its first byte, which is the version
+             the server chose for the connection the session came from.  */
+          if (from->session_tls12)
+            versions = GQ_TLSAUTO_TLS12;
         }
     }
   memset (&ev, 0, sizeof ev);
@@ -243,7 +255,7 @@ tls_start (struct twist_connection *conn, const struct twist_tls_want *want)
     ev.verify_peer = twist_verify_accept;
   else if (t->also_name != NULL)
     ev.verify_peer = tls_verify_names;
-  rc = gq_tlsauto_client_new (&t->tls, &cfg, &ev, 0);
+  rc = gq_tlsauto_client_new (&t->tls, &cfg, &ev, versions);
   if (rc != GQ_OK)
     {
       tls_free (t);

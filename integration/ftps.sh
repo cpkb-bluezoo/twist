@@ -82,16 +82,27 @@ def note(text):
     with open(log, "a") as f:
         f.write(text + "\n")
 
+# A mode with "12" in its name serves TLS 1.2 only, one with "noticket" issues
+# no session ticket, and "reuse" ones refuse a data connection that did not
+# resume the session of the control connection.
+tls12 = "12" in mode
+need_reuse = mode.startswith("reuse") or mode.endswith("-reuse")
+shared = need_reuse or mode in ("tls12", "noticket12")
+
 def context(c, k):
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.load_cert_chain(c, k)
+    if tls12:
+        ctx.maximum_version = ssl.TLSVersion.TLSv1_2
+    if "noticket" in mode:
+        ctx.options |= ssl.OP_NO_TICKET
     return ctx
 
 ctl_ctx = context(cert, key)
 # "reuse" is vsftpd's default: the data connection has to resume the session
 # of the control connection, so both are served by one context (one set of
 # ticket keys), and one that does not resume is refused.
-data_ctx = ctl_ctx if mode == "reuse" else context(data_cert, data_key)
+data_ctx = ctl_ctx if shared else context(data_cert, data_key)
 
 def readline(sock):
     buf = b""
@@ -169,8 +180,8 @@ def session(raw):
                 if prot:
                     d.settimeout(5)
                     d = data_ctx.wrap_socket(d, server_side=True)
-                    note("data tls reused=%s" % d.session_reused)
-                    if mode == "reuse" and not d.session_reused:
+                    note("data tls %s reused=%s" % (d.version(), d.session_reused))
+                    if need_reuse and not d.session_reused:
                         d.close()
                         say("522 SSL connection failed; session reuse required")
                         continue
@@ -266,7 +277,32 @@ check "$(is "$out" "-rw-r--r--")" "a listing still ends well"
 start reuse reuse good
 check "$(is "$(get $ca "ftps://u:p@127.0.0.1:$port/hello")" "hello over ftps")" \
   "a server that requires session reuse"
-check "$(has reuse "^data tls reused=True")" "the data session was the control session"
+check "$(has reuse "^data tls TLSv1.3 reused=True")" "the data session was the control session"
+
+# The same with TLS 1.2, where the session of the control connection is an
+# RFC 5077 ticket.  A server that issued one and requires the data connection
+# to resume it is satisfied; one that issued none cannot be (twist does not make
+# up a session), so a full handshake is made where the server allows it and the
+# transfer fails where it does not.
+start reuse12 reuse12 good
+check "$(is "$(get $ca "ftps://u:p@127.0.0.1:$port/hello")" "hello over ftps")" \
+  "TLS 1.2: a server that requires session reuse"
+check "$(has reuse12 "^data tls TLSv1.2 reused=True")" \
+  "TLS 1.2: the data session was the control session"
+start plain12 tls12 good
+check "$(is "$(get $ca "ftps://u:p@127.0.0.1:$port/hello")" "hello over ftps")" \
+  "TLS 1.2: the data connection is TLS 1.2 too"
+check "$(has plain12 "^data tls TLSv1.2 reused=True")" \
+  "TLS 1.2: and resumes the session without being required to"
+start notick12 noticket12 good
+check "$(is "$(get $ca "ftps://u:p@127.0.0.1:$port/hello")" "hello over ftps")" \
+  "TLS 1.2, no ticket: a full handshake where the server allows it"
+check "$(has notick12 "^data tls TLSv1.2 reused=False")" \
+  "TLS 1.2, no ticket: and the data session is a new one"
+start notick12r noticket12-reuse good
+out=$(status $ca "ftps://u:p@127.0.0.1:$port/hello")
+check "$([ "$out" != 0 ] && echo ok)" \
+  "TLS 1.2, no ticket: a server that requires reuse refuses it ($out)"
 
 # A server that will not protect it: the file is not fetched in the clear.
 start refuse refuse good
