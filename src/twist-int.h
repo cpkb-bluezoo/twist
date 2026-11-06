@@ -2324,6 +2324,8 @@ struct twist_smb_session_info
   uint32_t max_read, max_write, max_transact;
   uint64_t session_id;
   uint32_t tree_id;
+  /* The NT status of the last error response the server sent, or 0.  */
+  uint32_t status;
 };
 
 struct twist_smb_session *
@@ -2591,6 +2593,23 @@ size_t twist_ldap_receive (struct twist_ldap *ldap, const uint8_t *data,
                            size_t len);
 const uint8_t *twist_ldap_command (const struct twist_ldap *ldap, size_t *len);
 int twist_ldap_attach (struct twist_transfer *transfer);
+
+/* smb:// (src/smb/smb.c): one file from a share, over the session layer.  The
+   test seam: with no connection the frames the handler sends go to SEND
+   instead, and twist_smb_receive is what the connection would call.  */
+struct twist_smb;
+struct twist_smb *twist_smb_new (struct twist_transfer *transfer, int live);
+void twist_smb_free (void *smb);
+int twist_smb_attach (struct twist_transfer *transfer);
+void twist_smb_test_seam (struct twist_smb *x,
+                          int (*send) (void *user, const uint8_t *data,
+                                       size_t len),
+                          void *user);
+/* The random values of the next sessions made (the tests fix them); NULL for
+   the system's.  */
+void twist_smb_set_test_rnd (const struct twist_ntlm_rand *rnd);
+int twist_smb_start (struct twist_smb *x);
+size_t twist_smb_receive (struct twist_smb *x, const uint8_t *data, size_t len);
 
 struct twist_gopher;
 struct twist_gopher *twist_gopher_new (struct twist_transfer *transfer,

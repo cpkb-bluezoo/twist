@@ -632,6 +632,7 @@ on_error (void *u, uint32_t status, unsigned ctx, uint32_t n)
 
   s->got_error = 1;
   s->err_status = status;
+  s->info.status = status;
   return FWD (s, error, status, ctx, n);
 }
 
@@ -910,9 +911,9 @@ on_end (void *u, uint64_t off)
       rc = finish_tree (s);
       break;
     case P_EST:
-    case P_DONE:
-      rc = s->up.message_end != NULL && s->phase == P_EST
-        ? s->up.message_end (s->up.user, off) : TWIST_OK;
+    case P_DONE:			/* The LOGOFF response ends here too.  */
+      rc = s->up.message_end != NULL ? s->up.message_end (s->up.user, off)
+                                     : TWIST_OK;
       break;
     default:
       break;
