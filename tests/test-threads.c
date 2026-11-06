@@ -229,6 +229,7 @@ test_finish_on_the_loop (const char *path)
   int i;
 
   snprintf (url, sizeof url, "file://%s", path);
+  setenv ("TWIST_NO_URING", "1", 1);
   twist_transfer_setopt (transfer, TWISTOPT_URL, url);
   transfer->write_cb = body;
   /* Before the start: the worker may run as soon as it has the job, and what
@@ -251,6 +252,7 @@ test_finish_on_the_loop (const char *path)
          "and was finished on the loop's thread, not a worker's");
   twist_transfer_free (transfer);
   twist_runtime_free (runtime);
+  unsetenv ("TWIST_NO_URING");
 }
 
 /* ---- letting go of a transfer does not wait ---- */

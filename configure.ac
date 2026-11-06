@@ -167,6 +167,26 @@ AC_SUBST([BROTLI_CFLAGS])
 AC_SUBST([BROTLI_LIBS])
 AC_SUBST([BROTLI_REQUIRES])
 
+AC_ARG_WITH([liburing],
+  [AS_HELP_STRING([--with-liburing],
+     [use io_uring for the file I/O of transfers on Linux, if the kernel and
+      sandbox allow it, with liburing @<:@default=check@:>@])],
+  [], [with_liburing=check])
+LIBURING_REQUIRES=
+LIBURING_CFLAGS=
+LIBURING_LIBS=
+AS_IF([test "x$with_liburing" != xno],
+  [PKG_CHECK_MODULES([LIBURING], [liburing],
+     [AC_DEFINE([HAVE_LIBURING], [1], [Define if liburing is available])
+      LIBURING_REQUIRES="liburing"],
+     [LIBURING_CFLAGS=
+      LIBURING_LIBS=
+      AS_IF([test "x$with_liburing" = xyes],
+        [AC_MSG_ERROR([liburing not found])])])])
+AC_SUBST([LIBURING_CFLAGS])
+AC_SUBST([LIBURING_LIBS])
+AC_SUBST([LIBURING_REQUIRES])
+
 AC_ARG_WITH([readline],
   [AS_HELP_STRING([--with-readline],
      [link the twist program with GNU Readline @<:@default=check@:>@])],

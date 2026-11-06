@@ -305,6 +305,14 @@ the loader gives a program.  zlib is required.  libbrotli is optional: with it
 (libbrotlidec and libbrotlienc, found by pkg-config, HAVE_BROTLI in config.h)
 twist decodes and codes br, and without it br is not a known coding, so the
 default Accept-Encoding is "gzip, deflate".  Both builds are tested: CI builds
-with --with-brotli and with --without-brotli.  No dependency other than
-quickstep, foxtrot (and so libgcrypt), zlib, libbrotli, and GNU readline is added
-without explicit approval.  Readline links into the twist program only.
+with --with-brotli and with --without-brotli.  liburing is optional too (found
+by pkg-config, HAVE_LIBURING in config.h): on Linux, with it, the file I/O of
+transfers goes through io_uring (reactor/uringio.c) when the kernel and the
+sandbox allow a ring, and through the storage pool when they do not, or when
+TWIST_NO_URING is in the environment.  Docker's and podman's default profiles
+refuse io_uring_setup, so a container shows the pool; to see the ring run it
+with --security-opt seccomp=unconfined (and label=disable under SELinux).
+test-fio runs its tests through both and says which it used.  No dependency
+other than quickstep, foxtrot (and so libgcrypt), zlib, libbrotli, liburing, and
+GNU readline is added without explicit approval.  Readline links into the twist
+program only.

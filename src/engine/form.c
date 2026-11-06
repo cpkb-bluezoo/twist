@@ -539,6 +539,15 @@ enum { PH_PART, PH_BODY, PH_END, PH_DONE };
 
 struct form_src;
 
+/* What a descriptor source calls back with, apart from the source: the source
+   cannot be freed from inside one of its own callbacks, and the callbacks that
+   are still to come after it is let go of must find nobody.  */
+struct form_fs
+{
+  struct form_src *src;		/* NULL once let go of.  */
+  struct twist_fd_source *fs;
+};
+
 /* The open of a file part, which runs on a worker and may run after the
    source is gone: it holds what it needs.  */
 struct form_in
@@ -564,6 +573,7 @@ struct form_src
   int body_err;
   struct twist_fio *fio;
   struct twist_fd_source *fs;
+  struct form_fs *fsctx;
   int held;			/* The body source is paused for the writer.  */
   uint8_t pend[TWIST_FIO_CHUNK];
   size_t pend_len, pend_off;
@@ -730,9 +740,14 @@ static const struct twist_fio_read_ops in_ops = { in_open, NULL, in_chunk,
 static size_t
 fs_chunk (void *user, const uint8_t *data, size_t len)
 {
-  struct form_src *s = user;
-  const struct twist_formpart *p = s->form->parts[s->idx];
+  struct form_fs *ctx = user;
+  struct form_src *s = ctx->src;
+  const struct twist_formpart *p;
   size_t off = 0;
+
+  if (s == NULL)
+    return len;
+  p = s->form->parts[s->idx];
 
   form_pump (s);
   while (off < len && !s->failed && twist_upload_active (s->up)
@@ -759,8 +774,11 @@ fs_chunk (void *user, const uint8_t *data, size_t len)
 static void
 fs_end (void *user, int err)
 {
-  struct form_src *s = user;
+  struct form_fs *ctx = user;
+  struct form_src *s = ctx->src;
 
+  if (s == NULL)
+    return;
   s->body_ended = 1;
   s->body_err = err;
   form_pump (s);
@@ -769,12 +787,33 @@ fs_end (void *user, int err)
 static const struct twist_fd_source_ops fs_ops = { fs_chunk, fs_end };
 
 static void
+fs_retire (void *p)
+{
+  struct form_fs *ctx = p;
+
+  twist_fd_source_free (ctx->fs);
+  free (ctx);
+}
+
+static void
 body_stop (struct form_src *s)
 {
   twist_fio_free (s->fio);
   s->fio = NULL;
-  twist_fd_source_free (s->fs);
-  s->fs = NULL;
+  if (s->fs != NULL)
+    {
+      /* This may be called from a callback of the source: it is paused, and
+         freed from the loop when the call is over.  */
+      struct form_fs *ctx = s->fsctx;
+
+      ctx->src = NULL;
+      ctx->fs = s->fs;
+      twist_fd_source_pause (s->fs);
+      s->fs = NULL;
+      s->fsctx = NULL;
+      if (twist_loop_post (s->t->loop, fs_retire, ctx) != TWIST_OK)
+        fs_retire (ctx);
+    }
 }
 
 /* Begin to read the part being sent.  */
@@ -793,7 +832,22 @@ body_open (struct form_src *s)
   if (p->kind == KIND_FD)
     regular = fstat (p->fd, &st) == 0 && S_ISREG (st.st_mode);
   if (!regular)
-    return twist_fd_source_new (t->loop, p->fd, &fs_ops, s, &s->fs);
+    {
+      struct form_fs *ctx = calloc (1, sizeof *ctx);
+      int rc;
+
+      if (ctx == NULL)
+        return TWIST_ERR_NOMEM;
+      ctx->src = s;
+      rc = twist_fd_source_new (t->loop, p->fd, &fs_ops, ctx, &s->fs);
+      if (rc != TWIST_OK)
+        {
+          free (ctx);
+          return rc;
+        }
+      s->fsctx = ctx;
+      return TWIST_OK;
+    }
   {
     struct form_in *in = calloc (1, sizeof *in);
     int rc;

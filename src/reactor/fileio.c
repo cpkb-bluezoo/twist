@@ -162,6 +162,8 @@ twist_fio_inflight (struct twist_fio *f)
 {
   int n;
 
+  if (twist_uio_is (f))
+    return twist_uio_inflight (f);
   pthread_mutex_lock (&f->mu);
   n = f->inflight;
   pthread_mutex_unlock (&f->mu);
@@ -176,6 +178,11 @@ twist_fio_free (struct twist_fio *f)
 {
   if (f == NULL)
     return;
+  if (twist_uio_is (f))
+    {
+      twist_uio_free (f);
+      return;
+    }
   pthread_mutex_lock (&f->mu);
   f->released = 1;
   f->stop = 1;
@@ -471,6 +478,11 @@ deliver (struct twist_fio *f)
 void
 twist_fio_pause (struct twist_fio *f)
 {
+  if (twist_uio_is (f))
+    {
+      twist_uio_pause (f);
+      return;
+    }
   if (f != NULL)
     f->paused = 1;
 }
@@ -478,6 +490,11 @@ twist_fio_pause (struct twist_fio *f)
 void
 twist_fio_resume (struct twist_fio *f)
 {
+  if (twist_uio_is (f))
+    {
+      twist_uio_resume (f);
+      return;
+    }
   if (f == NULL || !f->paused)
     return;
   f->paused = 0;
@@ -620,6 +637,8 @@ twist_fio_read_new (struct twist_loop *loop, struct twist_storage *st,
   if (loop == NULL || st == NULL || ops == NULL || ops->open == NULL
       || ops->chunk == NULL || ops->end == NULL)
     return TWIST_ERR_INVAL;
+  if (twist_uio_usable (loop, st))
+    return twist_uio_read_new (loop, st, ops, user, out);
   /* The worker waits on the loop for room to hand over what it reads, so it
      cannot be the loop's own thread.  */
   if (twist_storage_threads (st) == 0)
@@ -854,6 +873,8 @@ twist_fio_write (struct twist_fio *f, const uint8_t *data, size_t len)
   struct fio_chunk *c = NULL;
   int i;
 
+  if (twist_uio_is (f))
+    return twist_uio_write (f, data, len);
   if (f == NULL || f->dir != FIO_WRITE || len > TWIST_FIO_CHUNK)
     return TWIST_ERR_INVAL;
   pthread_mutex_lock (&f->mu);
@@ -917,6 +938,11 @@ twist_fio_write (struct twist_fio *f, const uint8_t *data, size_t len)
 void
 twist_fio_write_end (struct twist_fio *f)
 {
+  if (twist_uio_is (f))
+    {
+      twist_uio_write_end (f);
+      return;
+    }
   if (f == NULL || f->dir != FIO_WRITE)
     return;
   pthread_mutex_lock (&f->mu);
@@ -941,6 +967,8 @@ twist_fio_write_fd_new (struct twist_loop *loop, struct twist_storage *st,
   *out = NULL;
   if (loop == NULL || st == NULL || fd < 0 || ops == NULL || ops->end == NULL)
     return TWIST_ERR_INVAL;
+  if (twist_uio_usable (loop, st))
+    return twist_uio_write_fd_new (loop, st, fd, at, ops, user, out);
   if (twist_storage_threads (st) == 0)
     return TWIST_ERR_UNSUPPORTED;
   f = fio_new (loop, FIO_WRITE);

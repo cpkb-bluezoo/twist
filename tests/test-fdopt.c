@@ -303,6 +303,32 @@ test_write_file (struct twist_runtime *rt)
   free (got);
 }
 
+/* The body has been written, and acknowledged, before the transfer finishes (a
+   slow connection, or a loaded machine): nothing else is coming from the
+   writer to say it is done, and the end must still close it.  */
+static void
+test_write_file_then_finish (struct twist_runtime *rt)
+{
+  char path[64];
+  int fd = temp_file (path, NULL, 0);
+  struct twist_transfer *t = make (rt);
+  uint8_t *data = pattern (5000);
+
+  twist_transfer_setopt (t, TWISTOPT_WRITEFD, (long) fd);
+  twist_transfer_fds_setup (t);
+  check (twist_deliver (t, data, 5000) == 5000, "delivered");
+  run_for (rt, 300);
+  check (!t->done, "the transfer is not over before it is finished");
+  twist_transfer_finish (t, TWIST_OK);
+  run_for (rt, 500);
+  check (t->done && t->result == TWIST_OK,
+         "and it is over once it is, though the write had already gone");
+  twist_transfer_free (t);
+  close (fd);
+  unlink (path);
+  free (data);
+}
+
 /* A descriptor that cannot be polled and is not a regular file (/dev/null is
    one) takes the body too: it is written to on a thread of the pool.  */
 static void
@@ -338,6 +364,7 @@ main (void)
   test_read_pipe (rt);
   test_write_pipe (rt);
   test_write_file (rt);
+  test_write_file_then_finish (rt);
   test_write_unpollable (rt);
   twist_runtime_free (rt);
   return tests_finish ();

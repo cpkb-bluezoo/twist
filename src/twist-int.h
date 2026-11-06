@@ -536,6 +536,11 @@ void twist_origintab_session (struct twist_origintab *tab, const char *key,
 
 struct twist_loop *twist_loop_new (int external);
 void twist_loop_free (struct twist_loop *loop);
+/* One thing a user of the loop keeps on it (the ring of the file I/O), and how
+   to free it when the loop is freed.  */
+void *twist_loop_ext (struct twist_loop *loop);
+void twist_loop_set_ext (struct twist_loop *loop, void *ext,
+                         void (*ext_free) (void *));
 void twist_loop_set_now (struct twist_loop *loop, uint64_t (*now_ms) (void *),
                          void *user);
 uint64_t twist_loop_now (struct twist_loop *loop);
@@ -1156,6 +1161,29 @@ int twist_fio_write (struct twist_fio *f, const uint8_t *data, size_t len);
 void twist_fio_write_end (struct twist_fio *f);
 
 void twist_fio_free (struct twist_fio *f);
+
+/* The same calls through io_uring (reactor/uringio.c), which the ones above
+   dispatch to for a loop that can have a ring (liburing, Linux, and a kernel
+   and sandbox that allow it; TWIST_NO_URING in the environment says no).  A
+   twist_fio of that kind begins with TWIST_UIO_MAGIC, and is freed before its
+   loop.  There is no worker: the open of a file to read is one short job of the
+   pool, and the rest is the loop's thread and the kernel.  */
+#define TWIST_UIO_MAGIC 0x75696f01
+int twist_uio_usable (struct twist_loop *loop, struct twist_storage *st);
+int twist_uio_is (const struct twist_fio *f);
+int twist_uio_read_new (struct twist_loop *loop, struct twist_storage *st,
+                        const struct twist_fio_read_ops *ops, void *user,
+                        struct twist_fio **out);
+int twist_uio_write_fd_new (struct twist_loop *loop, struct twist_storage *st,
+                            int fd, long long at,
+                            const struct twist_fio_write_ops *ops, void *user,
+                            struct twist_fio **out);
+int twist_uio_write (struct twist_fio *f, const uint8_t *data, size_t len);
+void twist_uio_write_end (struct twist_fio *f);
+void twist_uio_pause (struct twist_fio *f);
+void twist_uio_resume (struct twist_fio *f);
+int twist_uio_inflight (struct twist_fio *f);
+void twist_uio_free (struct twist_fio *f);
 /* For tests: how many chunks are unacknowledged.  */
 int twist_fio_inflight (struct twist_fio *f);
 

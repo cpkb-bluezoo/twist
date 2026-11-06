@@ -46,6 +46,8 @@ struct twist_slot
 
 struct twist_loop
 {
+  void *ext;			/* Set by twist_loop_set_ext.  */
+  void (*ext_free) (void *);
   struct twist_poll *poll;
   struct twist_timer_heap *timers;
   struct twist_cmdq *cmds;
@@ -154,6 +156,9 @@ twist_loop_free (struct twist_loop *loop)
 {
   if (loop == NULL)
     return;
+  /* Before the poll set goes: what is kept here watches descriptors.  */
+  if (loop->ext_free != NULL)
+    loop->ext_free (loop->ext);
   twist_poll_close (loop->poll);
   twist_timer_heap_free (loop->timers);
   twist_cmdq_free (loop->cmds);
@@ -171,6 +176,19 @@ twist_loop_free (struct twist_loop *loop)
       free (n);
     }
   free (loop);
+}
+
+void *
+twist_loop_ext (struct twist_loop *loop)
+{
+  return loop != NULL ? loop->ext : NULL;
+}
+
+void
+twist_loop_set_ext (struct twist_loop *loop, void *ext, void (*ext_free) (void *))
+{
+  loop->ext = ext;
+  loop->ext_free = ext_free;
 }
 
 void

@@ -501,6 +501,72 @@ test_writers_yield (struct twist_loop *loop, struct twist_storage *st)
     }
 }
 
+/* A descriptor written to, from an offset, through whichever backend there is:
+   what was there before the offset stays, and the position is not moved.  */
+static void
+test_write_fd (struct twist_loop *loop, struct twist_storage *st)
+{
+  char out[64];
+  struct wr w;
+  int fd;
+  int dfd;
+  FILE *fp;
+  uint8_t *got = malloc (FILE_SIZE + 10);
+  size_t n = 0;
+
+  snprintf (out, sizeof out, "/tmp/twist-test-fio-out-XXXXXX");
+  fd = mkstemp (out);
+  (void) !write (fd, "0123456789", 10);
+  dfd = dup (fd);
+  memset (&w, 0, sizeof w);
+  check (twist_fio_write_fd_new (loop, st, dfd, 10, &wr_ops, &w, &w.f)
+         == TWIST_OK, "a writer on a descriptor");
+  wr_pump (&w);
+  run_for (loop, 800);
+  check (w.ends == 1 && w.end_err == TWIST_OK, "ends well");
+  fp = fopen (out, "rb");
+  if (fp != NULL)
+    {
+      n = fread (got, 1, FILE_SIZE + 10, fp);
+      fclose (fp);
+    }
+  check (n == FILE_SIZE + 10 && memcmp (got, "0123456789", 10) == 0
+         && memcmp (got + 10, content, FILE_SIZE) == 0,
+         "the file is what was there, then the content from the offset");
+  twist_fio_free (w.f);
+  free (w.msg);
+  close (fd);
+  unlink (out);
+  free (got);
+}
+
+/* Which backend there is: the reads and writes of a loop that can have a ring
+   use it, unless the environment says not to.  */
+static void
+test_backend (struct twist_loop *loop, struct twist_storage *st, int uring)
+{
+  struct rd r;
+  struct twist_fio *f;
+
+  rd_init (&r);
+  r.start = 0;
+  r.length = 100;
+  twist_fio_read_new (loop, st, &rd_ops, &r, &f);
+  if (uring)
+    {
+      check (twist_uio_is (f) == twist_uio_usable (loop, st),
+             "a loop that can have a ring uses it");
+      fprintf (stderr, "test-fio: %s\n", twist_uio_is (f)
+               ? "io_uring in use" : "no io_uring here; the pool");
+    }
+  else
+    check (!twist_uio_is (f), "TWIST_NO_URING keeps the pool");
+  run_for (loop, 200);
+  twist_fio_free (f);
+  free (r.got);
+  free (r.msg);
+}
+
 static size_t hopped;
 
 static void
@@ -555,15 +621,21 @@ test_pools_apart (void)
   twist_runtime_free (runtime);
 }
 
-int
-main (void)
+/* Every test through the pool (TWIST_NO_URING), and through io_uring where the
+   loop can have it (and, where it cannot, through the pool again).  */
+static void
+run_all (int uring)
 {
-  struct twist_loop *loop = twist_loop_new (0);
+  struct twist_loop *loop;
   struct twist_storage *st;
 
-  if (loop == NULL || make_file () != 0)
-    return 77;
+  if (uring)
+    unsetenv ("TWIST_NO_URING");
+  else
+    setenv ("TWIST_NO_URING", "1", 1);
+  loop = twist_loop_new (0);
   st = twist_storage_new (2, 32);
+  test_backend (loop, st, uring);
   test_read (loop, st);
   test_read_range (loop, st);
   test_read_missing (loop, st);
@@ -574,10 +646,20 @@ main (void)
   test_write_credit (loop, st);
   test_write_fail (loop, st);
   test_write_release (loop, st);
+  test_write_fd (loop, st);
   test_writers_yield (loop, st);
-  test_pools_apart ();
   twist_storage_free (st);
   twist_loop_free (loop);
+}
+
+int
+main (void)
+{
+  if (make_file () != 0)
+    return 77;
+  run_all (0);
+  run_all (1);
+  test_pools_apart ();
   unlink (path);
   free (content);
   return tests_finish ();

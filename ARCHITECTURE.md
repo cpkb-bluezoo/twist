@@ -309,6 +309,23 @@ The loop drains the command queue at the top of every iteration.
   the worker is last to be done with the record frees it. There is no
   cancellation; a read that never returns holds one worker until the process
   exits.
+- Writers have a pool of their own (`xfer_w`), and a writer with nothing to
+  write that finds another job queued puts itself at the back of the queue and
+  gives its thread up. A read waits for a write to give room, so a pool that was
+  all writers waiting for data, or that the two shared and the readers filled,
+  could not make progress.
+- On Linux with liburing the same calls go through io_uring instead
+  (`reactor/uringio.c`; one ring to a loop, found by `twist_loop_ext`, made when
+  first wanted, with an eventfd the loop watches like any descriptor). There is
+  no worker: the loop's thread submits up to four reads or writes of 16 KiB, the
+  kernel does them, and the completions are reaped on the loop, delivered in
+  order, and acknowledged by the callback returning, as before. The open of a file
+  to read is the transfer's own and runs as one short job of the pool. Letting
+  go of a transfer cancels what is under way, and the record is freed when the
+  last completion has been reaped, so a read cannot complete into a transfer that
+  has gone. A ring that cannot be had (an old kernel, a sandbox that refuses
+  `io_uring_setup`, no liburing at build time, or `TWIST_NO_URING`) leaves the
+  loop with the pool, which is also macOS. The two are the same to every caller.
 - `file://` is the first user.
 
 ### Push Sources and Sinks

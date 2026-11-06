@@ -180,13 +180,24 @@ twist_sink_gate (struct twist_transfer *t, int result)
 {
   if (result != TWIST_OK || t->gated)
     return 0;
-  if (!t->sink_paused && t->held_len == 0 && !twist_wsink_busy (t))
-    return 0;
+  if (!t->sink_paused && t->held_len == 0)
+    {
+      /* Everything has been given to the writer.  It closes once it has it,
+         and it is told so now: if what it was given has been written and
+         acknowledged already, nothing will come from it afterwards to say that
+         it is done.  */
+      twist_wsink_close (t);
+      if (!twist_wsink_busy (t))
+        return 0;
+    }
   t->gated = 1;
   t->gated_result = result;
   return 1;
 }
 
+/* The writer or the application has room, or the writer is done: if the end of
+   the transfer was put off, go on with it when nothing is left to give or
+   write.  */
 void
 twist_sink_gate_check (struct twist_transfer *t)
 {

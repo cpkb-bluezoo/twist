@@ -20,8 +20,8 @@ FROM ubuntu:24.04 AS build
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
          autoconf autopoint automake build-essential ca-certificates curl \
-         bzip2 gettext git libbrotli-dev libgnutls28-dev libreadline-dev \
-         libtool pkg-config texinfo zlib1g-dev \
+         bzip2 gettext git libbrotli-dev libgnutls28-dev liburing-dev \
+         libreadline-dev libtool pkg-config texinfo zlib1g-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # foxtrot needs libgcrypt 1.12.4 or newer, and that needs a newer libgpg-error
