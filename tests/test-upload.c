@@ -24,6 +24,7 @@
 #include "twist-int.h"
 
 #include <arpa/inet.h>
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <pthread.h>
 #include <stdio.h>
@@ -241,6 +242,121 @@ test_detach (void)
          "nothing is read or delivered after the consumer is detached");
   twist_transfer_free (t);
   free (data);
+}
+
+/* A read callback that says to wait does not end the body: the callback is
+   asked again after the transfer is resumed.  */
+static int wait_calls;
+
+static size_t
+wait_read (char *ptr, size_t size, size_t nmemb, void *user)
+{
+  struct cb *c = user;
+
+  (void) size;
+  (void) nmemb;
+  wait_calls++;
+  if (wait_calls == 2)
+    return TWIST_READFUNC_PAUSE;
+  if (c->off >= c->total)
+    return 0;
+  ptr[0] = (char) c->data[c->off++];
+  return 1;
+}
+
+static void
+test_read_pause (void)
+{
+  struct twist_transfer *t = twist_transfer_new ();
+  struct cb c;
+  struct cons k;
+  uint8_t data[10];
+
+  memset (&c, 0, sizeof c);
+  memset (&k, 0, sizeof k);
+  memset (data, 'w', sizeof data);
+  c.data = data;
+  c.total = sizeof data;
+  wait_calls = 0;
+  t->read_cb = wait_read;
+  t->read_data = &c;
+  k.up = twist_transfer_upload (t);
+  twist_upload_attach (k.up, &cons_ops, &k, 4096);
+  twist_upload_resume (k.up);
+  check (k.chunks == 1 && k.ends == 0 && wait_calls == 2,
+         "a callback that says to wait is not asked again, and is not the end");
+  check (twist_transfer_resume (t) == TWIST_OK, "the transfer is resumed");
+  check (k.ends == 1 && k.end_err == TWIST_OK && k.n == 10,
+         "and the body goes on to its end");
+  twist_upload_detach (k.up);
+  twist_transfer_free (t);
+}
+
+/* An upload the application pushes: refused when the transfer cannot take
+   more, and the want-more callback says when it can.  */
+static int wants;
+
+static void
+on_want (twist_transfer *t, void *user)
+{
+  (void) t;
+  (void) user;
+  wants++;
+}
+
+static void
+test_push_api (void)
+{
+  struct twist_transfer *t = twist_transfer_new ();
+  struct cons k;
+  uint8_t data[300];
+  size_t taken = 0;
+
+  memset (&k, 0, sizeof k);
+  memset (data, 'u', sizeof data);
+  check (twist_transfer_upload_push (t, data, 1, &taken) != TWIST_OK,
+         "a push to a transfer that has no pushed upload is refused");
+  twist_transfer_setopt (t, TWISTOPT_UPLOAD_PUSH, 1L);
+  twist_transfer_setopt (t, TWISTOPT_WANTFUNCTION, on_want);
+  wants = 0;
+  k.up = twist_transfer_upload (t);
+  check (k.up != NULL, "a transfer with a pushed upload has one");
+  twist_upload_attach (k.up, &cons_ops, &k, 100);
+  twist_upload_resume (k.up);
+  check (wants == 1, "the application is told it may push");
+  /* The consumer takes a chunk and says to stop.  */
+  k.pause_after = 1;
+  check (twist_transfer_upload_push (t, data, sizeof data, &taken) == TWIST_OK
+         && taken == 100 && k.n == 100,
+         "a push is taken up to the pause, and no more");
+  check (twist_transfer_upload_push (t, data, 50, &taken) == TWIST_ERR_AGAIN
+         && taken == 0 && k.n == 100,
+         "a push past the pause point is refused, and nothing is taken");
+  k.pause_after = 0;
+  twist_upload_resume (k.up);
+  check (wants == 2, "and the application is told when it may push again");
+  check (twist_transfer_upload_push (t, data + 100, 200, &taken) == TWIST_OK
+         && taken == 200 && k.n == 300 && memcmp (k.got, data, 300) == 0,
+         "then the rest is taken, in order");
+  check (twist_transfer_upload_end (t, TWIST_OK) == TWIST_OK && k.ends == 1
+         && k.end_err == TWIST_OK, "the end is passed on, once");
+  check (twist_transfer_upload_end (t, TWIST_OK) == TWIST_OK && k.ends == 1,
+         "and not again");
+  twist_upload_detach (k.up);
+  twist_transfer_free (t);
+
+  /* An upload that fails.  */
+  t = twist_transfer_new ();
+  memset (&k, 0, sizeof k);
+  twist_transfer_setopt (t, TWISTOPT_UPLOAD_PUSH, 1L);
+  k.up = twist_transfer_upload (t);
+  twist_upload_attach (k.up, &cons_ops, &k, 100);
+  twist_upload_resume (k.up);
+  twist_transfer_upload_end (t, TWIST_ERR_ABORTED);
+  check (k.ends == 1 && k.end_err == TWIST_ERR_ABORTED,
+         "an upload that fails says why");
+  twist_upload_detach (k.up);
+  twist_transfer_free (t);
 }
 
 /* ---- HTTP/1 against a server ---- */
@@ -549,15 +665,162 @@ test_http_short (void)
   free (data);
 }
 
+/* POST the contents of a descriptor (TWISTOPT_READFD): a file, whose length
+   is known, and a pipe, which is chunked.  The descriptor is not closed.  */
+static void
+test_http_readfd (void)
+{
+  char path[64];
+  char opath[64];
+  char reply[16] = { 0 };
+  int ofd;
+  size_t total = 200000;
+  uint8_t *data = pattern (total);
+  int fd;
+  struct srv s;
+  int result = 0;
+  struct twist_runtime *runtime = twist_runtime_new ();
+  struct twist_transfer *t = twist_transfer_new ();
+  struct check_job job = { 0, 0, 0 };
+  char url[64];
+
+  snprintf (path, sizeof path, "/tmp/twist-test-upload-XXXXXX");
+  fd = mkstemp (path);
+  if (fd < 0 || write (fd, data, total) != (ssize_t) total
+      || runtime == NULL || t == NULL)
+    return;
+  lseek (fd, 0, SEEK_SET);
+  memset (&s, 0, sizeof s);
+  if (srv_start (&s) != 0)
+    return;
+  pthread_create (&s.thread, NULL, srv_main, &s);
+  snprintf (url, sizeof url, "http://127.0.0.1:%d/up", s.port);
+  twist_transfer_setopt (t, TWISTOPT_URL, url);
+  twist_transfer_setopt (t, TWISTOPT_CUSTOMREQUEST, "POST");
+  twist_transfer_setopt (t, TWISTOPT_READFD, (long) fd);
+  twist_transfer_setopt (t, TWISTOPT_INFILESIZE, (long long) total);
+  /* And the reply goes to a file of its own, at its position.  */
+  snprintf (opath, sizeof opath, "/tmp/twist-test-reply-XXXXXX");
+  ofd = mkstemp (opath);
+  (void) !write (ofd, "reply:", 6);
+  twist_transfer_setopt (t, TWISTOPT_WRITEFD, (long) ofd);
+  twist_runtime_start (runtime, t, check_job_done, &job);
+  check_pump (runtime, &job, 8000);
+  result = job.done ? job.result : -1;
+  close (s.listen_fd);
+  pthread_join (s.thread, NULL);
+  check (result == TWIST_OK && s.body_n == total && !s.chunked
+         && memcmp (s.body, data, total) == 0,
+         "the contents of a file descriptor are uploaded");
+  check (fcntl (fd, F_GETFD) != -1 && lseek (fd, 0, SEEK_CUR) == 0,
+         "and the descriptor is neither closed nor moved");
+  {
+    FILE *fp = fopen (opath, "rb");
+
+    if (fp != NULL)
+      {
+        size_t n = fread (reply, 1, sizeof reply - 1, fp);
+
+        reply[n] = 0;
+        fclose (fp);
+      }
+  }
+  check (strcmp (reply, "reply:ok") == 0,
+         "the reply is in the file given for it, written before the end");
+  free (s.body);
+  twist_runtime_free (runtime);
+  twist_transfer_free (t);
+  close (fd);
+  close (ofd);
+  unlink (path);
+  unlink (opath);
+  free (data);
+}
+
+/* An upload pushed from the thread that drives a runtime of several threads, to
+   a transfer that runs on another: the bytes are queued and the transfer's own
+   thread takes them, and the end is passed on.  */
+static void
+test_push_threads (void)
+{
+  struct twist_runtime *runtime = twist_runtime_new ();
+  struct twist_transfer *t = twist_transfer_new ();
+  struct check_job job = { 0, 0, 0 };
+  struct srv s;
+  char url[64];
+  size_t total = 400000;
+  uint8_t *data = pattern (total);
+  size_t off = 0;
+  int ended = 0;
+  double end;
+  struct timespec ts;
+
+  memset (&s, 0, sizeof s);
+  if (runtime == NULL || t == NULL
+      || twist_runtime_setopt (runtime, TWIST_RUNTIMEOPT_THREADS, 2L) != TWIST_OK
+      || srv_start (&s) != 0)
+    return;
+  pthread_create (&s.thread, NULL, srv_main, &s);
+  snprintf (url, sizeof url, "http://127.0.0.1:%d/up", s.port);
+  twist_transfer_setopt (t, TWISTOPT_URL, url);
+  twist_transfer_setopt (t, TWISTOPT_CUSTOMREQUEST, "POST");
+  twist_transfer_setopt (t, TWISTOPT_UPLOAD_PUSH, 1L);
+  twist_transfer_setopt (t, TWISTOPT_INFILESIZE, (long long) total);
+  runtime->rotate = 1;		/* Not the first lane, which is this thread's.  */
+  twist_runtime_start (runtime, t, check_job_done, &job);
+  check (twist_transfer_remote (t), "the transfer runs on a thread of its own");
+  clock_gettime (CLOCK_MONOTONIC, &ts);
+  end = (double) ts.tv_sec * 1000.0 + (double) ts.tv_nsec / 1e6 + 8000;
+  while (!job.done)
+    {
+      size_t taken = 0;
+
+      if (off < total)
+        {
+          int rc = twist_transfer_upload_push (t, data + off, total - off,
+                                               &taken);
+
+          if (rc == TWIST_OK || rc == TWIST_ERR_AGAIN)
+            off += taken;
+        }
+      else if (!ended)
+        {
+          twist_transfer_upload_end (t, TWIST_OK);
+          ended = 1;
+        }
+      twist_runtime_run_once (runtime, 1);
+      clock_gettime (CLOCK_MONOTONIC, &ts);
+      if ((double) ts.tv_sec * 1000.0 + (double) ts.tv_nsec / 1e6 > end)
+        break;
+    }
+  if (!job.done)
+    fprintf (stderr, "  pushed %zu of %zu, end %s\n", off, total,
+             ended ? "pushed" : "not pushed");
+  check (job.done && job.result == TWIST_OK, "the upload is done");
+  close (s.listen_fd);
+  pthread_join (s.thread, NULL);
+  check (s.body_n == total && memcmp (s.body, data, total) == 0 && !s.chunked
+         && s.clen == (long long) total,
+         "and the server has all of it, in order, as pushed");
+  free (s.body);
+  twist_runtime_free (runtime);
+  twist_transfer_free (t);
+  free (data);
+}
+
 int
 main (void)
 {
   test_adapter ();
   test_adapter_abort ();
   test_detach ();
+  test_read_pause ();
+  test_push_api ();
   test_http_length ();
   test_http_chunked ();
   test_http_stall ();
   test_http_short ();
+  test_http_readfd ();
+  test_push_threads ();
   return tests_finish ();
 }

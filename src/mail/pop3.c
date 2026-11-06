@@ -148,30 +148,14 @@ body_sink (void *user, const uint8_t *data, size_t len)
 {
   struct twist_pop3 *p = user;
   struct twist_transfer *transfer = p->transfer;
-  size_t n;
 
   if (transfer->write_cb == NULL || len == 0)
     {
       twist_transfer_downloaded (transfer, len);
       return 0;
     }
-  {
-    char buf[512];
-    size_t off = 0;
-
-    while (off < len)
-      {
-        size_t chunk = len - off;
-
-        if (chunk > sizeof buf)
-          chunk = sizeof buf;
-        memcpy (buf, data + off, chunk);
-        n = transfer->write_cb (buf, 1, chunk, transfer->write_data);
-        if (n < chunk)
-          return 1;
-        off += chunk;
-      }
-  }
+  if (twist_deliver (transfer, data, len) < len)
+    return 1;
   twist_transfer_downloaded (transfer, len);
   return 0;
 }

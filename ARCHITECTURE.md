@@ -269,6 +269,31 @@ The loop drains the command queue at the top of every iteration.
   for room in the connection's queue, and pauses its source while it waits;
   it never pauses the connection's read.
 
+### The Application's Side of Upload and Download
+
+- **Write pause.** A write callback returns `TWIST_WRITEFUNC_PAUSE` when it
+  cannot take more. It takes none of what it was given; the transfer holds that
+  and what follows (at most 4 MiB, then it stops with an error), and gives it
+  again, in order, on `twist_transfer_resume`. The handler's pause function
+  stops the peer where it can: an HTTP/2 stream's window, an HTTP/3 stream's
+  credit, a TCP read, the file pipeline. The end of a transfer that succeeded
+  waits for the held body, so the program never hears of the end before it has
+  the body.
+- **Read pause.** A read callback returns `TWIST_READFUNC_PAUSE` for "not yet";
+  the body does not end, and the callback is asked again after the resume.
+- **Pushed upload.** `TWISTOPT_UPLOAD_PUSH` makes the upload a producer the
+  application feeds with `twist_transfer_upload_push`. A push is taken up to the
+  consumer's pause point; past it, none of it is taken and the want-more
+  callback says when to try again. From a thread other than the one that runs
+  the transfer the bytes are queued, up to 64 KiB, and the transfer's thread
+  takes them.
+- **Descriptors.** `TWISTOPT_READFD` and `TWISTOPT_WRITEFD` use the file pipeline
+  for a regular file and a descriptor source or sink for anything else. The
+  descriptor is the application's: it is neither closed nor made non-blocking,
+  and a file's position is not moved. A file can be read again for a restart; a
+  pipe cannot (`TWIST_ERR_REWIND`). A transfer written to a descriptor is not
+  over until the body has been written to it.
+
 ### Regular-file Pipeline
 
 - A regular file cannot be polled, so its reads and writes are jobs on the

@@ -749,8 +749,7 @@ deliver (struct twist_sftp_xfer *g)
         }
       if (e->write_cb != NULL)
         {
-          size_t put = twist_write_bytes (e->write_cb, e->write_data,
-                                          sl->data, sl->got);
+          size_t put = twist_deliver (e, sl->data, sl->got);
 
           if (put < sl->got)
             {
@@ -1170,7 +1169,7 @@ write_entry (struct twist_sftp_xfer *g, const gf_sftp_name *name)
   n = twist_ssh_sanitize (line, text.data, text.len);
   line[n++] = '\n';
   if (e->write_cb != NULL
-      && twist_write_bytes (e->write_cb, e->write_data, line, n) < n)
+      && twist_deliver (e, line, n) < n)
     {
       free (line);
       fail (g, TWIST_ERR_ABORTED, NULL);
@@ -1771,8 +1770,8 @@ begin (struct twist_sftp_xfer *g)
   struct twist_ssh *s = g->ssh;
   int rc;
 
-  g->put = s->transfer->postfields != NULL || s->transfer->read_cb != NULL
-           || s->transfer->upload != NULL;
+  g->put = s->transfer->postfields != NULL
+           || twist_transfer_has_source (s->transfer);
   twist_rate_init (&g->rate, g->put ? s->transfer->max_send_speed
                                     : s->transfer->max_recv_speed);
   g->chunk_max = twist_rate_chunk (&g->rate, SFTP_CHUNK);

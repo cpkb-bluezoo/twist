@@ -220,27 +220,14 @@ static int
 deliver (struct twist_rtsp *r, const uint8_t *data, size_t len)
 {
   struct twist_transfer *transfer = r->transfer;
-  size_t off = 0;
 
   if (transfer->write_cb == NULL || len == 0)
     {
       twist_transfer_downloaded (transfer, len);
       return TWIST_OK;
     }
-  while (off < len)
-    {
-      char buf[512];
-      size_t chunk = len - off;
-      size_t n;
-
-      if (chunk > sizeof buf)
-        chunk = sizeof buf;
-      memcpy (buf, data + off, chunk);
-      n = transfer->write_cb (buf, 1, chunk, transfer->write_data);
-      if (n < chunk)
-        return TWIST_ERR_ABORTED;
-      off += chunk;
-    }
+  if (twist_deliver (transfer, data, len) < len)
+      return TWIST_ERR_ABORTED;
   twist_transfer_downloaded (transfer, len);
   return TWIST_OK;
 }

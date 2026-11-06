@@ -73,6 +73,9 @@ twist_transfer_new (void)
   transfer->proxy_verifypeer = 1;
   transfer->progress.lastshow = -1;
   transfer->telnet_input_fd = -1;
+  transfer->read_fd = -1;
+  transfer->write_fd = -1;
+  pthread_mutex_init (&transfer->xmu, NULL);
   transfer->pipewait = 1;
   return transfer;
 }
@@ -137,6 +140,10 @@ transfer_clear (struct twist_transfer *transfer)
   twist_transfer_release (transfer);
   twist_upload_free (transfer->upload);
   transfer->upload = NULL;
+  twist_wsink_free (transfer);
+  twist_sink_clear (transfer);
+  free (transfer->xq);
+  pthread_mutex_destroy (&transfer->xmu);
   free (transfer->url_string);
   twist_url_free_int (transfer->url);
   free (transfer->method);
@@ -267,6 +274,21 @@ twist_transfer_setopt (twist_transfer *transfer, int opt, ...)
       break;
     case TWISTOPT_SEEKDATA:
       transfer->seek_data = va_arg (ap, void *);
+      break;
+    case TWISTOPT_UPLOAD_PUSH:
+      transfer->push_upload = va_arg (ap, long) != 0;
+      break;
+    case TWISTOPT_WANTFUNCTION:
+      transfer->want_cb = va_arg (ap, twist_want_callback);
+      break;
+    case TWISTOPT_WANTDATA:
+      transfer->want_data = va_arg (ap, void *);
+      break;
+    case TWISTOPT_READFD:
+      transfer->read_fd = (int) va_arg (ap, long);
+      break;
+    case TWISTOPT_WRITEFD:
+      transfer->write_fd = (int) va_arg (ap, long);
       break;
     case TWISTOPT_APPEND:
       transfer->append = va_arg (ap, long) != 0;
@@ -654,6 +676,9 @@ twist_transfer_finish (struct twist_transfer *transfer, int result)
 {
   if (transfer == NULL || transfer->done)
     return TWIST_OK;
+  /* A body not yet given to the application, or written, comes first.  */
+  if (twist_sink_gate (transfer, result))
+    return TWIST_OK;
   transfer->done = 1;
   transfer->result = result;
   twist_progress_end (transfer, result);
@@ -710,6 +735,14 @@ twist_transfer_start (struct twist_transfer *transfer)
     }
   transfer->done = 0;
   twist_progress_begin (transfer);
+  /* A body held from an earlier attempt is not this one's.  */
+  twist_sink_clear (transfer);
+  rc = twist_transfer_fds_setup (transfer);
+  if (rc != TWIST_OK)
+    {
+      twist_transfer_finish (transfer, rc);
+      return rc;
+    }
   rc = scheme->attach (transfer);
   if (rc != TWIST_OK && !transfer->done)
     twist_transfer_finish (transfer, rc);

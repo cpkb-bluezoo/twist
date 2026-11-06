@@ -135,6 +135,22 @@ twist_upload_resume (struct twist_upload *up)
     }
 }
 
+/* The producer asked to wait; go on, unless the consumer has said to stop.  */
+void
+twist_upload_kick (struct twist_upload *up)
+{
+  if (up == NULL || !up->attached || up->paused || up->finished)
+    return;
+  if (up->prod.resume != NULL)
+    {
+      up->depth++;
+      up->prod.resume (up->prod_user);
+      up->depth--;
+      if (up->dead && up->depth == 0)
+        twist_upload_free (up);
+    }
+}
+
 int
 twist_upload_push (struct twist_upload *up, const uint8_t *data, size_t len)
 {
@@ -204,6 +220,10 @@ adapter_resume (void *user)
       if (want > sizeof a->buf)
         want = sizeof a->buf;
       n = t->read_cb ((char *) a->buf, 1, want, t->read_data);
+      /* Nothing yet: the source is not over, and is asked again when the
+         application resumes the transfer.  */
+      if (n == TWIST_READFUNC_PAUSE)
+        break;
       if (n == TWIST_READFUNC_ABORT || n > want)
         {
           twist_upload_finish (a->up, TWIST_ERR_ABORTED);
@@ -270,6 +290,188 @@ static const struct twist_upload_producer adapter_ops = {
   adapter_resume, adapter_pause, adapter_restart, adapter_release, adapter_skip
 };
 
+/* ---- an upload the application pushes ---- */
+
+struct push_src
+{
+  struct twist_transfer *transfer;
+  struct twist_upload *up;
+  int active;			/* The consumer can take more.  */
+  int started;			/* The application has been told once.  */
+  int need_want;		/* A push was refused or cut short.  */
+  int end_set;			/* The application has ended it.  */
+  int end_err;
+  int in_want;
+  int in_drain;
+};
+
+static void
+push_resume (void *user)
+{
+  struct push_src *p = user;
+
+  p->active = 1;
+  /* What another thread pushed comes first.  */
+  if (!p->in_drain)
+    twist_transfer_xdrain (p->transfer);
+  if (p->end_set)
+    {
+      twist_upload_finish (p->up, p->end_err);
+      return;
+    }
+  if (p->in_want || (p->started && !p->need_want))
+    return;
+  p->started = 1;
+  p->need_want = 0;
+  if (p->transfer->want_cb != NULL)
+    {
+      p->in_want = 1;
+      p->transfer->want_cb (p->transfer, p->transfer->want_data);
+      p->in_want = 0;
+    }
+}
+
+static void
+push_pause (void *user)
+{
+  struct push_src *p = user;
+
+  p->active = 0;
+}
+
+static int
+push_restart (void *user)
+{
+  (void) user;
+  return -1;			/* What was pushed is gone.  */
+}
+
+static void
+push_release (void *user)
+{
+  struct push_src *p = user;
+
+  if (p->transfer->push_src == p)
+    p->transfer->push_src = NULL;
+  free (p);
+}
+
+static const struct twist_upload_producer push_ops = {
+  push_resume, push_pause, push_restart, push_release, NULL
+};
+
+int
+twist_transfer_upload_push_local (struct twist_transfer *t, const uint8_t *data,
+                                  size_t len, size_t *taken)
+{
+  struct push_src *p = t->push_src;
+  size_t done = 0;
+
+  *taken = 0;
+  if (p == NULL || t->upload == NULL)
+    return TWIST_ERR_INVAL;
+  while (done < len && p->active)
+    {
+      size_t max = twist_upload_max (p->up);
+      size_t n = len - done;
+      int rc;
+
+      if (max == 0)
+        break;
+      if (n > max)
+        n = max;
+      rc = twist_upload_push (p->up, data + done, n);
+      if (rc != TWIST_OK)
+        {
+          *taken = done;
+          return done > 0 ? TWIST_OK : rc;
+        }
+      done += n;
+    }
+  *taken = done;
+  if (done < len)
+    p->need_want = 1;
+  return done == 0 && len > 0 ? TWIST_ERR_AGAIN : TWIST_OK;
+}
+
+/* A cap on what another thread can have waiting at once.  */
+#define XQ_MAX 65536
+
+/* Take what another thread pushed (and its end) into the upload, on the thread
+   that runs the transfer, as far as the consumer will have it; the rest waits.
+   And say the application may push again, if it was turned away.  */
+void
+twist_transfer_xdrain (struct twist_transfer *t)
+{
+  struct push_src *p = t->push_src;
+  uint8_t *buf;
+  size_t n;
+  size_t taken = 0;
+  int wanted = 0;
+  int end = 0;
+
+  if (p == NULL || p->in_drain)
+    return;
+  p->in_drain = 1;
+  pthread_mutex_lock (&t->xmu);
+  t->xq_posted = 0;
+  buf = t->xq;
+  n = t->xq_len;
+  t->xq = NULL;
+  t->xq_len = t->xq_cap = 0;
+  pthread_mutex_unlock (&t->xmu);
+  if (n > 0)
+    twist_transfer_upload_push_local (t, buf, n, &taken);
+  pthread_mutex_lock (&t->xmu);
+  if (taken < n)
+    {
+      /* What was not taken goes back in front of what has come meanwhile.  */
+      size_t rest = n - taken;
+      uint8_t *joined = malloc (rest + t->xq_len > 0 ? rest + t->xq_len : 1);
+
+      if (joined != NULL)
+        {
+          memcpy (joined, buf + taken, rest);
+          if (t->xq_len > 0)
+            memcpy (joined + rest, t->xq, t->xq_len);
+          free (t->xq);
+          t->xq = joined;
+          t->xq_len += rest;
+          t->xq_cap = t->xq_len;
+        }
+      t->xq_wanted = 1;
+    }
+  else if (t->xq_wanted && t->xq_len < XQ_MAX / 2)
+    {
+      t->xq_wanted = 0;
+      wanted = 1;
+    }
+  end = t->xq_end && t->xq_len == 0;
+  pthread_mutex_unlock (&t->xmu);
+  free (buf);
+  p->in_drain = 0;
+  if (end)
+    twist_transfer_upload_end_local (t, t->xq_end_err);
+  else if (wanted && t->want_cb != NULL)
+    t->want_cb (t, t->want_data);
+}
+
+int
+twist_transfer_upload_end_local (struct twist_transfer *t, int result)
+{
+  struct push_src *p = t->push_src;
+
+  if (p == NULL || t->upload == NULL)
+    return TWIST_ERR_INVAL;
+  if (p->end_set)
+    return TWIST_OK;
+  p->end_set = 1;
+  p->end_err = result;
+  /* To a consumer that is there; otherwise when it comes.  */
+  twist_upload_finish (p->up, result);
+  return TWIST_OK;
+}
+
 struct twist_upload *
 twist_transfer_upload (struct twist_transfer *t)
 {
@@ -279,6 +481,30 @@ twist_transfer_upload (struct twist_transfer *t)
     return NULL;
   if (t->upload != NULL)
     return t->upload;
+  if (t->push_upload)
+    {
+      struct push_src *p = calloc (1, sizeof *p);
+
+      if (p == NULL)
+        return NULL;
+      p->transfer = t;
+      p->up = twist_upload_new (&push_ops, p);
+      if (p->up == NULL)
+        {
+          free (p);
+          return NULL;
+        }
+      t->push_src = p;
+      t->upload = p->up;
+      return p->up;
+    }
+  if (t->read_fd >= 0)
+    {
+      struct twist_upload *up = twist_fd_upload_new (t);
+
+      t->upload = up;
+      return up;
+    }
   if (t->read_cb == NULL)
     return NULL;
   a = calloc (1, sizeof *a);

@@ -483,6 +483,74 @@ live_find (struct twist_lane *lane, unsigned long serial, int remove)
   return NULL;
 }
 
+/* ---- calls on a transfer from another thread ---- */
+
+/* The caller is not on the thread that runs TRANSFER, which is a lane's other
+   than the first (the first is the thread that drives the runtime).  */
+int
+twist_transfer_remote (struct twist_transfer *t)
+{
+  struct twist_lane *lane = t->lane;
+
+  if (t->runtime == NULL || lane == NULL || lane->index == 0)
+    return 0;
+  return this_lane != lane;
+}
+
+struct xcall
+{
+  struct twist_runtime *runtime;
+  struct twist_lane *lane;
+  unsigned long serial;
+  int op;
+};
+
+static void
+xcall_cmd (void *user)
+{
+  struct xcall *c = user;
+
+  if (!c->runtime->closing)
+    {
+      struct twist_transfer *t = live_find (c->lane, c->serial, 0);
+
+      if (t != NULL && !t->done)
+        {
+          int *in_call = lane_incall (c->lane);
+
+          (*in_call)++;
+          if (c->op == TWIST_XOP_DRAIN)
+            twist_transfer_xdrain (t);
+          else if (c->op == TWIST_XOP_RESUME)
+            twist_transfer_resume_local (t);
+          (*in_call)--;
+        }
+    }
+  free (c);
+}
+
+int
+twist_transfer_post_op (struct twist_transfer *t, int op)
+{
+  struct xcall *c = calloc (1, sizeof *c);
+  struct twist_cmd *node;
+
+  if (c == NULL)
+    return TWIST_ERR_NOMEM;
+  node = twist_loop_cmd_new (xcall_cmd, c);
+  if (node == NULL)
+    {
+      free (c);
+      return TWIST_ERR_NOMEM;
+    }
+  c->runtime = t->runtime;
+  c->lane = t->lane;
+  c->serial = t->serial;
+  c->op = op;
+  twist_loop_cmd_post (t->lane->loop, node);
+  return TWIST_OK;
+}
+
 /* ---- commands to a lane ---- */
 
 /* The table, with its lock held, asks for an idle connection of LOOP to be

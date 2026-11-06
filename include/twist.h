@@ -105,6 +105,14 @@ struct twist_slist *twist_slist_append (struct twist_slist *list,
                                         const char *data);
 void twist_slist_free_all (struct twist_slist *list);
 
+/* A write callback returns the number of bytes it took.  Fewer than it was
+   given ends the transfer (TWIST_ERR_ABORTED), as a full disk must.  Returning
+   this instead takes none of them and pauses the transfer's reading until
+   twist_transfer_resume, when the same bytes are given again.  Data already on
+   its way meanwhile is held, a few megabytes at most, and the peer is slowed
+   by flow control where the protocol has it (HTTP/2 and HTTP/3 pause the one
+   stream, and the others on the connection go on).  */
+#define TWIST_WRITEFUNC_PAUSE ((size_t) 0x10000002)
 typedef size_t (*twist_write_callback) (char *ptr, size_t size, size_t nmemb,
                                         void *userdata);
 typedef size_t (*twist_read_callback) (char *ptr, size_t size, size_t nmemb,
@@ -114,6 +122,13 @@ typedef size_t (*twist_read_callback) (char *ptr, size_t size, size_t nmemb,
    transfer fails, where 0 would be taken as the end and send a short file as
    if it were whole.  sftp and scp honour it.  */
 #define TWIST_READFUNC_ABORT ((size_t) 0x10000000)
+/* Returning this says there is nothing to give yet and there will be: the body
+   does not end, and the callback is called again after twist_transfer_resume.
+   It is not 0, which is the end.  A callback that blocks, as one that waits on
+   a descriptor does, blocks the loop that runs the transfer; use
+   twist_transfer_upload_push, or TWISTOPT_READFD, for a source that is not
+   ready when it is asked.  */
+#define TWIST_READFUNC_PAUSE ((size_t) 0x10000003)
 /* Makes the data that the read callback gives start again at OFFSET from the
    beginning (ORIGIN is always SEEK_SET).  0 is done; anything else, it cannot.
    An upload that has to be sent again needs it (TWIST_ERR_REWIND).  */
@@ -267,9 +282,11 @@ enum twist_opt
   /* A FILE * that the progress meter is written to.  NULL, the default, is
      standard error.  Twist does not close it.  */
   TWISTOPT_STDERR = 59,
-  /* A long long: how many bytes TWISTOPT_READFUNCTION will give, if the
-     application knows.  It is for the progress only; no request carries it.
-     -1, the default, is not known.  */
+  /* A long long: how many bytes the upload will give (from
+     TWISTOPT_READFUNCTION, TWISTOPT_READFD or twist_transfer_upload_push), if
+     the application knows.  HTTP sends it as the Content-Length; without it an
+     HTTP/1.1 upload is sent chunked.  Other schemes use it for the progress,
+     and IMAP for the size of the message.  -1, the default, is not known.  */
   TWISTOPT_INFILESIZE = 60,
   /* Comma-separated hosts that do not go through a proxy: a host name matches
      itself and the names under it, an address matches itself or a network as
@@ -377,7 +394,28 @@ enum twist_opt
   TWISTOPT_FORBID_REUSE = 78,
   /* A long.  Non-zero has the transfer make a connection of its own, and not
      take one that an earlier transfer kept.  */
-  TWISTOPT_FRESH_CONNECT = 79
+  TWISTOPT_FRESH_CONNECT = 79,
+  /* A long.  Non-zero has the upload come from twist_transfer_upload_push and
+     twist_transfer_upload_end, for an application whose data is not there when
+     it is asked: the transfer calls TWISTOPT_WANTFUNCTION when it can take
+     more, and the application pushes when it has it.  */
+  TWISTOPT_UPLOAD_PUSH = 80,
+  /* A twist_want_callback: the upload may be pushed to again.  It is called
+     once the transfer begins, and again whenever a push has been refused
+     (TWIST_ERR_AGAIN) and the transfer can take more.  */
+  TWISTOPT_WANTFUNCTION = 81,
+  /* The pointer that is passed to it.  */
+  TWISTOPT_WANTDATA = 82,
+  /* A long: a descriptor the upload is read from.  A regular file is read on a
+     pool of threads; a pipe, socket or terminal is waited for.  Twist does not
+     close it, does not make it non-blocking, and does not move its position
+     if it is a file.  Starting it again (a redirect, a retry) is possible
+     only for a file, and is TWIST_ERR_REWIND for the others.  */
+  TWISTOPT_READFD = 83,
+  /* A long: a descriptor the body is written to, in place of
+     TWISTOPT_WRITEFUNCTION.  As for TWISTOPT_READFD.  A descriptor that cannot
+     take more pauses the transfer until it can.  */
+  TWISTOPT_WRITEFD = 84
 };
 
 /* Options of a runtime (twist_runtime_setopt).  */
@@ -437,6 +475,10 @@ const char *twist_transfer_error (const twist_transfer *transfer);
 #define TWIST_POLL_OUT 2
 #define TWIST_POLL_REMOVE 4
 
+/* Called when an upload that is pushed can take more.  See
+   TWISTOPT_WANTFUNCTION.  It runs on the loop, and may push.  */
+typedef void (*twist_want_callback) (twist_transfer *transfer, void *userdata);
+
 /* Called once, from the loop, when a transfer that was started has ended.
    RESULT is TWIST_OK or the code that ended it.  The transfer has let go of
    its connection and is in no runtime by then, so the callback may read
@@ -479,6 +521,23 @@ int twist_runtime_run_once (twist_runtime *runtime, int timeout_ms);
    TWIST_POLL_OUT), or the deadline has passed.  */
 int twist_runtime_on_ready (twist_runtime *runtime, int fd, int events);
 int twist_runtime_on_timer (twist_runtime *runtime);
+
+/* Push up to LEN bytes of the upload of TRANSFER, which has
+   TWISTOPT_UPLOAD_PUSH.  *TAKEN is how many were taken: all of them, or fewer
+   because the transfer cannot take more now, and then what was not taken is
+   the caller's to push again.  TWIST_ERR_AGAIN, with none taken, if it cannot
+   take any; TWISTOPT_WANTFUNCTION is called when it can.  Called from a
+   thread other than the one that runs the transfer (a runtime with
+   TWIST_RUNTIMEOPT_THREADS) the bytes are copied and queued, up to a few
+   kilobytes, and *TAKEN says how many.  */
+int twist_transfer_upload_push (twist_transfer *transfer, const void *data,
+                                size_t len, size_t *taken);
+/* No more will be pushed.  RESULT is TWIST_OK for the end of the data, or the
+   code the upload failed with.  */
+int twist_transfer_upload_end (twist_transfer *transfer, int result);
+/* Go on after a callback returned TWIST_WRITEFUNC_PAUSE or
+   TWIST_READFUNC_PAUSE.  */
+int twist_transfer_resume (twist_transfer *transfer);
 
 /* Begin TRANSFER on RUNTIME.  It returns at once, and DONE (which may be
    NULL) is called when the transfer ends, whether it ran or could not begin,

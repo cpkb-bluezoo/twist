@@ -266,12 +266,10 @@ file_chunk (void *user, uint8_t *data, size_t len)
 {
   struct twist_file *f = user;
   struct twist_transfer *transfer = f->transfer;
-  size_t got;
 
   if (transfer->write_cb == NULL)
     return TWIST_OK;
-  got = transfer->write_cb ((char *) data, 1, len, transfer->write_data);
-  if (got < len)
+  if (twist_deliver (transfer, data, len) < len)
     return TWIST_ERR_ABORTED;
   f->total += len;
   twist_progress_downloaded (transfer, len);
@@ -295,6 +293,26 @@ file_end (void *user, int err, char *msg)
       transfer->size_download = f->total;
     }
   twist_transfer_finish (transfer, err);	/* F may be freed by it.  */
+}
+
+/* The application's write callback is full: the chunks stay unacknowledged, and
+   the worker stops after four.  */
+static void
+file_pause_hook (struct twist_transfer *t)
+{
+  struct twist_file *f = t->state;
+
+  if (f != NULL && f->fio != NULL)
+    twist_fio_pause (f->fio);
+}
+
+static void
+file_resume_hook (struct twist_transfer *t)
+{
+  struct twist_file *f = t->state;
+
+  if (f != NULL && f->fio != NULL)
+    twist_fio_resume (f->fio);
 }
 
 static const struct twist_fio_read_ops file_ops = { file_open, file_size,
@@ -351,6 +369,8 @@ twist_file_attach (struct twist_transfer *transfer)
       free (f);
       return rc;
     }
+  transfer->pause_fn = file_pause_hook;
+  transfer->resume_fn = file_resume_hook;
   transfer->state = f;
   transfer->state_free = file_free;
   return TWIST_OK;

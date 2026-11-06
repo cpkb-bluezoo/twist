@@ -795,6 +795,26 @@ ftp_protect_refused (struct twist_ftp *f)
    callback, or what the application pushes), and the connection is closed,
    which is how an FTP upload ends, when the last of it has been queued.  */
 
+/* The application's write callback is full: the data connection stops reading,
+   and what is already on its way is held by the transfer.  */
+static void
+ftp_pause_hook (struct twist_transfer *t)
+{
+  struct twist_ftp *f = t->state;
+
+  if (f != NULL && f->data != NULL)
+    twist_endpoint_pause_read (twist_connection_endpoint (f->data));
+}
+
+static void
+ftp_resume_hook (struct twist_transfer *t)
+{
+  struct twist_ftp *f = t->state;
+
+  if (f != NULL && f->data != NULL && !f->finished)
+    twist_endpoint_resume_read (twist_connection_endpoint (f->data));
+}
+
 static void
 ftp_close_data (void *user)
 {
@@ -1355,9 +1375,7 @@ twist_ftp_data (struct twist_ftp *f, const uint8_t *data, size_t len)
   f->received += (long long) len;
   if (f->transfer->write_cb != NULL)
     {
-      accepted = twist_write_bytes (f->transfer->write_cb,
-                                    f->transfer->write_data,
-                                    data, len);
+      accepted = twist_deliver (f->transfer, data, len);
       if (accepted < len)
         {
           twist_transfer_downloaded (f->transfer, accepted);
@@ -1593,7 +1611,7 @@ twist_ftp_new (struct twist_transfer *transfer, int live)
   f->live = live;
   f->expect = -1;
   f->upload = !transfer->nobody
-              && (transfer->postfields != NULL || transfer->read_cb != NULL);
+              && (transfer->postfields != NULL || twist_transfer_has_source (transfer));
   f->append = transfer->append;
   f->resume = transfer->resume_from;
   f->implicit_tls = transfer->url->scheme != NULL
@@ -1613,6 +1631,8 @@ twist_ftp_new (struct twist_transfer *transfer, int live)
     }
   transfer->state = f;
   transfer->state_free = twist_ftp_free;
+  transfer->pause_fn = ftp_pause_hook;
+  transfer->resume_fn = ftp_resume_hook;
   return f;
 }
 

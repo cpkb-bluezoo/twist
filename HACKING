@@ -123,6 +123,14 @@ more than 2 MiB, and given on twist_http_resume_body.  Pausing a whole
 multiplexed connection because one stream's consumer is slow is the mistake
 this avoids.
 
+A handler gives the body to the application with twist_deliver and never calls
+the write callback itself: a callback may return TWIST_WRITEFUNC_PAUSE, and
+twist_deliver then holds what was not taken and what follows, and calls the
+transfer's pause function (set it in attach to stop the peer: pause the
+connection's read, or the stream).  Its resume function undoes that.  Where a
+handler has no such function the held body is the bound on what the peer can
+make the transfer keep.
+
 Parsers do not copy the tail.  A field that must be remembered across
 calls is a fixed-size scratch with its own hard maximum (the HTTP/1
 line buffer is one).  Bytes copied into that scratch are counted as

@@ -593,7 +593,6 @@ emit_bytes (struct twist_ldap *l, const void *data, size_t n)
 {
   struct twist_transfer *transfer = l->transfer;
   const uint8_t *p = data;
-  size_t off = 0;
 
   if (n == 0)
     return TWIST_OK;
@@ -602,20 +601,8 @@ emit_bytes (struct twist_ldap *l, const void *data, size_t n)
       twist_transfer_downloaded (transfer, n);
       return TWIST_OK;
     }
-  while (off < n)
-    {
-      char buf[512];
-      size_t chunk = n - off;
-      size_t got;
-
-      if (chunk > sizeof buf)
-        chunk = sizeof buf;
-      memcpy (buf, p + off, chunk);
-      got = transfer->write_cb (buf, 1, chunk, transfer->write_data);
-      if (got < chunk)
-        return TWIST_ERR_ABORTED;
-      off += chunk;
-    }
+  if (twist_deliver (transfer, p, n) < n)
+      return TWIST_ERR_ABORTED;
   twist_transfer_downloaded (transfer, n);
   return TWIST_OK;
 }

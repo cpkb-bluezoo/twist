@@ -198,7 +198,6 @@ static int
 deliver (struct twist_imap *m, const uint8_t *data, size_t len)
 {
   struct twist_transfer *transfer = m->transfer;
-  size_t n;
 
   if (len == 0)
     return TWIST_OK;
@@ -207,23 +206,8 @@ deliver (struct twist_imap *m, const uint8_t *data, size_t len)
       twist_transfer_downloaded (transfer, len);
       return TWIST_OK;
     }
-  {
-    char buf[512];
-    size_t off = 0;
-
-    while (off < len)
-      {
-        size_t chunk = len - off;
-
-        if (chunk > sizeof buf)
-          chunk = sizeof buf;
-        memcpy (buf, data + off, chunk);
-        n = transfer->write_cb (buf, 1, chunk, transfer->write_data);
-        if (n < chunk)
-          return TWIST_ERR_ABORTED;
-        off += chunk;
-      }
-  }
+  if (twist_deliver (transfer, data, len) < len)
+    return TWIST_ERR_ABORTED;
   twist_transfer_downloaded (transfer, len);
   return TWIST_OK;
 }
@@ -810,7 +794,7 @@ twist_imap_new (struct twist_transfer *transfer, int live)
                     && strcmp (transfer->url->scheme, "imaps") == 0;
   m->use_ssl = m->implicit_tls ? TWIST_USE_SSL_NONE : transfer->use_ssl;
   m->upload = !transfer->nobody
-              && (transfer->postfields != NULL || transfer->read_cb != NULL);
+              && (transfer->postfields != NULL || twist_transfer_has_source (transfer));
   twist_mail_sasl_init (&m->sasl);
   transfer->state = m;
   transfer->state_free = twist_imap_free;

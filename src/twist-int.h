@@ -211,6 +211,36 @@ struct twist_transfer
   /* The upload as a push source (twist_transfer_upload): made from read_cb
      when a handler first needs it, or set by whoever pushes.  */
   struct twist_upload *upload;
+  /* The body going to the application can be paused (TWIST_WRITEFUNC_PAUSE):
+     what comes meanwhile is held, and given again on resume.  PAUSE_FN and
+     RESUME_FN are the handler's, to stop the peer where it can.  */
+  int sink_paused;
+  uint8_t *held;
+  size_t held_len;
+  size_t held_cap;
+  void (*pause_fn) (struct twist_transfer *);
+  void (*resume_fn) (struct twist_transfer *);
+  /* The upload as the application pushes it, and the descriptors it gave.  */
+  int push_upload;
+  struct push_src *push_src;
+  twist_want_callback want_cb;
+  void *want_data;
+  int read_fd;
+  int write_fd;
+  struct fd_wsink *wsink;
+  /* Bytes pushed to the upload from another thread than the one that runs the
+     transfer, and the end, until the transfer's thread takes them.  */
+  pthread_mutex_t xmu;
+  uint8_t *xq;
+  size_t xq_len;
+  size_t xq_cap;
+  int xq_posted;
+  int xq_wanted;
+  int xq_end;
+  int xq_end_err;
+  /* The end of the transfer waits for the body to be given and written.  */
+  int gated;
+  int gated_result;
   /* Whether the transfer uses the runtime's cookie jar, HSTS list and Alt-Svc
      list (TWISTOPT_USE_COOKIES, _USE_HSTS and _USE_ALTSVC).  */
   int use_cookies;
@@ -437,15 +467,6 @@ int twist_transfer_origin_okey (struct twist_transfer *transfer, char *buf,
 /* Whether the transfer may share a connection with others to its origin
    (HTTP/2 or HTTP/3 may be had), from its options and URL alone.  */
 int twist_http_may_multiplex (struct twist_transfer *transfer);
-/* Pause the delivery of the response body of an HTTP TRANSFER, and resume it.
-   On HTTP/1 the connection stops reading (it is the transfer's own).  On HTTP/2
-   only the stream is paused: its window is not given back, so the server stops
-   when it has used it, and the connection and its other streams go on.  What
-   was already on its way is held, no more than a window of it.  HTTP/3 pauses its stream by
-   withholding the QUIC stream's credit, where the QUIC library can
-   (otherwise TWIST_ERR_UNSUPPORTED).  */
-int twist_http_pause_body (struct twist_transfer *transfer);
-void twist_http_resume_body (struct twist_transfer *transfer);
 struct twist_origintab *twist_origintab_new (void);
 void twist_origintab_free (struct twist_origintab *tab);
 void twist_origintab_set_cap (struct twist_origintab *tab, long cap);
@@ -1113,6 +1134,10 @@ int twist_fio_write_new (struct twist_loop *loop, struct twist_storage *st,
                          const char *path, int append,
                          const struct twist_fio_write_ops *ops, void *user,
                          struct twist_fio **out);
+int twist_fio_write_fd_new (struct twist_loop *loop, struct twist_storage *st,
+                            int fd, long long at,
+                            const struct twist_fio_write_ops *ops, void *user,
+                            struct twist_fio **out);
 /* Queue LEN (at most TWIST_FIO_CHUNK) bytes, copied: TWIST_OK, 1 if there is
    no room (CREDIT says when there is), or why the write has failed.  */
 int twist_fio_write (struct twist_fio *f, const uint8_t *data, size_t len);
@@ -2150,6 +2175,52 @@ int twist_status_code (const char *s);
 int twist_header_connection_specific (const char *name, size_t n,
                                       const char *value);
 void *twist_xmalloc (size_t n);
+/* Give DATA to the application's write callback, a piece at a time.  It
+   returns LEN when all of it is taken or held for a transfer that is paused,
+   and fewer when the callback has said to stop.  The data is the caller's
+   again at once.  */
+size_t twist_deliver (struct twist_transfer *transfer, const void *data,
+                      size_t len);
+/* Set up the descriptors the application gave (TWISTOPT_WRITEFD) for a
+   transfer that is starting: the body goes to a callback of the transfer's own.
+   The upload from TWISTOPT_READFD is made when the handler asks for it.  */
+int twist_transfer_fds_setup (struct twist_transfer *transfer);
+/* The end of a transfer that succeeded waits for the body to reach the
+   application (what is held while its callback was full) and its descriptor.
+   Returns 1 if RESULT is put off; twist_sink_gate_check ends it when it can.  */
+int twist_sink_gate (struct twist_transfer *transfer, int result);
+void twist_sink_gate_check (struct twist_transfer *transfer);
+struct twist_upload *twist_fd_upload_new (struct twist_transfer *transfer);
+void twist_wsink_free (struct twist_transfer *transfer);
+int twist_wsink_busy (struct twist_transfer *transfer);
+void twist_wsink_close (struct twist_transfer *transfer);
+/* Free what is held.  */
+void twist_sink_clear (struct twist_transfer *transfer);
+/* Whether the application gave the transfer an upload to send: a read
+   callback, a descriptor, or one it pushes.  */
+static inline int
+twist_transfer_has_source (const struct twist_transfer *t)
+{
+  return t->read_cb != NULL || t->upload != NULL || t->push_upload
+         || t->read_fd >= 0;
+}
+/* Resume on the thread that runs the transfer.  */
+int twist_transfer_resume_local (struct twist_transfer *transfer);
+/* Run the upload's producer if the consumer has not paused it (it is
+   asleep because the application said to wait).  */
+void twist_upload_kick (struct twist_upload *up);
+/* Whether the caller is on another thread than the one that runs TRANSFER, and
+   so must hand its call over.  POST_OP asks the transfer's thread to run
+   twist_transfer_xdrain (OP_DRAIN) or twist_transfer_resume_local (OP_RESUME).  */
+enum { TWIST_XOP_DRAIN = 1, TWIST_XOP_RESUME = 2 };
+int twist_transfer_remote (struct twist_transfer *transfer);
+int twist_transfer_post_op (struct twist_transfer *transfer, int op);
+void twist_transfer_xdrain (struct twist_transfer *transfer);
+int twist_transfer_upload_push_local (struct twist_transfer *transfer,
+                                      const uint8_t *data, size_t len,
+                                      size_t *taken);
+int twist_transfer_upload_end_local (struct twist_transfer *transfer,
+                                     int result);
 size_t twist_write_bytes (twist_write_callback cb, void *user,
                           const void *data, size_t len);
 

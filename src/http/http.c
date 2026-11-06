@@ -87,14 +87,8 @@ struct twist_http
   /* The meter of an HTTP/1 upload follows the body bytes that the connection
      has written: where it began, and how much of it has been reported.  */
   int up_tracked;
-  /* The response body, paused by the application (twist_http_pause_body): what
-     arrives meanwhile is held, no more than HELD_MAX, and given on resume.
-     STREAM is the HTTP/2 stream of the request.  */
-  int body_paused;
-  int flushing;
-  uint8_t *held;
-  size_t held_len;
-  size_t held_cap;
+  /* The HTTP/2 stream and the QUIC stream of the request, for pausing the
+     response body (the transfer's pause function).  */
   uint32_t stream;
   uint64_t qstream;		/* The QUIC stream of an HTTP/3 request.  */
   uint64_t up_base;
@@ -958,7 +952,7 @@ forward_refused (const struct twist_http *h, int code)
   if (!h->fwd || h->fell_back || h->ws || (code != 405 && code != 501))
     return 0;
   if (m == NULL)
-    return t->postfields == NULL && t->read_cb == NULL && t->upload == NULL;
+    return t->postfields == NULL && !twist_transfer_has_source (t);
   return strcmp (m, "GET") == 0 || strcmp (m, "HEAD") == 0
          || strcmp (m, "OPTIONS") == 0;
 }
@@ -1259,13 +1253,8 @@ accepts_coding (const char *accept, const char *name)
    the transfer ends there, with what was taken counted: the rest of the body
    is not read to be thrown away.  Ending it only queues its completion, so it
    is safe from inside the parser.  */
-/* No more than this is held for a paused body: a window's worth is what can
-   be on its way when an HTTP/2 stream is paused, and a read's worth on
-   HTTP/1.  */
-#define HELD_MAX (2u * 1024u * 1024u)
-
 static void
-emit_body (struct twist_http *h, const uint8_t *data, size_t len)
+deliver_body (struct twist_http *h, const uint8_t *data, size_t len)
 {
   size_t got = len;
 
@@ -1273,76 +1262,10 @@ emit_body (struct twist_http *h, const uint8_t *data, size_t len)
     return;
   if (!(h->transfer->failonerror && h->status >= 400)
       && h->transfer->write_cb != NULL && len > 0)
-    got = twist_write_bytes (h->transfer->write_cb, h->transfer->write_data, data, len);
+    got = twist_deliver (h->transfer, data, len);
   h->transfer->size_download += got;
   if (got < len)
     http_complete (h, TWIST_ERR_ABORTED);
-}
-
-static void
-deliver_body (struct twist_http *h, const uint8_t *data, size_t len)
-{
-  if (h->finished)
-    return;
-  if (!h->body_paused && h->held_len == 0)
-    {
-      emit_body (h, data, len);
-      return;
-    }
-  /* Paused (or still giving back what was held): this comes after it.  */
-  if (len > HELD_MAX - h->held_len)
-    {
-      http_complete (h, TWIST_ERR_PROTOCOL);
-      return;
-    }
-  if (h->held_len + len > h->held_cap)
-    {
-      size_t cap = h->held_cap == 0 ? 16384 : h->held_cap;
-      uint8_t *grown;
-
-      while (cap < h->held_len + len)
-        cap *= 2;
-      grown = realloc (h->held, cap);
-      if (grown == NULL)
-        {
-          http_complete (h, TWIST_ERR_NOMEM);
-          return;
-        }
-      h->held = grown;
-      h->held_cap = cap;
-    }
-  memcpy (h->held + h->held_len, data, len);
-  h->held_len += len;
-}
-
-/* Give back what was held, a piece at a time, until it is all given or the
-   application pauses again.  */
-static void
-flush_held (struct twist_http *h)
-{
-  size_t off = 0;
-
-  if (h->flushing)
-    return;
-  h->flushing = 1;
-  while (off < h->held_len && !h->body_paused && !h->finished)
-    {
-      size_t n = h->held_len - off;
-
-      if (n > 16384)
-        n = 16384;
-      /* The application may pause or end the transfer from here.  */
-      emit_body (h, h->held + off, n);
-      off += n;
-    }
-  if (off >= h->held_len)
-    h->held_len = 0;
-  else if (off > 0)
-    {
-      memmove (h->held, h->held + off, h->held_len - off);
-      h->held_len -= off;
-    }
-  h->flushing = 0;
 }
 
 static void http_free (void *p);
@@ -1353,49 +1276,39 @@ transfer_http (struct twist_transfer *t)
   return t != NULL && t->state_free == http_free ? t->state : NULL;
 }
 
-int
-twist_http_pause_body (struct twist_transfer *t)
+/* The application's write callback is full: stop the peer where it can be
+   stopped.  An HTTP/2 stream's window is not given back, so the server stops
+   when it has used it, and the connection and its other streams go on; an
+   HTTP/3 stream's credit is withheld likewise; on HTTP/1 the connection is the
+   transfer's own and its read is paused.  What is already on its way is held
+   by the transfer.  */
+static void
+http_pause_hook (struct twist_transfer *t)
 {
   struct twist_http *h = transfer_http (t);
 
-  if (h == NULL)
-    return TWIST_ERR_INVAL;
-  if (h->body_paused)
-    return TWIST_OK;
-  if (h->conn == NULL)
-    return TWIST_ERR_INVAL;
+  if (h == NULL || h->conn == NULL)
+    return;
   if (h->mode == HTTP_H3)
-    {
-      int rc = twist_quic_hold_recv (h->conn, h->qstream, 1);
-
-      if (rc != TWIST_OK)
-        return rc;
-      h->body_paused = 1;
-      return TWIST_OK;
-    }
-  h->body_paused = 1;
-  if (h->mode == HTTP_H2)
+    twist_quic_hold_recv (h->conn, h->qstream, 1);
+  else if (h->mode == HTTP_H2)
     twist_h2_hold_stream (h->h2, h->stream, 1);
   else
     twist_endpoint_pause_read (twist_connection_endpoint (h->conn));
-  return TWIST_OK;
 }
 
-void
-twist_http_resume_body (struct twist_transfer *t)
+static void
+http_resume_hook (struct twist_transfer *t)
 {
   struct twist_http *h = transfer_http (t);
 
-  if (h == NULL || !h->body_paused)
+  if (h == NULL || h->conn == NULL)
     return;
-  h->body_paused = 0;
-  if (h->mode == HTTP_H2)
-    twist_h2_hold_stream (h->h2, h->stream, 0);
-  else if (h->mode == HTTP_H3 && h->conn != NULL)
+  if (h->mode == HTTP_H3)
     twist_quic_hold_recv (h->conn, h->qstream, 0);
-  flush_held (h);
-  if (h->mode == HTTP_H1 && h->conn != NULL && !h->body_paused
-      && !h->finished)
+  else if (h->mode == HTTP_H2)
+    twist_h2_hold_stream (h->h2, h->stream, 0);
+  else if (!h->finished)
     twist_endpoint_resume_read (twist_connection_endpoint (h->conn));
 }
 
@@ -1633,7 +1546,7 @@ has_source_body (const struct twist_http *h)
   const struct twist_transfer *t = h->transfer;
 
   if (h->ws || h->suppress_body || t->nobody || t->postfields != NULL
-      || (t->read_cb == NULL && t->upload == NULL))
+      || !twist_transfer_has_source (t))
     return 0;
   return t->method == NULL
          || (strcmp (t->method, "GET") != 0 && strcmp (t->method, "HEAD") != 0);
@@ -4398,7 +4311,6 @@ http_free (void *p)
   free (h->ws_upgrade);
   free (h->ws_connection);
   free (h->ws_accept);
-  free (h->held);
   free (h->location);
   free (h->challenge);
   free (h->auth_line);
@@ -4434,6 +4346,8 @@ twist_http_attach (struct twist_transfer *transfer)
   h->transfer = transfer;
   transfer->state = h;
   transfer->state_free = http_free;
+  transfer->pause_fn = http_pause_hook;
+  transfer->resume_fn = http_resume_hook;
   h->handler.connected = http_connected;
   h->handler.receive = http_receive;
   h->handler.disconnected = http_disconnected;

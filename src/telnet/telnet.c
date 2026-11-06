@@ -563,9 +563,7 @@ write_text (struct twist_telnet *t, uint8_t *data, size_t len)
 
   if (len == 0)
     return TWIST_OK;
-  if (transfer->write_cb != NULL
-      && transfer->write_cb ((char *) data, 1, len,
-                             transfer->write_data) < len)
+  if (transfer->write_cb != NULL && twist_deliver (transfer, data, len) < len)
     return TWIST_ERR_ABORTED;
   /* The text, not the commands in what came.  */
   twist_transfer_downloaded (transfer, len);
@@ -1036,7 +1034,7 @@ input_start (struct twist_telnet *t)
 
   /* With neither a push source nor a descriptor there is nothing to send;
      the session is the server's.  */
-  if (transfer->read_cb != NULL || transfer->upload != NULL)
+  if (twist_transfer_has_source (transfer))
     {
       t->up = twist_transfer_upload (transfer);
       if (t->up == NULL

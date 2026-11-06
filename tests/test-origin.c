@@ -721,16 +721,17 @@ pausing_body (char *ptr, size_t size, size_t nmemb, void *user)
   struct pausing *p = user;
 
   (void) ptr;
-  p->got += size * nmemb;
+  /* Full: it takes none of this, and is given it again on resume.  */
   if (!p->paused && p->got >= (size_t) p->pause_at)
     {
       p->paused = 1;
-      twist_http_pause_body (p->transfer);
+      return TWIST_WRITEFUNC_PAUSE;
     }
+  p->got += size * nmemb;
   return size * nmemb;
 }
 
-/* Pausing the body of one stream stops that stream only: its window is not
+/* A write callback that is full (TWIST_WRITEFUNC_PAUSE) pauses its stream only: its window is not
    given back, so the server stops sending on it, and another stream on the
    same connection is still answered.  Resumed, it goes on and ends.  */
 static void
@@ -782,7 +783,7 @@ test_h2_pause_stream (void)
          "the paused stream receives nothing more");
   check (__atomic_load_n (&s.big_left[0], __ATOMIC_ACQUIRE) > 0,
          "because the server has not been given its window back");
-  twist_http_resume_body (r.t[0]);
+  twist_transfer_resume (r.t[0]);
   check (run_wait (&r, 2), "resumed, it ends");
   check (r.job[0].result == TWIST_OK && p.got == (size_t) HUGE_BODY,
          "with all of the body");

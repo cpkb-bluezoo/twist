@@ -96,6 +96,8 @@ struct twist_fio
   /* Writing: the file, and the chunks that the loop has given the worker.  */
   char *path;
   int append;
+  int wfd;			/* An open descriptor to write at WOFF, in place of PATH.  */
+  long long woff;
   struct fio_chunk *wq_head;
   struct fio_chunk *wq_tail;
   int end_req;
@@ -680,9 +682,12 @@ write_work (void *arg)
       worker_end (f, TWIST_OK, NULL);
       return;
     }
-  fd = open (f->path,
-             O_WRONLY | O_CREAT | O_CLOEXEC | (f->append ? O_APPEND : O_TRUNC),
-             0666);
+  if (f->wfd >= 0)
+    fd = f->wfd;
+  else
+    fd = open (f->path,
+               O_WRONLY | O_CREAT | O_CLOEXEC | (f->append ? O_APPEND : O_TRUNC),
+               0666);
   if (fd < 0)
     {
       err = TWIST_ERR_FILE;
@@ -719,7 +724,10 @@ write_work (void *arg)
       pthread_mutex_unlock (&f->mu);
       while (done < c->len)
         {
-          ssize_t n = write (fd, c->data + done, c->len - done);
+          ssize_t n = f->wfd >= 0
+                      ? pwrite (fd, c->data + done, c->len - done,
+                                (off_t) (f->woff + (long long) done))
+                      : write (fd, c->data + done, c->len - done);
 
           if (n < 0 && errno == EINTR)
             continue;
@@ -739,6 +747,7 @@ write_work (void *arg)
           pthread_mutex_unlock (&f->mu);
           break;
         }
+      f->woff += (long long) c->len;
       rc = twist_loop_post (f->loop, on_loop, c);
       if (rc != TWIST_OK)
         {
@@ -783,6 +792,7 @@ twist_fio_write_new (struct twist_loop *loop, struct twist_storage *st,
   f->wops = *ops;
   f->user = user;
   f->append = append;
+  f->wfd = -1;
   f->path = twist_xmalloc (strlen (path) + 1);
   if (f->path == NULL)
     {
@@ -878,4 +888,50 @@ twist_fio_write_end (struct twist_fio *f)
   f->end_req = 1;
   pthread_cond_broadcast (&f->cv);
   pthread_mutex_unlock (&f->mu);
+}
+
+/* As twist_fio_write_new, to an open descriptor, from the offset AT (the
+   caller's position is not moved).  FD is the writer's from here, and is
+   closed when it ends.  */
+int
+twist_fio_write_fd_new (struct twist_loop *loop, struct twist_storage *st,
+                        int fd, long long at,
+                        const struct twist_fio_write_ops *ops, void *user,
+                        struct twist_fio **out)
+{
+  struct twist_fio *f;
+  int rc;
+
+  *out = NULL;
+  if (loop == NULL || st == NULL || fd < 0 || ops == NULL || ops->end == NULL)
+    return TWIST_ERR_INVAL;
+  if (twist_storage_threads (st) == 0)
+    return TWIST_ERR_UNSUPPORTED;
+  f = fio_new (loop, FIO_WRITE);
+  if (f == NULL)
+    return TWIST_ERR_NOMEM;
+  f->wops = *ops;
+  f->user = user;
+  f->wfd = fd;
+  f->woff = at;
+  f->path = twist_xmalloc (1);
+  if (f->path == NULL)
+    {
+      f->live = 0;
+      f->wfd = -1;
+      twist_fio_free (f);
+      return TWIST_ERR_NOMEM;
+    }
+  f->path[0] = 0;
+  rc = twist_storage_submit (st, write_work, f, NULL, NULL, NULL);
+  if (rc != TWIST_OK)
+    {
+      f->live = 0;
+      f->wfd = -1;
+      twist_fio_free (f);
+      return rc;
+    }
+  f->user_free = ops->release;
+  *out = f;
+  return TWIST_OK;
 }

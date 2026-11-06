@@ -257,7 +257,6 @@ static int
 deliver (struct twist_mqtt *m, const uint8_t *data, size_t len)
 {
   struct twist_transfer *transfer = m->transfer;
-  size_t off = 0;
 
   if (len == 0)
     return TWIST_OK;
@@ -266,20 +265,8 @@ deliver (struct twist_mqtt *m, const uint8_t *data, size_t len)
       twist_transfer_downloaded (transfer, len);
       return TWIST_OK;
     }
-  while (off < len)
-    {
-      char buf[512];
-      size_t chunk = len - off;
-      size_t n;
-
-      if (chunk > sizeof buf)
-        chunk = sizeof buf;
-      memcpy (buf, data + off, chunk);
-      n = transfer->write_cb (buf, 1, chunk, transfer->write_data);
-      if (n < chunk)
-        return TWIST_ERR_ABORTED;
-      off += chunk;
-    }
+  if (twist_deliver (transfer, data, len) < len)
+      return TWIST_ERR_ABORTED;
   twist_transfer_downloaded (transfer, len);
   return TWIST_OK;
 }
@@ -368,7 +355,7 @@ after_connack (struct twist_mqtt *m)
 
       return send_publish (m, (const uint8_t *) t->postfields, plen);
     }
-  if (m->transfer->read_cb != NULL || m->transfer->upload != NULL)
+  if (twist_transfer_has_source (m->transfer))
     {
       m->up = twist_transfer_upload (m->transfer);
       m->collected = malloc (MQTT_BODY);
