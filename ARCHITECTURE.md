@@ -579,7 +579,9 @@ later is a new `attach` function, not a new reactor.
 | tftp | datagram handler | new |
 | file | storage pool | new |
 | scp, sftp | TCP endpoint, SSH session (foxtrot) on it, SFTP on a channel | foxtrot |
-| smb, smbs, rtmp, rtmps | TCP endpoint | new, large |
+| smb | TCP endpoint, SMB 3.1.1 session layer (negotiate, NTLMv2 in SPNEGO, keys, AES-GCM) on it | new |
+| smbs | QUIC stream, the same session layer on it | new |
+| rtmp, rtmps | TCP endpoint | new, large |
 
 `scp` and `sftp` are one handler. foxtrot is an I/O-free SSH engine
 (transport, authentication, channels, SFTP v3) in the same style as

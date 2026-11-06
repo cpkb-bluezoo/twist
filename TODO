@@ -85,6 +85,18 @@ DNS (src/dns, RFC 8305)
   - What has not been answered 2 s after the first address is given up on (the
     lookup is complete then): a very slow nameserver loses its other types.
 
+SMB and SMBS (src/smb)
+
+  - Each URL makes a connection of its own, with a negotiation and a login.  A
+    session could be kept and used for the next URL for the same server, share
+    and user, as the SFTP sessions are.
+  - smbs: how the messages map onto the QUIC stream (one bidirectional stream,
+    the four-byte header kept) is assumed, not checked against MS-SMB2 or a
+    server that speaks SMB over QUIC.  SMB2_TRANSPORT_CAPABILITIES, which lets a
+    server and client leave SMB's own encryption off inside QUIC, is not used.
+  - The long form of a listing is made here, as SMB has none; it has no owner or
+    group, and its dates are in UTC.
+
 Environment
 
   - A configuration file.
@@ -127,6 +139,7 @@ Runtime
 
 Protocols not yet done
 
-  - SMB/SMBS.
   - RTMP/RTMPS.
-  - NTLM and Negotiate, only after an explicit dependency decision.
+  - NTLM for HTTP and for proxies, and Negotiate, only after an explicit
+    dependency decision.  NTLM has been decided for SMB only, where it is the
+    authenticator for a standalone server (src/auth/ntlm.c, spnego.c).
