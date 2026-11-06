@@ -38,6 +38,7 @@ libtwist_la_LIBADD = $(QUICKSTEP_LIBS) $(FOXTROT_LIBS) $(ZLIB_LIBS) \
 ##   http/     HTTP/1, HTTP/2, HTTP/3 and cookies
 ##   ftp/ file/ mail/ mqtt/ ldap/ ws/ gopher/ rtsp/ dict/ telnet/ tftp/ ssh/  scheme handlers
 ##   mime/     streaming MIME writer
+##   smb/      SMB2 parser and request writer
 ##   tls/      quickstep TLS and QUIC under the connection
 
 libtwist_la_SOURCES = \
@@ -123,6 +124,8 @@ libtwist_la_SOURCES = \
   mail/smtp.c \
   mail/wire.c \
   mime/writer.c \
+  smb/parser.c \
+  smb/writer.c \
   mqtt/mqtt.c \
   ldap/ldap.c \
   ws/ws.c \
