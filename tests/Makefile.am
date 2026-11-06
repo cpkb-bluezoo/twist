@@ -20,7 +20,7 @@ AM_TESTS_ENVIRONMENT = \
 
 noinst_HEADERS = check.h http-ev.h feed.h body.h
 
-PROGRAM_TESTS = test-reactor test-engine test-http test-auth test-asn1 test-ntlm test-spnego test-smb test-dns test-resolve test-race test-conn-rate test-conn-out test-push test-fio test-fd test-upload test-relay test-sink test-fdopt test-route \
+PROGRAM_TESTS = test-reactor test-engine test-http test-auth test-asn1 test-ntlm test-spnego test-smb test-smb-session test-dns test-resolve test-race test-conn-rate test-conn-out test-push test-fio test-fd test-upload test-relay test-sink test-fdopt test-route \
 	test-ftp test-mail test-mqtt test-ldap test-ws test-gopher test-rtsp test-dict test-telnet \
 	test-tftp test-file test-tls test-errors test-coding test-ssh \
 	test-quote test-rate test-glob test-vars test-progress test-bar test-meter test-origin test-runtime-threads test-proxyenv test-env test-template test-masque test-threads
@@ -38,6 +38,8 @@ test_asn1_SOURCES = test-asn1.c check.c
 test_ntlm_SOURCES = test-ntlm.c check.c
 test_spnego_SOURCES = test-spnego.c check.c
 test_smb_SOURCES = test-smb.c check.c
+test_smb_session_SOURCES = test-smb-session.c check.c
+test_smb_session_LDADD = $(LDADD) $(QUICKSTEP_LIBS)
 test_dns_SOURCES = test-dns.c check.c
 test_resolve_SOURCES = test-resolve.c check.c
 test_race_SOURCES = test-race.c check.c

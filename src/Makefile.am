@@ -125,6 +125,7 @@ libtwist_la_SOURCES = \
   mail/wire.c \
   mime/writer.c \
   smb/parser.c \
+  smb/session.c \
   smb/writer.c \
   mqtt/mqtt.c \
   ldap/ldap.c \

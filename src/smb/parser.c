@@ -205,7 +205,10 @@ end_message (struct twist_smb_parser *p)
   if (p->framed)
     to_gather (p, ST_FRAME, 4);
   else
-    p->st = ST_DONE;
+    {
+      to_gather (p, ST_FRAME, 4);	/* Ready for the next, once begun.  */
+      p->st = ST_DONE;
+    }
   return rc;
 }
 
@@ -929,4 +932,38 @@ twist_smb_parser_message (struct twist_smb_parser *p, const uint8_t *msg,
     }
   to_gather (p, ST_FRAME, 4);
   return TWIST_OK;
+}
+
+/* A message with no framing, to be fed by receive, so that a consumer that
+   stops it can be resumed from the plaintext the caller keeps.  */
+int
+twist_smb_parser_begin_message (struct twist_smb_parser *p, size_t len)
+{
+  if (p == NULL || p->failed || (p->st != ST_FRAME && p->st != ST_DONE)
+      || p->have != 0)
+    return TWIST_ERR_INVAL;
+  if (len < 4 || len > p->max_frame)
+    {
+      p->failed = 1;
+      if (p->ev.failure != NULL)
+        p->ev.failure (p->ev.user, TWIST_ERR_PROTOCOL);
+      return TWIST_ERR_PROTOCOL;
+    }
+  p->framed = 0;
+  p->mlen = len;
+  p->mpos = 0;
+  to_gather (p, ST_MSGHEAD, 4);
+  return TWIST_OK;
+}
+
+int
+twist_smb_parser_done (const struct twist_smb_parser *p)
+{
+  return p != NULL && !p->failed && p->st == ST_DONE;
+}
+
+int
+twist_smb_parser_failed (const struct twist_smb_parser *p)
+{
+  return p == NULL || p->failed;
 }
