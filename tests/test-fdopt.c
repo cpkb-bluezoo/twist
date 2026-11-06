@@ -303,6 +303,30 @@ test_write_file (struct twist_runtime *rt)
   free (got);
 }
 
+/* A descriptor that cannot be polled and is not a regular file (/dev/null is
+   one) takes the body too: it is written to on a thread of the pool.  */
+static void
+test_write_unpollable (struct twist_runtime *rt)
+{
+  int fd = open ("/dev/null", O_WRONLY);
+  struct twist_transfer *t = make (rt);
+  uint8_t *data = pattern (100000);
+  size_t i;
+
+  check (fd >= 0, "/dev/null opened");
+  twist_transfer_setopt (t, TWISTOPT_WRITEFD, (long) fd);
+  check (twist_transfer_fds_setup (t) == TWIST_OK, "a descriptor set up");
+  for (i = 0; i < 100000; i += 5000)
+    check (twist_deliver (t, data + i, 5000) == 5000, "delivered");
+  twist_transfer_finish (t, TWIST_OK);
+  run_for (rt, 500);
+  check (t->done && t->result == TWIST_OK,
+         "the transfer ends well and is not failed by the descriptor");
+  twist_transfer_free (t);
+  close (fd);
+  free (data);
+}
+
 int
 main (void)
 {
@@ -314,6 +338,7 @@ main (void)
   test_read_pipe (rt);
   test_write_pipe (rt);
   test_write_file (rt);
+  test_write_unpollable (rt);
   twist_runtime_free (rt);
   return tests_finish ();
 }

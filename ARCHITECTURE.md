@@ -669,6 +669,18 @@ name with `#N` filled in; the transfers are ordinary ones on the operation's
 loop, so SFTP URLs on one server share a session. Errors carry the URL and a
 caret under the place.
 
+The command line does no I/O of its own on the loop's thread for a body or an
+upload. `-T` (and a file for the schemes that stream) gives the transfer
+`TWISTOPT_READFD`; `-o` and standard output give it `TWISTOPT_WRITEFD`. A file
+for `-o` is opened when the job is made, without emptying it, and cut to what
+was written when the transfer ends (a file made for a transfer that wrote
+nothing is removed), so a transfer that fails before any body leaves what was
+there. Standard output as a regular file is advanced by what was written, and a
+parallel run keeps it on stdio, since transfers that start together would all
+begin at one offset. Headers (`-i`, `-D`) are written by the tool, in order
+with the body, so a transfer that has them, and a body on a terminal, which is
+looked at for NULs first, keep the write callback.
+
 The connect timeout is one budget for the whole of making a connection. The mail link (the shared dialer) arms a phase timer for a protocol that
 asks (`twist_mail_link_phase_begin`), and the protocol ends it when it is up;
 for SSH that is the login, so a long transfer is not cut off and a kept session

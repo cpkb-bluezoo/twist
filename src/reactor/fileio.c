@@ -98,6 +98,7 @@ struct twist_fio
   int append;
   int wfd;			/* An open descriptor to write at WOFF, in place of PATH.  */
   long long woff;
+  int wplain;			/* Write at the descriptor's own position.  */
   struct fio_chunk *wq_head;
   struct fio_chunk *wq_tail;
   int end_req;
@@ -724,7 +725,7 @@ write_work (void *arg)
       pthread_mutex_unlock (&f->mu);
       while (done < c->len)
         {
-          ssize_t n = f->wfd >= 0
+          ssize_t n = f->wfd >= 0 && !f->wplain
                       ? pwrite (fd, c->data + done, c->len - done,
                                 (off_t) (f->woff + (long long) done))
                       : write (fd, c->data + done, c->len - done);
@@ -891,8 +892,9 @@ twist_fio_write_end (struct twist_fio *f)
 }
 
 /* As twist_fio_write_new, to an open descriptor, from the offset AT (the
-   caller's position is not moved).  FD is the writer's from here, and is
-   closed when it ends.  */
+   caller's position is not moved; a negative AT writes at the descriptor's own
+   position, for one that cannot be written to at an offset).  FD is the
+   writer's from here, and is closed when it ends.  */
 int
 twist_fio_write_fd_new (struct twist_loop *loop, struct twist_storage *st,
                         int fd, long long at,
@@ -913,7 +915,8 @@ twist_fio_write_fd_new (struct twist_loop *loop, struct twist_storage *st,
   f->wops = *ops;
   f->user = user;
   f->wfd = fd;
-  f->woff = at;
+  f->woff = at < 0 ? 0 : at;
+  f->wplain = at < 0;
   f->path = twist_xmalloc (1);
   if (f->path == NULL)
     {

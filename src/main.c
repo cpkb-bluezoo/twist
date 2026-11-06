@@ -1161,38 +1161,7 @@ is_telnet_url (const char *url)
 struct cli_upload
 {
   int fd;
-  int failed;			/* A read failed.  */
 };
-
-/* Read straight from the descriptor: what a pipe has is what is given, and
-   the transfer does not wait for a whole buffer of it.  A read that fails is
-   not the end of the data.  */
-static size_t
-read_upload (char *ptr, size_t size, size_t nmemb, void *user)
-{
-  struct cli_upload *u = user;
-  ssize_t n;
-
-  do
-    n = read (u->fd, ptr, size * nmemb);
-  while (n < 0 && errno == EINTR);
-  if (n < 0)
-    {
-      u->failed = 1;
-      return TWIST_READFUNC_ABORT;
-    }
-  return (size_t) n;
-}
-
-/* Start the data again from the beginning: for a file.  */
-static int
-seek_upload (void *user, long long offset, int origin)
-{
-  struct cli_upload *u = user;
-
-  return origin == SEEK_SET && lseek (u->fd, (off_t) offset, SEEK_SET)
-         == (off_t) offset ? 0 : 1;
-}
 
 /* One URL being fetched: the transfer made for it, and everything the tool
    holds for as long as it runs.  A job is made by job_prepare, handed to the
@@ -1221,6 +1190,10 @@ struct cli_job
   struct twist_bar bar;
   int bar_used;
   int body_short;               /* A write to the body came up short.  */
+  int wfd;                      /* The body goes to this descriptor, or -1.  */
+  int wfd_owned;                /* The tool opened it and closes it.  */
+  int wcreated;                 /* The tool made the file WFD is.  */
+  long long wbase;              /* Where in the file the body begins.  */
   int refuse_binary;            /* The body is on a terminal by default.  */
   size_t refused_len;           /* The write it was refused in.  */
   int reads_stdin;              /* The transfer reads standard input.  */
@@ -1664,11 +1637,81 @@ job_body (struct cli_job *job)
   return job->body;
 }
 
+/* Have the body written to a descriptor.  Standard output is the descriptor
+   itself.  A file is opened here, but without emptying it, as the curl tool
+   does not until there is something to put in it: job_body_end makes it what
+   the body was once it ends.  If the file cannot be opened the callback tells
+   of it when there is a body to write.  */
+static void
+job_body_fd (struct cli_job *job)
+{
+  int fd;
+
+  if (job->out_path == NULL)
+    {
+      struct stat st;
+
+      if (job->body != stdout)
+        return;
+      /* A file that is standard output is written at the position it is at
+         when the transfer begins, and the transfers that run together would
+         all begin at one: they go through stdio, which writes as it goes.  */
+      if (job->run->parallel && fstat (STDOUT_FILENO, &st) == 0
+          && S_ISREG (st.st_mode))
+        return;
+      fflush (stdout);
+      job->wfd = STDOUT_FILENO;
+      return;
+    }
+  if (job->out_failed)
+    return;
+  fd = open (job->out_path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0666);
+  if (fd >= 0)
+    job->wcreated = 1;
+  else if (errno == EEXIST)
+    fd = open (job->out_path, O_WRONLY | O_CLOEXEC);
+  if (fd < 0)
+    return;
+  if (job->out_mode != NULL && job->out_mode[0] == 'a')
+    job->wbase = (long long) lseek (fd, 0, SEEK_END);
+  job->wfd = fd;
+  job->wfd_owned = 1;
+}
+
+/* The transfer written to a file has ended with RC: the file is what was
+   written and no more; a file made for a transfer that put nothing in it
+   is not left.  */
+static void
+job_body_end (struct cli_job *job, int rc)
+{
+  struct stat st;
+  long long written = job->transfer->progress.downloaded;
+
+  if (fstat (job->wfd, &st) != 0 || !S_ISREG (st.st_mode))
+    return;
+  /* Standard output is the tool's and goes on from where this body ended.  */
+  if (!job->wfd_owned)
+    {
+      lseek (job->wfd, (off_t) written, SEEK_CUR);
+      return;
+    }
+  if (rc == TWIST_OK || written > 0)
+    {
+      if (ftruncate (job->wfd, (off_t) (job->wbase + written)) != 0
+          && rc == TWIST_OK)
+        job->body_short = 1;
+    }
+  else if (job->wcreated)
+    unlink (job->out_path);
+}
+
 static void
 job_free (struct cli_job *job)
 {
   if (job == NULL)
     return;
+  if (job->wfd_owned)
+    close (job->wfd);
   free (job->out_path);
   if (job->body != NULL && job->body != stdout)
     fclose (job->body);
@@ -1730,6 +1773,7 @@ job_prepare (struct cli_run *run, struct cli_next *next, struct cli_job **out)
   job->up_owned = next->up_owned;
   next->up_owned = NULL;
   job->body = stdout;
+  job->wfd = -1;
   job->ustream.fd = -1;
   job->use_url = job->url;
   url = job->url;
@@ -1846,6 +1890,11 @@ job_prepare (struct cli_run *run, struct cli_next *next, struct cli_job **out)
     }
   else if (op->dump_header != NULL)
     job->dump = stdout;
+  /* The body is written by the library, off the loop's thread, when nothing
+     else is to go into its stream in order with it: headers (-i, -D) are
+     written by the tool, and a body on a terminal is looked at first.  */
+  if (!op->include && job->dump == NULL && !job->refuse_binary)
+    job_body_fd (job);
   if (upload != NULL && is_telnet_url (url) && strcmp (upload, "-") == 0)
     {
       /* Standard input is what a telnet session reads when it is given
@@ -1952,19 +2001,15 @@ job_prepare (struct cli_run *run, struct cli_next *next, struct cli_job **out)
   twist_transfer_setopt (transfer, TWISTOPT_NOBODY, op->head ? 1L : 0L);
   twist_transfer_setopt (transfer, TWISTOPT_POSTFIELDS, payload);
   {
-    /* What an upload from a file comes to, for the progress.  */
+    /* What an upload from a file comes to, for the progress.  A file can be
+       read again from the start, as a redirect or a second request for
+       authentication needs; a pipe cannot.  */
     struct stat ust;
     long long usize = -1;
 
     if (job->streaming && fstat (job->ustream.fd, &ust) == 0
         && S_ISREG (ust.st_mode))
-      {
-        usize = (long long) ust.st_size;
-        /* A file can be read again from the start, as a redirect or a second
-           request for authentication needs; a pipe cannot.  */
-        twist_transfer_setopt (transfer, TWISTOPT_SEEKFUNCTION, seek_upload);
-        twist_transfer_setopt (transfer, TWISTOPT_SEEKDATA, &job->ustream);
-      }
+      usize = (long long) ust.st_size;
     twist_transfer_setopt (transfer, TWISTOPT_INFILESIZE, usize);
   }
   /* The meter is drawn unless -s or --no-progress-meter says not, or the
@@ -2000,10 +2045,10 @@ job_prepare (struct cli_run *run, struct cli_next *next, struct cli_job **out)
       twist_transfer_setopt (transfer, TWISTOPT_XFERINFOFUNCTION, NULL);
       twist_transfer_setopt (transfer, TWISTOPT_XFERINFODATA, NULL);
     }
-  twist_transfer_setopt (transfer, TWISTOPT_READFUNCTION,
-                         job->streaming ? read_upload : NULL);
-  twist_transfer_setopt (transfer, TWISTOPT_READDATA,
-                         job->streaming ? &job->ustream : NULL);
+  /* The library reads the descriptor off the loop's thread and does not
+     close it.  */
+  if (job->streaming)
+    twist_transfer_setopt (transfer, TWISTOPT_READFD, (long) job->ustream.fd);
   if (payload != NULL)
     twist_transfer_setopt (transfer, TWISTOPT_POSTFIELDSIZE, (long) payload_n);
   twist_transfer_setopt (transfer, TWISTOPT_HTTPHEADER,
@@ -2031,8 +2076,13 @@ job_prepare (struct cli_run *run, struct cli_next *next, struct cli_job **out)
                          op->ftp_create_dirs
                          && strncmp (job->use_url, "sftp://", 7) == 0
                          ? 1L : 0L);
-  twist_transfer_setopt (transfer, TWISTOPT_WRITEFUNCTION, write_body);
-  twist_transfer_setopt (transfer, TWISTOPT_WRITEDATA, job);
+  if (job->wfd >= 0)
+    twist_transfer_setopt (transfer, TWISTOPT_WRITEFD, (long) job->wfd);
+  else
+    {
+      twist_transfer_setopt (transfer, TWISTOPT_WRITEFUNCTION, write_body);
+      twist_transfer_setopt (transfer, TWISTOPT_WRITEDATA, job);
+    }
   if (op->include || job->dump != NULL)
     {
       twist_transfer_setopt (transfer, TWISTOPT_HEADERFUNCTION, write_header);
@@ -2066,8 +2116,16 @@ job_finish (struct cli_job *job, int rc)
   int write_failed;
 
   finish_headers (&job->hdrs);
+  if (job->wfd >= 0)
+    {
+      /* The library only fails a transfer written to a descriptor if the
+         write did not go.  */
+      if (rc == TWIST_ERR_ABORTED && !job->aborted)
+        job->body_short = 1;
+      job_body_end (job, rc);
+    }
   /* A transfer that worked and had no body still makes the file.  */
-  if (job->body == NULL && job->out_path != NULL && rc == TWIST_OK
+  else if (job->body == NULL && job->out_path != NULL && rc == TWIST_OK
       && job_body (job) == NULL)
     job->body_short = 1;
   if (job->body == NULL)
@@ -2089,18 +2147,6 @@ job_finish (struct cli_job *job, int rc)
   code = cli_status (rc, job->use_url);
   if (transfer->proto_status != 0)
     code = transfer->proto_status;
-  if (job->ustream.failed)
-    {
-      char msg[256];
-
-      snprintf (msg, sizeof msg, _("could not read %s"), job->upload);
-      diag_code (26, msg);
-      emit_writeout (op->writeout, transfer, 26);
-      if (job->bar_used)
-        twist_bar_finish (&job->bar);
-      job_free (job);
-      return 26;
-    }
   write_failed = (job->body_short || job->hdrs.short_write)
                  && (code == 0 || code == 42);
   if (write_failed)
@@ -2130,6 +2176,8 @@ job_finish (struct cli_job *job, int rc)
       diag_code (code, detail != NULL ? detail : twist_strerror (rc));
     }
   emit_writeout (op->writeout, transfer, code);
+  /* The body of another transfer goes to standard output without this.  */
+  fflush (stdout);
   /* After the message: the bar's line ends last.  */
   if (job->bar_used)
     twist_bar_finish (&job->bar);

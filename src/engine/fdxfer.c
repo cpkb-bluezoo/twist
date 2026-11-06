@@ -423,6 +423,8 @@ twist_transfer_fds_setup (struct twist_transfer *t)
 {
   struct fd_wsink *w;
   struct stat st;
+  int regular;
+  int plain;
   int rc;
 
   if (t->write_fd < 0 || t->wsink != NULL)
@@ -431,37 +433,46 @@ twist_transfer_fds_setup (struct twist_transfer *t)
   if (w == NULL)
     return TWIST_ERR_NOMEM;
   w->t = t;
-  if (fstat (t->write_fd, &st) == 0 && S_ISREG (st.st_mode))
-    {
-      off_t at = lseek (t->write_fd, 0, SEEK_CUR);
-      int dfd = dup (t->write_fd);
-
-      if (dfd < 0 || t->runtime == NULL || t->runtime->xfer == NULL)
-        {
-          if (dfd >= 0)
-            close (dfd);
-          free (w);
-          return TWIST_ERR_INVAL;
-        }
-      rc = twist_fio_write_fd_new (t->loop, t->runtime->xfer, dfd,
-                                   at >= 0 ? (long long) at : 0, &wfio_ops, w,
-                                   &w->fio);
-      if (rc != TWIST_OK)
-        {
-          close (dfd);
-          free (w);
-          return rc;
-        }
-    }
-  else
+  regular = fstat (t->write_fd, &st) == 0 && S_ISREG (st.st_mode);
+  /* A character device that is not a terminal (/dev/null) cannot be waited
+     for, nor can it be written to at an offset.  */
+  plain = !regular && S_ISCHR (st.st_mode) && !isatty (t->write_fd);
+  if (!regular && !plain)
     {
       rc = twist_fd_sink_new (t->loop, t->write_fd, &sink_ops, w, &w->sink);
-      if (rc != TWIST_OK)
+      if (rc == TWIST_OK)
+        goto ready;
+      if (rc == TWIST_ERR_NOMEM)
         {
           free (w);
           return rc;
         }
+      /* It cannot be waited for after all: it is written to on a thread of
+         the pool.  */
     }
+  {
+    off_t at = regular ? lseek (t->write_fd, 0, SEEK_CUR) : -1;
+    int dfd = dup (t->write_fd);
+
+    if (dfd < 0 || t->runtime == NULL || t->runtime->xfer == NULL)
+      {
+        if (dfd >= 0)
+          close (dfd);
+        free (w);
+        return TWIST_ERR_INVAL;
+      }
+    if (regular && at < 0)
+      at = 0;
+    rc = twist_fio_write_fd_new (t->loop, t->runtime->xfer, dfd,
+                                 (long long) at, &wfio_ops, w, &w->fio);
+    if (rc != TWIST_OK)
+      {
+        close (dfd);
+        free (w);
+        return rc;
+      }
+  }
+ready:
   t->wsink = w;
   t->write_cb = wsink_cb;
   t->write_data = w;
