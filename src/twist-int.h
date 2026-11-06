@@ -1949,6 +1949,54 @@ size_t twist_der_receive (struct twist_der_reader *r, const uint8_t *data,
 /* Between top-level elements, with nothing open and nothing half read.  */
 int twist_der_idle (const struct twist_der_reader *r);
 
+/* NTLMv2 (src/auth/ntlm.c) for SMB, a codec with no I/O.  The caller makes
+   the client, gets the NEGOTIATE bytes, feeds the server's CHALLENGE (whole
+   or in pieces, then twist_ntlm_challenge_end; twist_ntlm_challenge does both),
+   and gets the AUTHENTICATE bytes and the exported session key.  The
+   signature calls make and check the message signature of the session, which
+   SPNEGO uses for mechListMIC.  Every error is TWIST_ERR_AUTH, or
+   TWIST_ERR_INVAL for a call made out of order.  RAND is a hook for the two
+   random values, the client challenge and then the exported session key; with
+   none, gq_random is used.  */
+struct twist_ntlm;
+struct twist_ntlm_rand
+{
+  int (*fill) (void *user, void *buf, size_t len);	/* 0 or an error.  */
+  void *user;
+};
+struct twist_ntlm *twist_ntlm_new (const char *domain, const char *user,
+                                   const char *password, const char *host,
+                                   const struct twist_ntlm_rand *rnd);
+void twist_ntlm_free (struct twist_ntlm *n);
+int twist_ntlm_negotiate (struct twist_ntlm *n, uint8_t *out, size_t cap,
+                          size_t *len);
+int twist_ntlm_feed (struct twist_ntlm *n, const uint8_t *data, size_t len);
+int twist_ntlm_challenge_end (struct twist_ntlm *n);
+int twist_ntlm_challenge (struct twist_ntlm *n, const uint8_t *data,
+                          size_t len);
+int twist_ntlm_authenticate (struct twist_ntlm *n, uint8_t *out, size_t cap,
+                             size_t *len);
+int twist_ntlm_session_key (const struct twist_ntlm *n, uint8_t key[16]);
+int twist_ntlm_sign (struct twist_ntlm *n, const void *msg, size_t len,
+                     uint8_t out[16]);
+int twist_ntlm_verify (struct twist_ntlm *n, const void *msg, size_t len,
+                       const uint8_t signature[16]);
+
+/* The pieces of NTLMv2 that MS-NLMP 4.2.4 gives worked examples of, and the
+   text conversion SMB shares: UTF-8 to UTF-16LE, upper-casing Latin, Greek
+   and Cyrillic letters if UPPER; invalid UTF-8 is TWIST_ERR_INVAL.  */
+int twist_ntlm_ntowfv2 (const char *user, const char *domain,
+                        const char *password, uint8_t key[16]);
+int twist_ntlm_v2_response (const uint8_t respkey[16],
+                            const uint8_t server_chal[8], const uint8_t *temp,
+                            size_t templen, uint8_t proof[16],
+                            uint8_t base_key[16]);
+int twist_ntlm_session_keys (const uint8_t session_key[16], uint8_t sign_c[16],
+                             uint8_t seal_c[16], uint8_t sign_s[16],
+                             uint8_t seal_s[16]);
+int twist_utf16le_from_utf8 (const char *s, size_t slen, int upper,
+                             uint8_t *out, size_t cap, size_t *outlen);
+
 /* For NTLM (src/auth/ntlm.c) and nothing else.  MD4 makes the NT hash of a
    password, RC4 carries the exported session key and seals a signature's
    checksum, and HMAC-MD5 does the rest.  They are not part of twist.h.  */

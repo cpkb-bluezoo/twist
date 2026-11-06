@@ -54,6 +54,7 @@ libtwist_la_SOURCES = \
   auth/hmacmd5.c \
   auth/md4.c \
   auth/md5.c \
+  auth/ntlm.c \
   auth/rc4.c \
   auth/sasl.c \
   auth/sha256.c \
