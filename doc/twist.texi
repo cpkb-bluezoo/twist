@@ -1047,6 +1047,25 @@ Request body.  @code{@@} is not a file.
 Form field.  The value is percent-encoded.  @code{name=value} encodes
 the value, @code{name@@file} encodes the file, and @code{@@file} encodes
 the file with no name.
+@item -F @var{name}=@var{content}
+@itemx --form @var{name}=@var{content}
+A part of a @code{multipart/form-data} body, for @code{http} and @code{https}.
+The content is text; @code{@@file}, a file sent as one (with its name and
+the type @code{application/octet-stream}); or @code{<file}, the contents of a
+file as the value.  @code{-} for the file is standard input.  Parameters follow,
+each after a semicolon: @code{type=}@var{media type}, @code{filename=}@var{name},
+@code{headers=}@var{header} (or @code{headers=@@file} for a file of them), and
+@code{encoder=binary} or @code{encoder=base64}.  A value with a semicolon in it
+is put between double quotes.  The request is a POST.  The body is made as it is
+sent: a file is read off the thread that runs the transfers, and standard input
+as it arrives, so a large file or a slow pipe is not held in memory or waited
+on by other transfers.  @code{Content-Length} is sent when every part's length
+is known (text and regular files); with a part from a pipe the body is chunked
+under HTTP/1 and has no length under HTTP/2 and HTTP/3.  A part from standard
+input can be sent once, so a redirect that sends the body again is refused.
+@item --form-escape
+Write the names and file names of @option{-F} parts with a backslash before a
+double quote or a backslash, and not percent-encoded (@code{%22} for a quote).
 @item -G
 @itemx --get
 Append @option{-d} to the query string instead of sending a request
@@ -1570,7 +1589,7 @@ A @option{--quote} command of an @code{sftp} transfer failed.
 The output could not be written.
 @item 26
 A local file named by @option{-d}, @option{--data-binary},
-@option{--data-urlencode}, or @option{-T} could not be read.
+@option{--data-urlencode}, @option{-F}, or @option{-T} could not be read.
 @item 27
 Out of memory.
 @item 25

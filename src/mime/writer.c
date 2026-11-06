@@ -34,11 +34,17 @@
    returns.  Base64 keeps at most two leftover octets.  */
 
 #define MIME_CAP 4096
-#define MIME_MARK (MIME_CAP * 3 / 4)
+/* A flush is tried once this much is held.  What is left is room for a header
+   line and a boundary (MIME_STEP), so a caller that checks twist_mime_ready
+   before each step never overflows while the sink is paused.  */
+#define MIME_MARK (MIME_CAP * 5 / 8)
+#define MIME_STEP 1100
 
 struct twist_mime
 {
   int (*sink) (void *user, const uint8_t *data, size_t len);
+  /* Or a sink that may take only some, or none (twist_mime_new_push).  */
+  int (*take) (void *user, const uint8_t *data, size_t len, size_t *taken);
   void *user;
   uint8_t buf[MIME_CAP];
   size_t len;
@@ -52,6 +58,8 @@ struct twist_mime
   int b64_n;
   int b64_col;
   int err;
+  int strict;			/* A delimiter always follows a CRLF.  */
+  int paused;			/* The sink did not take it all.  */
 };
 
 static int
@@ -59,8 +67,29 @@ flush (struct twist_mime *m, int force)
 {
   if (m->err != TWIST_OK)
     return m->err;
-  if (m->len == 0 || (m->len < MIME_MARK && !force))
+  if (m->len == 0 || (m->len < MIME_MARK && !force) || m->paused)
     return TWIST_OK;
+  if (m->take != NULL)
+    {
+      size_t taken = 0;
+
+      if (m->take (m->user, m->buf, m->len, &taken) != 0 || taken > m->len)
+        {
+          m->err = TWIST_ERR_ABORTED;
+          return m->err;
+        }
+      if (taken < m->len)
+        {
+          /* The sink is full: what it did not take stays, and the writer
+             takes no more until twist_mime_resume.  */
+          memmove (m->buf, m->buf + taken, m->len - taken);
+          m->len -= taken;
+          m->paused = 1;
+          return TWIST_OK;
+        }
+      m->len = 0;
+      return TWIST_OK;
+    }
   if (m->sink (m->user, m->buf, m->len) != 0)
     {
       m->err = TWIST_ERR_ABORTED;
@@ -80,9 +109,16 @@ emit (struct twist_mime *m, const void *data, size_t n)
     return m->err;
   for (i = 0; i < n; i++)
     {
+      if (m->len == MIME_CAP)
+        {
+          /* Held by a sink that is full, and the caller did not wait for
+             twist_mime_ready.  */
+          m->err = TWIST_ERR_NOMEM;
+          return m->err;
+        }
       m->buf[m->len++] = p[i];
       m->bol = p[i] == '\n';
-      if (m->len == MIME_CAP && flush (m, 1) != TWIST_OK)
+      if (m->len == MIME_CAP && !m->paused && flush (m, 1) != TWIST_OK)
         return m->err;
     }
   return flush (m, 0);
@@ -114,6 +150,80 @@ twist_mime_new (int (*sink) (void *, const uint8_t *, size_t), void *user)
   m->user = user;
   m->bol = 1;
   return m;
+}
+
+struct twist_mime *
+twist_mime_new_push (int (*take) (void *, const uint8_t *, size_t, size_t *),
+                     void *user)
+{
+  struct twist_mime *m;
+
+  if (take == NULL)
+    return NULL;
+  m = calloc (1, sizeof *m);
+  if (m == NULL)
+    return NULL;
+  m->take = take;
+  m->user = user;
+  m->bol = 1;
+  return m;
+}
+
+void
+twist_mime_set_strict (struct twist_mime *mime, int strict)
+{
+  if (mime != NULL)
+    mime->strict = strict != 0;
+}
+
+/* Whether a step (a header line, a boundary, a piece of body of at most
+   TWIST_MIME_PIECE bytes) may be written now.  */
+int
+twist_mime_ready (const struct twist_mime *mime)
+{
+  return mime != NULL && mime->err == TWIST_OK && !mime->paused
+         && MIME_CAP - mime->len >= MIME_STEP;
+}
+
+size_t
+twist_mime_pending (const struct twist_mime *mime)
+{
+  return mime != NULL ? mime->len : 0;
+}
+
+int
+twist_mime_paused (const struct twist_mime *mime)
+{
+  return mime != NULL && mime->paused;
+}
+
+/* The sink can take more: offer it what is held.  Whether it is still full
+   is twist_mime_paused.  */
+int
+twist_mime_resume (struct twist_mime *mime)
+{
+  if (mime == NULL)
+    return TWIST_ERR_INVAL;
+  mime->paused = 0;
+  return flush (mime, 1);
+}
+
+/* Start the message again, with the boundary it had.  */
+void
+twist_mime_reset (struct twist_mime *mime)
+{
+  if (mime == NULL)
+    return;
+  mime->len = 0;
+  mime->parts = 0;
+  mime->bol = 1;
+  mime->header = 0;
+  mime->b64 = 0;
+  mime->b64_acc = 0;
+  mime->b64_n = 0;
+  mime->b64_col = 0;
+  mime->err = TWIST_OK;
+  mime->paused = 0;
 }
 
 void
@@ -204,7 +314,7 @@ twist_mime_part (struct twist_mime *mime)
     return TWIST_ERR_INVAL;
   if (b64_end (mime) != TWIST_OK)
     return mime->err;
-  if (mime->parts > 0 && !mime->bol)
+  if (mime->parts > 0 && (mime->strict || !mime->bol))
     n = snprintf (line, sizeof line, "\r\n--%s\r\n", mime->boundary);
   else
     n = snprintf (line, sizeof line, "--%s\r\n", mime->boundary);
@@ -218,7 +328,7 @@ twist_mime_part (struct twist_mime *mime)
 int
 twist_mime_header (struct twist_mime *mime, const char *name, const char *value)
 {
-  char line[256];
+  char line[1024];
   int n;
 
   if (mime == NULL || !mime->header || bad_header (name) || bad_header (value))
@@ -298,7 +408,7 @@ twist_mime_finish (struct twist_mime *mime)
     return TWIST_ERR_INVAL;
   if (b64_end (mime) != TWIST_OK)
     return mime->err;
-  if (!mime->bol && emit_str (mime, "\r\n") != TWIST_OK)
+  if ((mime->strict || !mime->bol) && emit_str (mime, "\r\n") != TWIST_OK)
     return mime->err;
   n = snprintf (line, sizeof line, "--%s--\r\n", mime->boundary);
   if (n < 0 || emit (mime, line, (size_t) n) != TWIST_OK)

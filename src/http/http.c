@@ -2136,7 +2136,7 @@ send_request_target (struct twist_http *h, const char *target)
   else if (transfer->postfields != NULL && !h->suppress_body)
     method = "POST";
   else if (has_source_body (h))
-    method = "PUT";
+    method = transfer->form != NULL ? "POST" : "PUT";
   {
     char hosttext[400];
 
@@ -2167,6 +2167,10 @@ send_request_target (struct twist_http *h, const char *target)
       rc = rewind_source (h);
       if (rc != TWIST_OK)
         return rc;
+      /* A form's boundary and length are known once it is made, and the
+         request names them.  */
+      if (transfer->form != NULL && twist_transfer_upload (transfer) == NULL)
+        return TWIST_ERR_NOMEM;
       /* Sent as it is read: by the connection (HTTP/1), or by the pump.
          Chunked needs HTTP/1.1.  */
       if (h->mode == HTTP_H1
@@ -2192,6 +2196,16 @@ send_request_target (struct twist_http *h, const char *target)
         }
     }
   extra = request_headers (h);
+  if (source && transfer->form != NULL && transfer->form_boundary[0] != 0
+      && !header_named (transfer->headers, "Content-Type"))
+    {
+      char line[96];
+
+      snprintf (line, sizeof line,
+                "Content-Type: multipart/form-data; boundary=%s",
+                transfer->form_boundary);
+      extra = twist_slist_append (extra, line);
+    }
   if (source)
     {
       char line[64];

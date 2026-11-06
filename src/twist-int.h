@@ -228,6 +228,9 @@ struct twist_transfer
   int read_fd;
   int write_fd;
   struct fd_wsink *wsink;
+  /* The multipart body, and the boundary its Content-Type names.  */
+  struct twist_form *form;
+  char form_boundary[48];
   /* Bytes pushed to the upload from another thread than the one that runs the
      transfer, and the end, until the transfer's thread takes them.  */
   pthread_mutex_t xmu;
@@ -815,6 +818,9 @@ struct twist_upload_producer
   /* Advance past the first N bytes without pushing them (to resume an upload
      at an offset): 0, or an error if the source is shorter.  May be NULL.  */
   int (*skip) (void *user, long long n);
+  /* The consumer has gone (the transfer ended, or failed): stop reading, so
+     that a reader waiting to hand over a chunk is let go.  May be NULL.  */
+  void (*stop) (void *user);
 };
 struct twist_upload *twist_upload_new (const struct twist_upload_producer *p,
                                        void *user);
@@ -1867,6 +1873,30 @@ int twist_mime_body_b64 (struct twist_mime *mime, const uint8_t *data,
                          size_t len);
 int twist_mime_finish (struct twist_mime *mime);
 
+/* A writer that pushes: TAKE is given what is held and says how much it took
+   (TAKEN), returning non-zero only for a failure.  If it took less than it
+   was given, the writer is paused: the rest stays in its buffer (it keeps no
+   more than the 4 KiB it always had), and a caller that goes on only after
+   twist_mime_ready (true when it is not paused and has room for a header line
+   or TWIST_MIME_PIECE bytes of body) does not overflow it.  twist_mime_resume
+   offers what is held again; twist_mime_pending is how much is.  After
+   twist_mime_finish the message is out when nothing is pending.  Strict is
+   for a body that is not text with CRLF line ends: a delimiter always has a
+   CRLF before it, as multipart/form-data needs.  twist_mime_reset starts the
+   message over with its boundary.  */
+#define TWIST_MIME_PIECE 512
+struct twist_mime *twist_mime_new_push (int (*take) (void *user,
+                                                     const uint8_t *data,
+                                                     size_t len,
+                                                     size_t *taken),
+                                        void *user);
+void twist_mime_set_strict (struct twist_mime *mime, int strict);
+int twist_mime_ready (const struct twist_mime *mime);
+size_t twist_mime_pending (const struct twist_mime *mime);
+int twist_mime_paused (const struct twist_mime *mime);
+int twist_mime_resume (struct twist_mime *mime);
+void twist_mime_reset (struct twist_mime *mime);
+
 #define TWIST_MAIL_LINE_MAX 4096
 
 size_t twist_mail_line (const uint8_t *data, size_t len, const uint8_t **line,
@@ -2202,8 +2232,16 @@ static inline int
 twist_transfer_has_source (const struct twist_transfer *t)
 {
   return t->read_cb != NULL || t->upload != NULL || t->push_upload
-         || t->read_fd >= 0;
+         || t->read_fd >= 0 || t->form != NULL;
 }
+
+/* The form of a transfer (engine/form.c): the upload that sends it, made
+   with its boundary and the length of the message if every part's is known
+   (set as the transfer's INFILESIZE), and the release of the transfer's
+   reference to it.  */
+struct twist_upload *twist_form_upload_new (struct twist_transfer *transfer);
+void twist_form_unref (struct twist_form *form);
+struct twist_form *twist_form_ref (struct twist_form *form);
 /* Resume on the thread that runs the transfer.  */
 int twist_transfer_resume_local (struct twist_transfer *transfer);
 /* Run the upload's producer if the consumer has not paused it (it is

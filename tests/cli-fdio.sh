@@ -56,6 +56,26 @@ class H(http.server.BaseHTTPRequestHandler):
             self.reply(b"x" * (8 << 20))
         else:
             self.reply(b"small")
+    def do_POST(self):
+        te = self.headers.get("Transfer-Encoding", "") == "chunked"
+        body = b""
+        if te:
+            while True:
+                n = int(self.rfile.readline().split(b";")[0], 16)
+                if n == 0:
+                    while self.rfile.readline() not in (b"\r\n", b""):
+                        pass
+                    break
+                body += self.rfile.read(n)
+                self.rfile.read(2)
+        else:
+            body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+        with open(sys.argv[1] + "/post.head", "w") as f:
+            f.write(str(self.headers))
+        with open(sys.argv[1] + "/post.body", "wb") as f:
+            f.write(body)
+        self.reply(b"stored")
+
     def do_PUT(self):
         if self.headers.get("Transfer-Encoding", "") == "chunked":
             while True:
@@ -77,7 +97,7 @@ s = S(("127.0.0.1", 0), H)
 print(s.server_address[1], flush=True)
 s.serve_forever()
 PY
-python3 "$work/server.py" > "$work/port" 2>/dev/null &
+python3 "$work/server.py" "$work" > "$work/port" 2>/dev/null &
 pids="$pids $!"
 i=0
 while [ ! -s "$work/port" ] && [ $i -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
@@ -153,5 +173,62 @@ check "$([ "$(cat "$work/keep")" = keep ] && echo ok)" \
 "$TWIST" -s -o "$work/none" "http://127.0.0.1:1/" 2>/dev/null
 check "$([ ! -e "$work/none" ] && echo ok)" \
   "and makes none"
+
+# -F: a multipart body made as it is sent.  Files are read off the loop's
+# thread; the length is sent when every part has one.
+printf 'one\ntwo\n' > "$work/f.txt"
+dd if=/dev/zero bs=1024 count=300 2>/dev/null | tr '\0' 'q' > "$work/big.bin"
+"$TWIST" -s -F a=hello -F "up=@$work/big.bin;type=text/x-test;filename=n.dat" \
+  -F "v=<$work/f.txt" -F 'e=binary;encoder=base64;headers=X-Part: 1' \
+  "$base/form" > "$work/form.out"
+check "$([ "$(cat "$work/form.out")" = stored ] && echo ok)" "-F: the form is posted"
+head=$(cat "$work/post.head")
+check "$(case "$head" in (*"Content-Type: multipart/form-data; boundary="*) echo ok;; esac)" \
+  "-F: the Content-Type names a boundary"
+len=$(sed -n 's/^Content-Length: *//p' "$work/post.head" | tr -d '\r')
+check "$([ "$len" -eq "$(size_of "$work/post.body")" ] && echo ok)" \
+  "-F: Content-Length is the length of the message ($len)"
+check "$(grep -c 'name="a"' "$work/post.body" | sed 's/^1$/ok/')" "-F: a field"
+check "$(grep -a -c 'filename="n.dat"' "$work/post.body" | sed 's/^1$/ok/')" \
+  "-F: filename= is used"
+check "$(grep -a -c 'Content-Type: text/x-test' "$work/post.body" | sed 's/^1$/ok/')" \
+  "-F: type= is used"
+check "$(grep -a -c 'name="v"; filename' "$work/post.body" | sed 's/^0$/ok/')" \
+  "-F: <file is a value and not a file"
+check "$(grep -a -c '^X-Part: 1' "$work/post.body" | sed 's/^1$/ok/')" \
+  "-F: headers= is added to the part"
+check "$(grep -a -c 'Content-Transfer-Encoding: base64' "$work/post.body" | sed 's/^1$/ok/')" \
+  "-F: encoder=base64"
+check "$([ "$(grep -a -c qqqqqqqqqqqqqqqqqqqq "$work/post.body")" -ge 1 ] && echo ok)" \
+  "-F: the file's bytes are there"
+
+# A part from standard input that has nothing for a while is streamed: no length,
+# and what comes later is in the part.
+{ sleep 2; printf 'late bytes'; } | "$TWIST" -s -F 'in=@-' "$base/form" > "$work/form.out"
+check "$([ "$(cat "$work/form.out")" = stored ] && echo ok)" "-F @-: posted"
+check "$(grep -c -i '^Transfer-Encoding: chunked' "$work/post.head" | sed 's/^1$/ok/')" \
+  "-F @-: no length, so it is chunked"
+check "$(grep -a -c 'late bytes' "$work/post.body" | sed 's/^1$/ok/')" \
+  "-F @-: and the late bytes are in the part"
+
+# Names: percent-encoded, or with a backslash for --form-escape.
+"$TWIST" -s -F 'a"b=1' "$base/form" > /dev/null
+check "$(grep -a -c 'name="a%22b"' "$work/post.body" | sed 's/^1$/ok/')" \
+  "-F: a quote in a name is percent-encoded"
+"$TWIST" -s --form-escape -F 'a"b=1' "$base/form" > /dev/null
+check "$(grep -a -c 'name="a\\"b"' "$work/post.body" | sed 's/^1$/ok/')" \
+  "--form-escape: a quote in a name has a backslash"
+
+# What is refused.
+"$TWIST" -s -F nothing "$base/form" 2>/dev/null; st=$?
+check "$([ $st -eq 2 ] && echo ok)" "-F without a name is status 2 ($st)"
+"$TWIST" -s -F "a=@$work/missing" "$base/form" 2>/dev/null; st=$?
+check "$([ $st -eq 26 ] && echo ok)" "-F with a file that is not there is status 26 ($st)"
+"$TWIST" -s -F a=b -d x "$base/form" 2>/dev/null; st=$?
+check "$([ $st -eq 2 ] && echo ok)" "-F with -d is status 2 ($st)"
+"$TWIST" -s -F 'a=b;encoder=quoted-printable' "$base/form" 2>/dev/null; st=$?
+check "$([ $st -eq 2 ] && echo ok)" "an encoder that is not offered is status 2 ($st)"
+"$TWIST" -s -F a=b ftp://127.0.0.1:1/x 2>/dev/null; st=$?
+check "$([ $st -eq 2 ] && echo ok)" "-F for an ftp URL is status 2 ($st)"
 
 exit $fail

@@ -669,6 +669,21 @@ name with `#N` filled in; the transfers are ordinary ones on the operation's
 loop, so SFTP URLs on one server share a session. Errors carry the URL and a
 caret under the place.
 
+A form (`src/engine/form.c`, `TWISTOPT_FORM`) is a multipart/form-data body
+made as it is sent. Its upload is a push source: the MIME writer
+(`src/mime/writer.c`) turns part headers and body pieces into bytes, and its
+sink, which may take only some, is the upload, so the writer pauses and keeps
+its 4 KiB buffer while the connection is full and goes on when it is resumed.
+A part of data is fed to the writer in pieces as it is ready; a file part is
+read by the file pipeline and a pipe or terminal by the descriptor source, so
+the loop reads no part, and each is held while the writer is. The writer runs
+strict for a form, so a delimiter always has a CRLF before it (a body that ends
+in a newline is not mistaken for a line end). The length is the headers, counted
+by running the writer with empty bodies, plus the sizes of the bodies, and is
+the transfer's `INFILESIZE` if every part's is known; otherwise HTTP/1 is
+chunked. The form is made before the request head, which names its boundary
+and length.
+
 The command line does no I/O of its own on the loop's thread for a body or an
 upload. `-T` (and a file for the schemes that stream) gives the transfer
 `TWISTOPT_READFD`; `-o` and standard output give it `TWISTOPT_WRITEFD`. A file

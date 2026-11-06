@@ -139,6 +139,8 @@ transfer_clear (struct twist_transfer *transfer)
 {
   twist_transfer_release (transfer);
   twist_upload_free (transfer->upload);
+  twist_form_unref (transfer->form);
+  transfer->form = NULL;
   transfer->upload = NULL;
   twist_wsink_free (transfer);
   twist_sink_clear (transfer);
@@ -289,6 +291,15 @@ twist_transfer_setopt (twist_transfer *transfer, int opt, ...)
       break;
     case TWISTOPT_WRITEFD:
       transfer->write_fd = (int) va_arg (ap, long);
+      break;
+    case TWISTOPT_FORM:
+      {
+        struct twist_form *form = va_arg (ap, struct twist_form *);
+
+        form = twist_form_ref (form);
+        twist_form_unref (transfer->form);
+        transfer->form = form;
+      }
       break;
     case TWISTOPT_APPEND:
       transfer->append = va_arg (ap, long) != 0;

@@ -297,8 +297,18 @@ src_release (void *user)
   free (s);
 }
 
+/* The consumer is gone: a worker reading the file is let go.  */
+static void
+src_stop (void *user)
+{
+  struct fd_src *s = user;
+
+  twist_fio_free (s->fio);
+  s->fio = NULL;
+}
+
 static const struct twist_upload_producer src_ops = {
-  src_resume, src_pause, src_restart, src_release, src_skip
+  src_resume, src_pause, src_restart, src_release, src_skip, src_stop
 };
 
 struct twist_upload *

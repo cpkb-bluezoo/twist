@@ -95,6 +95,8 @@ twist_upload_detach (struct twist_upload *up)
     return;
   up->attached = 0;
   up->paused = 1;
+  if (up->prod.stop != NULL)
+    up->prod.stop (up->prod_user);
 }
 
 int
@@ -287,7 +289,8 @@ adapter_skip (void *user, long long n)
 }
 
 static const struct twist_upload_producer adapter_ops = {
-  adapter_resume, adapter_pause, adapter_restart, adapter_release, adapter_skip
+  adapter_resume, adapter_pause, adapter_restart, adapter_release, adapter_skip,
+  NULL
 };
 
 /* ---- an upload the application pushes ---- */
@@ -357,7 +360,7 @@ push_release (void *user)
 }
 
 static const struct twist_upload_producer push_ops = {
-  push_resume, push_pause, push_restart, push_release, NULL
+  push_resume, push_pause, push_restart, push_release, NULL, NULL
 };
 
 int
@@ -498,6 +501,13 @@ twist_transfer_upload (struct twist_transfer *t)
       t->upload = p->up;
       return p->up;
     }
+  if (t->form != NULL)
+    {
+      struct twist_upload *up = twist_form_upload_new (t);
+
+      t->upload = up;
+      return up;
+    }
   if (t->read_fd >= 0)
     {
       struct twist_upload *up = twist_fd_upload_new (t);
@@ -604,7 +614,7 @@ mem_release (void *user)
 }
 
 static const struct twist_upload_producer mem_ops = {
-  mem_resume, mem_pause, mem_restart, mem_release, mem_skip
+  mem_resume, mem_pause, mem_restart, mem_release, mem_skip, NULL
 };
 
 struct twist_upload *

@@ -808,6 +808,411 @@ test_push_threads (void)
   free (data);
 }
 
+/* ---- multipart/form-data (TWISTOPT_FORM) ---- */
+
+struct fwriter
+{
+  int fd;
+  int delay_ms;
+  const uint8_t *data;
+  size_t len;
+};
+
+/* Write to a pipe after a while, so that the part is empty when the transfer
+   first looks at it.  */
+static void *
+fwriter_main (void *arg)
+{
+  struct fwriter *w = arg;
+  size_t off = 0;
+
+  usleep ((useconds_t) w->delay_ms * 1000);
+  while (off < w->len)
+    {
+      size_t n = w->len - off > 1500 ? 1500 : w->len - off;
+
+      if (write (w->fd, w->data + off, n) != (ssize_t) n)
+        break;
+      off += n;
+      usleep (2000);
+    }
+  close (w->fd);
+  return NULL;
+}
+
+/* POST FORM to a server and say what it got.  */
+static void
+form_post (struct twist_form *form, struct srv *s, int *result)
+{
+  struct twist_runtime *runtime = twist_runtime_new ();
+  struct twist_transfer *t = twist_transfer_new ();
+  struct check_job job = { 0, 0, 0 };
+  char url[64];
+
+  memset (s, 0, sizeof *s);
+  *result = -1;
+  if (srv_start (s) != 0 || runtime == NULL || t == NULL)
+    return;
+  pthread_create (&s->thread, NULL, srv_main, s);
+  snprintf (url, sizeof url, "http://127.0.0.1:%d/form", s->port);
+  twist_transfer_setopt (t, TWISTOPT_URL, url);
+  twist_transfer_setopt (t, TWISTOPT_FORM, form);
+  t->write_cb = NULL;
+  if (twist_runtime_start (runtime, t, check_job_done, &job) == TWIST_OK)
+    check_pump (runtime, &job, 10000);
+  *result = job.done ? job.result : -1;
+  close (s->listen_fd);
+  pthread_join (s->thread, NULL);
+  twist_runtime_free (runtime);
+  twist_transfer_free (t);
+}
+
+/* The boundary named in the head.  */
+static int
+head_boundary (const struct srv *s, char *out, size_t cap)
+{
+  const char *p = strstr (s->head, "boundary=");
+  size_t n = 0;
+
+  if (p == NULL)
+    return 0;
+  p += 9;
+  while (p[n] != 0 && p[n] != '\r' && p[n] != '\n' && n + 1 < cap)
+    {
+      out[n] = p[n];
+      n++;
+    }
+  out[n] = 0;
+  return 1;
+}
+
+struct mbuf
+{
+  uint8_t *p;
+  size_t n;
+};
+
+static void
+madd (struct mbuf *m, const void *d, size_t n)
+{
+  m->p = realloc (m->p, m->n + n + 1);
+  memcpy (m->p + m->n, d, n);
+  m->n += n;
+}
+
+static void
+madds (struct mbuf *m, const char *s)
+{
+  madd (m, s, strlen (s));
+}
+
+static int
+temp_data_file (char *path, size_t cap, const uint8_t *data, size_t len)
+{
+  int fd;
+
+  snprintf (path, cap, "/tmp/twist-test-form-XXXXXX");
+  fd = mkstemp (path);
+  if (fd >= 0 && write (fd, data, len) != (ssize_t) len)
+    {
+      close (fd);
+      return -1;
+    }
+  return fd;
+}
+
+/* Data, a file larger than the writer's buffer, a base64 part and a header of
+   its own: the length is sent, and the message is what a reader expects.  */
+static void
+test_form_known_length (void)
+{
+  char path[64];
+  size_t flen = 300000;
+  uint8_t *fdata = pattern (flen);
+  int fd = temp_data_file (path, sizeof path, fdata, flen);
+  struct twist_form *form = twist_form_new ();
+  struct twist_formpart *p;
+  struct srv s;
+  int result;
+  char b[64];
+  struct mbuf want = { NULL, 0 };
+  static const uint8_t raw[] = "binary\n";
+  /* base64 of 100 bytes: more than a line of 76.  */
+  uint8_t sixty[100];
+  size_t i;
+
+  close (fd);
+  for (i = 0; i < sizeof sixty; i++)
+    sixty[i] = (uint8_t) (i * 7);
+  p = twist_form_add (form, "plain");
+  twist_formpart_data (p, "hello", 5);
+  p = twist_form_add (form, "up\"load");
+  twist_formpart_file (p, path);
+  twist_formpart_filename (p, "a\"b.bin");
+  twist_formpart_type (p, "application/octet-stream");
+  p = twist_form_add (form, "enc");
+  twist_formpart_data (p, sixty, sizeof sixty);
+  twist_formpart_encoder (p, TWIST_FORM_BASE64);
+  twist_formpart_header (p, "X-Part: one");
+  p = twist_form_add (form, "nl");
+  twist_formpart_data (p, raw, sizeof raw - 1);
+  form_post (form, &s, &result);
+  check (result == TWIST_OK, "a form is posted");
+  check (head_boundary (&s, b, sizeof b), "with a boundary in its Content-Type");
+  check (strstr (s.head, "POST /form") != NULL, "a POST by default");
+  check (!s.chunked && s.clen == (long long) s.body_n,
+         "and a Content-Length that is the length of the message");
+  madds (&want, "--");
+  madds (&want, b);
+  madds (&want, "\r\nContent-Disposition: form-data; name=\"plain\"\r\n\r\n"
+                "hello\r\n--");
+  madds (&want, b);
+  madds (&want, "\r\nContent-Disposition: form-data; name=\"up%22load\"; "
+                "filename=\"a%22b.bin\"\r\nContent-Type: "
+                "application/octet-stream\r\n\r\n");
+  madd (&want, fdata, flen);
+  madds (&want, "\r\n--");
+  madds (&want, b);
+  madds (&want, "\r\nContent-Disposition: form-data; name=\"enc\"\r\n"
+                "Content-Transfer-Encoding: base64\r\nX-Part: one\r\n\r\n");
+  /* 100 bytes: 33 groups and one byte; a line of 76 characters, then the
+     rest.  */
+  {
+    static const char tab[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvw"
+                              "xyz0123456789+/";
+    size_t col = 0;
+
+    for (i = 0; i < sizeof sixty; i += 3)
+      {
+        size_t left = sizeof sixty - i;
+        unsigned v = (unsigned) sixty[i] << 16;
+        char q[4];
+
+        if (left > 1)
+          v |= (unsigned) sixty[i + 1] << 8;
+        if (left > 2)
+          v |= sixty[i + 2];
+        q[0] = tab[(v >> 18) & 63];
+        q[1] = tab[(v >> 12) & 63];
+        q[2] = left > 1 ? tab[(v >> 6) & 63] : '=';
+        q[3] = left > 2 ? tab[v & 63] : '=';
+        madd (&want, q, 4);
+        col += 4;
+        if (col >= 76 && left > 2)
+          {
+            madds (&want, "\r\n");
+            col = 0;
+          }
+      }
+  }
+  madds (&want, "\r\n--");
+  madds (&want, b);
+  madds (&want, "\r\nContent-Disposition: form-data; name=\"nl\"\r\n\r\n"
+                "binary\n\r\n--");
+  madds (&want, b);
+  madds (&want, "--\r\n");
+  check (s.body_n == want.n && memcmp (s.body, want.p, want.n) == 0,
+         "the message is the parts in order, each ending in a CRLF before the "
+         "delimiter, even a body that ends in a newline");
+  check (s.body_n > flen, "and the large file is all there");
+  free (want.p);
+  free (s.body);
+  twist_form_free (form);
+  unlink (path);
+  free (fdata);
+}
+
+/* A part from a pipe that is empty at first, and has bytes later: the
+   transfer waits for them; there is no length, so it is chunked.  */
+static void
+test_form_pipe_part (void)
+{
+  int p[2];
+  size_t len = 70000;
+  uint8_t *data = pattern (len);
+  struct fwriter w;
+  pthread_t th;
+  struct twist_form *form = twist_form_new ();
+  struct twist_formpart *part;
+  struct srv s;
+  int result;
+  char b[64];
+  struct mbuf want = { NULL, 0 };
+
+  if (pipe (p) != 0)
+    return;
+  w.fd = p[1];
+  w.delay_ms = 300;
+  w.data = data;
+  w.len = len;
+  pthread_create (&th, NULL, fwriter_main, &w);
+  part = twist_form_add (form, "a");
+  twist_formpart_data (part, "1", 1);
+  part = twist_form_add (form, "stdin");
+  twist_formpart_fd (part, p[0]);
+  twist_formpart_type (part, "text/plain");
+  form_post (form, &s, &result);
+  pthread_join (th, NULL);
+  check (result == TWIST_OK, "a form with a part from an empty pipe is done");
+  check (s.chunked && !s.bad_framing,
+         "and has no length, so it is chunked");
+  check (head_boundary (&s, b, sizeof b), "with a boundary");
+  madds (&want, "--");
+  madds (&want, b);
+  madds (&want, "\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\n1\r\n--");
+  madds (&want, b);
+  madds (&want, "\r\nContent-Disposition: form-data; name=\"stdin\"\r\n"
+                "Content-Type: text/plain\r\n\r\n");
+  madd (&want, data, len);
+  madds (&want, "\r\n--");
+  madds (&want, b);
+  madds (&want, "--\r\n");
+  check (s.body_n == want.n && memcmp (s.body, want.p, want.n) == 0,
+         "the bytes that came later are in the part");
+  free (want.p);
+  free (s.body);
+  close (p[0]);
+  twist_form_free (form);
+  free (data);
+}
+
+/* A header with a line break in it is refused: nothing is sent.  */
+static void
+test_form_header_injection (void)
+{
+  struct twist_form *form = twist_form_new ();
+  struct twist_formpart *p = twist_form_add (form, "a");
+  struct srv s;
+  int result;
+
+  twist_formpart_data (p, "x", 1);
+  twist_formpart_header (p, "X-A: b\r\nX-Injected: yes");
+  form_post (form, &s, &result);
+  check (result != TWIST_OK && strstr (s.head, "X-Injected") == NULL,
+         "a part header with a CR or LF fails the transfer and is not sent");
+  free (s.body);
+  twist_form_free (form);
+}
+
+/* Backslash escaping, and a name that cannot be written that way.  */
+static void
+test_form_escape (void)
+{
+  struct twist_form *form = twist_form_new ();
+  struct twist_formpart *p;
+  struct srv s;
+  int result;
+
+  twist_form_set_escape (form, 1);
+  p = twist_form_add (form, "a\"b\\c");
+  twist_formpart_data (p, "x", 1);
+  form_post (form, &s, &result);
+  check (result == TWIST_OK && s.body != NULL
+         && strstr ((char *) s.body, "name=\"a\\\"b\\\\c\"") != NULL,
+         "with --form-escape a quote and a backslash have a backslash");
+  free (s.body);
+  twist_form_free (form);
+  form = twist_form_new ();
+  twist_form_set_escape (form, 1);
+  p = twist_form_add (form, "a\nb");
+  twist_formpart_data (p, "x", 1);
+  form_post (form, &s, &result);
+  check (result == TWIST_ERR_INVAL,
+         "and a line break in a name fails the transfer");
+  free (s.body);
+  twist_form_free (form);
+}
+
+/* ---- the MIME writer, paused ---- */
+
+struct slow
+{
+  uint8_t out[65536];
+  size_t n;
+  size_t allow;		/* The most it takes at once (0: nothing).  */
+};
+
+static int
+slow_take (void *user, const uint8_t *data, size_t len, size_t *taken)
+{
+  struct slow *s = user;
+  size_t n = len < s->allow ? len : s->allow;
+
+  memcpy (s->out + s->n, data, n);
+  s->n += n;
+  *taken = n;
+  return 0;
+}
+
+/* A sink that takes none, and then a little at a time: the writer holds what
+   it has, says it is not ready, and nothing is lost or written twice.  */
+static void
+test_mime_pause (void)
+{
+  struct slow s;
+  struct twist_mime *m;
+  uint8_t body[2000];
+  size_t i;
+  size_t fed = 0;
+  int paused_seen = 0;
+  int rounds = 0;
+
+  memset (&s, 0, sizeof s);
+  for (i = 0; i < sizeof body; i++)
+    body[i] = (uint8_t) ('a' + i % 26);
+  m = twist_mime_new_push (slow_take, &s);
+  check (m != NULL && twist_mime_begin (m, "form-data") == TWIST_OK, "a writer");
+  twist_mime_set_strict (m, 1);
+  twist_mime_part (m);
+  twist_mime_header (m, "Content-Disposition", "form-data; name=\"x\"");
+  twist_mime_body (m, NULL, 0);
+  while (fed < sizeof body || twist_mime_pending (m) > 0)
+    {
+      if (twist_mime_paused (m))
+        {
+          paused_seen = 1;
+          check (!twist_mime_ready (m), "a paused writer is not ready");
+          /* The sink takes a little more each round.  */
+          s.allow = 100;
+          twist_mime_resume (m);
+          s.allow = 0;
+        }
+      else if (twist_mime_ready (m) && fed < sizeof body)
+        {
+          size_t n = sizeof body - fed > TWIST_MIME_PIECE
+                     ? TWIST_MIME_PIECE : sizeof body - fed;
+
+          check (twist_mime_body (m, body + fed, n) == TWIST_OK, "fed");
+          fed += n;
+        }
+      else
+        {
+          s.allow = 100;
+          twist_mime_resume (m);
+          s.allow = 0;
+        }
+      if (++rounds > 100000)
+        break;
+    }
+  s.allow = 100000;
+  twist_mime_finish (m);
+  twist_mime_resume (m);
+  check (paused_seen, "the sink's refusal paused the writer");
+  check (twist_mime_pending (m) == 0, "and everything was taken in the end");
+  {
+    const char *end = "\r\n--";
+    const uint8_t *p = s.out;
+    size_t at = 0;
+
+    for (i = 0; i + 2000 <= s.n; i++)
+      if (memcmp (s.out + i, body, sizeof body) == 0)
+        at = i;
+    check (at > 0 && memcmp (p + at + sizeof body, end, 4) == 0,
+           "the body came out whole, once, with a CRLF before the delimiter");
+  }
+  twist_mime_free (m);
+}
+
 int
 main (void)
 {
@@ -822,5 +1227,10 @@ main (void)
   test_http_short ();
   test_http_readfd ();
   test_push_threads ();
+  test_mime_pause ();
+  test_form_known_length ();
+  test_form_pipe_part ();
+  test_form_header_injection ();
+  test_form_escape ();
   return tests_finish ();
 }

@@ -415,7 +415,16 @@ enum twist_opt
   /* A long: a descriptor the body is written to, in place of
      TWISTOPT_WRITEFUNCTION.  As for TWISTOPT_READFD.  A descriptor that cannot
      take more pauses the transfer until it can.  */
-  TWISTOPT_WRITEFD = 84
+  TWISTOPT_WRITEFD = 84,
+  /* A twist_form: the body is a multipart/form-data message made from its
+     parts, sent as it is made and not built first.  The transfer holds a
+     reference to the form (twist_form_free is still the caller's); it is not
+     to be changed after.  The request is a POST unless a method is given, and
+     has the Content-Type of the message unless a header gives one.  The
+     length is sent if every part's is known (data, regular files), and
+     otherwise the body is chunked (HTTP/1) or has no length (HTTP/2 and 3).
+     A form is HTTP's only.  */
+  TWISTOPT_FORM = 85
 };
 
 /* Options of a runtime (twist_runtime_setopt).  */
@@ -538,6 +547,45 @@ int twist_transfer_upload_end (twist_transfer *transfer, int result);
 /* Go on after a callback returned TWIST_WRITEFUNC_PAUSE or
    TWIST_READFUNC_PAUSE.  */
 int twist_transfer_resume (twist_transfer *transfer);
+
+/* A multipart/form-data message (TWISTOPT_FORM).  A part has a name and a
+   value that is data, a file, or a descriptor.  A file is read on a pool of
+   threads, and a descriptor that is not a file is waited for, so that the
+   transfer's loop never reads a part; a part is read as the connection can
+   take it.  A part that comes from a descriptor other than a file can be sent
+   once only.  Starting again (a redirect that keeps the body) needs every part
+   to be data or a file; if not, it is TWIST_ERR_REWIND.  */
+typedef struct twist_form twist_form;
+typedef struct twist_formpart twist_formpart;
+enum twist_form_encoder
+{
+  TWIST_FORM_BINARY = 0,	/* The bytes as they are.  */
+  TWIST_FORM_BASE64 = 1		/* Base64, in lines of 76.  */
+};
+twist_form *twist_form_new (void);
+/* Drop the caller's reference; the form goes with the last one.  */
+void twist_form_free (twist_form *form);
+/* How a name or a file name is written in the Content-Disposition: by default
+   `"`, CR and LF are percent-encoded; with BACKSLASH `"` and `\` have a
+   backslash before them and CR and LF are refused (TWIST_ERR_INVAL).  */
+void twist_form_set_escape (twist_form *form, int backslash);
+/* A part named NAME (which is written to the message at once, and is
+   refused with TWIST_ERR_INVAL if it holds a CR or LF in backslash mode).
+   NULL if there is no memory.  */
+twist_formpart *twist_form_add (twist_form *form, const char *name);
+/* The value, one of these.  The data is copied.  A path is opened when the
+   transfer begins; a descriptor is the caller's and is not closed, and is
+   read from where it is.  */
+int twist_formpart_data (twist_formpart *part, const void *data, size_t len);
+int twist_formpart_file (twist_formpart *part, const char *path);
+int twist_formpart_fd (twist_formpart *part, int fd);
+/* A file name for the part (it makes the part a file in the message), a
+   Content-Type, an encoder, and further headers, as "Name: value".  A header
+   with a CR or LF in it fails the transfer with TWIST_ERR_INVAL.  */
+int twist_formpart_filename (twist_formpart *part, const char *filename);
+int twist_formpart_type (twist_formpart *part, const char *type);
+int twist_formpart_encoder (twist_formpart *part, int encoder);
+int twist_formpart_header (twist_formpart *part, const char *header);
 
 /* Begin TRANSFER on RUNTIME.  It returns at once, and DONE (which may be
    NULL) is called when the transfer ends, whether it ran or could not begin,

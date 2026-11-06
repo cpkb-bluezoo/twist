@@ -93,6 +93,9 @@ struct cli_op
   size_t data_len;
   int has_data;
   int form_next;
+  twist_form *form;		/* -F, the parts so far.  */
+  int form_escape;		/* --form-escape.  */
+  int form_stdin;		/* A part reads standard input.  */
   char *method;
   int head;
   int head_given;		/* -I or --head was given.  */
@@ -262,6 +265,11 @@ usage (void)
   fputs (_("      --data-binary DATA  request body, kept as given\n"), stdout);
   fputs (_("      --data-raw DATA     request body, @ is not a file\n"), stdout);
   fputs (_("      --data-urlencode D  form field, percent-encoded\n"), stdout);
+  fputs (_("  -F, --form NAME=PART    multipart/form-data part: text, @file or <file,\n"
+           "                          then ;type= ;filename= ;headers= ;encoder=\n"),
+         stdout);
+  fputs (_("      --form-escape       backslash-escape quotes in -F names, not %22\n"),
+         stdout);
   fputs (_("  -G, --get               put -d on the query string\n"), stdout);
   fputs (_("  -T, --upload-file FILE  upload FILE (- is stdin) with PUT; send it to telnet\n"),
          stdout);
@@ -666,6 +674,281 @@ add_urlencode (struct cli_op *op, const char *text)
   else
     rc = op_add_bytes (op, enc.p != NULL ? enc.p : "", enc.n, 1);
   free (enc.p);
+  return rc;
+}
+
+/* One value of -F: QUOTED text between double quotes, with a backslash before
+   a quote or a backslash, or text up to the next semicolon.  Returns the text
+   in memory of its own (NULL if there is none), with *END after it.  */
+static char *
+form_word (const char *s, const char **end, int semicolon_ends)
+{
+  struct cli_bytes b;
+
+  memset (&b, 0, sizeof b);
+  if (*s == '"')
+    {
+      s++;
+      while (*s != 0 && *s != '"')
+        {
+          if (*s == '\\' && (s[1] == '"' || s[1] == '\\'))
+            s++;
+          if (bytes_add (&b, s, 1) != TWIST_OK)
+            {
+              free (b.p);
+              return NULL;
+            }
+          s++;
+        }
+      if (*s == '"')
+        s++;
+    }
+  else
+    {
+      while (*s != 0 && !(semicolon_ends && *s == ';'))
+        {
+          if (bytes_add (&b, s, 1) != TWIST_OK)
+            {
+              free (b.p);
+              return NULL;
+            }
+          s++;
+        }
+    }
+  *end = s;
+  if (bytes_add (&b, "", 1) != TWIST_OK)
+    {
+      free (b.p);
+      return NULL;
+    }
+  return b.p;
+}
+
+/* Whether S begins a parameter of a part: ;type= ;filename= ;headers=
+   ;encoder=.  */
+static int
+form_param_at (const char *s)
+{
+  static const char *const keys[] = { "type=", "filename=", "headers=",
+                                      "encoder=" };
+  size_t i;
+
+  if (*s != ';')
+    return 0;
+  s++;
+  for (i = 0; i < sizeof keys / sizeof keys[0]; i++)
+    if (strncasecmp (s, keys[i], strlen (keys[i])) == 0)
+      return 1;
+  return 0;
+}
+
+/* -F NAME=CONTENT[;type=T][;filename=F][;headers=H][;encoder=E].  CONTENT is
+   a string, @FILE (sent as a file with its name) or <FILE (its contents as the
+   value).  The parts are read when the transfer is run, not now.  */
+static int
+add_form (struct cli_op *op, const char *text)
+{
+  const char *eq = strchr (text, '=');
+  const char *p;
+  char *name = NULL;
+  char *value = NULL;
+  char *type = NULL;
+  char *filename = NULL;
+  struct twist_slist *headers = NULL;
+  struct twist_slist *h;
+  int encoder = TWIST_FORM_BINARY;
+  int file = 0;
+  int as_value = 0;
+  twist_formpart *part;
+  int rc = 0;
+
+  if (eq == NULL || eq == text)
+    {
+      diag_code (2, _("illegally formatted input field"));
+      return 2;
+    }
+  if (op->form == NULL)
+    {
+      op->form = twist_form_new ();
+      if (op->form == NULL)
+        return 27;
+    }
+  name = twist_xmalloc ((size_t) (eq - text) + 1);
+  if (name == NULL)
+    return 27;
+  memcpy (name, text, (size_t) (eq - text));
+  name[eq - text] = 0;
+  p = eq + 1;
+  if (*p == '@' || *p == '<')
+    {
+      file = 1;
+      as_value = *p == '<';
+      p++;
+      value = form_word (p, &p, 1);
+    }
+  else if (*p == '"')
+    value = form_word (p, &p, 1);
+  else
+    {
+      /* A literal ends at the first parameter, so a semicolon can be in it.  */
+      const char *q = p;
+
+      while (*q != 0 && !form_param_at (q))
+        q++;
+      value = twist_xmalloc ((size_t) (q - p) + 1);
+      if (value != NULL)
+        {
+          memcpy (value, p, (size_t) (q - p));
+          value[q - p] = 0;
+        }
+      p = q;
+    }
+  if (value == NULL)
+    {
+      free (name);
+      return 27;
+    }
+  while (*p == ';' && rc == 0)
+    {
+      const char *k = ++p;
+      const char *v;
+      char *word;
+
+      while (*p != 0 && *p != '=' && *p != ';')
+        p++;
+      if (*p != '=')
+        {
+          diag_code (2, _("illegally formatted input field"));
+          rc = 2;
+          break;
+        }
+      v = p + 1;
+      word = form_word (v, &p, 1);
+      if (word == NULL)
+        {
+          rc = 27;
+          break;
+        }
+      if (p - k >= 5 && strncasecmp (k, "type=", 5) == 0)
+        {
+          free (type);
+          type = word;
+        }
+      else if (strncasecmp (k, "filename=", 9) == 0)
+        {
+          free (filename);
+          filename = word;
+        }
+      else if (strncasecmp (k, "headers=", 8) == 0)
+        {
+          if (word[0] == '@')
+            {
+              struct cli_bytes lines;
+              char *l;
+              char *save = NULL;
+
+              memset (&lines, 0, sizeof lines);
+              if (read_named (word + 1, &lines, 0) != TWIST_OK
+                  || bytes_add (&lines, "", 1) != TWIST_OK)
+                {
+                  char msg[256];
+
+                  snprintf (msg, sizeof msg, _("could not read %s"), word + 1);
+                  diag_code (26, msg);
+                  rc = 26;
+                }
+              else
+                for (l = strtok_r (lines.p, "\r\n", &save); l != NULL;
+                     l = strtok_r (NULL, "\r\n", &save))
+                  headers = twist_slist_append (headers, l);
+              free (lines.p);
+            }
+          else
+            headers = twist_slist_append (headers, word);
+          free (word);
+        }
+      else if (strncasecmp (k, "encoder=", 8) == 0)
+        {
+          if (strcasecmp (word, "base64") == 0)
+            encoder = TWIST_FORM_BASE64;
+          else if (strcasecmp (word, "binary") == 0)
+            encoder = TWIST_FORM_BINARY;
+          else
+            {
+              diag_code (2, _("unsupported encoder; use binary or base64"));
+              rc = 2;
+            }
+          free (word);
+        }
+      else
+        {
+          diag_code (2, _("illegally formatted input field"));
+          free (word);
+          rc = 2;
+        }
+    }
+  if (rc == 0 && file && strcmp (value, "-") != 0 && access (value, R_OK) != 0)
+    {
+      char msg[256];
+
+      snprintf (msg, sizeof msg, _("could not read %s"), value);
+      diag_code (26, msg);
+      rc = 26;
+    }
+  if (rc == 0 && file && strcmp (value, "-") == 0 && op->form_stdin)
+    {
+      diag_code (2, _("only one form part can read standard input"));
+      rc = 2;
+    }
+  if (rc == 0)
+    {
+      part = twist_form_add (op->form, name);
+      if (part == NULL)
+        rc = 27;
+      else if (file)
+        {
+          const char *base = strrchr (value, '/');
+
+          if (strcmp (value, "-") == 0)
+            {
+              twist_formpart_fd (part, STDIN_FILENO);
+              op->form_stdin = 1;
+            }
+          else
+            twist_formpart_file (part, value);
+          /* A file is sent as one, with its name and a type; its contents
+             as a value (<) are not.  */
+          if (!as_value)
+            {
+              base = base != NULL ? base + 1 : value;
+              twist_formpart_filename (part, filename != NULL ? filename : base);
+              twist_formpart_type (part, type != NULL ? type
+                                   : "application/octet-stream");
+            }
+          else
+            {
+              twist_formpart_filename (part, filename);
+              twist_formpart_type (part, type);
+            }
+        }
+      else
+        {
+          twist_formpart_data (part, value, strlen (value));
+          twist_formpart_filename (part, filename);
+          twist_formpart_type (part, type);
+        }
+      if (part != NULL)
+        {
+          twist_formpart_encoder (part, encoder);
+          for (h = headers; h != NULL; h = h->next)
+            twist_formpart_header (part, h->data);
+        }
+    }
+  twist_slist_free_all (headers);
+  free (name);
+  free (value);
+  free (type);
+  free (filename);
   return rc;
 }
 
@@ -1780,7 +2063,24 @@ job_prepare (struct cli_run *run, struct cli_next *next, struct cli_job **out)
   /* A transfer reads standard input when it is told to send it, or is a
      telnet session that is given nothing else to send.  */
   job->reads_stdin = (upload != NULL && strcmp (upload, "-") == 0)
-                     || (upload == NULL && is_telnet_url (url));
+                     || (upload == NULL && is_telnet_url (url))
+                     || (op->form != NULL && op->form_stdin);
+  if (op->form != NULL)
+    {
+      if (!is_http_url (url))
+        {
+          diag_code (2, _("--form works for http and https URLs only"));
+          rc = 2;
+          goto fail;
+        }
+      if (upload != NULL || op->has_data)
+        {
+          diag_code (2, _("--form cannot be used with --data or "
+                          "--upload-file"));
+          rc = 2;
+          goto fail;
+        }
+    }
   if (run->parallel && job->reads_stdin)
     {
       if (run->stdin_taken)
@@ -2051,6 +2351,13 @@ job_prepare (struct cli_run *run, struct cli_next *next, struct cli_job **out)
     twist_transfer_setopt (transfer, TWISTOPT_READFD, (long) job->ustream.fd);
   if (payload != NULL)
     twist_transfer_setopt (transfer, TWISTOPT_POSTFIELDSIZE, (long) payload_n);
+  if (op->form != NULL)
+    {
+      /* Read as it is sent: files off the loop's thread, and standard input as
+         it comes.  */
+      twist_form_set_escape (op->form, op->form_escape);
+      twist_transfer_setopt (transfer, TWISTOPT_FORM, op->form);
+    }
   twist_transfer_setopt (transfer, TWISTOPT_HTTPHEADER,
                          op->headers != NULL ? op->headers : NULL);
   twist_transfer_setopt (transfer, TWISTOPT_TELNETOPTIONS, op->telnet);
@@ -2395,6 +2702,7 @@ free_op (struct cli_op *op)
   free_items (op->outputs);
   free_items (op->uploads);
   free (op->data);
+  twist_form_free (op->form);
   free (op->method);
   free (op->dump_header);
   free (op->writeout);
@@ -2560,6 +2868,9 @@ main (int argc, char **argv)
     { "data-binary", required_argument, NULL, 24 },
     { "data-raw", required_argument, NULL, 25 },
     { "data-urlencode", required_argument, NULL, 26 },
+    { "form", required_argument, NULL, 'F' },
+    { "form-escape", no_argument, NULL, 200 },
+    { "no-form-escape", no_argument, NULL, NEGATE_BIT | 200 },
     { "get", no_argument, NULL, 'G' },
     { "no-get", no_argument, NULL, NEGATE_BIT | 'G' },
     { "upload-file", required_argument, NULL, 'T' },
@@ -2733,7 +3044,7 @@ main (int argc, char **argv)
           continue;
         }
       c = getopt_long (argc, argv,
-                       "+:o:X:H:d:Lkx:A:u:Iw:fE:hm:e:r:b:sS#OT:t:GgiD:qC:lQ:U:Zap",
+                       "+:o:X:H:d:Lkx:A:u:Iw:fE:hm:e:r:b:sS#OT:t:GgiD:qC:lQ:U:ZapF:",
                        expandable, NULL);
       if (c == -1)
         break;
@@ -2831,6 +3142,12 @@ main (int argc, char **argv)
           break;
         case 'T':
           status = append_item (&op->uploads, &op->uploads_tail, optarg, 0);
+          break;
+        case 'F':
+          status = add_form (op, optarg);
+          break;
+        case 200:
+          op->form_escape = !negate;
           break;
         case 'a':
           op_set_long (op, TWISTOPT_APPEND, negate ? 0L : 1L);
