@@ -33,6 +33,7 @@ libtwist_la_LIBADD = $(QUICKSTEP_LIBS) $(FOXTROT_LIBS) $(ZLIB_LIBS) \
 ##   reactor/  loop, connection, poll, timers, runtime, storage
 ##   engine/   url, transfer/runtime, proxy, scheme table
 ##   dns/      DNS client: message parser, transport order, resolver
+##   asn1/     BER and DER writer and reader
 ##   auth/     SASL clients, HTTP Basic and Digest, hashes and ciphers
 ##   http/     HTTP/1, HTTP/2, HTTP/3 and cookies
 ##   ftp/ file/ mail/ mqtt/ ldap/ ws/ gopher/ rtsp/ dict/ telnet/ tftp/ ssh/  scheme handlers
@@ -46,6 +47,7 @@ libtwist_la_SOURCES = \
   strerror.c \
   twist-int.h \
   util.c \
+  asn1/asn1.c \
   auth/b64.c \
   auth/basic.c \
   auth/digest.c \

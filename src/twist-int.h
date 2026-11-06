@@ -1876,6 +1876,79 @@ int twist_smb_kdf (const uint8_t *key, size_t keylen,
                    const void *context, size_t contextlen,
                    unsigned bits, uint8_t *out);
 
+/* BER and DER (src/asn1/asn1.c), shared by LDAP and SPNEGO.  Tags are one
+   byte; lengths are definite, in at most three bytes.  */
+
+/* The writer encodes into BUF, which the caller owns.  An element that does
+   not fit sets err and nothing more is written.  A constructed element is
+   opened with twist_der_begin and closed with twist_der_end on its mark.  In
+   BER mode (DER 0) its length takes three bytes whatever it is; in DER mode
+   it takes the fewest, as DER requires.  */
+struct twist_der_writer
+{
+  uint8_t *buf;
+  size_t cap, n;
+  int err;
+  int der;
+};
+void twist_der_writer_init (struct twist_der_writer *w, uint8_t *buf,
+                            size_t cap, int der);
+void twist_der_put (struct twist_der_writer *w, uint8_t tag,
+                    const void *data, size_t n);
+void twist_der_put_int (struct twist_der_writer *w, uint8_t tag, int v);
+size_t twist_der_begin (struct twist_der_writer *w, uint8_t tag);
+void twist_der_end (struct twist_der_writer *w, size_t mark);
+
+/* The reader.  start and end bracket a constructed element and prim carries
+   a primitive one, whole: val is a slice of the scratch buffer given to
+   twist_der_reader_init (its size is the longest primitive taken) and is not
+   kept after the call.  A callback returns TWIST_OK, an error, or
+   TWIST_DER_STOP, after which the reader consumes nothing more.  An error
+   from a callback, or from the encoding, is reported once through failure,
+   and receive then takes all it is given.  */
+#define TWIST_DER_DEPTH 12
+#define TWIST_DER_STOP (-1)
+
+struct twist_der_events
+{
+  void *user;
+  int (*start) (void *user, uint8_t tag, size_t len);
+  int (*end) (void *user, uint8_t tag);
+  int (*prim) (void *user, uint8_t tag, const uint8_t *val, size_t len);
+  void (*failure) (void *user, int err);
+};
+
+/* Strict is DER: a tag is a single byte, and a length is in the short form
+   below 128 and otherwise the fewest bytes.  Indefinite lengths, lengths of
+   more than three bytes, nesting deeper than TWIST_DER_DEPTH and an element
+   longer than max_len are errors in both modes.  max_len is 1 MiB unless
+   the caller changes it.  */
+struct twist_der_reader
+{
+  const struct twist_der_events *ev;
+  uint8_t *val;
+  size_t cap, max_len;
+  int strict;
+  int st;
+  uint8_t tag;
+  size_t len, got;
+  int len_left, len_first;
+  struct
+  {
+    uint8_t tag;
+    size_t left;
+  } stk[TWIST_DER_DEPTH];
+  int depth;
+  int failed, stopped;
+};
+void twist_der_reader_init (struct twist_der_reader *r,
+                            const struct twist_der_events *ev, uint8_t *val,
+                            size_t cap, int strict);
+size_t twist_der_receive (struct twist_der_reader *r, const uint8_t *data,
+                          size_t len);
+/* Between top-level elements, with nothing open and nothing half read.  */
+int twist_der_idle (const struct twist_der_reader *r);
+
 /* For NTLM (src/auth/ntlm.c) and nothing else.  MD4 makes the NT hash of a
    password, RC4 carries the exported session key and seals a signature's
    checksum, and HMAC-MD5 does the rest.  They are not part of twist.h.  */
