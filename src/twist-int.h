@@ -1864,6 +1864,33 @@ int twist_auth_digest (const char *challenge, const char *method,
                        unsigned nc, const char *cnonce, char **out);
 int twist_md5 (const void *data, size_t len, uint8_t out[16]);
 int twist_sha256 (const void *data, size_t len, uint8_t out[32]);
+int twist_sha512 (const void *data, size_t len, uint8_t out[64]);
+int twist_cmac_aes128 (const uint8_t key[16], const void *data, size_t len,
+                       uint8_t out[16]);
+
+/* The key derivation of MS-SMB2 3.1.4.2 (SP800-108, counter mode, HMAC-SHA256).
+   LABEL and CONTEXT are given as SMB defines them, with the label's NUL; BITS
+   is 128 or 256 and OUT holds that many bits.  */
+int twist_smb_kdf (const uint8_t *key, size_t keylen,
+                   const void *label, size_t labellen,
+                   const void *context, size_t contextlen,
+                   unsigned bits, uint8_t *out);
+
+/* For NTLM (src/auth/ntlm.c) and nothing else.  MD4 makes the NT hash of a
+   password, RC4 carries the exported session key and seals a signature's
+   checksum, and HMAC-MD5 does the rest.  They are not part of twist.h.  */
+int twist_md4 (const void *data, size_t len, uint8_t out[16]);
+int twist_hmac_md5 (const void *key, size_t keylen, const void *data,
+                    size_t len, uint8_t out[16]);
+struct twist_rc4
+{
+  uint8_t s[256];
+  uint8_t i, j;
+};
+int twist_rc4_init (struct twist_rc4 *c, const uint8_t *key, size_t keylen);
+void twist_rc4_crypt (struct twist_rc4 *c, const uint8_t *in, uint8_t *out,
+                      size_t len);
+void twist_rc4_wipe (struct twist_rc4 *c);
 int twist_b64_encode (const uint8_t *in, size_t len, char **out);
 
 /* Client SASL.  Responses are raw bytes; the protocol encodes them.  */
