@@ -27,7 +27,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* smb:// as a download, against the scripted server of smbsrv.c: a whole
+/* smb:// as a download and as an upload, against the scripted server of smbsrv.c: a whole
    login, then the file as the handler asks for it.  The server can answer
    as a real one does not always: with less than was asked, with answers out
    of order, with an error for the file or the share.  */
@@ -37,6 +37,9 @@
 
 struct scen
 {
+  int strict_dirs;		/* A file whose directories are not there is refused.  */
+  uint32_t write_status;	/* An error for the writes.  */
+  int short_write;		/* Say one byte fewer was written.  */
   int short_reads;		/* Answer half of what is asked.  */
   int reorder;			/* Answer the reads that are waiting backwards.  */
   uint32_t create_status;	/* An error for the CREATE.  */
@@ -65,6 +68,15 @@ struct tx
   char cmds[256];
   char name[64];
   int saw_domain;
+  /* The server's side of an upload.  */
+  uint8_t store[FILE_MAX + 16];
+  size_t store_len;
+  int store_exists;
+  uint32_t disposition;
+  char dirs[256];
+  unsigned writes;
+  unsigned max_write_len;
+  int stalled;
 };
 
 static uint8_t
@@ -88,6 +100,12 @@ on_write (char *p, size_t size, size_t nmemb, void *u)
     memcpy (z->out + z->out_n, p, n);
   z->out_n += n;
   return n;
+}
+
+static int
+is_full (void *u)
+{
+  return ((struct tx *) u)->stalled;
 }
 
 static int
@@ -230,13 +248,55 @@ handle (struct tx *z, const uint8_t *f, size_t n)
         size_t off = plain.b[64 + 44] | (plain.b[64 + 45] << 8);
         size_t nl = plain.b[64 + 46] | (plain.b[64 + 47] << 8);
         char name[64];
-        uint32_t opts = plain.b[64 + 40] | (plain.b[64 + 41] << 8);
+        uint32_t disp = plain.b[64 + 36];
+        uint32_t opts = plain.b[64 + 40];
+        uint64_t eof = z->sc.size;
 
         for (i = 0; i < nl / 2 && i + 1 < sizeof name; i++)
           name[i] = (char) plain.b[off + 2 * i];
         name[i] = 0;
         snprintf (z->name, sizeof z->name, "%s", name);
-        note (z, 'O');
+        z->disposition = disp;
+        if ((opts & 1) != 0)
+          {
+            /* A directory.  */
+            note (z, 'M');
+            if (strlen (z->dirs) + strlen (name) + 2 < sizeof z->dirs)
+              {
+                strcat (z->dirs, name);
+                strcat (z->dirs, ";");
+              }
+            eof = 0;
+          }
+        else
+          {
+            note (z, 'O');
+            if (z->sc.strict_dirs && strchr (name, '\\') != NULL)
+              {
+                /* The directory above has to have been made.  */
+                char dir[64], probe[72];
+                const char *last = strrchr (name, '\\');
+
+                memcpy (dir, name, (size_t) (last - name));
+                dir[last - name] = 0;
+                snprintf (probe, sizeof probe, "%s;", dir);
+                if (strstr (z->dirs, probe) == NULL)
+                  {
+                    body_error (&r, 5, 0xC000003Au, id);
+                    srv_seal (&z->srv, &r);
+                    return;
+                  }
+              }
+            if (disp == 5)
+              {
+                z->store_len = 0;
+                z->store_exists = 1;
+              }
+            else if (disp == 3 && !z->store_exists)
+              z->store_exists = 1;
+            if (disp == 3 || disp == 5)
+              eof = z->store_len;
+          }
         if (z->sc.create_status != 0)
           {
             body_error (&r, 5, z->sc.create_status, id);
@@ -249,15 +309,49 @@ handle (struct tx *z, const uint8_t *f, size_t n)
         p8 (&r, 0);
         p32 (&r, 1);
         pz (&r, 32);
-        p64 (&r, z->sc.size);
-        p64 (&r, z->sc.size);
+        p64 (&r, eof);
+        p64 (&r, eof);
         p32 (&r, 0x20);
         p32 (&r, 0);
         for (i = 0; i < 16; i++)
           p8 (&r, 0xc0 + i);
         p32 (&r, 0);
         p32 (&r, 0);
-        (void) opts;
+        srv_seal (&z->srv, &r);
+        return;
+      }
+    case 9:			/* WRITE */
+      {
+        uint32_t len = plain.b[64 + 4] | (plain.b[64 + 5] << 8)
+          | (plain.b[64 + 6] << 16) | ((uint32_t) plain.b[64 + 7] << 24);
+        uint64_t off = 0;
+        size_t doff = plain.b[64 + 2] | (plain.b[64 + 3] << 8);
+
+        for (i = 0; i < 8; i++)
+          off |= (uint64_t) plain.b[64 + 8 + i] << (8 * i);
+        note (z, 'W');
+        z->writes++;
+        if (len > z->max_write_len)
+          z->max_write_len = len;
+        if (z->sc.write_status != 0)
+          {
+            body_error (&r, 9, z->sc.write_status, id);
+            srv_seal (&z->srv, &r);
+            return;
+          }
+        if (off + len <= FILE_MAX && doff + len <= plain.n)
+          {
+            memcpy (z->store + off, plain.b + doff, len);
+            if (off + len > z->store_len)
+              z->store_len = (size_t) (off + len);
+          }
+        header (&r, 9, 0, 0, id, SESSION_ID, 5);
+        p16 (&r, 17);
+        p16 (&r, 0);
+        p32 (&r, z->sc.short_write ? len - 1 : len);
+        p32 (&r, 0);
+        p16 (&r, 0);
+        p16 (&r, 0);
         srv_seal (&z->srv, &r);
         return;
       }
@@ -372,7 +466,7 @@ launch (struct tx *z)
   if (z->x == NULL || z->t->done)
     return;
   srv_init (&z->srv, z->sc.o, to_client, z);
-  twist_smb_test_seam (z->x, to_server, z);
+  twist_smb_test_seam (z->x, to_server, is_full, z);
   twist_smb_start (z->x);
   serve (z);
   if (getenv ("SMB_DEBUG") != NULL)
@@ -654,6 +748,285 @@ test_pause (void)
   finish (z);
 }
 
+
+/* ---- Uploads ---- */
+
+static const uint8_t *push_src;
+static size_t push_len, push_pos;
+static int push_ended;
+
+/* Push what is left of the source in pieces of PIECE bytes, as far as the
+   transfer takes it, and end it when it is all pushed.  */
+static void
+push_more (struct tx *z, size_t piece)
+{
+  while (push_pos < push_len)
+    {
+      size_t n = push_len - push_pos < piece ? push_len - push_pos : piece;
+      size_t taken = 0;
+      int rc = twist_transfer_upload_push (z->t, push_src + push_pos, n, &taken);
+
+      push_pos += taken;
+      if (rc != TWIST_OK || taken < n)
+        return;
+    }
+  if (!push_ended)
+    {
+      push_ended = 1;
+      twist_transfer_upload_end (z->t, TWIST_OK);
+    }
+}
+
+static struct tx *
+begin_put (const char *url, struct scen sc, const uint8_t *data, size_t n)
+{
+  struct tx *z = begin (url, "Domain\\User", sc);
+
+  push_src = data;
+  push_len = n;
+  push_pos = 0;
+  push_ended = 0;
+  twist_transfer_setopt (z->t, TWISTOPT_UPLOAD_PUSH, 1L);
+  return z;
+}
+
+/* Run an upload to its end, pushing PIECE bytes at a time.  */
+static void
+run_put (struct tx *z, size_t piece)
+{
+  int idle = 0;
+  unsigned iter;
+
+  if (z->x == NULL)
+    launch (z);
+  for (iter = 0; iter < 400000 && !z->t->done && idle < 4; iter++)
+    {
+      size_t before = push_pos;
+
+      push_more (z, piece);
+      serve (z);
+      idle = push_pos == before && z->qhead == z->qtail && !push_ended
+        ? idle + 1 : 0;
+    }
+}
+
+static uint8_t *
+pattern (size_t n)
+{
+  uint8_t *d = malloc (n);
+  size_t i;
+
+  for (i = 0; i < n; i++)
+    d[i] = (uint8_t) (i * 31 + i / 13);
+  return d;
+}
+
+#define PURL "smb://server.example/share/dir/up.bin"
+
+static void
+test_upload (void)
+{
+  struct scen sc = plain_scen ();
+  struct tx *z;
+  uint8_t *data = pattern (150000);
+  size_t pieces[] = { 1, 100000 }, k;
+
+  for (k = 0; k < 2; k++)
+    {
+      z = begin_put (PURL, sc, data, 150000);
+      run_put (z, pieces[k]);
+      check (z->t->done && z->t->result == TWIST_OK, "smb: an upload ends well");
+      check (z->store_len == 150000 && memcmp (z->store, data, 150000) == 0,
+             "smb: and the file is what was sent");
+      check (z->disposition == 5, "smb: the file is created, or replaced");
+      check (z->t->progress.uploaded == 150000,
+             "smb: the meter counts what the server wrote");
+      check (z->cmds[0] == 'O' && strcmp (z->cmds + strlen (z->cmds) - 3, "CDL") == 0
+             && strchr (z->cmds, 'R') == NULL,
+             "smb: CREATE, the writes, CLOSE, TREE_DISCONNECT and LOGOFF");
+      check (z->max_write_len <= 65536 && z->writes <= 24,
+             "smb: writes are gathered, not one for each byte of the source");
+      finish (z);
+    }
+  /* A file that is there is replaced, not added to.  */
+  z = begin_put (PURL, sc, data, 1000);
+  z->store_exists = 1;
+  z->store_len = 5000;
+  memset (z->store, 0xee, 5000);
+  run_put (z, 777);
+  check (z->t->done && z->t->result == TWIST_OK && z->store_len == 1000
+         && memcmp (z->store, data, 1000) == 0,
+         "smb: a file that is there is replaced");
+  finish (z);
+  /* An empty file.  */
+  z = begin_put (PURL, sc, data, 0);
+  run_put (z, 10);
+  check (z->t->done && z->t->result == TWIST_OK && z->store_exists
+         && z->store_len == 0 && z->writes == 0,
+         "smb: an upload of nothing makes an empty file");
+  finish (z);
+  /* The data of a POST.  */
+  z = begin (PURL, "Domain\\User", sc);
+  twist_transfer_setopt (z->t, TWISTOPT_POSTFIELDS, "hello, smb");
+  launch (z);
+  check (z->t->done && z->t->result == TWIST_OK && z->store_len == 10
+         && memcmp (z->store, "hello, smb", 10) == 0,
+         "smb: data given whole is uploaded too");
+  finish (z);
+  free (data);
+}
+
+static void
+test_append (void)
+{
+  struct scen sc = plain_scen ();
+  struct tx *z;
+  uint8_t *data = pattern (30000);
+
+  z = begin_put (PURL, sc, data, 30000);
+  twist_transfer_setopt (z->t, TWISTOPT_APPEND, 1L);
+  z->store_exists = 1;
+  z->store_len = 1000;
+  memset (z->store, 0xaa, 1000);
+  run_put (z, 4096);
+  check (z->t->done && z->t->result == TWIST_OK && z->disposition == 3,
+         "smb: -a opens the file without replacing it");
+  check (z->store_len == 31000 && z->store[999] == 0xaa
+         && memcmp (z->store + 1000, data, 30000) == 0,
+         "smb: and writes at the end of what is there");
+  finish (z);
+  z = begin_put (PURL, sc, data, 100);
+  twist_transfer_setopt (z->t, TWISTOPT_APPEND, 1L);
+  run_put (z, 100);
+  check (z->t->done && z->t->result == TWIST_OK && z->store_len == 100
+         && memcmp (z->store, data, 100) == 0,
+         "smb: -a makes the file if it is not there");
+  finish (z);
+  free (data);
+}
+
+static void
+test_dirs (void)
+{
+  struct scen sc = plain_scen ();
+  struct tx *z;
+  uint8_t *data = pattern (500);
+
+  sc.strict_dirs = 1;
+  z = begin_put ("smb://server.example/share/a/b/c.bin", sc, data, 500);
+  twist_transfer_setopt (z->t, TWISTOPT_CREATE_MISSING_DIRS, 1L);
+  run_put (z, 500);
+  check (z->t->done && z->t->result == TWIST_OK && z->store_len == 500
+         && strcmp (z->dirs, "a;a\\b;") == 0,
+         "smb: --ftp-create-dirs makes the directories, outermost first");
+  check (strncmp (z->cmds, "MCMCO", 5) == 0,
+         "smb: each is opened and the file after them");
+  finish (z);
+  z = begin_put ("smb://server.example/share/a/b/c.bin", sc, data, 500);
+  run_put (z, 500);
+  check (z->t->done && z->t->result == TWIST_ERR_FILE && z->t->proto_status == 25,
+         "smb: without it, a missing directory is an upload failure (25)");
+  finish (z);
+  free (data);
+}
+
+static void
+test_stall (void)
+{
+  struct scen sc = plain_scen ();
+  struct tx *z;
+  uint8_t *data = pattern (120000);
+  size_t before;
+
+  z = begin_put (PURL, sc, data, 120000);
+  z->stalled = 1;
+  launch (z);
+  {
+    int i;
+
+    for (i = 0; i < 40; i++)
+      {
+        push_more (z, 1000);
+        serve (z);
+      }
+  }
+  check (strchr (z->cmds, 'W') == NULL && !z->t->done,
+         "smb: a connection that is full is sent no write");
+  check (push_pos > 30000 && push_pos < 70000,
+         "smb: and the source is held back after about what fits in a write");
+  before = push_pos;
+  {
+    int i;
+
+    for (i = 0; i < 5; i++)
+      {
+        push_more (z, 1000);
+        serve (z);
+      }
+  }
+  check (push_pos == before, "smb: it takes no more while it waits");
+  z->stalled = 0;
+  twist_smb_drained (z->x);
+  run_put (z, 1000);
+  check (z->t->done && z->t->result == TWIST_OK && z->store_len == 120000
+         && memcmp (z->store, data, 120000) == 0,
+         "smb: it goes on when the connection has room, and every byte arrives");
+  finish (z);
+  free (data);
+}
+
+static void
+test_put_failures (void)
+{
+  struct scen sc = plain_scen ();
+  struct tx *z;
+  uint8_t *data = pattern (1000);
+
+  sc.write_status = 0xC000007Fu;
+  z = begin_put (PURL, sc, data, 1000);
+  run_put (z, 1000);
+  check (z->t->done && z->t->result == TWIST_ERR_FILE && z->t->proto_status == 25,
+         "smb: a disk that is full is an upload failure (25)");
+  finish (z);
+  sc = plain_scen ();
+  sc.create_status = 0xC0000022u;
+  z = begin_put (PURL, sc, data, 1000);
+  run_put (z, 1000);
+  check (z->t->done && z->t->proto_status == 9,
+         "smb: a file the user may not write is exit 9");
+  finish (z);
+  sc = plain_scen ();
+  sc.short_write = 1;
+  z = begin_put (PURL, sc, data, 1000);
+  run_put (z, 1000);
+  check (z->t->done && z->t->result == TWIST_ERR_PARTIAL,
+         "smb: a server that writes less than it was sent is not followed");
+  finish (z);
+  sc = plain_scen ();
+  z = begin_put (PURL, sc, data, 1000);
+  launch (z);
+  twist_transfer_upload_push (z->t, data, 500, &(size_t) { 0 });
+  twist_transfer_upload_end (z->t, TWIST_ERR_ABORTED);
+  serve (z);
+  push_more (z, 10);
+  serve (z);
+  check (z->t->done && z->t->result == TWIST_ERR_ABORTED,
+         "smb: a source that fails fails the transfer");
+  finish (z);
+  z = begin_put ("smb://server.example/share/dir/", sc, data, 1000);
+  launch (z);
+  check (z->t->done && z->t->result == TWIST_ERR_URL && z->qtail == 0,
+         "smb: an upload to a directory is a malformed URL");
+  finish (z);
+  z = begin_put (PURL, sc, data, 1000);
+  twist_transfer_setopt (z->t, TWISTOPT_RANGE, "1-2");
+  launch (z);
+  check (z->t->done && z->t->result == TWIST_ERR_INVAL,
+         "smb: a range does not apply to an upload");
+  finish (z);
+  free (data);
+}
+
 int
 main (void)
 {
@@ -662,5 +1035,10 @@ main (void)
   test_failures ();
   test_urls ();
   test_pause ();
+  test_upload ();
+  test_append ();
+  test_dirs ();
+  test_stall ();
+  test_put_failures ();
   return tests_finish ();
 }

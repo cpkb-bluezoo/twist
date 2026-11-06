@@ -53,6 +53,8 @@
    gave.  A listing and an upload are other issues and are refused here.  */
 
 #define READ_WINDOW 8u
+#define WRITE_WINDOW 8u
+#define PUSH_MAX 8192u
 #define SLOTS 32u
 #define SMB_STATUS_ACCESS_DENIED 0xC0000022u
 #define SMB_STATUS_END_OF_FILE 0xC0000011u
@@ -60,15 +62,26 @@
 #define FILE_READ_ATTRIBUTES 0x00000080u
 #define SYNCHRONIZE 0x00100000u
 #define FILE_SHARE_ALL 0x00000007u
+#define FILE_SHARE_READ 0x00000001u
 #define FILE_OPEN 0x00000001u
+#define FILE_OPEN_IF 0x00000003u
+#define FILE_OVERWRITE_IF 0x00000005u
+#define FILE_DIRECTORY_FILE 0x00000001u
 #define FILE_NON_DIRECTORY_FILE 0x00000040u
+#define FILE_WRITE_DATA 0x00000002u
+#define FILE_APPEND_DATA 0x00000004u
+#define FILE_WRITE_ATTRIBUTES 0x00000100u
+#define FILE_ATTRIBUTE_DIRECTORY 0x00000010u
 
 enum
 {
   X_NEW,
   X_LOGIN,			/* Until the tree is connected.  */
+  X_MKDIR,			/* Making a directory above the file.  */
+  X_MKCLOSE,
   X_OPEN,
   X_READ,
+  X_WRITE,
   X_CLOSE,
   X_TREED,
   X_LOGOFF,
@@ -108,6 +121,27 @@ struct twist_smb
   int hold;			/* The application's callback is full.  */
   int sent_close;
   int ranged;
+
+  /* Upload.  */
+  int put;
+  int append;
+  int make_dirs;
+  size_t dir_pos;		/* Into path: where the next directory name ends.  */
+  struct twist_upload *up;
+  int up_owned;
+  uint8_t *wbuf;
+  size_t wcap, wlen;
+  int src_eof, src_failed;
+  int pumping;
+  uint64_t put_off;
+  struct
+  {
+    uint64_t id;
+    uint32_t len;
+  } wr[WRITE_WINDOW];
+  unsigned nwr;
+  int cur_w;			/* Index of the write being answered, or -1.  */
+  int (*test_full) (void *user);
 };
 
 static const struct twist_ntlm_rand *test_rnd;
@@ -145,7 +179,9 @@ smb_fail (struct twist_smb *x, int err)
 
   if (x->finished)
     return;
-  if (x->phase >= X_CLOSE)
+  /* Once everything wanted is written (and, for an upload, the file is
+     closed) a failure in the teardown is not the transfer's.  */
+  if (x->phase >= (x->put ? X_TREED : X_CLOSE))
     {
       smb_complete (x, TWIST_OK);
       return;
@@ -284,6 +320,16 @@ smb_send (void *user, const uint8_t *data, size_t len)
   if (x->ep == NULL)
     return TWIST_ERR_CLOSED;
   return twist_endpoint_send (x->ep, data, len);
+}
+
+/* Whether the connection holds as much as it should of what has not been
+   written: nothing more is sent until it says it has room.  */
+static int
+conn_full (struct twist_smb *x)
+{
+  if (x->test_full != NULL)
+    return x->test_full (x->test_user);
+  return x->ep != NULL && twist_endpoint_full (x->ep);
 }
 
 /* ---- The range ---- */
@@ -506,6 +552,17 @@ on_header (void *u, const struct twist_smb_header *h)
   unsigned i;
 
   x->cur = NULL;
+  x->cur_w = -1;
+  if (x->phase == X_WRITE && h->command == TWIST_SMB_WRITE)
+    {
+      for (i = 0; i < x->nwr; i++)
+        if (x->wr[i].id == h->message_id)
+          {
+            x->cur_w = (int) i;
+            break;
+          }
+      return TWIST_OK;
+    }
   if (x->phase != X_READ || h->command != TWIST_SMB_READ)
     return TWIST_OK;
   for (i = 0; i < x->nslots; i++)
@@ -523,7 +580,7 @@ on_create (void *u, const struct twist_smb_create *r)
 {
   struct twist_smb *x = u;
 
-  if (x->phase != X_OPEN)
+  if (x->phase != X_OPEN && x->phase != X_MKDIR)
     return TWIST_ERR_PROTOCOL;
   memcpy (x->fid, r->file_id, 16);
   x->size = r->end_of_file;
@@ -607,8 +664,14 @@ on_error (void *u, uint32_t status, unsigned ctx, uint32_t n)
     default:
       break;
     }
+  /* An upload that fails is exit 25, unless it was not allowed to (9).  */
   if (err == TWIST_ERR_FILE && x->transfer->proto_status == 0)
-    x->transfer->proto_status = 78;
+    x->transfer->proto_status = x->put ? 25 : 78;
+  if (x->put && err == TWIST_ERR_PROTOCOL && x->phase >= X_OPEN)
+    {
+      err = TWIST_ERR_FILE;
+      x->transfer->proto_status = 25;
+    }
   {
     char msg[200];
 
@@ -622,11 +685,276 @@ on_error (void *u, uint32_t status, unsigned ctx, uint32_t n)
 }
 
 static int
+on_write (void *u, uint32_t count, uint32_t rem)
+{
+  struct twist_smb *x = u;
+
+  (void) rem;
+  if (x->phase != X_WRITE || x->cur_w < 0)
+    return TWIST_ERR_PROTOCOL;
+  if (count != x->wr[x->cur_w].len)
+    {
+      /* A server that writes less than it was sent is not followed.  */
+      detail (x, _("the server wrote less than it was sent"));
+      smb_complete (x, TWIST_ERR_PARTIAL);
+      return TWIST_OK;
+    }
+  twist_progress_uploaded (x->transfer, count);
+  return TWIST_OK;
+}
+
+static int
 on_pending (void *u, uint64_t async_id)
 {
   (void) u;
   (void) async_id;
   return TWIST_OK;
+}
+
+/* ---- Upload ---- */
+
+static int
+send_write (struct twist_smb *x)
+{
+  struct twist_smb_req h;
+  uint8_t head[256];
+  size_t n;
+  int rc = twist_smb_session_request (x->sess, 1, &h);
+
+  if (rc != TWIST_OK)
+    return rc;			/* TWIST_ERR_AGAIN: no credit for it yet.  */
+  rc = twist_smb_w_write (head, sizeof head, &n, &h, x->fid, (uint32_t) x->wlen,
+                          x->put_off);
+  if (rc != TWIST_OK)
+    return rc;
+  x->wr[x->nwr].id = h.message_id;
+  x->wr[x->nwr].len = (uint32_t) x->wlen;
+  x->nwr++;
+  rc = twist_smb_session_send (x->sess, head, n, x->wbuf, x->wlen);
+  x->put_off += x->wlen;
+  x->wlen = 0;
+  return rc;
+}
+
+static void pump_writes (struct twist_smb *x);
+
+/* A chunk of the source, pushed.  It is gathered with the others into writes
+   as big as the server takes; the source is paused while there is not room
+   for another.  */
+static int
+up_chunk (void *user, const uint8_t *data, size_t len)
+{
+  struct twist_smb *x = user;
+
+  if (len > x->wcap - x->wlen)
+    return TWIST_ERR_ABORTED;
+  memcpy (x->wbuf + x->wlen, data, len);
+  x->wlen += len;
+  if (x->wcap - x->wlen < 2 * PUSH_MAX)
+    twist_upload_pause (x->up);
+  pump_writes (x);
+  return TWIST_OK;
+}
+
+static void
+up_end (void *user, int err)
+{
+  struct twist_smb *x = user;
+
+  if (err == TWIST_OK)
+    x->src_eof = 1;
+  else
+    x->src_failed = err;
+  pump_writes (x);
+}
+
+static const struct twist_upload_consumer up_ops = { up_chunk, up_end };
+
+/* Send what is gathered, as the window, the credits and the connection allow;
+   ask the source for more while there is room; and close the file once the
+   source has ended and every write is answered.  A write is not made while
+   another is in flight and it could hold more, unless the source has ended,
+   so a source that gives a byte at a time makes writes of a good size.  */
+static void
+pump_writes (struct twist_smb *x)
+{
+  if (x->pumping)
+    return;
+  x->pumping = 1;
+  while (x->phase == X_WRITE && !x->finished && !x->src_failed)
+    {
+      size_t before;
+      int eof_before;
+
+      if (x->wlen > 0 && x->nwr < WRITE_WINDOW && !conn_full (x)
+          && (x->wcap - x->wlen < PUSH_MAX || x->src_eof || x->nwr == 0))
+        {
+          int rc = send_write (x);
+
+          if (rc == TWIST_ERR_AGAIN)
+            break;
+          if (rc != TWIST_OK)
+            {
+              x->pumping = 0;
+              smb_fail (x, rc);
+              return;
+            }
+          continue;
+        }
+      if (!x->src_eof && x->wcap - x->wlen >= 2 * PUSH_MAX)
+        {
+          before = x->wlen;
+          eof_before = x->src_eof;
+          twist_upload_resume (x->up);
+          if (x->wlen != before || x->src_eof != eof_before || x->src_failed)
+            continue;
+        }
+      break;
+    }
+  x->pumping = 0;
+  if (x->finished)
+    return;
+  if (x->src_failed)
+    {
+      smb_complete (x, x->src_failed);
+      return;
+    }
+  if (x->phase == X_WRITE && x->src_eof && x->wlen == 0 && x->nwr == 0)
+    begin_close (x);
+}
+
+/* The file is open for writing.  */
+static void
+opened_put (struct twist_smb *x)
+{
+  struct twist_transfer *t = x->transfer;
+  const struct twist_smb_session_info *info = twist_smb_session_info (x->sess);
+  long long total = twist_transfer_upload_size (t);
+
+  if (total >= 0)
+    twist_progress_ul_size (t, total);
+  x->wcap = info->max_write;
+  x->wbuf = malloc (x->wcap);
+  if (x->wbuf == NULL)
+    {
+      smb_fail (x, TWIST_ERR_NOMEM);
+      return;
+    }
+  if (t->postfields != NULL)
+    {
+      size_t n = t->postfieldsize_set && t->postfieldsize >= 0
+        ? (size_t) t->postfieldsize : strlen (t->postfields);
+
+      x->up = twist_upload_from_memory ((const uint8_t *) t->postfields, n);
+      x->up_owned = 1;
+    }
+  else
+    x->up = twist_transfer_upload (t);
+  if (x->up == NULL || twist_upload_attach (x->up, &up_ops, x, PUSH_MAX) != TWIST_OK)
+    {
+      smb_fail (x, TWIST_ERR_NOMEM);
+      return;
+    }
+  x->put_off = x->append ? x->size : 0;
+  x->phase = X_WRITE;
+  pump_writes (x);
+}
+
+/* A CREATE, for a file or a directory.  */
+static int
+send_create (struct twist_smb *x, const char *name, uint32_t access,
+             uint32_t share, uint32_t disposition, uint32_t options,
+             uint32_t attrs)
+{
+  struct twist_smb_req h;
+  struct twist_smb_create_req r;
+  uint8_t out[1024];
+  size_t n;
+
+  memset (&r, 0, sizeof r);
+  r.desired_access = access;
+  r.file_attributes = attrs;
+  r.share_access = share;
+  r.disposition = disposition;
+  r.options = options;
+  r.name = name;
+  if (twist_smb_session_request (x->sess, 1, &h) != TWIST_OK
+      || twist_smb_w_create (out, sizeof out, &n, &h, &r) != TWIST_OK
+      || twist_smb_session_send (x->sess, out, n, NULL, 0) != TWIST_OK)
+    return TWIST_ERR_PROTOCOL;
+  return TWIST_OK;
+}
+
+static int
+send_close_fid (struct twist_smb *x)
+{
+  struct twist_smb_req h;
+  uint8_t out[256];
+  size_t n;
+
+  if (twist_smb_session_request (x->sess, 1, &h) != TWIST_OK
+      || twist_smb_w_close (out, sizeof out, &n, &h, x->fid) != TWIST_OK
+      || twist_smb_session_send (x->sess, out, n, NULL, 0) != TWIST_OK)
+    return TWIST_ERR_PROTOCOL;
+  return TWIST_OK;
+}
+
+/* The next directory above the file that has not been made, if --ftp-create-dirs
+   asked for them: its path, or NULL.  */
+static char *
+next_dir (struct twist_smb *x)
+{
+  const char *sep;
+  char *dir;
+  size_t n;
+
+  if (!x->make_dirs)
+    return NULL;
+  sep = strchr (x->path + x->dir_pos, '\\');
+  if (sep == NULL)
+    return NULL;
+  n = (size_t) (sep - x->path);
+  dir = malloc (n + 1);
+  if (dir == NULL)
+    return NULL;
+  memcpy (dir, x->path, n);
+  dir[n] = 0;
+  x->dir_pos = n + 1;
+  return dir;
+}
+
+/* The directories, then the file.  */
+static void
+open_next (struct twist_smb *x)
+{
+  char *dir = next_dir (x);
+  int rc;
+
+  if (dir != NULL)
+    {
+      x->phase = X_MKDIR;
+      rc = send_create (x, dir, FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+                        FILE_SHARE_ALL, FILE_OPEN_IF, FILE_DIRECTORY_FILE,
+                        FILE_ATTRIBUTE_DIRECTORY);
+      free (dir);
+    }
+  else
+    {
+      x->phase = X_OPEN;
+      if (x->put)
+        rc = send_create (x, x->path,
+                          FILE_WRITE_DATA | FILE_APPEND_DATA
+                          | FILE_WRITE_ATTRIBUTES | FILE_READ_ATTRIBUTES
+                          | SYNCHRONIZE, FILE_SHARE_READ,
+                          x->append ? FILE_OPEN_IF : FILE_OVERWRITE_IF,
+                          FILE_NON_DIRECTORY_FILE, 0x80);
+      else
+        rc = send_create (x, x->path,
+                          FILE_READ_DATA | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+                          FILE_SHARE_ALL, FILE_OPEN, FILE_NON_DIRECTORY_FILE, 0);
+    }
+  if (rc != TWIST_OK)
+    smb_fail (x, rc);
 }
 
 /* The file is open: work out what to read.  */
@@ -693,7 +1021,8 @@ on_close (void *u, const struct twist_smb_close *r)
   struct twist_smb *x = u;
 
   (void) r;
-  return x->phase == X_CLOSE ? TWIST_OK : TWIST_ERR_PROTOCOL;
+  return x->phase == X_CLOSE || x->phase == X_MKCLOSE ? TWIST_OK
+                                                       : TWIST_ERR_PROTOCOL;
 }
 
 static void
@@ -727,13 +1056,34 @@ on_end (void *u, uint64_t off)
     return TWIST_OK;
   switch (x->phase)
     {
+    case X_MKDIR:
+      x->phase = X_MKCLOSE;
+      if (send_close_fid (x) != TWIST_OK)
+        smb_fail (x, TWIST_ERR_PROTOCOL);
+      break;
+    case X_MKCLOSE:
+      x->have_file = 0;
+      open_next (x);
+      break;
     case X_OPEN:
       if (!x->have_file)
         {
           smb_fail (x, TWIST_ERR_PROTOCOL);
           return TWIST_OK;
         }
-      opened (x);
+      if (x->put)
+        opened_put (x);
+      else
+        opened (x);
+      break;
+    case X_WRITE:
+      if (x->cur_w >= 0)
+        {
+          x->wr[x->cur_w] = x->wr[x->nwr - 1];
+          x->nwr--;
+          x->cur_w = -1;
+        }
+      pump_writes (x);
       break;
     case X_READ:
       if (sl == NULL)
@@ -776,24 +1126,10 @@ static void
 ops_established (void *u, uint32_t tree)
 {
   struct twist_smb *x = u;
-  struct twist_smb_req h;
-  struct twist_smb_create_req r;
-  uint8_t out[1024];
-  size_t n;
 
   (void) tree;
   twist_mail_link_phase_end (&x->link);
-  x->phase = X_OPEN;
-  memset (&r, 0, sizeof r);
-  r.desired_access = FILE_READ_DATA | FILE_READ_ATTRIBUTES | SYNCHRONIZE;
-  r.share_access = FILE_SHARE_ALL;
-  r.disposition = FILE_OPEN;
-  r.options = FILE_NON_DIRECTORY_FILE;
-  r.name = x->path;
-  if (twist_smb_session_request (x->sess, 1, &h) != TWIST_OK
-      || twist_smb_w_create (out, sizeof out, &n, &h, &r) != TWIST_OK
-      || twist_smb_session_send (x->sess, out, n, NULL, 0) != TWIST_OK)
-    smb_fail (x, TWIST_ERR_PROTOCOL);
+  open_next (x);
 }
 
 static void
@@ -826,12 +1162,27 @@ twist_smb_receive (struct twist_smb *x, const uint8_t *data, size_t len)
   return twist_smb_session_receive (x->sess, data, len);
 }
 
+/* The connection has written what it held: an upload goes on.  */
+void
+twist_smb_drained (struct twist_smb *x)
+{
+  if (x != NULL && x->put && !x->finished)
+    pump_writes (x);
+}
+
+static void
+smb_write_ready (struct twist_endpoint *ep)
+{
+  twist_smb_drained (ep->user_data);
+}
+
 static void
 smb_connected (struct twist_endpoint *ep)
 {
   struct twist_smb *x = ep->user_data;
 
   x->ep = ep;
+  ep->on_write_ready = smb_write_ready;
   twist_smb_start (x);
 }
 
@@ -906,9 +1257,10 @@ smb_resume_hook (struct twist_transfer *t)
 void
 twist_smb_test_seam (struct twist_smb *x,
                      int (*send) (void *user, const uint8_t *data, size_t len),
-                     void *user)
+                     int (*full) (void *user), void *user)
 {
   x->test_send = send;
+  x->test_full = full;
   x->test_user = user;
 }
 
@@ -922,6 +1274,13 @@ twist_smb_free (void *p)
     return;
   for (i = 0; i < x->nslots; i++)
     free (x->slots[i].buf);
+  if (x->up != NULL)
+    {
+      twist_upload_detach (x->up);
+      if (x->up_owned)
+        twist_upload_free (x->up);
+    }
+  free (x->wbuf);
   twist_smb_session_free (x->sess);
   twist_mail_link_close (&x->link);
   free (x->path);
@@ -953,17 +1312,31 @@ twist_smb_new (struct twist_transfer *transfer, int live)
   rc = take_path (x, &share, &dir);
   if (rc != TWIST_OK)
     goto bad;
+  x->put = twist_transfer_has_source (transfer) || transfer->postfields != NULL;
+  x->cur_w = -1;
+  if (dir && x->put)
+    {
+      detail (x, _("the path names a directory; give the name of the file to "
+                   "upload to"));
+      rc = TWIST_ERR_URL;
+      goto bad;
+    }
   if (dir || transfer->dirlistonly)
     {
       detail (x, _("listing a directory over smb is not supported"));
       rc = TWIST_ERR_UNSUPPORTED;
       goto bad;
     }
-  if (twist_transfer_has_source (transfer) || transfer->postfields != NULL)
+  if (x->put)
     {
-      detail (x, _("uploading over smb is not supported"));
-      rc = TWIST_ERR_UNSUPPORTED;
-      goto bad;
+      if (transfer->range != NULL || transfer->resume_from != 0)
+        {
+          detail (x, _("a range or a resume does not apply to an upload"));
+          rc = TWIST_ERR_INVAL;
+          goto bad;
+        }
+      x->append = transfer->append;
+      x->make_dirs = transfer->create_missing_dirs;
     }
   user = twist_mail_user (transfer);
   pass = twist_mail_pass (transfer);
@@ -1009,6 +1382,7 @@ twist_smb_new (struct twist_transfer *transfer, int live)
   up.create = on_create;
   up.close = on_close;
   up.read = on_read;
+  up.write = on_write;
   up.data = on_data;
   up.error = on_error;
   up.pending = on_pending;

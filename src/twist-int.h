@@ -2604,7 +2604,9 @@ int twist_smb_attach (struct twist_transfer *transfer);
 void twist_smb_test_seam (struct twist_smb *x,
                           int (*send) (void *user, const uint8_t *data,
                                        size_t len),
-                          void *user);
+                          int (*full) (void *user), void *user);
+/* The connection has written what it held (its on_write_ready).  */
+void twist_smb_drained (struct twist_smb *x);
 /* The random values of the next sessions made (the tests fix them); NULL for
    the system's.  */
 void twist_smb_set_test_rnd (const struct twist_ntlm_rand *rnd);
