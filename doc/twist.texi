@@ -1776,6 +1776,19 @@ is not encrypted, and by a method such as @code{PLAIN}, @code{LOGIN} or a
 simple bind that does not hide them; @code{PLAIN} is tried when the server
 advertises none.  Use the scheme with the @code{s}, or @option{--ssl-reqd}.
 
+@heading Where a TLS connection ends
+
+A TLS connection is over when the peer says so with a @code{close_notify}.  If
+the connection is closed without one, whoever is on the path may have cut the
+data short (a FIN can be forged, RFC 8446 section 6.1), so what was read is not
+taken to be all of it: the transfer ends with exit status 35.  This holds for
+every protocol that runs TLS, and for the data connection of @code{ftps} in
+particular, where it is what tells a whole file from a cut one when the server
+did not say how long the file is.  A server that said how long the file would
+be, and sent fewer bytes, exits 18 even when it closed properly.  A connection
+without TLS has no @code{close_notify}, and its close is the end as it always
+was.
+
 @heading Explicit TLS
 @anchor{Explicit TLS}
 

@@ -154,7 +154,17 @@ def session(raw):
             except OSError:
                 say("425 no data connection")
                 continue
-            say("150 Opening data connection (%d bytes)." % len(body))
+            # "nocn" and "clean" give no size, so that only how the data
+            # connection ends can say whether the file is whole: "nocn" ends it
+            # as an attacker on the path can, with a FIN and no close_notify,
+            # and "clean" with one.  "short" names a size that it then does not
+            # send, but ends cleanly.
+            if arg in ("nocn", "clean"):
+                say("150 Opening data connection.")
+            elif arg == "short":
+                say("150 Opening data connection (%d bytes)." % (len(body) + 100))
+            else:
+                say("150 Opening data connection (%d bytes)." % len(body))
             try:
                 if prot:
                     d.settimeout(5)
@@ -167,7 +177,7 @@ def session(raw):
                 else:
                     note("data plain")
                 d.sendall(body)
-                if prot:
+                if prot and arg != "nocn":
                     d = d.unwrap()
                 d.close()
                 say("226 done")
@@ -235,6 +245,21 @@ n=$(get $ca "ftps://u:p@127.0.0.1:$port/big" | wc -c)
 check "$(is "$n" 327680)" "a file of several records, whole (got $n)"
 check "$(is "$(get $ca "ftps://u:p@127.0.0.1:$port/" | head -c 10)" "-rw-r--r--")" \
   "a listing over a protected data connection"
+
+# How the data connection ends is how the file ends.  A FIN with no
+# close_notify is what anyone on the path can make, and is not the end of the
+# data (RFC 8446, section 6.1); one with a close_notify is.  A size in the 150
+# reply that the body falls short of is a partial file even then.
+out=$(get $ca "ftps://u:p@127.0.0.1:$port/clean"; echo "status $?")
+check "$(is "$out" "hello over ftps
+status 0")" "a data connection with a close_notify is the end of the file ($out)"
+check "$(is "$(status $ca "ftps://u:p@127.0.0.1:$port/nocn")" 35)" \
+  "one without a close_notify is status 35"
+check "$(is "$(status $ca "ftps://u:p@127.0.0.1:$port/short")" 18)" \
+  "a short body is status 18 though it ended cleanly"
+# The listing is a data connection too.
+out=$(get $ca "ftps://u:p@127.0.0.1:$port/" | head -c 10)
+check "$(is "$out" "-rw-r--r--")" "a listing still ends well"
 
 # A server that insists the data connection resumes the control session, as
 # vsftpd, ProFTPD and FileZilla Server do unless told not to.

@@ -281,9 +281,20 @@ tls_send_plain (struct twist_connection *conn, const uint8_t *data, size_t len)
   return TWIST_OK;
 }
 
+static int
+tls_eof (struct twist_connection *conn)
+{
+  struct twist_tls *t = twist_connection_tls (conn);
+
+  if (t == NULL || t->tls == NULL)
+    return TWIST_OK;
+  return gq_tlsauto_eof (t->tls) == GQ_OK ? TWIST_OK : TWIST_ERR_TLS;
+}
+
 int
 twist_tls_register (void)
 {
+  twist_tls_eof_fn = tls_eof;
   twist_tls_start_fn = tls_start;
   twist_tls_receive_fn = tls_receive;
   twist_tls_send_plain_fn = tls_send_plain;

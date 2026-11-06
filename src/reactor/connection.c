@@ -805,6 +805,7 @@ tcp_send (struct twist_endpoint *ep, const uint8_t *data, size_t len)
   return TWIST_OK;
 }
 
+int (*twist_tls_eof_fn) (struct twist_connection *);
 int (*twist_tls_send_plain_fn) (struct twist_connection *, const uint8_t *,
                                 size_t);
 
@@ -1267,6 +1268,13 @@ twist_connection_on_readable (struct twist_connection *c)
         twist_connection_ingest (c, tlsbuf, (size_t) n);
       else if (n == 0)
         {
+          /* The end of the transport.  On a TLS connection it is the end of
+             the data only if the peer said so with a close_notify: a FIN with
+             none is what anyone on the path can make, and what was read may
+             be a part.  */
+          if (!c->failed && c->tls != NULL && twist_tls_eof_fn != NULL
+              && twist_tls_eof_fn (c) != TWIST_OK)
+            twist_connection_fail (c, TWIST_ERR_TLS);
           twist_connection_fail (c, TWIST_ERR_CLOSED);
           break;
         }

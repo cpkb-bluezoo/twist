@@ -1005,7 +1005,11 @@ extern int (*twist_tls_start_fn) (struct twist_connection *conn,
 extern int (*twist_tls_receive_fn) (struct twist_connection *conn,
                                     const uint8_t *data, size_t len);
 extern int (*twist_tls_send_plain_fn) (struct twist_connection *conn,
-                                       const uint8_t *data, size_t len);
+                                       const uint8_t *data, size_t len);/* The transport reached end of file on a connection that runs TLS.  TWIST_OK
+   if the peer closed it with a close_notify, and TWIST_ERR_TLS if not: what
+   was read is then not known to be all of it, since a FIN can be forged
+   (RFC 8446, section 6.1).  */
+extern int (*twist_tls_eof_fn) (struct twist_connection *conn);
 /* A QUIC connection for the transfer TRANSFER to the address ADDR and PORT,
    which a lookup gave.  The certificate is checked against the host of the
    URL, not against ADDR.  */
