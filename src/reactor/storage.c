@@ -191,6 +191,17 @@ twist_storage_threads (const struct twist_storage *st)
   return st->nthreads;
 }
 
+size_t
+twist_storage_queued (struct twist_storage *st)
+{
+  size_t n;
+
+  pthread_mutex_lock (&st->mu);
+  n = st->len;
+  pthread_mutex_unlock (&st->mu);
+  return n;
+}
+
 int
 twist_storage_submit (struct twist_storage *st, void (*work) (void *),
                       void *arg, void (*done) (void *user, int err),

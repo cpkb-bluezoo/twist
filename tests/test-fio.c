@@ -450,6 +450,57 @@ test_write_release (struct twist_loop *loop, struct twist_storage *st)
   unlink (out);
 }
 
+static void
+ran_work (void *arg)
+{
+  __atomic_store_n ((int *) arg, 1, __ATOMIC_RELEASE);
+}
+
+/* Writers that are waiting for data do not hold their threads: with every
+   thread of the pool taken by one, a job that makes the data they wait for
+   (a read) still runs.  */
+static void
+test_writers_yield (struct twist_loop *loop, struct twist_storage *st)
+{
+  char out[2][64];
+  struct wr w[2];
+  int ran = 0;
+  int i;
+  double t0;
+
+  for (i = 0; i < 2; i++)
+    {
+      int fd;
+
+      snprintf (out[i], sizeof out[i], "/tmp/twist-test-fio-out-XXXXXX");
+      fd = mkstemp (out[i]);
+      close (fd);
+      memset (&w[i], 0, sizeof w[i]);
+      twist_fio_write_new (loop, st, out[i], 0, &wr_ops, &w[i], &w[i].f);
+    }
+  run_for (loop, 100);
+  twist_storage_submit (st, ran_work, &ran, NULL, NULL, NULL);
+  t0 = now_ms ();
+  while (!__atomic_load_n (&ran, __ATOMIC_ACQUIRE) && now_ms () - t0 < 2000)
+    run_for (loop, 20);
+  check (__atomic_load_n (&ran, __ATOMIC_ACQUIRE),
+         "a job runs although every thread was taken by a writer with no data");
+  for (i = 0; i < 2; i++)
+    {
+      w[i].ended_sent = 1;
+      twist_fio_write_end (w[i].f);
+    }
+  run_for (loop, 200);
+  check (w[0].ends == 1 && w[1].ends == 1,
+         "and the writers, put back in the queue, end when they are told to");
+  for (i = 0; i < 2; i++)
+    {
+      twist_fio_free (w[i].f);
+      free (w[i].msg);
+      unlink (out[i]);
+    }
+}
+
 static size_t hopped;
 
 static void
@@ -523,6 +574,7 @@ main (void)
   test_write_credit (loop, st);
   test_write_fail (loop, st);
   test_write_release (loop, st);
+  test_writers_yield (loop, st);
   test_pools_apart ();
   twist_storage_free (st);
   twist_loop_free (loop);

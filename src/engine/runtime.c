@@ -185,12 +185,14 @@ runtime_new (int embedded, twist_watch_callback watch,
   runtime->last_deadline = -2;
   runtime->storage = twist_storage_new (2, 32);
   runtime->xfer = twist_storage_new (2, 32);
+  runtime->xfer_w = twist_storage_new (2, 32);
   runtime->dns = twist_dns_cache_new ();
   runtime->jar = twist_jar_new ();
   runtime->hsts = twist_hsts_new ();
   runtime->altsvc = twist_altsvc_new ();
   runtime->origintab = twist_origintab_new ();
   if (runtime->storage == NULL || runtime->xfer == NULL
+      || runtime->xfer_w == NULL
       || runtime->dns == NULL || runtime->jar == NULL
       || runtime->hsts == NULL || runtime->altsvc == NULL
       || runtime->origintab == NULL)
@@ -202,6 +204,7 @@ runtime_new (int embedded, twist_watch_callback watch,
       twist_dns_cache_free (runtime->dns);
       twist_storage_free (runtime->storage);
       twist_storage_free (runtime->xfer);
+      twist_storage_free (runtime->xfer_w);
       lane_free (lane);
       free (runtime->lanes);
       free (runtime);
@@ -413,6 +416,15 @@ lanes_make (struct twist_runtime *runtime)
         return TWIST_ERR_NOMEM;
       twist_storage_free (runtime->xfer);
       runtime->xfer = xs;
+    }
+  if (want > 2)
+    {
+      struct twist_storage *ws = twist_storage_new (want, 32);
+
+      if (ws == NULL)
+        return TWIST_ERR_NOMEM;
+      twist_storage_free (runtime->xfer_w);
+      runtime->xfer_w = ws;
     }
   grown = realloc (runtime->lanes, want * sizeof *grown);
   if (grown == NULL)
@@ -764,6 +776,7 @@ twist_runtime_free (twist_runtime *runtime)
   twist_origintab_free (runtime->origintab);
   twist_storage_free (runtime->storage);
   twist_storage_free (runtime->xfer);
+  twist_storage_free (runtime->xfer_w);
   /* The storage threads are joined, so every job has run and posted its
      completion.  Deliver them: each owns its job and what the job carries,
      and dropped with the loop they would leak.  The runtime is there to be

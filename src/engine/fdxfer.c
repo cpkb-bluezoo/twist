@@ -464,7 +464,7 @@ twist_transfer_fds_setup (struct twist_transfer *t)
     off_t at = regular ? lseek (t->write_fd, 0, SEEK_CUR) : -1;
     int dfd = dup (t->write_fd);
 
-    if (dfd < 0 || t->runtime == NULL || t->runtime->xfer == NULL)
+    if (dfd < 0 || t->runtime == NULL || t->runtime->xfer_w == NULL)
       {
         if (dfd >= 0)
           close (dfd);
@@ -473,7 +473,7 @@ twist_transfer_fds_setup (struct twist_transfer *t)
       }
     if (regular && at < 0)
       at = 0;
-    rc = twist_fio_write_fd_new (t->loop, t->runtime->xfer, dfd,
+    rc = twist_fio_write_fd_new (t->loop, t->runtime->xfer_w, dfd,
                                  (long long) at, &wfio_ops, w, &w->fio);
     if (rc != TWIST_OK)
       {

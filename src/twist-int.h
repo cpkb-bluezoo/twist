@@ -359,6 +359,9 @@ struct twist_runtime
      STORAGE, which loads keys and known_hosts, so that a read that does not
      return cannot hold up those loads.  Built as it is, and grown with it.  */
   struct twist_storage *xfer;
+  /* A pool of its own for writers: a read waits for a write to give room, and
+     a pool the two shared could be all readers, with the writers behind.  */
+  struct twist_storage *xfer_w;
   struct twist_pool *pool;	/* The first lane's.  */
   struct twist_dns_cache *dns;
   /* The lanes, the first of which is the one above, and how many threads were
@@ -1079,6 +1082,8 @@ int twist_storage_submit (struct twist_storage *st, void (*work) (void *),
                           void *arg, void (*done) (void *user, int err),
                           void *user, struct twist_loop *loop);
 size_t twist_storage_threads (const struct twist_storage *st);
+/* How many jobs are waiting for a thread.  */
+size_t twist_storage_queued (struct twist_storage *st);
 
 /* ---- regular files on the storage pool ----
    A regular file cannot be polled (it is always ready, and O_NONBLOCK does

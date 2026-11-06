@@ -30,6 +30,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/types.h>
+#include <time.h>
 #include <unistd.h>
 
 /* Reads and writes of regular files, on the worker threads of a storage pool
@@ -99,6 +100,8 @@ struct twist_fio
   int wfd;			/* An open descriptor to write at WOFF, in place of PATH.  */
   long long woff;
   int wplain;			/* Write at the descriptor's own position.  */
+  struct twist_storage *wst;	/* The pool the writer runs on.  */
+  int wcur;			/* The file being written, once open; -1.  */
   struct fio_chunk *wq_head;
   struct fio_chunk *wq_tail;
   int end_req;
@@ -670,6 +673,10 @@ write_fail (struct twist_fio *f, int err)
   pthread_mutex_unlock (&f->mu);
 }
 
+/* A writer holds a thread of its pool only while it has something to write:
+   when it has nothing and another job is waiting for a thread, it puts itself
+   at the back of the queue and gives its thread up.  Otherwise a pool full
+   of writers waiting for data would keep out the jobs that make it.  */
 static void
 write_work (void *arg)
 {
@@ -678,26 +685,31 @@ write_work (void *arg)
   int err = TWIST_OK;
   char *msg = NULL;
 
-  if (started_released (f))
+  if (f->wcur < 0)
     {
-      worker_end (f, TWIST_OK, NULL);
-      return;
+      if (started_released (f))
+        {
+          worker_end (f, TWIST_OK, NULL);
+          return;
+        }
+      if (f->wfd >= 0)
+        fd = f->wfd;
+      else
+        fd = open (f->path,
+                   O_WRONLY | O_CREAT | O_CLOEXEC
+                   | (f->append ? O_APPEND : O_TRUNC), 0666);
+      if (fd < 0)
+        {
+          err = TWIST_ERR_FILE;
+          msg = errmsg_open (f->path);
+          write_fail (f, err);
+          write_drop_queue (f);
+          worker_end (f, err, msg);
+          return;
+        }
+      f->wcur = fd;
     }
-  if (f->wfd >= 0)
-    fd = f->wfd;
-  else
-    fd = open (f->path,
-               O_WRONLY | O_CREAT | O_CLOEXEC | (f->append ? O_APPEND : O_TRUNC),
-               0666);
-  if (fd < 0)
-    {
-      err = TWIST_ERR_FILE;
-      msg = errmsg_open (f->path);
-      write_fail (f, err);
-      write_drop_queue (f);
-      worker_end (f, err, msg);
-      return;
-    }
+  fd = f->wcur;
   for (;;)
     {
       struct fio_chunk *c;
@@ -706,7 +718,27 @@ write_work (void *arg)
 
       pthread_mutex_lock (&f->mu);
       while (f->wq_head == NULL && !f->end_req && !f->stop)
-        pthread_cond_wait (&f->cv, &f->mu);
+        {
+          struct timespec until;
+
+          if (f->wst != NULL && twist_storage_queued (f->wst) > 0)
+            {
+              pthread_mutex_unlock (&f->mu);
+              if (twist_storage_submit (f->wst, write_work, f, NULL, NULL,
+                                        NULL) == TWIST_OK)
+                return;
+              pthread_mutex_lock (&f->mu);
+            }
+          /* Look again soon: a job may be queued behind this one.  */
+          clock_gettime (CLOCK_REALTIME, &until);
+          until.tv_nsec += 5 * 1000 * 1000;
+          if (until.tv_nsec >= 1000000000L)
+            {
+              until.tv_sec++;
+              until.tv_nsec -= 1000000000L;
+            }
+          pthread_cond_timedwait (&f->cv, &f->mu, &until);
+        }
       if (f->stop)
         {
           pthread_mutex_unlock (&f->mu);
@@ -794,6 +826,8 @@ twist_fio_write_new (struct twist_loop *loop, struct twist_storage *st,
   f->user = user;
   f->append = append;
   f->wfd = -1;
+  f->wcur = -1;
+  f->wst = st;
   f->path = twist_xmalloc (strlen (path) + 1);
   if (f->path == NULL)
     {
@@ -914,6 +948,8 @@ twist_fio_write_fd_new (struct twist_loop *loop, struct twist_storage *st,
     return TWIST_ERR_NOMEM;
   f->wops = *ops;
   f->user = user;
+  f->wcur = -1;
+  f->wst = st;
   f->wfd = fd;
   f->woff = at < 0 ? 0 : at;
   f->wplain = at < 0;
