@@ -68,8 +68,6 @@ DNS (src/dns, RFC 8305)
   - HTTP/3 and QUIC under a proxy use one address (IPv4 if there is one) and
     are not raced; nor is a TCP connection through a proxy, whose own address
     is looked up with the one-address resolver.
-  - The cache holds addresses for the sink only when the HTTPS record is not
-    wanted, so an http(s) lookup is never cached.
   - DoQ and DoH send their queries one after another (three round trips for an
     http URL); DoT, TCP and UDP send them together.  DoH can only be pipelined
     over HTTP/2, and DoQ needs a stream for each, since every id is 0.
@@ -78,10 +76,6 @@ DNS (src/dns, RFC 8305)
     and 9.9.9.9 does yet (tried), so the queries go out separately in one
     flight.  gumdrop has the codec (dns/DnsMultiQType.java); a server that
     answers with MQTYPE-Response could be remembered and sent one message.
-  - A UDP query is not sent again when it is lost: it is waited for until the
-    transfer's timeout.
-  - With the default order a discovery query (DDR) is made before every lookup
-    that is not in the cache, and its outcome is not remembered.
   - What has not been answered 2 s after the first address is given up on (the
     lookup is complete then): a very slow nameserver loses its other types.
 

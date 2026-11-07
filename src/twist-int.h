@@ -1448,6 +1448,11 @@ size_t twist_dns_sort (struct twist_dns_addr *addrs, size_t n);
    (NULL restores it), and the resolution delay and how long to wait for the
    rest after the first answer (0 restores the 50 ms and 2 s).  */
 void twist_dns_set_nameserver (const char *ip, int port);
+/* For the tests: the first wait before a UDP query that has had no answer is
+   sent again, in milliseconds (0: the default), and forget what was learned
+   about designated resolvers.  */
+void twist_dns_set_retry (long first_ms);
+void twist_dns_ddr_forget (void);
 void twist_dns_set_timing (long resolution_delay_ms, long linger_ms);
 
 int twist_dns_resolve (struct twist_loop *loop, const char *host,
@@ -2729,6 +2734,15 @@ int twist_dns_cache_list (struct twist_dns_cache *cache, const char *name,
 void twist_dns_cache_keep (struct twist_dns_cache *cache, const char *name,
                            int qtype, const struct twist_dns_addr *addrs,
                            int n, uint32_t ttl_sec, uint64_t now_ms);
+/* The HTTPS record of NAME, kept with the addresses.  SVC NULL keeps that
+   there is none.  twist_dns_cache_https gives 1 with the record, 0 for kept as
+   none, -1 for nothing kept.  */
+void twist_dns_cache_keep_https (struct twist_dns_cache *cache,
+                                 const char *name,
+                                 const struct twist_dns_service *svc,
+                                 uint32_t ttl_sec, uint64_t now_ms);
+int twist_dns_cache_https (struct twist_dns_cache *cache, const char *name,
+                           struct twist_dns_service *out, uint64_t now_ms);
 void twist_dns_cache_free (struct twist_dns_cache *cache);
 int twist_dns_cache_put_msg (struct twist_dns_cache *cache, const char *name,
                              int qtype, const uint8_t *msg, size_t len,
