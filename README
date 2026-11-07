@@ -33,8 +33,8 @@ Each is a scheme of one transfer engine:
 
 The schemes with an s added to the protocol's name (https, wss, ftps, smtps,
 imaps, pop3s, ldaps, mqtts, gophers) are TLS from the first byte.  ftp, imap,
-pop3 and smtp can also be upgraded after they start (AUTH TLS, STARTTLS and
-STLS) with --ssl or --ssl-reqd; ldap and mqtt cannot.  smbs is SMB over QUIC,
+pop3, smtp and ldap can also be upgraded after they start (AUTH TLS, STARTTLS,
+STLS and LDAP's StartTLS) with --ssl or --ssl-reqd; mqtt cannot.  smbs is SMB over QUIC,
 not TLS on the SMB port.  rtmp and rtmps are recognised and not implemented;
 see TODO.
 

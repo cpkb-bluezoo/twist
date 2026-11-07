@@ -2596,6 +2596,8 @@ void twist_ldap_free (void *ldap);
 size_t twist_ldap_receive (struct twist_ldap *ldap, const uint8_t *data,
                            size_t len);
 const uint8_t *twist_ldap_command (const struct twist_ldap *ldap, size_t *len);
+/* The handshake that followed STARTTLS is done; as twist_imap_tls_done.  */
+void twist_ldap_tls_done (struct twist_ldap *ldap);
 int twist_ldap_attach (struct twist_transfer *transfer);
 
 /* smb:// (src/smb/smb.c): one file from a share, over the session layer.  The

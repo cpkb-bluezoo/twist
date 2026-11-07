@@ -20,6 +20,7 @@
 # include <config.h>
 #endif
 
+#include "gettext.h"
 #include "twist-int.h"
 
 #include <ctype.h>
@@ -30,12 +31,27 @@
 /* LDAPv3 client: simple bind, or a SASL bind through the shared
    mechanism when a bearer token is set, then one search.  Entries are
    written as LDIF as each value completes.  The BER decoder keeps a
-   fixed stack and one value buffer.  */
+   fixed stack and one value buffer.
+
+   With --ssl or --ssl-reqd on ldap:// the StartTLS extended operation (RFC
+   4511 section 4.14) is the first thing sent, and the bind, which carries a
+   password or a token, only after the handshake that follows a yes.  A server
+   that says no ends the transfer if there is a secret to send, and --ssl-reqd
+   ends it whatever there is; --ssl with nothing to hide goes on in the
+   clear.  Bytes behind the yes were sent in the clear and end the transfer.  */
 
 #define LDAP_CMD 2048
 #define LDAP_VAL 4096
 #define LDAP_NAME 128
 #define LDAP_DN 512
+#define STARTTLS_OID "1.3.6.1.4.1.1466.20037"
+
+enum
+{
+  T_NONE,			/* No upgrade was asked for, or it is done.  */
+  T_ASKED,			/* STARTTLS is sent, and not answered.  */
+  T_WAIT			/* The yes is in, and the handshake is not done.  */
+};
 
 struct twist_ldap
 {
@@ -44,6 +60,9 @@ struct twist_ldap
   struct twist_sasl_client *sasl;
   struct twist_endpoint *ep;
   int implicit_tls;
+  int use_ssl;
+  int tls_state;
+  int in_ext;
   int bind_sent;
   int finished;
   int next_id;
@@ -482,6 +501,89 @@ start_auth (struct twist_ldap *l)
   return send_bind (l, NULL, NULL, 0);
 }
 
+/* Whether the bind would carry a secret: a password, or a bearer token.  */
+static int
+has_secret (const struct twist_ldap *l)
+{
+  const char *pass = twist_mail_pass (l->transfer);
+  const char *token = l->transfer->bearer;
+
+  return (pass != NULL && pass[0] != 0) || (token != NULL && token[0] != 0);
+}
+
+/* The extended operation that starts TLS: an ExtendedRequest [23] with only
+   its requestName [0].  It is the first message, so its id is 1.  */
+static int
+send_starttls (struct twist_ldap *l)
+{
+  struct twist_der_writer o;
+  uint8_t obuf[LDAP_CMD];
+  size_t msg;
+  size_t op;
+
+  twist_der_writer_init (&o, obuf, sizeof obuf, 0);
+  msg = twist_der_begin (&o, 0x30);
+  twist_der_put_int (&o, 0x02, l->next_id);
+  l->expect_id = l->next_id++;
+  op = twist_der_begin (&o, 0x77);
+  twist_der_put (&o, 0x80, STARTTLS_OID, strlen (STARTTLS_OID));
+  twist_der_end (&o, op);
+  twist_der_end (&o, msg);
+  if (o.err)
+    return TWIST_ERR_PROTOCOL;
+  l->tls_state = T_ASKED;
+  return ldap_out (l, o.buf, o.n, 1);
+}
+
+/* The server has answered STARTTLS.  Yes starts the handshake, and nothing is
+   sent until it is done; a test with no connection has none to start.  No
+   goes on in the clear only when that sends no secret and TLS was not
+   required.  */
+static int
+finish_starttls (struct twist_ldap *l)
+{
+  if (!l->saw_code || l->tls_state != T_ASKED)
+    return TWIST_ERR_PROTOCOL;
+  if (l->result_code == 0)
+    {
+      l->tls_state = T_WAIT;
+      if (l->ep == NULL)
+        return TWIST_OK;
+      return twist_connection_start_tls (l->ep->conn, l->transfer->url->host,
+                                         l->transfer->verifypeer, NULL, 0,
+                                         l->transfer->cainfo,
+                                         l->transfer->capath,
+                                         l->transfer->sslcert,
+                                         l->transfer->sslkey);
+    }
+  l->tls_state = T_NONE;
+  if (l->use_ssl == TWIST_USE_SSL_ALL)
+    return twist_transfer_use_ssl_failed (l->transfer,
+                                          _("the server refused STARTTLS"));
+  if (has_secret (l))
+    return twist_transfer_use_ssl_failed (l->transfer,
+                                          _("the server refused STARTTLS, and "
+                                            "a password or token is not sent "
+                                            "in the clear"));
+  return start_auth (l);
+}
+
+/* The handshake that followed STARTTLS is done.  The reader starts again: it
+   was stopped at the yes.  */
+void
+twist_ldap_tls_done (struct twist_ldap *l)
+{
+  int rc;
+
+  if (l == NULL || l->finished || l->tls_state != T_WAIT)
+    return;
+  l->tls_state = T_NONE;
+  twist_der_reader_init (&l->rd, &l->ev, l->bval, sizeof l->bval, 0);
+  rc = start_auth (l);
+  if (rc != TWIST_OK)
+    ldap_complete (l, rc);
+}
+
 static int
 emit_bytes (struct twist_ldap *l, const void *data, size_t n)
 {
@@ -585,16 +687,26 @@ ber_int (const uint8_t *p, size_t n, int *out)
 
 static int finish_bind (struct twist_ldap *l);
 static int finish_search (struct twist_ldap *l);
+static int finish_starttls (struct twist_ldap *l);
 
 static int
 on_start (struct twist_ldap *l, uint8_t tag)
 {
-  if (tag == 0x64 || tag == 0x61 || tag == 0x65)
+  if (tag == 0x64 || tag == 0x61 || tag == 0x65 || tag == 0x78)
     {
       if (l->msg_id != l->expect_id)
         return TWIST_ERR_PROTOCOL;
     }
-  if (tag == 0x64)
+  /* The answer to STARTTLS is the only extended response there is to read,
+     and it is only read while it is waited for.  */
+  if (tag == 0x78)
+    {
+      if (l->tls_state != T_ASKED)
+        return TWIST_ERR_PROTOCOL;
+      l->in_ext = 1;
+      l->saw_code = 0;
+    }
+  else if (tag == 0x64)
     {
       l->in_entry = 1;
       l->in_vals = 0;
@@ -627,6 +739,11 @@ on_end (struct twist_ldap *l, uint8_t tag)
       l->attr[0] = 0;
       return emit_bytes (l, "\n", 1);
     }
+  else if (tag == 0x78)
+    {
+      l->in_ext = 0;
+      return finish_starttls (l);
+    }
   else if (tag == 0x61)
     {
       l->in_bind = 0;
@@ -647,7 +764,7 @@ on_prim (struct twist_ldap *l, uint8_t tag, const uint8_t *p, size_t n)
 
   if (tag == 0x02 && l->rd.depth == 1 && parent == 0x30)
     return ber_int (p, n, &l->msg_id);
-  if (tag == 0x0a && (l->in_bind || l->in_done))
+  if (tag == 0x0a && (l->in_bind || l->in_done || l->in_ext))
     {
       int rc = ber_int (p, n, &l->result_code);
 
@@ -733,7 +850,8 @@ finish_search (struct twist_ldap *l)
 static int
 der_stop (struct twist_ldap *l, int rc)
 {
-  return rc == TWIST_OK && l->finished ? TWIST_DER_STOP : rc;
+  return rc == TWIST_OK && (l->finished || l->tls_state == T_WAIT)
+    ? TWIST_DER_STOP : rc;
 }
 
 static int
@@ -776,9 +894,21 @@ twist_ldap_receive (struct twist_ldap *l, const uint8_t *data, size_t len)
 {
   if (l == NULL)
     return 0;
+  size_t used;
+
   if (l->finished)
     return len;
-  return twist_der_receive (&l->rd, data, len);
+  used = twist_der_receive (&l->rd, data, len);
+  /* A server that has agreed to start TLS says nothing more until the
+     handshake is done.  Whatever else is in this buffer came in the clear,
+     from whoever is on the path, and must not be taken for the encrypted
+     session's.  */
+  if (l->tls_state == T_WAIT && !l->finished && used < len)
+    {
+      ldap_complete (l, TWIST_ERR_PROTOCOL);
+      return len;
+    }
+  return used;
 }
 
 const uint8_t *
@@ -826,6 +956,13 @@ ldap_secure (struct twist_endpoint *ep, const char *alpn, size_t alpn_len)
   (void) alpn;
   (void) alpn_len;
   l->ep = ep;
+  /* After STARTTLS the login has not been written: it is made now.  For
+     ldaps it is the first message and waits to be sent.  */
+  if (l->tls_state == T_WAIT)
+    {
+      twist_ldap_tls_done (l);
+      return;
+    }
   rc = flush_bind (l);
   if (rc != TWIST_OK)
     ldap_complete (l, rc);
@@ -901,9 +1038,10 @@ twist_ldap_new (struct twist_transfer *transfer, int live)
                     && strcmp (transfer->url->scheme, "ldaps") == 0;
   transfer->state = l;
   transfer->state_free = twist_ldap_free;
+  l->use_ssl = l->implicit_tls ? TWIST_USE_SSL_NONE : transfer->use_ssl;
   rc = take_url (l);
   if (rc == TWIST_OK)
-    rc = start_auth (l);
+    rc = l->use_ssl != TWIST_USE_SSL_NONE ? send_starttls (l) : start_auth (l);
   if (rc != TWIST_OK)
     ldap_complete (l, rc);
   return l;

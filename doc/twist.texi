@@ -1683,8 +1683,8 @@ A SOCKS proxy refused the connection or could not complete it.
 
 A URL scheme selects the protocol.  The scheme with an @samp{s} is the
 same protocol inside TLS from the first byte.  @code{ftp}, @code{imap},
-@code{pop3} and @code{smtp} can be upgraded to TLS after they start, when
-@option{--ssl} or @option{--ssl-reqd} asks; nothing else is.
+@code{ldap}, @code{pop3} and @code{smtp} can be upgraded to TLS after they
+start, when @option{--ssl} or @option{--ssl-reqd} asks; nothing else is.
 
 @table @code
 @item dict
@@ -1772,9 +1772,9 @@ The schemes with a trailing @code{s} (@code{imaps}, @code{ldaps},
 @code{mqtts}, @code{pop3s}, @code{smtps}, @code{https}, @code{ftps},
 @code{wss}) are TLS from the first byte.  (@code{smbs} is not TLS on the SMB
 port: it is SMB over QUIC, whose handshake is TLS 1.3.)  The ones without are not upgraded
-unless asked: only @code{ftp}, @code{imap}, @code{pop3} and @code{smtp} can
-be, with @option{--ssl} or @option{--ssl-reqd} (@pxref{Explicit TLS}).
-@code{ldap} and @code{mqtt} cannot.  A user name and password given for any
+unless asked: only @code{ftp}, @code{imap}, @code{ldap}, @code{pop3} and
+@code{smtp} can be, with @option{--ssl} or @option{--ssl-reqd}
+(@pxref{Explicit TLS}).  @code{mqtt} cannot.  A user name and password given for any
 of these without the @code{s}, and not upgraded, are sent on a connection that
 is not encrypted, and by a method such as @code{PLAIN}, @code{LOGIN} or a
 simple bind that does not hide them; @code{PLAIN} is tried when the server
@@ -1797,9 +1797,10 @@ was.
 @anchor{Explicit TLS}
 
 @option{--ssl} and @option{--ssl-reqd} upgrade a connection that starts in the
-clear, for @code{ftp}, @code{imap}, @code{pop3} and @code{smtp}, with the
-command each protocol has: @code{AUTH TLS} (RFC 4217), @code{STARTTLS}
-(RFC 3501 and RFC 3207) and @code{STLS} (RFC 2595).  They do nothing for a
+clear, for @code{ftp}, @code{imap}, @code{ldap}, @code{pop3} and @code{smtp},
+with the command each protocol has: @code{AUTH TLS} (RFC 4217),
+@code{STARTTLS} (RFC 3501 and RFC 3207), the StartTLS extended operation of
+LDAP (RFC 4511) and @code{STLS} (RFC 2595).  They do nothing for a
 scheme that is TLS already, and nothing for the others.  Without one of them
 twist never asks, however much the server offers.
 
@@ -1819,6 +1820,16 @@ not offer the upgrade or refuses it, and nothing, no password, has been sent.
 @option{--ssl-reqd} when the server agrees and not otherwise, and whoever is on
 the path can make a server seem not to offer TLS, so it protects against nobody
 who is.  Use @option{--ssl-reqd}.
+
+@code{ldap} is the exception to the last: it sends a StartTLS extended
+operation first (a server that has none says so with an error, which is a no)
+and the bind, which carries a password or a bearer token, only after the
+handshake.  A server that says no ends the transfer with status 64 whenever
+the bind would carry a secret, even if only @option{--ssl} was given, because
+a password is never sent where it can be read on the strength of an option
+that said the upgrade was optional.  A transfer with no password or token,
+which binds without a secret, goes on in the clear with @option{--ssl} and
+ends with 64 with @option{--ssl-reqd}.  @code{ldaps} is not affected.
 
 A server that has said yes and then sends anything before the handshake, in the
 same packet or after it, has sent it in the clear, from anyone on the path, and

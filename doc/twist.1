@@ -60,7 +60,7 @@ is given (see
 The schemes that are implemented are listed under
 .BR PROTOCOLS .
 .SH PROTOCOLS
-A URL scheme selects the protocol.  The scheme with an \fBs\fR is the same protocol inside TLS from the first byte.  \fBftp\fR, \fBimap\fR, \fBpop3\fR and \fBsmtp\fR can be upgraded to TLS after they start, when \fB\-\-ssl\fR or \fB\-\-ssl\-reqd\fR asks; nothing else is.
+A URL scheme selects the protocol.  The scheme with an \fBs\fR is the same protocol inside TLS from the first byte.  \fBftp\fR, \fBimap\fR, \fBldap\fR, \fBpop3\fR and \fBsmtp\fR can be upgraded to TLS after they start, when \fB\-\-ssl\fR or \fB\-\-ssl\-reqd\fR asks; nothing else is.
 .TP
 .B dict
 Looks up a word with a DICT server: DEFINE, MATCH or SHOW, chosen by the URL path.  The reply is written until the server closes.
@@ -116,11 +116,11 @@ Reads a file, or uploads one with \fB\-\-data\fR or \fB\-T\fR.  It is a datagram
 WebSocket, over HTTP/1, HTTP/2 or HTTP/3.  The payload bytes are written.
 .PP
 The schemes with a trailing s are TLS from the first byte.  The others are not
-upgraded unless asked: only ftp, imap, pop3 and smtp can be, with
+upgraded unless asked: only ftp, imap, ldap, pop3 and smtp can be, with
 .B \-\-ssl
 or
 .BR \-\-ssl\-reqd ;
-ldap and mqtt cannot.  A user name and password given for any of these, and not
+mqtt cannot.  A user name and password given for any of these, and not
 upgraded, go on a connection that is not encrypted, by a method such as PLAIN,
 LOGIN or a simple bind that does not hide them; PLAIN is tried when the server
 advertises none.  Use the scheme with the s, or
@@ -139,9 +139,10 @@ close_notify, and its close is the end as it always was.
 .B \-\-ssl
 and
 .B \-\-ssl\-reqd
-upgrade a connection that starts in the clear, for ftp, imap, pop3 and smtp,
-with the command each protocol has: AUTH TLS (RFC 4217), STARTTLS (RFC 3501 and
-RFC 3207) and STLS (RFC 2595).  They do nothing for a scheme that is TLS
+upgrade a connection that starts in the clear, for ftp, imap, ldap, pop3 and
+smtp, with the command each protocol has: AUTH TLS (RFC 4217), STARTTLS (RFC
+3501 and RFC 3207), the StartTLS extended operation of LDAP (RFC 4511) and STLS
+(RFC 2595).  They do nothing for a scheme that is TLS
 already, and nothing for the others.  Without one of them twist never asks,
 however much the server offers.
 .PP
@@ -165,6 +166,18 @@ goes on in the clear instead.  That is as secure as
 when the server agrees and not otherwise, and whoever is on the path can make a
 server seem not to offer TLS, so it protects against nobody who is.  Use
 .BR \-\-ssl\-reqd .
+.PP
+ldap is the exception to the last: it sends a StartTLS extended operation first
+(a server that has none says so with an error, which is a no) and the bind,
+which carries a password or a bearer token, only after the handshake.  A server
+that says no ends the transfer with status 64 whenever the bind would carry a
+secret, even if only
+.B \-\-ssl
+was given.  A transfer with no password or token goes on in the clear with
+.BR \-\-ssl ,
+and ends with 64 with
+.BR \-\-ssl\-reqd .
+ldaps is not affected.
 .PP
 A server that has said yes and then sends anything before the handshake, in the
 same packet or after it, has sent it in the clear, from anyone on the path, and
