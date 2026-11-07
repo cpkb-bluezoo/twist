@@ -303,6 +303,48 @@ test_write_file (struct twist_runtime *rt)
   free (got);
 }
 
+/* A body that comes in small pieces goes to the writer in few: a call for
+   each piece was a hand-over to another thread for each, which cost more than
+   the writing.  What has come reaches the file without waiting for the end of
+   the transfer, though: a stream that is slow is not held back.  */
+static void
+test_write_batches (struct twist_runtime *rt)
+{
+  char path[64];
+  int fd = temp_file (path, NULL, 0);
+  struct twist_transfer *t = make (rt);
+  uint8_t *data = pattern (300000);
+  uint8_t *got = malloc (300000);
+  struct stat st;
+  size_t i;
+  FILE *fp;
+  size_t n;
+
+  twist_transfer_setopt (t, TWISTOPT_WRITEFD, (long) fd);
+  twist_transfer_fds_setup (t);
+  for (i = 0; i < 300000; i += 5000)
+    check (twist_deliver (t, data + i, 5000) == 5000, "delivered");
+  run_for (rt, 300);
+  check (twist_wsink_writes (t) <= 8,
+         "sixty pieces go to the writer in a few writes");
+  check (fstat (fd, &st) == 0 && st.st_size == 300000,
+         "and all of it is in the file before the transfer is finished");
+  twist_transfer_finish (t, TWIST_OK);
+  run_for (rt, 300);
+  check (t->done && t->result == TWIST_OK, "which then ends well");
+  fp = fopen (path, "rb");
+  n = fp != NULL ? fread (got, 1, 300000, fp) : 0;
+  if (fp != NULL)
+    fclose (fp);
+  check (n == 300000 && memcmp (got, data, 300000) == 0,
+         "with the body in order");
+  twist_transfer_free (t);
+  close (fd);
+  unlink (path);
+  free (data);
+  free (got);
+}
+
 /* The body has been written, and acknowledged, before the transfer finishes (a
    slow connection, or a loaded machine): nothing else is coming from the
    writer to say it is done, and the end must still close it.  */
@@ -364,6 +406,7 @@ main (void)
   test_read_pipe (rt);
   test_write_pipe (rt);
   test_write_file (rt);
+  test_write_batches (rt);
   test_write_file_then_finish (rt);
   test_write_unpollable (rt);
   twist_runtime_free (rt);

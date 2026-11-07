@@ -1151,6 +1151,10 @@ size_t twist_storage_queued (struct twist_storage *st);
    than the writer behind it takes (TWIST_FIO_CHUNK) in one job.  */
 #define TWIST_SINK_PIECE TWIST_FIO_CHUNK
 #define TWIST_FIO_PIPELINE 4
+/* The most a write to a file takes: the body comes in pieces of a record,
+   and goes out in pieces of this, so that a hand-over to a thread (or to the
+   ring) is made once for many.  */
+#define TWIST_FIO_WCHUNK 65536
 struct twist_fio;
 
 /* Reading.  OPEN runs on the worker, and gives the descriptor, the offset to
@@ -1199,9 +1203,14 @@ int twist_fio_write_fd_new (struct twist_loop *loop, struct twist_storage *st,
                             int fd, long long at,
                             const struct twist_fio_write_ops *ops, void *user,
                             struct twist_fio **out);
-/* Queue LEN (at most TWIST_FIO_CHUNK) bytes, copied: TWIST_OK, 1 if there is
+/* Queue LEN (at most TWIST_FIO_WCHUNK) bytes, copied: TWIST_OK, 1 if there is
    no room (CREDIT says when there is), or why the write has failed.  */
 int twist_fio_write (struct twist_fio *f, const uint8_t *data, size_t len);
+/* As twist_fio_write, without the copy: *BUF is a buffer of TWIST_FIO_WCHUNK
+   bytes (from twist_xmalloc) holding LEN of them, and on TWIST_OK it has
+   gone to the writer and *BUF is another of the same size to fill.  Otherwise
+   it is the caller's still.  */
+int twist_fio_write_swap (struct twist_fio *f, uint8_t **buf, size_t len);
 /* No more will be written; the file is closed once what was queued is.  */
 void twist_fio_write_end (struct twist_fio *f);
 
@@ -1223,7 +1232,8 @@ int twist_uio_write_fd_new (struct twist_loop *loop, struct twist_storage *st,
                             int fd, long long at,
                             const struct twist_fio_write_ops *ops, void *user,
                             struct twist_fio **out);
-int twist_uio_write (struct twist_fio *f, const uint8_t *data, size_t len);
+int twist_uio_write (struct twist_fio *f, const uint8_t *data, size_t len,
+                     uint8_t **swap);
 void twist_uio_write_end (struct twist_fio *f);
 void twist_uio_pause (struct twist_fio *f);
 void twist_uio_resume (struct twist_fio *f);
@@ -2882,6 +2892,9 @@ void twist_sink_gate_check (struct twist_transfer *transfer);
 struct twist_upload *twist_fd_upload_new (struct twist_transfer *transfer);
 void twist_wsink_free (struct twist_transfer *transfer);
 int twist_wsink_busy (struct twist_transfer *transfer);
+/* How many writes have been made to the writer of the body (for tests: the
+   body goes in as few as it can).  */
+size_t twist_wsink_writes (const struct twist_transfer *transfer);
 void twist_wsink_close (struct twist_transfer *transfer);
 /* Free what is held.  */
 void twist_sink_clear (struct twist_transfer *transfer);

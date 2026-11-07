@@ -867,15 +867,16 @@ twist_fio_write_new (struct twist_loop *loop, struct twist_storage *st,
   return TWIST_OK;
 }
 
-int
-twist_fio_write (struct twist_fio *f, const uint8_t *data, size_t len)
+static int
+fio_write (struct twist_fio *f, const uint8_t *data, size_t len,
+           uint8_t **swap)
 {
   struct fio_chunk *c = NULL;
   int i;
 
   if (twist_uio_is (f))
-    return twist_uio_write (f, data, len);
-  if (f == NULL || f->dir != FIO_WRITE || len > TWIST_FIO_CHUNK)
+    return twist_uio_write (f, data, len, swap);
+  if (f == NULL || f->dir != FIO_WRITE || len > TWIST_FIO_WCHUNK)
     return TWIST_ERR_INVAL;
   pthread_mutex_lock (&f->mu);
   if (f->end_req)
@@ -906,14 +907,28 @@ twist_fio_write (struct twist_fio *f, const uint8_t *data, size_t len)
       pthread_mutex_unlock (&f->mu);
       return 1;
     }
-  if (c->data == NULL)
+  if (c->data == NULL || swap != NULL)
     {
-      c->data = twist_xmalloc (TWIST_FIO_CHUNK);
-      if (c->data == NULL)
+      /* A buffer to fill, and, if the caller's goes, the one it gets.  */
+      uint8_t *fresh = c->data;
+
+      if (fresh == NULL)
         {
-          pthread_mutex_unlock (&f->mu);
-          return TWIST_ERR_NOMEM;
+          fresh = twist_xmalloc (TWIST_FIO_WCHUNK);
+          if (fresh == NULL)
+            {
+              pthread_mutex_unlock (&f->mu);
+              return TWIST_ERR_NOMEM;
+            }
         }
+      if (swap != NULL)
+        {
+          c->data = *swap;
+          *swap = fresh;
+          data = c->data;
+        }
+      else
+        c->data = fresh;
     }
   c->busy = 1;
   c->f = f;
@@ -922,7 +937,7 @@ twist_fio_write (struct twist_fio *f, const uint8_t *data, size_t len)
   c->msg = NULL;
   c->final_note = 0;
   c->next = NULL;
-  if (len > 0)
+  if (len > 0 && data != c->data)
     memcpy (c->data, data, len);
   f->inflight++;
   if (f->wq_tail != NULL)
@@ -933,6 +948,18 @@ twist_fio_write (struct twist_fio *f, const uint8_t *data, size_t len)
   pthread_cond_broadcast (&f->cv);
   pthread_mutex_unlock (&f->mu);
   return TWIST_OK;
+}
+
+int
+twist_fio_write (struct twist_fio *f, const uint8_t *data, size_t len)
+{
+  return fio_write (f, data, len, NULL);
+}
+
+int
+twist_fio_write_swap (struct twist_fio *f, uint8_t **buf, size_t len)
+{
+  return fio_write (f, *buf, len, buf);
 }
 
 void

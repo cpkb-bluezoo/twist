@@ -501,6 +501,82 @@ test_writers_yield (struct twist_loop *loop, struct twist_storage *st)
     }
 }
 
+/* A buffer handed over, not copied: what is written is what was in it, the
+   caller gets another to fill, and when the writer has no room the buffer is
+   the caller's still.  */
+static void
+swap_credit (void *user)
+{
+  (void) user;
+}
+
+static const struct twist_fio_write_ops swap_ops = { swap_credit, wr_end,
+                                                     NULL };
+
+static void
+test_write_swap (struct twist_loop *loop, struct twist_storage *st)
+{
+  enum { PIECES = 12, PIECE = TWIST_FIO_WCHUNK };
+  char out[64];
+  struct wr w;
+  uint8_t *buf = twist_xmalloc (TWIST_FIO_WCHUNK);
+  uint8_t *b;
+  size_t n;
+  int fd;
+  int sent = 0;
+  int full = 0;
+  int ok = 1;
+
+  snprintf (out, sizeof out, "/tmp/twist-test-fio-out-XXXXXX");
+  fd = mkstemp (out);
+  close (fd);
+  memset (&w, 0, sizeof w);
+  check (twist_fio_write_new (loop, st, out, 0, &swap_ops, &w, &w.f)
+         == TWIST_OK, "a write is begun");
+  while (sent < PIECES)
+    {
+      uint8_t *mine = buf;
+      int rc;
+
+      memset (buf, 'a' + sent, PIECE);
+      rc = twist_fio_write_swap (w.f, &buf, PIECE);
+      if (rc == 1)
+        {
+          full++;
+          if (buf != mine)
+            ok = 0;		/* Not taken: it must still be ours.  */
+          run_for (loop, 20);
+          continue;
+        }
+      if (rc != TWIST_OK || buf == mine || buf == NULL)
+        ok = 0;
+      sent++;
+    }
+  check (ok, "a buffer is swapped for another, or kept when there is no room");
+  check (full > 0, "and the writer did fill up");
+  twist_fio_write_end (w.f);
+  run_for (loop, 800);
+  check (w.ends == 1 && w.end_err == TWIST_OK, "it ends once, with no error");
+  b = malloc ((size_t) PIECES * PIECE);
+  {
+    FILE *fp = fopen (out, "rb");
+
+    n = fp != NULL ? fread (b, 1, (size_t) PIECES * PIECE, fp) : 0;
+    if (fp != NULL)
+      fclose (fp);
+  }
+  ok = n == (size_t) PIECES * PIECE;
+  for (fd = 0; ok && fd < PIECES; fd++)
+    ok = b[(size_t) fd * PIECE] == 'a' + fd
+         && b[(size_t) fd * PIECE + PIECE - 1] == 'a' + fd;
+  check (ok, "and the file has the pieces, in order");
+  free (b);
+  twist_fio_free (w.f);
+  free (w.msg);
+  free (buf);
+  unlink (out);
+}
+
 /* A descriptor written to, from an offset, through whichever backend there is:
    what was there before the offset stays, and the position is not moved.  */
 static void
@@ -687,6 +763,7 @@ run_all (int uring)
   test_write_fail (loop, st);
   test_write_release (loop, st);
   test_write_fd (loop, st);
+  test_write_swap (loop, st);
   test_writers_yield (loop, st);
   test_many_workers (loop, st);
   twist_storage_free (st);
