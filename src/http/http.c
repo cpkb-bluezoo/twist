@@ -3984,6 +3984,23 @@ on_resolved (void *user, int err, const struct twist_dns_service *svc)
   else if (h->https && rr_h3)
     twist_origin_set_h3 (h->transfer, host, 1,
                          svc->port > 0 ? svc->port : h->transfer->url->port);
+  /* HTTP/3 is QUIC, and QUIC is TLS 1.3: where that is not allowed it is not
+     used, and a request that must have it cannot be made.  */
+  if (!twist_transfer_quic_ok (h->transfer))
+    {
+      if (h->transfer->http_version == TWIST_HTTP_VERSION_3ONLY)
+        {
+          twist_transfer_set_error (h->transfer,
+                                    twist_strdup (_("HTTP/3 needs TLS 1.3, "
+                                                    "which the newest TLS "
+                                                    "version allowed rules "
+                                                    "out")));
+          http_complete (h, TWIST_ERR_UNSUPPORTED);
+          return;
+        }
+      rr_h3 = 0;
+      cached = 0;
+    }
   if (twist_http_discover (h->transfer->http_version, h->https,
                            svc->have_https,
                            rr_h3, cached, &h->how) != TWIST_OK)

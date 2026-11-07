@@ -87,21 +87,22 @@ for v in http_proxy HTTP_PROXY https_proxy HTTPS_PROXY all_proxy ALL_PROXY \
   unset $v
 done
 
-# run OFFER: a resolver that offers OFFER, a transfer of http://www.test/ with
-# it as the resolver, and what it says it was asked and answered.
+# run OFFER [TLS [OPTION [VALUE]]]: a resolver that offers OFFER and speaks only TLS
+# version TLS if that is given, a transfer of http://www.test/ with it as the
+# resolver, and what it says it was asked and answered.
 run ()
 {
   : > "$work/log"
   rm -f "$work/ready"
   python3 -I "$here/doh-peer.py" "$work/cert.pem" "$work/key.pem" 18855 \
-    "$work/log" "$work/ready" 500 "$1" >"$work/peer.out" 2>&1 &
+    "$work/log" "$work/ready" 500 "$1" $2 >"$work/peer.out" 2>&1 &
   peer=$!
   pids="$pids $peer"
   n=0
   while [ ! -s "$work/ready" ] && [ $n -lt 100 ]; do sleep 0.1; n=$((n + 1)); done
   [ -s "$work/ready" ] || skip "the resolver did not start ($(head -c 200 "$work/peer.out"))"
   out=$(SSL_CERT_FILE="$work/cert.pem" timeout 20 "$TWIST" -s -S --max-time 15 \
-          --doh-url https://127.0.0.1:18855/dns-query "http://www.test:$port/" \
+          $3 $4 --doh-url https://127.0.0.1:18855/dns-query "http://www.test:$port/" \
           2> "$work/err")
   status=$?
   err=$(cat "$work/err")
@@ -122,5 +123,13 @@ check "$(is "$status:$out" "0:origin")" "HTTP/1.1: the transfer ($status $out $e
 check "$(grep -q '^alpn http/1.1$' "$work/log" && echo ok)" "HTTP/1.1 was agreed ($log)"
 check "$(grep '^answer ' "$work/log" | head -n 1 | grep -q ' 1$' && echo ok)" \
   "HTTP/1.1: the queries go one at a time ($log)"
+
+# The limit on TLS versions is the resolver's too.
+run h2 1.2 --tls-max 1.2
+check "$(is "$status:$out" "0:origin")" "a TLS 1.2 resolver with --tls-max 1.2 ($status $out $err; $log)"
+run h2 1.2 --tlsv1.3
+check "$(grep -q '^query ' "$work/log" || echo ok)" "a TLS 1.2 resolver with --tlsv1.3 is not asked ($status $out; $log)"
+run h2 1.3 --tls-max 1.2
+check "$(grep -q '^query ' "$work/log" || echo ok)" "a TLS 1.3 resolver with --tls-max 1.2 is not asked ($status $out; $log)"
 
 exit $fail

@@ -283,6 +283,7 @@ start_attempt (struct twist_race *r, const struct twist_dns_addr *addr)
   c = twist_connection_new (r->loop);
   if (c == NULL)
     return TWIST_ERR_NOMEM;
+  twist_connection_set_tls_versions (c, twist_transfer_tls_versions (r->transfer));
   twist_connection_endpoint (c)->user_data = a;
   twist_connection_set_handler (c, &attempt_handler);
   /* Set before the connect: it can connect at once.  */

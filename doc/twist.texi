@@ -279,6 +279,16 @@ A string: the text of a @code{Cookie} header.  It is not a cookie file.
 A long, one of @code{TWIST_HTTP_VERSION_NONE} (the default, which lets twist
 choose), @code{_1_0}, @code{_1_1}, @code{_2_0}, @code{_2TLS}, @code{_3},
 @code{_3ONLY} and @code{_2_PRIOR_KNOWLEDGE}.
+@item TWISTOPT_TLS_MIN_VERSION
+@itemx TWISTOPT_TLS_MAX_VERSION
+A long: the oldest and the newest TLS version, @code{TWIST_TLS_1_2} or
+@code{TWIST_TLS_1_3}; 0, the default, is no choice.  TLS 1.2 is the oldest
+there is, and any other value is @code{TWIST_ERR_INVAL}, as is a minimum above
+the maximum when the transfer begins.  The limit is that of every TLS connection
+of the transfer: to the server, to an @code{https} proxy, and to a DoT or DoH
+resolver.  QUIC is TLS 1.3 only, so with a maximum of TLS 1.2 HTTP/3 is not used
+(it falls back, and @code{TWIST_HTTP_VERSION_3ONLY} is
+@code{TWIST_ERR_UNSUPPORTED}), nor is a DoQ resolver or @code{smbs}.
 @item TWISTOPT_ACCEPT_ENCODING
 A string: the response codings to accept.  An empty string is @samp{br},
 @samp{gzip} and @samp{deflate}, or @samp{gzip} and @samp{deflate} when the
@@ -1491,6 +1501,20 @@ and then the system's authorities are trusted.
 Select the HTTP version.  HTTP/3 is used when discovered from an HTTPS
 record or a cached Alt-Svc entry.  HTTP/2 on HTTPS is ALPN.  Cleartext
 HTTP/2 is an h2c upgrade, unless prior knowledge was requested.
+@item --tlsv1.2
+@itemx --tlsv1.3
+@itemx --tls-max @var{version}
+Limit the TLS versions.  @option{--tlsv1.2} allows TLS 1.2 and 1.3, which is
+what is done without it, and is there so that a script that passes it works.
+@option{--tlsv1.3} allows TLS 1.3 only.  @option{--tls-max} is the newest
+allowed, @samp{1.2} or @samp{1.3}: @samp{1.2} is TLS 1.2 only.  The limit goes
+for a connection to the server, to an @code{https} proxy, and to a DoT or DoH
+resolver.  TLS 1.2 is the oldest twist offers, so @option{--tlsv1.0},
+@option{--tlsv1.1} and a @option{--tls-max} of those are refused, and so is a
+minimum above the maximum (exit status 2).  HTTP/3, DoQ and @code{smbs} are
+QUIC, which is TLS 1.3: with @option{--tls-max 1.2} they are not used, so
+@option{--http3} goes on over TCP and @option{--http3-only} and a
+@code{quic://} resolver fail.  @option{--tlsv1.2} leaves them as they were.
 @item --dns-order @var{list}
 Comma-separated DNS transports.  The default is @code{doq,dot,doh,udp}.
 DoQ and DoT are used when the system resolver advertises them, or when

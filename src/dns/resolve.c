@@ -129,6 +129,7 @@ struct dns_query
   const char *keyfile;
   struct twist_url *doh_parsed;
   struct twist_doh *dohp;
+  unsigned tls_versions;
   /* The HTTP/2 session of a DoH resolver that agreed to it: each query is a
      stream, and they are all out at once.  */
   struct twist_h2 *h2;
@@ -1392,6 +1393,7 @@ open_udp (struct dns_query *q)
       return TWIST_ERR_RESOLVE;
     }
   q->conn = twist_connection_new (q->loop);
+  twist_connection_set_tls_versions (q->conn, q->tls_versions);
   if (q->conn == NULL)
     {
       close (fd);
@@ -1412,6 +1414,7 @@ open_tcp (struct dns_query *q)
   int rc;
 
   q->conn = twist_connection_new (q->loop);
+  twist_connection_set_tls_versions (q->conn, q->tls_versions);
   if (q->conn == NULL)
     return TWIST_ERR_NOMEM;
   ep = twist_connection_endpoint (q->conn);
@@ -1593,6 +1596,7 @@ connect_doh (struct dns_query *q, const struct twist_dns_addr *addr)
   port = q->doh_parsed->port > 0 ? q->doh_parsed->port : 443;
   tmo = q->timeout_ms > 0 ? (uint64_t) q->timeout_ms : 5000;
   q->conn = twist_connection_new (q->loop);
+  twist_connection_set_tls_versions (q->conn, q->tls_versions);
   if (q->conn == NULL)
     return TWIST_ERR_NOMEM;
   ep = twist_connection_endpoint (q->conn);
@@ -1729,6 +1733,7 @@ dial_tcp (struct dns_query *q, const struct twist_dns_addr *addr, int port,
   int rc;
 
   q->conn = twist_connection_new (q->loop);
+  twist_connection_set_tls_versions (q->conn, q->tls_versions);
   if (q->conn == NULL)
     return TWIST_ERR_NOMEM;
   ep = twist_connection_endpoint (q->conn);
@@ -1851,6 +1856,9 @@ connect_doq (struct dns_query *q, const struct twist_dns_addr *addr, int port,
   rc = remember_peer (q, name, addr, port);
   if (rc != TWIST_OK)
     return rc;
+  /* QUIC is TLS 1.3 only.  */
+  if (q->tls_versions == TWIST_TLS_V12)
+    return TWIST_ERR_UNSUPPORTED;
   require_asked_address (q, discovered);
   memset (&opts, 0, sizeof opts);
   opts.also_name = q->also_name[0] != 0 ? q->also_name : NULL;
@@ -2204,7 +2212,8 @@ resolve (struct twist_loop *loop, const char *host, const int *order,
          size_t norder, int want_https, const char *doh_url,
          const char *doq_url, const char *dot_url, int doh_verifypeer,
          const char *cainfo, const char *capath, const char *certfile,
-         const char *keyfile, long timeout_ms, struct twist_dns_cache *cache,
+         const char *keyfile, unsigned tls_versions, long timeout_ms,
+         struct twist_dns_cache *cache,
          void (*cb) (void *, int, const struct twist_dns_addr *),
          void (*svc_cb) (void *, int, const struct twist_dns_service *),
          const struct twist_dns_sink *sink, void *user)
@@ -2354,6 +2363,7 @@ resolve (struct twist_loop *loop, const char *host, const int *order,
   q->capath = capath;
   q->certfile = certfile;
   q->keyfile = keyfile;
+  q->tls_versions = tls_versions;
   q->timeout_ms = timeout_ms;
   if (order != NULL && norder > 0)
     {
@@ -2418,7 +2428,7 @@ twist_dns_resolve (struct twist_loop *loop, const char *host,
                    void *user)
 {
   return resolve (loop, host, order, norder, 0, NULL, NULL, NULL, 1, NULL,
-                  NULL, NULL, NULL, 0, loop_cache (loop), cb, NULL, NULL, user);
+                  NULL, NULL, NULL, 0, 0, loop_cache (loop), cb, NULL, NULL, user);
 }
 
 int
@@ -2429,7 +2439,7 @@ twist_dns_resolve_service (struct twist_loop *loop, const char *host,
                            void *user)
 {
   return resolve (loop, host, order, norder, 1, NULL, NULL, NULL, 1, NULL,
-                  NULL, NULL, NULL, 0, NULL, NULL, cb, NULL, user);
+                  NULL, NULL, NULL, 0, 0, NULL, NULL, cb, NULL, user);
 }
 
 /* A name is looked up within the time to connect, and no longer than the
@@ -2459,7 +2469,7 @@ twist_dns_resolve_transfer (struct twist_transfer *transfer, const char *host,
                   transfer->doq_url, transfer->dot_url,
                   transfer->doh_verifypeer,
                   transfer->cainfo, transfer->capath, transfer->sslcert,
-                  transfer->sslkey,
+                  transfer->sslkey, twist_transfer_tls_versions (transfer),
                   transfer_timeout (transfer), transfer_cache (transfer), cb,
                   NULL, NULL, user);
 }
@@ -2483,7 +2493,7 @@ twist_dns_resolve_service_transfer (struct twist_transfer *transfer,
                   transfer->doq_url, transfer->dot_url,
                   transfer->doh_verifypeer,
                   transfer->cainfo, transfer->capath, transfer->sslcert,
-                  transfer->sslkey,
+                  transfer->sslkey, twist_transfer_tls_versions (transfer),
                   transfer_timeout (transfer), NULL, NULL, cb, NULL, user);
 }
 
@@ -2496,7 +2506,7 @@ twist_dns_resolve_sink (struct twist_loop *loop, const char *host,
   if (sink == NULL)
     return TWIST_ERR_INVAL;
   return resolve (loop, host, order, norder, want_https, NULL, NULL, NULL, 1, NULL,
-                  NULL, NULL, NULL, 0, cache, NULL, NULL, sink, NULL);
+                  NULL, NULL, NULL, 0, 0, cache, NULL, NULL, sink, NULL);
 }
 
 int
@@ -2515,6 +2525,7 @@ twist_dns_resolve_sink_transfer (struct twist_transfer *transfer,
                   transfer->doh_url, transfer->doq_url, transfer->dot_url,
                   transfer->doh_verifypeer, transfer->cainfo, transfer->capath,
                   transfer->sslcert, transfer->sslkey,
+                  twist_transfer_tls_versions (transfer),
                   transfer_timeout (transfer),
                   want_https ? NULL : transfer_cache (transfer), NULL, NULL,
                   sink, NULL);

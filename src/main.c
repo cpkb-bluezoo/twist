@@ -113,6 +113,9 @@ struct cli_op
   uint64_t limit_rate;		/* Bytes a second; 0: none.  */
   int globoff;			/* -g: {} and [] in a URL are plain.  */
   char *mail_from;
+  /* The TLS versions asked for (--tlsv1.2, --tls-max), 0 for neither.  */
+  long tls_min;
+  long tls_max;
   char *output_dir;
   int create_dirs;
   int resume_set;
@@ -398,6 +401,11 @@ usage (void)
   fputs (_("      --http3             use HTTP/3 when it is discovered\n"),
          stdout);
   fputs (_("      --http3-only        fail unless HTTP/3 can be used\n"),
+         stdout);
+  fputs (_("      --tlsv1.2           use TLS 1.2 or later (the oldest offered)\n"),
+         stdout);
+  fputs (_("      --tlsv1.3           use TLS 1.3 only\n"), stdout);
+  fputs (_("      --tls-max VERSION   use no TLS newer than 1.2 or 1.3\n"),
          stdout);
   fputs (_("      --dns-order LIST    DNS transports (default doq,dot,doh,udp)\n"),
          stdout);
@@ -2973,6 +2981,11 @@ main (int argc, char **argv)
     { "http2-prior-knowledge", no_argument, NULL, 9 },
     { "http3", no_argument, NULL, 5 },
     { "http3-only", no_argument, NULL, 10 },
+    { "tlsv1.0", no_argument, NULL, 210 },
+    { "tlsv1.1", no_argument, NULL, 211 },
+    { "tlsv1.2", no_argument, NULL, 212 },
+    { "tlsv1.3", no_argument, NULL, 213 },
+    { "tls-max", required_argument, NULL, 214 },
     { "dns-order", required_argument, NULL, 8 },
     { "doh-url", required_argument, NULL, 13 },
     { "doh-insecure", no_argument, NULL, 14 },
@@ -3603,6 +3616,53 @@ main (int argc, char **argv)
         case 10:
           op_set_long (op, TWISTOPT_HTTP_VERSION,
                        (long) TWIST_HTTP_VERSION_3ONLY);
+          break;
+        case 210:
+        case 211:
+          diag (_("TLS older than 1.2 is not offered; the oldest version "
+                  "is TLS 1.2"));
+          suggest ();
+          status = 2;
+          break;
+        case 212:
+        case 213:
+          op->tls_min = c == 212 ? TWIST_TLS_1_2 : TWIST_TLS_1_3;
+          op_set_long (op, TWISTOPT_TLS_MIN_VERSION, op->tls_min);
+          if (op->tls_min == TWIST_TLS_1_3 && op->tls_max == TWIST_TLS_1_2)
+            {
+              diag (_("--tlsv1.3 and --tls-max 1.2 cannot both be met"));
+              suggest ();
+              status = 2;
+            }
+          break;
+        case 214:
+          if (strcmp (optarg, "1.2") == 0)
+            op->tls_max = TWIST_TLS_1_2;
+          else if (strcmp (optarg, "1.3") == 0)
+            op->tls_max = TWIST_TLS_1_3;
+          else if (strcmp (optarg, "1.0") == 0 || strcmp (optarg, "1.1") == 0
+                   || strcmp (optarg, "1") == 0)
+            {
+              diag (_("TLS older than 1.2 is not offered; the oldest version "
+                      "is TLS 1.2"));
+              suggest ();
+              status = 2;
+              break;
+            }
+          else
+            {
+              diag (_("option --tls-max: the version is 1.2 or 1.3"));
+              suggest ();
+              status = 2;
+              break;
+            }
+          op_set_long (op, TWISTOPT_TLS_MAX_VERSION, op->tls_max);
+          if (op->tls_min == TWIST_TLS_1_3 && op->tls_max == TWIST_TLS_1_2)
+            {
+              diag (_("--tlsv1.3 and --tls-max 1.2 cannot both be met"));
+              suggest ();
+              status = 2;
+            }
           break;
         case 11:
           free (op->mail_from);

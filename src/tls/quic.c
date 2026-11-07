@@ -1292,6 +1292,8 @@ quic_connect (struct twist_transfer *transfer,
   if (transfer == NULL || transfer->url == NULL || transfer->url->host == NULL
       || addr == NULL)
     return TWIST_ERR_INVAL;
+  if (!twist_transfer_quic_ok (transfer))
+    return TWIST_ERR_UNSUPPORTED;
   return twist_quic_dial (transfer->loop, transfer->url->host, "h3", addr,
                           port,
                           transfer->cainfo, transfer->capath,

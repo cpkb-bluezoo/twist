@@ -21,9 +21,10 @@
 # spoken here by hand, which is little: the requests' headers are not read, only
 # their bodies, which are the queries.
 #
-#   doh-peer.py CERT KEY PORT LOG READY DELAY_MS ALPN
+#   doh-peer.py CERT KEY PORT LOG READY DELAY_MS ALPN [TLSVERSION]
 #
-# ALPN is h2 or http/1.1, what the resolver offers.  Each query is answered
+# ALPN is h2 or http/1.1, what the resolver offers, and TLSVERSION 1.2 or 1.3
+# the only TLS version it speaks (the default is both).  Each query is answered
 # DELAY_MS after it arrives: 127.0.0.1 for an A query, nothing for any other
 # type.  What happens is written to LOG, one line each:
 #   alpn NAME          what was agreed
@@ -33,6 +34,7 @@
 import asyncio, ssl, struct, sys
 
 cert, key, port, log, ready, delay, offer = sys.argv[1:8]
+tlsonly = sys.argv[8] if len(sys.argv) > 8 else ""
 delay = int(delay) / 1000.0
 seen = 0
 PREFACE = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
@@ -137,6 +139,10 @@ async def handle(reader, writer):
 
 async def main():
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    if tlsonly:
+        v = ssl.TLSVersion.TLSv1_2 if tlsonly == "1.2" else ssl.TLSVersion.TLSv1_3
+        ctx.minimum_version = v
+        ctx.maximum_version = v
     ctx.load_cert_chain(cert, key)
     ctx.set_alpn_protocols(["h2", "http/1.1"] if offer == "h2" else ["http/1.1"])
     server = await asyncio.start_server(handle, "127.0.0.1", int(port), ssl=ctx)

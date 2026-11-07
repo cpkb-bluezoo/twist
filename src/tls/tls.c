@@ -241,6 +241,12 @@ tls_start (struct twist_connection *conn, const struct twist_tls_want *want)
             versions = GQ_TLSAUTO_TLS12;
         }
     }
+  /* What the user allows: a session of a version that is not allowed does not
+     come to this, as it was made under the same limit.  */
+  if (want->versions == TWIST_TLS_V12)
+    versions = GQ_TLSAUTO_TLS12;
+  else if (want->versions == TWIST_TLS_V13)
+    versions = GQ_TLSAUTO_TLS13;
   memset (&ev, 0, sizeof ev);
   ev.user = conn;
   ev.write = tls_write;

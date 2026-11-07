@@ -172,6 +172,9 @@ struct twist_transfer
   /* TWISTOPT_USE_SSL.  */
   int use_ssl;
   int http_version;
+  /* TWISTOPT_TLS_MIN_VERSION and TWISTOPT_TLS_MAX_VERSION; 0 is not set.  */
+  int tls_min;
+  int tls_max;
   int dns_order[4];
   int dns_order_n;
   struct twist_origin_hint *origins;
@@ -622,6 +625,33 @@ void twist_connection_hold_read (struct twist_connection *conn, int hold);
    kept for as long as the connection is, by whatever uses it.  */
 void twist_connection_set_rate (struct twist_connection *conn,
                                 uint64_t recv_limit, uint64_t send_limit);
+/* The TLS versions a connection may speak (TWIST_TLS_V12, TWIST_TLS_V13, or'd;
+   0 is both), which twist_connection_start_tls offers.  */
+#define TWIST_TLS_V12 1u
+#define TWIST_TLS_V13 2u
+void twist_connection_set_tls_versions (struct twist_connection *conn,
+                                        unsigned versions);
+/* The versions that TRANSFER allows: 0 for both, else one of them (a minimum
+   above the maximum gives 0 too: twist_transfer_check_tls says it is wrong).  */
+static inline unsigned
+twist_transfer_tls_versions (const struct twist_transfer *transfer)
+{
+  unsigned v = 0;
+
+  if (transfer->tls_min == TWIST_TLS_1_3)
+    v = TWIST_TLS_V13;
+  if (transfer->tls_max == TWIST_TLS_1_2)
+    v = v != 0 ? 0 : TWIST_TLS_V12;
+  return v;
+}
+/* Whether QUIC, which is TLS 1.3 only, may be used for TRANSFER.  */
+static inline int
+twist_transfer_quic_ok (const struct twist_transfer *transfer)
+{
+  return transfer->tls_max != TWIST_TLS_1_2;
+}
+/* TWIST_ERR_INVAL if the minimum is above the maximum.  */
+int twist_transfer_check_tls (const struct twist_transfer *transfer);
 /* The limits that the transfer was given (--limit-rate), on a connection that
    is made for it.  */
 static inline void
@@ -630,6 +660,7 @@ twist_connection_limit (struct twist_connection *conn,
 {
   twist_connection_set_rate (conn, transfer->max_recv_speed,
                              transfer->max_send_speed);
+  twist_connection_set_tls_versions (conn, twist_transfer_tls_versions (transfer));
 }
 void twist_connection_force_write (struct twist_connection *conn, int force);
 int twist_connection_queue_out (struct twist_connection *conn,
@@ -964,6 +995,9 @@ struct twist_tls_want
      resolver that a DoT or DoQ resolver was discovered from (RFC 9462,
      section 4.2).  NULL: only SERVER_NAME.  */
   const char *also_name;
+  /* The TLS versions that may be used, TWIST_TLS_V12 and TWIST_TLS_V13 or'd;
+     0 is both.  */
+  unsigned versions;
 };
 
 struct gq_tls_config;

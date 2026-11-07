@@ -1208,6 +1208,27 @@ h2c upgrade.  Prior knowledge is only
 .BR \-\-http2-prior-knowledge .
 The HTTP/1 minor version is taken from the response status line.
 .TP
+.B \-\-tlsv1.2
+.TQ
+.B \-\-tlsv1.3
+.TQ
+.BI \-\-tls-max " version"
+Limit the TLS versions.
+.B \-\-tlsv1.2
+allows TLS 1.2 and 1.3 (the default).
+.B \-\-tlsv1.3
+allows 1.3 only.
+.B \-\-tls-max
+1.2 allows 1.2 only.  TLS 1.2 is the oldest offered, so
+.BR \-\-tlsv1.0 ,
+.B \-\-tlsv1.1
+and a
+.B \-\-tls-max
+of those, or a minimum above the maximum, are refused (status 2).  HTTP/3, DoQ
+and smbs are TLS 1.3: with
+.B \-\-tls-max 1.2
+they are not used.
+.TP
 .BI \-\-mail-from " address"
 SMTP sender.  Repeat
 .B \-\-mail-rcpt
