@@ -1143,6 +1143,9 @@ size_t twist_storage_queued (struct twist_storage *st);
    is no cancellation of a read that is under way; it holds a worker of the
    pool until it returns.  A full queue fails the submit at once.  */
 #define TWIST_FIO_CHUNK 16384
+/* What the sink gives the application's write callback at a time: no more
+   than the writer behind it takes (TWIST_FIO_CHUNK) in one job.  */
+#define TWIST_SINK_PIECE TWIST_FIO_CHUNK
 #define TWIST_FIO_PIPELINE 4
 struct twist_fio;
 
