@@ -109,4 +109,22 @@ check "$(is "$(wc -c < "$work/big" | tr -d ' ')" 600000)" "with all of the body"
 check "$(is "$(grep -c '^connection$' "$work/peer.log")" 1)" \
   "over one connection ($(tr '\n' ';' < "$work/peer.log"))"
 
+# A consumer that takes a little at a time: the sink is full again each time it
+# has been given back, and what is held for it must not grow past what it can
+# take. The body is larger than all that twist will hold.
+rm -f "$work/fifo2" "$work/huge"
+mkfifo "$work/fifo2"
+( exec 3< "$work/fifo2"
+  while :; do
+    n=$(head -c 262144 <&3 | tee -a "$work/huge" | wc -c)
+    [ "$n" -eq 0 ] && break
+    sleep 0.05
+  done ) &
+pids="$pids $!"
+timeout 60 "$TWIST" -s -S --http3-only --max-time 50 --cacert "$work/cert.pem" \
+  -o "$work/fifo2" "https://127.0.0.1:$port/huge" 2> "$work/err2"
+st=$?
+check "$(is "$st" 0)" "16 MiB into a slow consumer ends ($st; $(cat "$work/err2"))"
+check "$(is "$(wc -c < "$work/huge" | tr -d ' ')" 16777216)" "with all of the body"
+
 exit $fail

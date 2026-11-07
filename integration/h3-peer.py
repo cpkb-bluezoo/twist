@@ -24,7 +24,7 @@
 #       that is bidirectional, which a server may not do in HTTP/3 (RFC 9114,
 #       section 6.1).  The close of each connection is written to LOG as
 #       "closed 0xCODE".  GET /big is 600000 bytes, more than a stream's
-#       window and a pipe's buffer.  Each connection is written to LOG as
+#       window and a pipe's buffer, and GET /huge is 16 MiB.  Each connection is written to LOG as
 #       "connection", and each request as "request PATH".
 #   h3-peer.py proxy CERT KEY PORT LOG READY [REFUSED]
 #       A proxy for CONNECT-UDP (RFC 9298): a CONNECT with :protocol
@@ -86,6 +86,12 @@ class Peer(QuicConnectionProtocol):
                 self._quic._remote_max_streams_bidi, 4)
             sid = self._quic.get_next_available_stream_id()
             self._quic.send_stream_data(sid, b"not for you", end_stream=False)
+        if headers.get(b":path") == b"/huge":
+            self._h3.send_headers(stream_id, [
+                (b":status", b"200"), (b"content-length", b"16777216")])
+            self._h3.send_data(stream_id, b"x" * 16777216, end_stream=True)
+            self.transmit()
+            return
         if headers.get(b":path") == b"/big":
             self._h3.send_headers(stream_id, [
                 (b":status", b"200"), (b"content-length", b"600000")])

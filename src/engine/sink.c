@@ -157,14 +157,18 @@ twist_transfer_resume_local (struct twist_transfer *t)
   if (t->sink_paused)
     {
       t->sink_paused = 0;
-      if (t->resume_fn != NULL)
-        t->resume_fn (t);
-      /* The callback may be full again at once, and it may end the
-         transfer.  */
+      /* What was held is given first.  The callback may be full again at
+         once, and it may end the transfer.  The peer is let go only when all
+         of it has been taken: the credit it is given back is for what has
+         been delivered to the transfer, and held bytes are that, so letting
+         it go while some are only held would let them grow, a window at a
+         time, with no bound.  If the callback is full again the peer stays
+         stopped, as it was.  */
       if (!t->done)
         rc = flush (t);
-      if (t->sink_paused && t->pause_fn != NULL)
-        t->pause_fn (t);
+      if (!t->sink_paused && rc == TWIST_OK && !t->done
+          && t->resume_fn != NULL)
+        t->resume_fn (t);
       if (rc != TWIST_OK)
         twist_transfer_finish (t, rc);
     }

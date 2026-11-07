@@ -132,9 +132,16 @@ test_pause_resume (void)
   twist_transfer_resume (t);
   check (t->sink_paused && s.n < 3000 && s.n > 512,
          "paused again part way through what was held");
+  /* The peer is let go (its window, its credit) for what the callback has
+     taken, not for what is only held: otherwise a callback that takes a
+     little each time lets the held bytes grow without bound.  */
+  check (s.pauses == 1 && s.resumes == 0,
+         "and the peer is not let go while some is still held");
   twist_transfer_resume (t);
   check (!t->sink_paused && s.n == 3000 && memcmp (s.got, data, 3000) == 0,
          "and the rest comes on the next resume");
+  check (s.pauses == 1 && s.resumes == 1,
+         "and then the peer is let go, once");
   twist_transfer_free (t);
   free (data);
 }

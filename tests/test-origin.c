@@ -81,6 +81,9 @@ struct srv
 /* A response on /Z is larger than a stream's window, so a stream that is not
    given its window back stalls the server.  */
 #define HUGE_BODY (2 * 1024 * 1024)
+/* A response on /Y is larger than all that a transfer will hold for a sink that
+   is full.  */
+#define ENORMOUS_BODY (16 * 1024 * 1024)
 
 static const char h1_reply[] =
   "HTTP/1.1 200 OK\r\nContent-Length: 6\r\n\r\nhello\n";
@@ -273,6 +276,7 @@ srv_serve (struct srv *s, int i)
           int ping = 0;
           int upload = 0;
           int granting = 0;
+          int enormous = 0;
 
           /* A request for /r is sent to /1, one for /b is answered at length
              as the windows allow, and one for /p waits for the client to
@@ -286,6 +290,7 @@ srv_serve (struct srv *s, int i)
                 ping |= s->buf[i][k + 1] == 'p';
                 upload |= s->buf[i][k + 1] == 'U';
                 granting |= s->buf[i][k + 1] == 'W';
+                enormous |= s->buf[i][k + 1] == 'Y';
               }
           if (granting)
             s->grant[i] = 1;
@@ -293,12 +298,13 @@ srv_serve (struct srv *s, int i)
             s->up_stream[i] = stream;
           else if (redirect)
             n += frame (out + n, 1, 5, stream, moved, sizeof moved);
-          else if (big || huge)
+          else if (big || huge || enormous)
             {
               n += frame (out + n, 1, 4, stream, &status200, 1);
               s->big_stream[i] = stream;
               __atomic_store_n (&s->big_left[i],
-                                huge ? (long) HUGE_BODY : (long) BIG,
+                                enormous ? (long) ENORMOUS_BODY
+                                : huge ? (long) HUGE_BODY : (long) BIG,
                                 __ATOMIC_RELEASE);
               s->big_win[i] = s->stream_init[i];
             }
@@ -955,6 +961,70 @@ test_h2_uploads_together (void)
   srv_stop (&s);
 }
 
+/* A write callback that takes a little each time it is resumed and is full
+   again at once: the peer must not be let go for what is only held, or what is
+   held grows by a window at each resume, with no bound, and the transfer is
+   ended when it passes what a transfer will hold.  */
+struct cycler
+{
+  size_t got;
+  size_t budget;		/* What it will take before it is full.  */
+};
+
+static size_t
+cycler_body (char *ptr, size_t size, size_t nmemb, void *user)
+{
+  struct cycler *c = user;
+  size_t n = size * nmemb;
+
+  (void) ptr;
+  if (c->budget < n)
+    return TWIST_WRITEFUNC_PAUSE;
+  c->budget -= n;
+  c->got += n;
+  return n;
+}
+
+static void
+test_h2_slow_sink_cycles (void)
+{
+  struct srv s;
+  struct run r;
+  struct cycler c;
+  size_t most_held = 0;
+  int k;
+
+  check (srv_start (&s, 1, 0) == 0, "server");
+  check (run_open (&r), "runtime");
+  memset (&c, 0, sizeof c);
+  c.budget = 200000;
+  run_make (&r, 0, &s, 1, -1);
+  run_path (&r, 0, &s, "/Y");
+  twist_transfer_setopt (r.t[0], TWISTOPT_WRITEFUNCTION, cycler_body);
+  twist_transfer_setopt (r.t[0], TWISTOPT_WRITEDATA, &c);
+  twist_transfer_setopt (r.t[0], TWISTOPT_TIMEOUT_MS, 30000L);
+  run_go (&r, 0);
+  for (k = 0; k < 20000 && !r.job[0].done; k++)
+    {
+      twist_runtime_run_once (r.runtime, 1);
+      if (r.t[0]->held_len > most_held)
+        most_held = r.t[0]->held_len;
+      /* Every so often the consumer has room for a little.  */
+      if (k % 5 == 0 && r.t[0]->sink_paused && !r.job[0].done)
+        {
+          c.budget = 200000;
+          twist_transfer_resume (r.t[0]);
+        }
+    }
+  check (r.job[0].done && r.job[0].result == TWIST_OK,
+         "a body larger than all that is held ends, for a consumer that takes "
+         "a little each time");
+  check (c.got == (size_t) ENORMOUS_BODY, "with all of it");
+  check (most_held < 2 * 1024 * 1024, "and no more was held than a few windows");
+  run_close (&r, 1);
+  srv_stop (&s);
+}
+
 /* The server pings after the first transfer has ended, while the second is
    waiting for its answer, which is not sent until the ping is.  */
 static void
@@ -1258,6 +1328,8 @@ main (void)
   test_h2_upload_stalled ();
   announce ("test_h2_uploads_together");
   test_h2_uploads_together ();
+  announce ("test_h2_slow_sink_cycles");
+  test_h2_slow_sink_cycles ();
   announce ("test_h2_ping");
   test_h2_ping ();
   announce ("test_leader_fails");
