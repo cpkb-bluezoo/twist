@@ -416,15 +416,15 @@ wsink_cb (char *ptr, size_t size, size_t nmemb, void *user)
     return 0;
   if (w->fio != NULL)
     {
-      if (len > TWIST_FIO_WCHUNK)
-        len = TWIST_FIO_WCHUNK;
+      if (len > twist_fio_wchunk ())
+        len = twist_fio_wchunk ();
       if (w->stage == NULL)
         {
-          w->stage = twist_xmalloc (TWIST_FIO_WCHUNK);
+          w->stage = twist_xmalloc (twist_fio_wchunk ());
           if (w->stage == NULL)
             return 0;
         }
-      if (w->stage_len + len > TWIST_FIO_WCHUNK)
+      if (w->stage_len + len > twist_fio_wchunk ())
         {
           rc = wsink_flush (w);
           if (rc == 1)
@@ -437,7 +437,7 @@ wsink_cb (char *ptr, size_t size, size_t nmemb, void *user)
         }
       memcpy (w->stage + w->stage_len, ptr, len);
       w->stage_len += len;
-      if (w->stage_len == TWIST_FIO_WCHUNK)
+      if (w->stage_len == twist_fio_wchunk ())
         {
           /* Full.  If the writer has no room, the next piece waits for it.  */
           if (wsink_flush (w) < 0)

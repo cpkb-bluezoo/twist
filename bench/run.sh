@@ -24,6 +24,8 @@
 #   bench/run.sh                              everything
 #   bench/run.sh --only get-big --protocols h2
 #   ENGINE=docker bench/run.sh                (default: podman, else docker)
+#   TWIST_WRITE_CHUNK=128k bench/run.sh       (the size of a write to a file;
+#                                              TWIST_NO_URING goes in too)
 #
 # On a laptop other processes disturb the numbers; the workflow runs it on a
 # runner that has nothing else to do.  Compare ratios, not times.
@@ -43,4 +45,4 @@ $engine build --target bench -f ci/Dockerfile \
   -t "$image" . || exit 1
 # Memory for the files, and the host's network: no translation between the
 # clients and nginx.
-exec $engine run --rm --network host --shm-size "${SHM:-2g}" "$image" "$@"
+exec $engine run --rm -e TWIST_WRITE_CHUNK -e TWIST_NO_URING --network host --shm-size "${SHM:-2g}" "$image" "$@"

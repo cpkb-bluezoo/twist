@@ -1153,8 +1153,17 @@ size_t twist_storage_queued (struct twist_storage *st);
 #define TWIST_FIO_PIPELINE 4
 /* The most a write to a file takes: the body comes in pieces of a record,
    and goes out in pieces of this, so that a hand-over to a thread (or to the
-   ring) is made once for many.  */
-#define TWIST_FIO_WCHUNK 65536
+   ring) is made once for many.  It is TWIST_FIO_WCHUNK_DEFAULT unless
+   TWIST_WRITE_CHUNK in the environment says otherwise: a number of bytes,
+   with k or m after it for KiB or MiB, kept between the least (a whole piece
+   from the sink) and the most.  Each write holds up to TWIST_FIO_PIPELINE
+   buffers of it, and the sink one more.  twist_fio_wchunk_parse gives what a
+   setting means (NULL or what is not a size: the default).  */
+#define TWIST_FIO_WCHUNK_DEFAULT 65536
+#define TWIST_FIO_WCHUNK_MIN TWIST_SINK_PIECE
+#define TWIST_FIO_WCHUNK_MAX (4u * 1024 * 1024)
+size_t twist_fio_wchunk_parse (const char *setting);
+size_t twist_fio_wchunk (void);
 struct twist_fio;
 
 /* Reading.  OPEN runs on the worker, and gives the descriptor, the offset to
@@ -1203,11 +1212,11 @@ int twist_fio_write_fd_new (struct twist_loop *loop, struct twist_storage *st,
                             int fd, long long at,
                             const struct twist_fio_write_ops *ops, void *user,
                             struct twist_fio **out);
-/* Queue LEN (at most TWIST_FIO_WCHUNK) bytes, copied: TWIST_OK, 1 if there is
-   no room (CREDIT says when there is), or why the write has failed.  */
+/* Queue LEN (at most twist_fio_wchunk ()) bytes, copied: TWIST_OK, 1 if there
+   is no room (CREDIT says when there is), or why the write has failed.  */
 int twist_fio_write (struct twist_fio *f, const uint8_t *data, size_t len);
-/* As twist_fio_write, without the copy: *BUF is a buffer of TWIST_FIO_WCHUNK
-   bytes (from twist_xmalloc) holding LEN of them, and on TWIST_OK it has
+/* As twist_fio_write, without the copy: *BUF is a buffer of twist_fio_wchunk
+   () bytes (from twist_xmalloc) holding LEN of them, and on TWIST_OK it has
    gone to the writer and *BUF is another of the same size to fill.  Otherwise
    it is the caller's still.  */
 int twist_fio_write_swap (struct twist_fio *f, uint8_t **buf, size_t len);

@@ -683,7 +683,7 @@ twist_uio_write (struct twist_fio *f, const uint8_t *data, size_t len,
   size_t i;
   int busy = 0;
 
-  if (len > TWIST_FIO_WCHUNK)
+  if (len > twist_fio_wchunk ())
     return TWIST_ERR_INVAL;
   if (u->end_req)
     return TWIST_ERR_INVAL;
@@ -707,7 +707,7 @@ twist_uio_write (struct twist_fio *f, const uint8_t *data, size_t len,
 
       if (fresh == NULL)
         {
-          fresh = twist_xmalloc (TWIST_FIO_WCHUNK);
+          fresh = twist_xmalloc (twist_fio_wchunk ());
           if (fresh == NULL)
             return TWIST_ERR_NOMEM;
         }

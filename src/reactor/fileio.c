@@ -867,6 +867,54 @@ twist_fio_write_new (struct twist_loop *loop, struct twist_storage *st,
   return TWIST_OK;
 }
 
+size_t
+twist_fio_wchunk_parse (const char *setting)
+{
+  char *end;
+  unsigned long long v;
+
+  if (setting == NULL || *setting < '0' || *setting > '9')
+    return TWIST_FIO_WCHUNK_DEFAULT;
+  errno = 0;
+  v = strtoull (setting, &end, 10);
+  if (errno == ERANGE)
+    return TWIST_FIO_WCHUNK_MAX;
+  if (*end == 'k' || *end == 'K')
+    {
+      v = v > TWIST_FIO_WCHUNK_MAX ? TWIST_FIO_WCHUNK_MAX : v * 1024;
+      end++;
+    }
+  else if (*end == 'm' || *end == 'M')
+    {
+      v = v > TWIST_FIO_WCHUNK_MAX ? TWIST_FIO_WCHUNK_MAX : v * 1048576;
+      end++;
+    }
+  if (*end != '\0')
+    return TWIST_FIO_WCHUNK_DEFAULT;
+  if (v < TWIST_FIO_WCHUNK_MIN)
+    return TWIST_FIO_WCHUNK_MIN;
+  if (v > TWIST_FIO_WCHUNK_MAX)
+    return TWIST_FIO_WCHUNK_MAX;
+  return (size_t) v;
+}
+
+static size_t wchunk_size;
+static pthread_once_t wchunk_once = PTHREAD_ONCE_INIT;
+
+static void
+wchunk_init (void)
+{
+  wchunk_size = twist_fio_wchunk_parse (twist_getenv_secure
+                                        ("TWIST_WRITE_CHUNK"));
+}
+
+size_t
+twist_fio_wchunk (void)
+{
+  pthread_once (&wchunk_once, wchunk_init);
+  return wchunk_size;
+}
+
 static int
 fio_write (struct twist_fio *f, const uint8_t *data, size_t len,
            uint8_t **swap)
@@ -876,7 +924,7 @@ fio_write (struct twist_fio *f, const uint8_t *data, size_t len,
 
   if (twist_uio_is (f))
     return twist_uio_write (f, data, len, swap);
-  if (f == NULL || f->dir != FIO_WRITE || len > TWIST_FIO_WCHUNK)
+  if (f == NULL || f->dir != FIO_WRITE || len > twist_fio_wchunk ())
     return TWIST_ERR_INVAL;
   pthread_mutex_lock (&f->mu);
   if (f->end_req)
@@ -914,7 +962,7 @@ fio_write (struct twist_fio *f, const uint8_t *data, size_t len,
 
       if (fresh == NULL)
         {
-          fresh = twist_xmalloc (TWIST_FIO_WCHUNK);
+          fresh = twist_xmalloc (twist_fio_wchunk ());
           if (fresh == NULL)
             {
               pthread_mutex_unlock (&f->mu);

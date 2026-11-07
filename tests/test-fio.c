@@ -516,10 +516,11 @@ static const struct twist_fio_write_ops swap_ops = { swap_credit, wr_end,
 static void
 test_write_swap (struct twist_loop *loop, struct twist_storage *st)
 {
-  enum { PIECES = 12, PIECE = TWIST_FIO_WCHUNK };
+  enum { PIECES = 12 };
+  const size_t PIECE = twist_fio_wchunk ();
   char out[64];
   struct wr w;
-  uint8_t *buf = twist_xmalloc (TWIST_FIO_WCHUNK);
+  uint8_t *buf = twist_xmalloc (twist_fio_wchunk ());
   uint8_t *b;
   size_t n;
   int fd;
@@ -770,11 +771,42 @@ run_all (int uring)
   twist_loop_free (loop);
 }
 
+/* The size of a piece for the writer is the environment's, within bounds.  */
+static void
+test_wchunk (void)
+{
+  check (twist_fio_wchunk_parse (NULL) == TWIST_FIO_WCHUNK_DEFAULT,
+         "no setting is the default");
+  check (twist_fio_wchunk_parse ("") == TWIST_FIO_WCHUNK_DEFAULT
+         && twist_fio_wchunk_parse ("x") == TWIST_FIO_WCHUNK_DEFAULT
+         && twist_fio_wchunk_parse ("-5") == TWIST_FIO_WCHUNK_DEFAULT
+         && twist_fio_wchunk_parse ("64kb") == TWIST_FIO_WCHUNK_DEFAULT,
+         "what is not a size is the default");
+  check (twist_fio_wchunk_parse ("131072") == 131072,
+         "a number of bytes");
+  check (twist_fio_wchunk_parse ("128k") == 131072
+         && twist_fio_wchunk_parse ("128K") == 131072
+         && twist_fio_wchunk_parse ("1m") == 1048576,
+         "with k or m for KiB and MiB");
+  check (twist_fio_wchunk_parse ("1") == TWIST_FIO_WCHUNK_MIN
+         && twist_fio_wchunk_parse ("100m") == TWIST_FIO_WCHUNK_MAX
+         && twist_fio_wchunk_parse ("99999999999999999999")
+            == TWIST_FIO_WCHUNK_MAX,
+         "and kept within the least and the most");
+  check (TWIST_FIO_WCHUNK_MIN >= TWIST_SINK_PIECE,
+         "the least takes a whole piece from the sink");
+  check (twist_fio_wchunk () == 32768,
+         "the size in use is the one the environment gave at the start");
+}
+
 int
 main (void)
 {
+  /* Before anything asks, so the tests run with other than the default.  */
+  setenv ("TWIST_WRITE_CHUNK", "32k", 1);
   if (make_file () != 0)
     return 77;
+  test_wchunk ();
   run_all (0);
   run_all (1);
   test_pools_apart ();
