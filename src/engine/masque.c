@@ -732,6 +732,8 @@ twist_masque_connect (struct twist_transfer *transfer,
       return TWIST_ERR_NOMEM;
     }
   m->state = M_ASK;
+  if (!twist_transfer_quic_ok (transfer))
+    return TWIST_ERR_UNSUPPORTED;
   /* To the proxy: QUIC with datagrams.  */
   memset (&oo, 0, sizeof oo);
   oo.datagrams = 1;

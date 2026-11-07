@@ -160,6 +160,15 @@ enum twist_http_version
   TWIST_HTTP_VERSION_2_PRIOR_KNOWLEDGE = 7
 };
 
+/* For TWISTOPT_TLS_MIN_VERSION and TWISTOPT_TLS_MAX_VERSION: the version as it
+   is on the wire.  */
+enum twist_tls_version
+{
+  TWIST_TLS_DEFAULT = 0,
+  TWIST_TLS_1_2 = 0x0303,
+  TWIST_TLS_1_3 = 0x0304
+};
+
 #define TWISTAUTH_NONE 0u
 #define TWISTAUTH_BASIC (1u << 0)
 #define TWISTAUTH_DIGEST (1u << 1)
@@ -424,7 +433,19 @@ enum twist_opt
      length is sent if every part's is known (data, regular files), and
      otherwise the body is chunked (HTTP/1) or has no length (HTTP/2 and 3).
      A form is HTTP's only.  */
-  TWISTOPT_FORM = 85
+  TWISTOPT_FORM = 85,
+  /* A long: the oldest TLS version to use, TWIST_TLS_1_2 or TWIST_TLS_1_3.
+     0, the default, is TWIST_TLS_1_2, the oldest there is: an older version is
+     TWIST_ERR_INVAL.  TLS 1.3 only (QUIC, so HTTP/3, is always that) is
+     TWIST_TLS_1_3.  This goes for the TLS of every connection of the transfer:
+     to the server, to an https proxy, and to a DoT or DoH resolver.  */
+  TWISTOPT_TLS_MIN_VERSION = 86,
+  /* A long: the newest TLS version to use, TWIST_TLS_1_2 or TWIST_TLS_1_3, the
+     default (0).  TWIST_TLS_1_2 is TLS 1.2 only, and no QUIC: HTTP/3 is not
+     used (it falls back, or with TWIST_HTTP_VERSION_3ONLY the transfer fails
+     with TWIST_ERR_UNSUPPORTED), and nor is a DoQ resolver or smbs.  A
+     minimum above the maximum is TWIST_ERR_INVAL when the transfer begins.  */
+  TWISTOPT_TLS_MAX_VERSION = 87
 };
 
 /* Options of a runtime (twist_runtime_setopt).  */

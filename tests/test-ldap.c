@@ -249,10 +249,132 @@ test_ldap_names (void)
   }
 }
 
+/* STARTTLS (RFC 4511 section 4.14): --ssl and --ssl-reqd send the extended
+   operation first, and a name and a password, or a bearer token, are not
+   written until the handshake is done.  The peer here is the bytes it would
+   send; the command is what the client has written.  */
+static const uint8_t starttls_ok[] = {
+  0x30, 0x0c, 0x02, 0x01, 0x01, 0x78, 0x07, 0x0a, 0x01, 0x00, 0x04, 0x00,
+  0x04, 0x00
+};
+static const uint8_t starttls_no[] = {	/* protocolError */
+  0x30, 0x0c, 0x02, 0x01, 0x01, 0x78, 0x07, 0x0a, 0x01, 0x02, 0x04, 0x00,
+  0x04, 0x00
+};
+static const uint8_t bind_ok2[] = {
+  0x30, 0x0c, 0x02, 0x01, 0x02, 0x61, 0x07, 0x0a, 0x01, 0x00, 0x04, 0x00,
+  0x04, 0x00
+};
+#define STARTTLS_OID "1.3.6.1.4.1.1466.20037"
+
+static twist_transfer *
+starttls_transfer (const char *url, int use_ssl)
+{
+  twist_transfer *t = twist_transfer_new ();
+
+  check (twist_url_parse_int (url, &t->url) == TWIST_OK, "starttls url");
+  t->use_ssl = use_ssl;
+  return t;
+}
+
+static int
+sent (struct twist_ldap *l, const char *what)
+{
+  size_t n = 0;
+  const uint8_t *cmd = twist_ldap_command (l, &n);
+
+  return has_bytes (cmd, n, what, strlen (what));
+}
+
+static void
+test_ldap_starttls (void)
+{
+  twist_transfer *t;
+  struct twist_ldap *l;
+  uint8_t both[sizeof starttls_ok + sizeof bind_ok2];
+
+  /* Offered: the extended operation first, and nothing of the login.  */
+  t = starttls_transfer ("ldap://cn=alice:secret@127.0.0.1/dc=x", TWIST_USE_SSL_ALL);
+  l = twist_ldap_new (t, 0);
+  check (sent (l, STARTTLS_OID), "starttls: the first thing written is STARTTLS");
+  check (!sent (l, "secret") && !sent (l, "cn=alice"),
+         "starttls: and holds no name or password");
+  feed_bin (ldap_recv, l, starttls_ok, sizeof starttls_ok, 1);
+  check (!t->done, "starttls: a yes waits for the handshake");
+  check (!sent (l, "secret") && !sent (l, "cn=alice"),
+         "starttls: and the login is not written before it");
+  twist_ldap_tls_done (l);
+  check (sent (l, "cn=alice") && sent (l, "secret") && !sent (l, STARTTLS_OID),
+         "starttls: the bind is written when the handshake is done");
+  feed_bin (ldap_recv, l, bind_ok2, sizeof bind_ok2, 1);
+  check (!t->done && sent (l, "objectClass"), "starttls: and the search follows");
+  twist_transfer_free (t);
+
+  /* Bytes behind the yes came in the clear.  */
+  t = starttls_transfer ("ldap://cn=alice:secret@127.0.0.1/dc=x", TWIST_USE_SSL_TRY);
+  l = twist_ldap_new (t, 0);
+  memcpy (both, starttls_ok, sizeof starttls_ok);
+  memcpy (both + sizeof starttls_ok, bind_ok2, sizeof bind_ok2);
+  feed_bin (ldap_recv, l, both, sizeof both, sizeof both);
+  check (t->done && t->result == TWIST_ERR_PROTOCOL && !sent (l, "secret"),
+         "starttls: bytes in the clear behind the yes end the transfer");
+  twist_transfer_free (t);
+
+  /* Refused, with a password: it is not sent, whether TLS was wanted or
+     required.  */
+  t = starttls_transfer ("ldap://cn=alice:secret@127.0.0.1/dc=x", TWIST_USE_SSL_TRY);
+  l = twist_ldap_new (t, 0);
+  feed_bin (ldap_recv, l, starttls_no, sizeof starttls_no, 1);
+  check (t->done && t->result == TWIST_ERR_USE_SSL && !sent (l, "secret"),
+         "starttls: a refusal with a password fails, though only --ssl was given");
+  twist_transfer_free (t);
+  t = starttls_transfer ("ldap://cn=alice:secret@127.0.0.1/dc=x", TWIST_USE_SSL_ALL);
+  l = twist_ldap_new (t, 0);
+  feed_bin (ldap_recv, l, starttls_no, sizeof starttls_no, 1);
+  check (t->done && t->result == TWIST_ERR_USE_SSL && !sent (l, "secret"),
+         "starttls: and so does --ssl-reqd");
+  twist_transfer_free (t);
+
+  /* A bearer token is a secret as a password is.  */
+  t = starttls_transfer ("ldap://alice@127.0.0.1/dc=x", TWIST_USE_SSL_TRY);
+  t->bearer = twist_strdup ("tok");
+  l = twist_ldap_new (t, 0);
+  check (!sent (l, "tok") && !sent (l, "XOAUTH2"),
+         "starttls: a bearer token is not written before the handshake");
+  feed_bin (ldap_recv, l, starttls_no, sizeof starttls_no, 1);
+  check (t->done && t->result == TWIST_ERR_USE_SSL && !sent (l, "tok"),
+         "starttls: and a refusal fails the transfer");
+  twist_transfer_free (t);
+
+  /* No credentials: --ssl goes on in the clear, --ssl-reqd does not.  */
+  t = starttls_transfer ("ldap://127.0.0.1/dc=x", TWIST_USE_SSL_TRY);
+  l = twist_ldap_new (t, 0);
+  feed_bin (ldap_recv, l, starttls_no, sizeof starttls_no, 1);
+  check (!t->done && !sent (l, STARTTLS_OID) && sent (l, "\x60"),
+         "starttls: with no credentials a refusal goes on in the clear");
+  feed_bin (ldap_recv, l, bind_ok2, sizeof bind_ok2, 1);
+  check (!t->done && sent (l, "objectClass"), "starttls: and searches");
+  twist_transfer_free (t);
+  t = starttls_transfer ("ldap://127.0.0.1/dc=x", TWIST_USE_SSL_ALL);
+  l = twist_ldap_new (t, 0);
+  feed_bin (ldap_recv, l, starttls_no, sizeof starttls_no, 1);
+  check (t->done && t->result == TWIST_ERR_USE_SSL,
+         "starttls: --ssl-reqd with no credentials does not");
+  twist_transfer_free (t);
+
+  /* Not asked for: the bind is written at once, as it was.  */
+  t = starttls_transfer ("ldap://cn=alice:secret@127.0.0.1/dc=x", TWIST_USE_SSL_NONE);
+  l = twist_ldap_new (t, 0);
+  check (sent (l, "secret") && !sent (l, STARTTLS_OID),
+         "starttls: without --ssl nothing is asked for");
+  twist_transfer_free (t);
+}
+
 int
 main (void)
 {
   test_ldap ();
   test_ldap_names ();
+  test_ldap_starttls ();
   return tests_finish ();
 }

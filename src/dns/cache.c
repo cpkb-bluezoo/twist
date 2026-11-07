@@ -36,6 +36,9 @@ struct dns_ent
   int type;
   struct twist_dns_addr addr[DNS_ADDRS];
   int naddr;
+  /* An HTTPS record (type 65): its service, or that there is none.  */
+  struct twist_dns_service svc;
+  int has_svc;
   uint64_t expiry;
   struct dns_ent *next;
 };
@@ -525,4 +528,88 @@ twist_dns_cache_end (struct twist_dns_cache *cache, struct twist_loop *loop,
       free (w);
       w = next;
     }
+}
+
+/* The HTTPS record of NAME, kept with its addresses so that a second lookup
+   that wants it asks for nothing: SVC, or NULL to keep that there is none (for
+   the short while a name with none of a type is).  Only the parameters are
+   kept, not the address.  */
+void
+twist_dns_cache_keep_https (struct twist_dns_cache *cache, const char *name,
+                            const struct twist_dns_service *svc,
+                            uint32_t ttl_sec, uint64_t now_ms)
+{
+  struct dns_ent *e;
+  char *copy;
+
+  if (cache == NULL || name == NULL)
+    return;
+  if (svc == NULL || !svc->have_https)
+    {
+      svc = NULL;
+      ttl_sec = DNS_NEGATIVE_TTL;
+    }
+  else if (ttl_sec == 0)
+    return;
+  if (ttl_sec > DNS_TTL_MAX)
+    ttl_sec = DNS_TTL_MAX;
+  pthread_mutex_lock (&cache->mu);
+  e = find_ent (cache, name, 65);
+  if (e == NULL)
+    {
+      evict_soonest (cache);
+      copy = twist_strdup (name);
+      e = calloc (1, sizeof *e);
+      if (copy == NULL || e == NULL)
+        {
+          free (copy);
+          free (e);
+          pthread_mutex_unlock (&cache->mu);
+          return;
+        }
+      e->name = copy;
+      e->type = 65;
+      e->next = cache->head;
+      cache->head = e;
+      cache->n++;
+    }
+  memset (&e->svc, 0, sizeof e->svc);
+  e->has_svc = svc != NULL;
+  if (svc != NULL)
+    {
+      e->svc.have_https = 1;
+      e->svc.nalpn = svc->nalpn;
+      memcpy (e->svc.alpn, svc->alpn, sizeof e->svc.alpn);
+      e->svc.port = svc->port;
+    }
+  e->expiry = now_ms + (uint64_t) ttl_sec * 1000u;
+  pthread_mutex_unlock (&cache->mu);
+}
+
+/* 1: the record, copied to OUT.  0: it is kept that there is none.  -1:
+   nothing is kept.  */
+int
+twist_dns_cache_https (struct twist_dns_cache *cache, const char *name,
+                       struct twist_dns_service *out, uint64_t now_ms)
+{
+  struct dns_ent *e;
+  int r = -1;
+
+  if (cache == NULL || name == NULL)
+    return -1;
+  pthread_mutex_lock (&cache->mu);
+  e = find_ent (cache, name, 65);
+  if (e != NULL && e->expiry <= now_ms)
+    {
+      drop_ent (cache, e);
+      e = NULL;
+    }
+  if (e != NULL)
+    {
+      r = e->has_svc ? 1 : 0;
+      if (r == 1 && out != NULL)
+        *out = e->svc;
+    }
+  pthread_mutex_unlock (&cache->mu);
+  return r;
 }

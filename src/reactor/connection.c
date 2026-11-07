@@ -83,6 +83,8 @@ struct twist_connection
   /* A second name the server's certificate has to be valid for, which
      twist_connection_start_tls passes on (see twist_connection_require_name).  */
   char *also_name;
+  /* TWIST_TLS_V12 and TWIST_TLS_V13 or'd: what TLS may speak.  0: both.  */
+  unsigned tls_versions;
   struct twist_timer *connect_timer;
   /* The limits on what is read and written (twist_connection_set_rate), and
      the waits for the next chunk to be earned: while one is on, that
@@ -805,6 +807,7 @@ tcp_send (struct twist_endpoint *ep, const uint8_t *data, size_t len)
   return TWIST_OK;
 }
 
+int (*twist_tls_eof_fn) (struct twist_connection *);
 int (*twist_tls_send_plain_fn) (struct twist_connection *, const uint8_t *,
                                 size_t);
 
@@ -1267,6 +1270,13 @@ twist_connection_on_readable (struct twist_connection *c)
         twist_connection_ingest (c, tlsbuf, (size_t) n);
       else if (n == 0)
         {
+          /* The end of the transport.  On a TLS connection it is the end of
+             the data only if the peer said so with a close_notify: a FIN with
+             none is what anyone on the path can make, and what was read may
+             be a part.  */
+          if (!c->failed && c->tls != NULL && twist_tls_eof_fn != NULL
+              && twist_tls_eof_fn (c) != TWIST_OK)
+            twist_connection_fail (c, TWIST_ERR_TLS);
           twist_connection_fail (c, TWIST_ERR_CLOSED);
           break;
         }
@@ -1436,6 +1446,14 @@ twist_connection_require_name (struct twist_connection *c, const char *name)
   return TWIST_OK;
 }
 
+void
+twist_connection_set_tls_versions (struct twist_connection *c,
+                                   unsigned versions)
+{
+  if (c != NULL)
+    c->tls_versions = versions & (TWIST_TLS_V12 | TWIST_TLS_V13);
+}
+
 int
 twist_connection_start_tls (struct twist_connection *c, const char *server_name,
                             int verify, const char *const *alpn, size_t n_alpn,
@@ -1470,5 +1488,6 @@ twist_connection_start_tls_resuming (struct twist_connection *c,
   want.keyfile = keyfile;
   want.resume_from = session_from;
   want.also_name = c->also_name;
+  want.versions = c->tls_versions;
   return twist_tls_start_fn (c, &want);
 }

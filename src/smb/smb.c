@@ -1732,6 +1732,8 @@ smbs_dial (struct twist_smb *x, const struct twist_dns_addr *addr)
       spec.no_cert = 1;
       rc = twist_masque_connect (t, &spec, addr, &smbs_handler, x, &x->qconn);
     }
+  else if (!twist_transfer_quic_ok (t))
+    rc = TWIST_ERR_UNSUPPORTED;
   else
     {
       rc = twist_quic_dial (t->loop, u->host, "smb", addr, u->port, t->cainfo,

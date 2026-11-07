@@ -61,6 +61,7 @@ struct ns_cfg
   uint8_t addr[4][16];      /* IPv4 in the first four bytes.  */
   int port;                 /* HTTPS: the port parameter, or 0.  */
   const char *alpn;         /* HTTPS: one ALPN id, or NULL.  */
+  int drop_first;           /* Drop this many queries of the type, then answer.  */
 };
 
 struct pending
@@ -87,6 +88,7 @@ struct fake_ns
   int qtype[32];
   double at[32];
   int at_first_answer;      /* How many had come when the first was sent.  */
+  int seen[3];              /* Queries of each type that have come.  */
   double first_answer;
   struct pending pend[16];
 };
@@ -189,6 +191,7 @@ ns_serve (void *arg)
             {
               size_t off = 12;
               int qtype;
+              int dropped;
               const struct ns_cfg *c;
 
               while (off < (size_t) got && buf[off] != 0)
@@ -196,6 +199,7 @@ ns_serve (void *arg)
               qtype = (buf[off + 1] << 8) | buf[off + 2];
               c = &ns->cfg[type_index (qtype)];
               pthread_mutex_lock (&ns->mu);
+              dropped = c->drop_first > ns->seen[type_index (qtype)]++;
               if (ns->nq < 32)
                 {
                   ns->qtype[ns->nq] = qtype;
@@ -203,7 +207,7 @@ ns_serve (void *arg)
                 }
               ns->nq++;
               for (i = 0; i < 16; i++)
-                if (!ns->pend[i].used && c->mode != DROP)
+                if (!ns->pend[i].used && c->mode != DROP && !dropped)
                   {
                     struct pending *p = &ns->pend[i];
 
@@ -469,6 +473,7 @@ fresh (struct fake_ns *ns)
   ns->nq = 0;
   ns->first_answer = 0;
   ns->at_first_answer = 0;
+  memset (ns->seen, 0, sizeof ns->seen);
   memset (ns->cfg, 0, sizeof ns->cfg);
   ns->gate = 0;
   pthread_mutex_unlock (&ns->mu);
@@ -777,6 +782,166 @@ test_cache (struct fake_ns *ns, struct twist_loop *loop)
   g_cache = NULL;
 }
 
+
+/* How many queries of QTYPE the fake has had since fresh.  */
+static int
+queries_of (struct fake_ns *ns, int qtype)
+{
+  int i, n = 0;
+
+  pthread_mutex_lock (&ns->mu);
+  for (i = 0; i < ns->nq && i < 32; i++)
+    if (ns->qtype[i] == qtype)
+      n++;
+  pthread_mutex_unlock (&ns->mu);
+  return n;
+}
+
+/* A UDP query that gets no answer is sent again, a few times, and the lookup
+   goes on with what it has: the transfer's timeout is still the last
+   deadline.  */
+static void
+test_retry (struct fake_ns *ns, struct twist_loop *loop)
+{
+  struct got g;
+
+  twist_dns_set_retry (80);
+  fresh (ns);
+  set_v4 (&ns->cfg[0], "192.0.2.70");
+  ns->cfg[0].drop_first = 1;
+  ns->cfg[1].mode = NODATA;
+  ask (ns, loop, &g, "retry.test", 0, 3000);
+  check (strcmp (seq (&g), "192.0.2.70") == 0 && completed (&g) == TWIST_OK,
+         "a query that got no answer is sent again, and resolves");
+  check (queries_of (ns, 1) == 2, "the A query was sent twice");
+  check (queries_of (ns, 28) == 1,
+         "and the AAAA query, which was answered, once");
+
+  /* Two are lost.  */
+  fresh (ns);
+  set_v4 (&ns->cfg[0], "192.0.2.71");
+  ns->cfg[0].drop_first = 2;
+  ns->cfg[1].mode = NODATA;
+  ask (ns, loop, &g, "retry2.test", 0, 3000);
+  check (strcmp (seq (&g), "192.0.2.71") == 0 && queries_of (ns, 1) == 3,
+         "and again if that is lost too");
+
+  /* Never answered: a few retries and no more.  */
+  fresh (ns);
+  set_v4 (&ns->cfg[0], "192.0.2.72");
+  ns->cfg[1].mode = DROP;
+  ask (ns, loop, &g, "never.test", 0, 3000);
+  twist_loop_run_once_ms (loop, 700);
+  check (strcmp (seq (&g), "192.0.2.72") == 0 && completed (&g) == TWIST_OK,
+         "a type that is never answered does not hold up the others");
+  {
+    int n = queries_of (ns, 28);
+
+    check (n >= 2 && n <= 4, "and is asked for a bounded number of times");
+  }
+  twist_dns_set_retry (0);
+}
+
+/* The HTTPS record is kept with the addresses: a second lookup of a name for
+   which it is wanted sends nothing, and is given the same.  */
+static void
+test_cache_https (struct fake_ns *ns, struct twist_loop *loop)
+{
+  struct got g;
+
+  g_cache = twist_dns_cache_new ();
+  fresh (ns);
+  set_v4 (&ns->cfg[0], "192.0.2.80");
+  set_v6 (&ns->cfg[1], "2001:db8::80");
+  ns->cfg[2].alpn = "h2";
+  ns->cfg[2].port = 8443;
+  ask (ns, loop, &g, "web.test", 1, 3000);
+  check (queries_of (ns, 1) == 1 && queries_of (ns, 28) == 1
+         && queries_of (ns, 65) == 1, "an https lookup asks A, AAAA and HTTPS");
+  ask (ns, loop, &g, "web.test", 1, 3000);
+  check (queries_of (ns, 1) == 1 && queries_of (ns, 28) == 1
+         && queries_of (ns, 65) == 1,
+         "the same again sends no query: one upstream lookup for two");
+  check (strcmp (seq (&g), "2001:db8::80 192.0.2.80") == 0
+         && completed (&g) == TWIST_OK, "and gives the same addresses");
+  check (count_kind (&g, C_HTTPS) == 1, "and the HTTPS record");
+  {
+    int i;
+
+    for (i = 0; i < g.n; i++)
+      if (g.call[i].kind == C_HTTPS)
+        check (strcmp (g.call[i].alpn, "h2") == 0 && g.call[i].port == 8443,
+               "with its ALPN and port, from the cache");
+  }
+
+  /* A name with no HTTPS record is kept as having none.  */
+  fresh (ns);
+  set_v4 (&ns->cfg[0], "192.0.2.81");
+  ns->cfg[1].mode = NODATA;
+  ns->cfg[2].mode = NODATA;
+  ask (ns, loop, &g, "plain.test", 1, 3000);
+  ask (ns, loop, &g, "plain.test", 1, 3000);
+  check (queries_of (ns, 65) == 1 && queries_of (ns, 1) == 1,
+         "a name with no HTTPS record is not asked for it again");
+  check (strcmp (seq (&g), "192.0.2.81") == 0 && count_kind (&g, C_HTTPS) == 0,
+         "and still has none");
+
+  /* A lookup that wants HTTPS is not served by one that did not ask.  */
+  fresh (ns);
+  set_v4 (&ns->cfg[0], "192.0.2.82");
+  ns->cfg[1].mode = NODATA;
+  ns->cfg[2].alpn = "h3";
+  ask (ns, loop, &g, "later.test", 0, 3000);
+  ask (ns, loop, &g, "later.test", 1, 3000);
+  check (queries_of (ns, 65) == 1 && count_kind (&g, C_HTTPS) == 1,
+         "HTTPS wanted after addresses only: the lookup is made, and has it");
+  twist_dns_cache_free (g_cache);
+  g_cache = NULL;
+}
+
+/* A lookup with the default order asks the nameserver for a designated
+   resolver (DDR) first.  What it says, including that there is none, is
+   remembered, so the next lookup does not ask.  */
+static void
+test_ddr_memory (struct fake_ns *ns, struct twist_loop *loop)
+{
+  struct twist_dns_sink sink;
+  struct got g;
+  double end;
+
+  twist_dns_ddr_forget ();
+  fresh (ns);
+  set_v4 (&ns->cfg[0], "192.0.2.90");
+  ns->cfg[1].mode = NODATA;
+  memset (&g, 0, sizeof g);
+  memset (&sink, 0, sizeof sink);
+  sink.user = &g;
+  sink.address = g_address;
+  sink.type_error = g_type_error;
+  sink.complete = g_complete;
+  twist_dns_set_nameserver ("127.0.0.1", ns->port);
+  g.start = now_ms ();
+  twist_dns_resolve_sink (loop, "ddr1.test", NULL, 0, 0, NULL, &sink);
+  end = g.start + 3000;
+  while (!g.done && now_ms () < end)
+    twist_loop_run_once_ms (loop, 5);
+  check (completed (&g) == TWIST_OK && strcmp (seq (&g), "192.0.2.90") == 0,
+         "a lookup with the default order resolves, there being no designated resolver");
+  check (queries_of (ns, 64) == 1, "after one discovery query");
+  memset (&g, 0, sizeof g);
+  sink.user = &g;
+  g.start = now_ms ();
+  twist_dns_resolve_sink (loop, "ddr2.test", NULL, 0, 0, NULL, &sink);
+  end = g.start + 3000;
+  while (!g.done && now_ms () < end)
+    twist_loop_run_once_ms (loop, 5);
+  check (completed (&g) == TWIST_OK && strcmp (seq (&g), "192.0.2.90") == 0,
+         "the next lookup of another name resolves too");
+  check (queries_of (ns, 64) == 1,
+         "and sends no discovery query: that there is none is remembered");
+  twist_dns_ddr_forget ();
+}
+
 /* A name the machine knows is not asked for, and gives both of its families,
    IPv6 first, as a name from the network does.  */
 static void
@@ -833,6 +998,9 @@ main (void)
   test_failures (&ns, loop);
   test_one_address (&ns, loop);
   test_cache (&ns, loop);
+  test_retry (&ns, loop);
+  test_cache_https (&ns, loop);
+  test_ddr_memory (&ns, loop);
   test_local (&ns, loop);
   twist_dns_set_timing (0, 0);
   twist_dns_set_nameserver (NULL, 0);

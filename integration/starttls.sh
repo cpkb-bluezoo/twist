@@ -103,6 +103,88 @@ class Conn:
         self.buf = b''
         self.tls = True
 
+def ber(tag, content):
+    n = len(content)
+    if n < 128:
+        head = bytes([n])
+    elif n < 256:
+        head = bytes([0x81, n])
+    else:
+        head = bytes([0x82, n >> 8, n & 255])
+    return bytes([tag]) + head + content
+
+def tlv(b, i):
+    # One element at B[I:]: its tag, its content and where the next begins.
+    tag, n, i = b[i], b[i + 1], i + 2
+    if n & 0x80:
+        k = n & 0x7f
+        n = int.from_bytes(b[i:i + k], 'big')
+        i += k
+    return tag, b[i:i + n], i + n
+
+def ldap_result(mid, op, code):
+    return ber(0x30, ber(2, bytes([mid])) +
+               ber(op, ber(0x0a, bytes([code])) + ber(4, b'') + ber(4, b'')))
+
+def ldap_msg(c):
+    # One LDAPMessage: the bytes inside its SEQUENCE.
+    while True:
+        b = c.buf
+        if len(b) >= 2:
+            n, hdr = b[1], 2
+            if n & 0x80:
+                k = n & 0x7f
+                if len(b) >= 2 + k:
+                    n, hdr = int.from_bytes(b[2:2 + k], 'big'), 2 + k
+                else:
+                    n = None
+            if n is not None and len(b) >= hdr + n:
+                c.buf = b[hdr + n:]
+                return b[hdr:hdr + n]
+        d = c.sock.recv(4096)
+        if not d:
+            return None
+        c.buf += d
+
+def ldap(c):
+    while True:
+        m = ldap_msg(c)
+        if m is None:
+            return
+        _, mid_b, i = tlv(m, 0)
+        mid = mid_b[0]
+        op, body, _ = tlv(m, i)
+        if op == 0x77:
+            # StartTLS.  A server that has none does not know the operation.
+            note(c, 'STARTTLS')
+            if mode in ('normal', 'inject'):
+                said = ldap_result(mid, 0x78, 0)
+                if mode == 'inject':
+                    # A bind response, in the clear, behind the yes.
+                    said += ldap_result(mid + 1, 0x61, 0)
+                c.sock.sendall(said)
+                c.sock = ctx.wrap_socket(c.sock, server_side=True)
+                c.buf = b''
+                c.tls = True
+            else:
+                c.sock.sendall(ldap_result(mid, 0x78, 2 if mode == 'nooffer' else 53))
+        elif op == 0x60:
+            _, _, j = tlv(body, 0)
+            _, name, j = tlv(body, j)
+            _, secret, _ = tlv(body, j)
+            note(c, 'BIND %s/%s' % (name.decode('latin-1'), secret.decode('latin-1')))
+            # A server of "normal" mode wants the bind to be protected.
+            if mode in ('normal', 'inject') and not c.tls:
+                c.sock.sendall(ldap_result(mid, 0x61, 13))
+            else:
+                c.sock.sendall(ldap_result(mid, 0x61, 0))
+        elif op == 0x63:
+            note(c, 'SEARCH')
+            entry = ber(0x64, ber(4, b'cn=x') + ber(0x30, ber(0x30, ber(4, b'cn') + ber(0x31, ber(4, b'hello')))))
+            c.sock.sendall(ber(0x30, ber(2, bytes([mid])) + entry) + ldap_result(mid, 0x65, 0))
+        elif op == 0x42:
+            return
+
 INJECT = {'smtp': '250 AUTH PLAIN\r\n', 'imap': '* CAPABILITY IMAP4rev1 AUTH=PLAIN\r\n',
           'pop3': '+OK\r\nUSER\r\n.\r\n', 'ftp': '331 injected\r\n'}
 
@@ -276,7 +358,7 @@ def ftp(c):
         else:
             c.send('500 what\r\n')
 
-handler = {'smtp': smtp, 'imap': imap, 'pop3': pop3, 'ftp': ftp}[proto]
+handler = {'smtp': smtp, 'imap': imap, 'pop3': pop3, 'ftp': ftp, 'ldap': ldap}[proto]
 
 def session(raw):
     c = Conn(raw)
@@ -416,5 +498,75 @@ for p in smtp imap pop3 ftp; do
   check "$(is $rc 8)" "$p: bytes in the clear behind the yes end the transfer, status 8 ($rc: $out)"
   check "$(lacks $log 'LOGIN')" "$p: and no login was sent"
 done
+
+# ldap: a bind carries a password, so it is not sent until the upgrade is done,
+# and a server that will not upgrade is not sent one in its place, whether TLS
+# was wanted or required.  A transfer with nothing to hide may go on in the
+# clear when TLS is only wanted.  The URL has a name and a password, or has
+# neither.
+lrun ()
+{
+  u=$1; shift
+  out=$(timeout 30 "$TWIST" -s -S "$@" "$u" 2>&1)
+  rc=$?
+}
+lsecret () { echo "ldap://cn=alice:secret@127.0.0.1:$1/dc=x?cn?base"; }
+lnone () { echo "ldap://127.0.0.1:$1/dc=x?cn?base"; }
+lgot () { printf %s "$out" | grep -q 'cn: hello' && echo ok; }
+
+for flag in --ssl-reqd --ssl; do
+  start ldap normal
+  lrun "$(lsecret "$port")" $flag $ca
+  check "$(is $rc 0)" "ldap: $flag against a server that offers TLS works ($rc: $out)"
+  check "$(lgot)" "ldap: and the search is whole"
+  check "$(has $log 'tls BIND cn=alice/secret')" "ldap: the bind came encrypted"
+  check "$(lacks $log 'clear BIND')" "ldap: and none in the clear"
+  check "$(has $log 'clear STARTTLS')" "ldap: after the upgrade was asked for"
+done
+
+# Not asked for: nothing is upgraded, and this server takes no bind in the
+# clear.
+start ldap normal
+lrun "$(lsecret "$port")" $ca
+check "$(is $rc 67)" "ldap: without --ssl the bind in the clear is refused, status 67 ($rc)"
+check "$(lacks $log 'STARTTLS')" "ldap: and no upgrade was asked for"
+
+# A server that has no TLS, or says no: a password is not sent, and the
+# transfer fails, with --ssl as with --ssl-reqd.
+for mode in nooffer refuse; do
+  for flag in --ssl --ssl-reqd; do
+    start ldap $mode
+    lrun "$(lsecret "$port")" $flag $ca
+    check "$(is $rc 64)" "ldap: $flag and a server that $mode, with a password, is status 64 ($rc: $out)"
+    check "$(lacks $log 'BIND')" "ldap: and the bind was never sent"
+  done
+done
+
+# With nothing to hide: --ssl goes on in the clear, --ssl-reqd does not.
+for mode in nooffer refuse; do
+  start ldap $mode
+  lrun "$(lnone "$port")" --ssl $ca
+  check "$(is $rc 0)" "ldap: --ssl and a server that $mode, with no password, goes on ($rc: $out)"
+  check "$(has $log 'clear BIND /')" "ldap: in the clear"
+  start ldap $mode
+  lrun "$(lnone "$port")" --ssl-reqd $ca
+  check "$(is $rc 64)" "ldap: --ssl-reqd and a server that $mode is status 64 ($rc: $out)"
+  check "$(lacks $log 'BIND')" "ldap: and no bind was sent"
+done
+
+# The certificate is checked after the upgrade, as always.
+start ldap normal
+lrun "$(lsecret "$port")" --ssl-reqd
+check "$(is $rc 35)" "ldap: an untrusted certificate is status 35 ($rc: $out)"
+check "$(lacks $log 'BIND')" "ldap: and no bind was sent"
+start ldap normal
+lrun "$(lsecret "$port")" --ssl-reqd -k
+check "$(is $rc 0)" "ldap: -k takes it ($rc: $out)"
+
+# Bytes in the clear behind the server's yes are an attack.
+start ldap inject
+lrun "$(lsecret "$port")" --ssl-reqd $ca
+check "$(is $rc 8)" "ldap: bytes in the clear behind the yes end the transfer, status 8 ($rc: $out)"
+check "$(lacks $log 'BIND')" "ldap: and no bind was sent"
 
 [ $fail -eq 0 ]

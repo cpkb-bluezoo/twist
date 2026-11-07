@@ -459,6 +459,20 @@ twist_transfer_setopt (twist_transfer *transfer, int opt, ...)
     case TWISTOPT_HTTP_VERSION:
       transfer->http_version = (int) va_arg (ap, long);
       break;
+    case TWISTOPT_TLS_MIN_VERSION:
+    case TWISTOPT_TLS_MAX_VERSION:
+      {
+        long v = va_arg (ap, long);
+
+        /* 1.2 is the oldest there is: nothing older is offered.  */
+        if (v != TWIST_TLS_DEFAULT && v != TWIST_TLS_1_2 && v != TWIST_TLS_1_3)
+          rc = TWIST_ERR_INVAL;
+        else if (opt == TWISTOPT_TLS_MIN_VERSION)
+          transfer->tls_min = (int) v;
+        else
+          transfer->tls_max = (int) v;
+      }
+      break;
     case TWISTOPT_DNS_ORDER:
       {
         const char *s = va_arg (ap, const char *);
@@ -699,6 +713,13 @@ twist_transfer_finish (struct twist_transfer *transfer, int result)
 }
 
 int
+twist_transfer_check_tls (const struct twist_transfer *transfer)
+{
+  return transfer->tls_min == TWIST_TLS_1_3
+         && transfer->tls_max == TWIST_TLS_1_2 ? TWIST_ERR_INVAL : TWIST_OK;
+}
+
+int
 twist_transfer_start (struct twist_transfer *transfer)
 {
   const struct twist_scheme *scheme;
@@ -743,6 +764,15 @@ twist_transfer_start (struct twist_transfer *transfer)
                                                 "only")));
       twist_transfer_finish (transfer, TWIST_ERR_UNSUPPORTED);
       return TWIST_ERR_UNSUPPORTED;
+    }
+  rc = twist_transfer_check_tls (transfer);
+  if (rc != TWIST_OK)
+    {
+      twist_transfer_set_error (transfer,
+                                twist_strdup (_("the oldest TLS version is "
+                                                "newer than the newest")));
+      twist_transfer_finish (transfer, rc);
+      return rc;
     }
   transfer->done = 0;
   twist_progress_begin (transfer);

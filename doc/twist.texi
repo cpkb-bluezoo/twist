@@ -279,6 +279,16 @@ A string: the text of a @code{Cookie} header.  It is not a cookie file.
 A long, one of @code{TWIST_HTTP_VERSION_NONE} (the default, which lets twist
 choose), @code{_1_0}, @code{_1_1}, @code{_2_0}, @code{_2TLS}, @code{_3},
 @code{_3ONLY} and @code{_2_PRIOR_KNOWLEDGE}.
+@item TWISTOPT_TLS_MIN_VERSION
+@itemx TWISTOPT_TLS_MAX_VERSION
+A long: the oldest and the newest TLS version, @code{TWIST_TLS_1_2} or
+@code{TWIST_TLS_1_3}; 0, the default, is no choice.  TLS 1.2 is the oldest
+there is, and any other value is @code{TWIST_ERR_INVAL}, as is a minimum above
+the maximum when the transfer begins.  The limit is that of every TLS connection
+of the transfer: to the server, to an @code{https} proxy, and to a DoT or DoH
+resolver.  QUIC is TLS 1.3 only, so with a maximum of TLS 1.2 HTTP/3 is not used
+(it falls back, and @code{TWIST_HTTP_VERSION_3ONLY} is
+@code{TWIST_ERR_UNSUPPORTED}), nor is a DoQ resolver or @code{smbs}.
 @item TWISTOPT_ACCEPT_ENCODING
 A string: the response codings to accept.  An empty string is @samp{br},
 @samp{gzip} and @samp{deflate}, or @samp{gzip} and @samp{deflate} when the
@@ -1491,6 +1501,20 @@ and then the system's authorities are trusted.
 Select the HTTP version.  HTTP/3 is used when discovered from an HTTPS
 record or a cached Alt-Svc entry.  HTTP/2 on HTTPS is ALPN.  Cleartext
 HTTP/2 is an h2c upgrade, unless prior knowledge was requested.
+@item --tlsv1.2
+@itemx --tlsv1.3
+@itemx --tls-max @var{version}
+Limit the TLS versions.  @option{--tlsv1.2} allows TLS 1.2 and 1.3, which is
+what is done without it, and is there so that a script that passes it works.
+@option{--tlsv1.3} allows TLS 1.3 only.  @option{--tls-max} is the newest
+allowed, @samp{1.2} or @samp{1.3}: @samp{1.2} is TLS 1.2 only.  The limit goes
+for a connection to the server, to an @code{https} proxy, and to a DoT or DoH
+resolver.  TLS 1.2 is the oldest twist offers, so @option{--tlsv1.0},
+@option{--tlsv1.1} and a @option{--tls-max} of those are refused, and so is a
+minimum above the maximum (exit status 2).  HTTP/3, DoQ and @code{smbs} are
+QUIC, which is TLS 1.3: with @option{--tls-max 1.2} they are not used, so
+@option{--http3} goes on over TCP and @option{--http3-only} and a
+@code{quic://} resolver fail.  @option{--tlsv1.2} leaves them as they were.
 @item --dns-order @var{list}
 Comma-separated DNS transports.  The default is @code{doq,dot,doh,udp}.
 DoQ and DoT are used when the system resolver advertises them, or when
@@ -1683,8 +1707,8 @@ A SOCKS proxy refused the connection or could not complete it.
 
 A URL scheme selects the protocol.  The scheme with an @samp{s} is the
 same protocol inside TLS from the first byte.  @code{ftp}, @code{imap},
-@code{pop3} and @code{smtp} can be upgraded to TLS after they start, when
-@option{--ssl} or @option{--ssl-reqd} asks; nothing else is.
+@code{ldap}, @code{pop3} and @code{smtp} can be upgraded to TLS after they
+start, when @option{--ssl} or @option{--ssl-reqd} asks; nothing else is.
 
 @table @code
 @item dict
@@ -1706,7 +1730,11 @@ runs TLS on each data connection, and checks the server against the host
 of the URL as it does the control connection (@option{-k} turns both
 off).  The data connection resumes the TLS session of the control
 connection when the server gave a ticket for it, since servers commonly
-insist on that.  A server that will not protect the data connection ends
+insist on that: with TLS 1.3, and with TLS 1.2 (RFC 5077 tickets; twist
+does not resume by session identifier).  A server that gave no ticket gets a
+full handshake on the data connection, which succeeds where the server allows
+it and fails where it requires the session to be reused (vsftpd's default):
+twist does not make up a session it was not given.  A server that will not protect the data connection ends
 the transfer with status 35; the file is never fetched unprotected
 instead.
 @item gopher, gophers
@@ -1768,21 +1796,35 @@ The schemes with a trailing @code{s} (@code{imaps}, @code{ldaps},
 @code{mqtts}, @code{pop3s}, @code{smtps}, @code{https}, @code{ftps},
 @code{wss}) are TLS from the first byte.  (@code{smbs} is not TLS on the SMB
 port: it is SMB over QUIC, whose handshake is TLS 1.3.)  The ones without are not upgraded
-unless asked: only @code{ftp}, @code{imap}, @code{pop3} and @code{smtp} can
-be, with @option{--ssl} or @option{--ssl-reqd} (@pxref{Explicit TLS}).
-@code{ldap} and @code{mqtt} cannot.  A user name and password given for any
+unless asked: only @code{ftp}, @code{imap}, @code{ldap}, @code{pop3} and
+@code{smtp} can be, with @option{--ssl} or @option{--ssl-reqd}
+(@pxref{Explicit TLS}).  @code{mqtt} cannot.  A user name and password given for any
 of these without the @code{s}, and not upgraded, are sent on a connection that
 is not encrypted, and by a method such as @code{PLAIN}, @code{LOGIN} or a
 simple bind that does not hide them; @code{PLAIN} is tried when the server
 advertises none.  Use the scheme with the @code{s}, or @option{--ssl-reqd}.
 
+@heading Where a TLS connection ends
+
+A TLS connection is over when the peer says so with a @code{close_notify}.  If
+the connection is closed without one, whoever is on the path may have cut the
+data short (a FIN can be forged, RFC 8446 section 6.1), so what was read is not
+taken to be all of it: the transfer ends with exit status 35.  This holds for
+every protocol that runs TLS, and for the data connection of @code{ftps} in
+particular, where it is what tells a whole file from a cut one when the server
+did not say how long the file is.  A server that said how long the file would
+be, and sent fewer bytes, exits 18 even when it closed properly.  A connection
+without TLS has no @code{close_notify}, and its close is the end as it always
+was.
+
 @heading Explicit TLS
 @anchor{Explicit TLS}
 
 @option{--ssl} and @option{--ssl-reqd} upgrade a connection that starts in the
-clear, for @code{ftp}, @code{imap}, @code{pop3} and @code{smtp}, with the
-command each protocol has: @code{AUTH TLS} (RFC 4217), @code{STARTTLS}
-(RFC 3501 and RFC 3207) and @code{STLS} (RFC 2595).  They do nothing for a
+clear, for @code{ftp}, @code{imap}, @code{ldap}, @code{pop3} and @code{smtp},
+with the command each protocol has: @code{AUTH TLS} (RFC 4217),
+@code{STARTTLS} (RFC 3501 and RFC 3207), the StartTLS extended operation of
+LDAP (RFC 4511) and @code{STLS} (RFC 2595).  They do nothing for a
 scheme that is TLS already, and nothing for the others.  Without one of them
 twist never asks, however much the server offers.
 
@@ -1802,6 +1844,16 @@ not offer the upgrade or refuses it, and nothing, no password, has been sent.
 @option{--ssl-reqd} when the server agrees and not otherwise, and whoever is on
 the path can make a server seem not to offer TLS, so it protects against nobody
 who is.  Use @option{--ssl-reqd}.
+
+@code{ldap} is the exception to the last: it sends a StartTLS extended
+operation first (a server that has none says so with an error, which is a no)
+and the bind, which carries a password or a bearer token, only after the
+handshake.  A server that says no ends the transfer with status 64 whenever
+the bind would carry a secret, even if only @option{--ssl} was given, because
+a password is never sent where it can be read on the strength of an option
+that said the upgrade was optional.  A transfer with no password or token,
+which binds without a secret, goes on in the clear with @option{--ssl} and
+ends with 64 with @option{--ssl-reqd}.  @code{ldaps} is not affected.
 
 A server that has said yes and then sends anything before the handshake, in the
 same packet or after it, has sent it in the clear, from anyone on the path, and
@@ -1973,6 +2025,11 @@ encryption of the connections: it is for debugging.
 @item TWIST_CA_BUNDLE file name
 If set, it is used as the @option{--cacert} value, and @env{SSL_CERT_DIR} and
 @env{SSL_CERT_FILE} are not looked at.
+@item CURL_CA_BUNDLE file name
+Like @env{TWIST_CA_BUNDLE}, for a script written for curl, which sets this one:
+it is used as the @option{--cacert} value, and @env{SSL_CERT_DIR} and
+@env{SSL_CERT_FILE} are not looked at.  @env{TWIST_CA_BUNDLE} comes first.
+An empty value is not set.
 @end table
 
 The names of the certificate variables are looked at only when neither
@@ -1982,7 +2039,7 @@ they name and that cannot be read is an error.
 A process that has more rights than the user who started it does not read the
 environment at all, for any of the variables above that name a file, a
 directory, a socket or a server: @env{HOME}, the proxy variables and
-@env{NO_PROXY}, @env{QLOGDIR}, @env{SSH_AUTH_SOCK}, @env{SSL_CERT_DIR},
+@env{NO_PROXY}, @env{QLOGDIR}, @env{SSH_AUTH_SOCK}, @env{CURL_CA_BUNDLE}, @env{SSL_CERT_DIR},
 @env{SSL_CERT_FILE}, @env{SSLKEYLOGFILE} and @env{TWIST_CA_BUNDLE}.  That is
 a program that is set-user-ID or set-group-ID, one whose real and effective
 IDs differ, and one that the kernel started with more rights (file

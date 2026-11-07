@@ -60,7 +60,7 @@ is given (see
 The schemes that are implemented are listed under
 .BR PROTOCOLS .
 .SH PROTOCOLS
-A URL scheme selects the protocol.  The scheme with an \fBs\fR is the same protocol inside TLS from the first byte.  \fBftp\fR, \fBimap\fR, \fBpop3\fR and \fBsmtp\fR can be upgraded to TLS after they start, when \fB\-\-ssl\fR or \fB\-\-ssl\-reqd\fR asks; nothing else is.
+A URL scheme selects the protocol.  The scheme with an \fBs\fR is the same protocol inside TLS from the first byte.  \fBftp\fR, \fBimap\fR, \fBldap\fR, \fBpop3\fR and \fBsmtp\fR can be upgraded to TLS after they start, when \fB\-\-ssl\fR or \fB\-\-ssl\-reqd\fR asks; nothing else is.
 .TP
 .B dict
 Looks up a word with a DICT server: DEFINE, MATCH or SHOW, chosen by the URL path.  The reply is written until the server closes.
@@ -116,22 +116,33 @@ Reads a file, or uploads one with \fB\-\-data\fR or \fB\-T\fR.  It is a datagram
 WebSocket, over HTTP/1, HTTP/2 or HTTP/3.  The payload bytes are written.
 .PP
 The schemes with a trailing s are TLS from the first byte.  The others are not
-upgraded unless asked: only ftp, imap, pop3 and smtp can be, with
+upgraded unless asked: only ftp, imap, ldap, pop3 and smtp can be, with
 .B \-\-ssl
 or
 .BR \-\-ssl\-reqd ;
-ldap and mqtt cannot.  A user name and password given for any of these, and not
+mqtt cannot.  A user name and password given for any of these, and not
 upgraded, go on a connection that is not encrypted, by a method such as PLAIN,
 LOGIN or a simple bind that does not hide them; PLAIN is tried when the server
 advertises none.  Use the scheme with the s, or
 .BR \-\-ssl\-reqd .
+.SH "WHERE A TLS CONNECTION ENDS"
+A TLS connection is over when the peer says so with a close_notify.  If the
+connection is closed without one, whoever is on the path may have cut the data
+short (a FIN can be forged, RFC 8446 section 6.1), so what was read is not taken
+to be all of it: the transfer ends with exit status 35.  This holds for every
+protocol that runs TLS, and for the data connection of ftps in particular, where
+it is what tells a whole file from a cut one when the server did not say how long
+the file is.  A server that said how long the file would be, and sent fewer
+bytes, exits 18 even when it closed properly.  A connection without TLS has no
+close_notify, and its close is the end as it always was.
 .SH "EXPLICIT TLS"
 .B \-\-ssl
 and
 .B \-\-ssl\-reqd
-upgrade a connection that starts in the clear, for ftp, imap, pop3 and smtp,
-with the command each protocol has: AUTH TLS (RFC 4217), STARTTLS (RFC 3501 and
-RFC 3207) and STLS (RFC 2595).  They do nothing for a scheme that is TLS
+upgrade a connection that starts in the clear, for ftp, imap, ldap, pop3 and
+smtp, with the command each protocol has: AUTH TLS (RFC 4217), STARTTLS (RFC
+3501 and RFC 3207), the StartTLS extended operation of LDAP (RFC 4511) and STLS
+(RFC 2595).  They do nothing for a scheme that is TLS
 already, and nothing for the others.  Without one of them twist never asks,
 however much the server offers.
 .PP
@@ -155,6 +166,18 @@ goes on in the clear instead.  That is as secure as
 when the server agrees and not otherwise, and whoever is on the path can make a
 server seem not to offer TLS, so it protects against nobody who is.  Use
 .BR \-\-ssl\-reqd .
+.PP
+ldap is the exception to the last: it sends a StartTLS extended operation first
+(a server that has none says so with an error, which is a no) and the bind,
+which carries a password or a bearer token, only after the handshake.  A server
+that says no ends the transfer with status 64 whenever the bind would carry a
+secret, even if only
+.B \-\-ssl
+was given.  A transfer with no password or token goes on in the clear with
+.BR \-\-ssl ,
+and ends with 64 with
+.BR \-\-ssl\-reqd .
+ldaps is not affected.
 .PP
 A server that has said yes and then sends anything before the handshake, in the
 same packet or after it, has sent it in the clear, from anyone on the path, and
@@ -1185,6 +1208,27 @@ h2c upgrade.  Prior knowledge is only
 .BR \-\-http2-prior-knowledge .
 The HTTP/1 minor version is taken from the response status line.
 .TP
+.B \-\-tlsv1.2
+.TQ
+.B \-\-tlsv1.3
+.TQ
+.BI \-\-tls-max " version"
+Limit the TLS versions.
+.B \-\-tlsv1.2
+allows TLS 1.2 and 1.3 (the default).
+.B \-\-tlsv1.3
+allows 1.3 only.
+.B \-\-tls-max
+1.2 allows 1.2 only.  TLS 1.2 is the oldest offered, so
+.BR \-\-tlsv1.0 ,
+.B \-\-tlsv1.1
+and a
+.B \-\-tls-max
+of those, or a minimum above the maximum, are refused (status 2).  HTTP/3, DoQ
+and smbs are TLS 1.3: with
+.B \-\-tls-max 1.2
+they are not used.
+.TP
 .BI \-\-mail-from " address"
 SMTP sender.  Repeat
 .B \-\-mail-rcpt
@@ -1382,6 +1426,19 @@ value, and
 and
 .B SSL_CERT_FILE
 are not looked at.
+.TP
+.B CURL_CA_BUNDLE file name
+Like
+.BR TWIST_CA_BUNDLE ,
+for a script written for curl, which sets this one: it is used as the
+.B \-\-cacert
+value, and
+.B SSL_CERT_DIR
+and
+.B SSL_CERT_FILE
+are not looked at.
+.B TWIST_CA_BUNDLE
+comes first.  An empty value is not set.
 .PP
 The names of the certificate variables are looked at only when neither
 .B \-\-cacert
@@ -1398,6 +1455,7 @@ the proxy variables and
 .BR NO_PROXY ,
 .BR QLOGDIR ,
 .BR SSH_AUTH_SOCK ,
+.BR CURL_CA_BUNDLE ,
 .BR SSL_CERT_DIR ,
 .BR SSL_CERT_FILE ,
 .B SSLKEYLOGFILE

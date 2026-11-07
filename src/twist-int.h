@@ -172,6 +172,9 @@ struct twist_transfer
   /* TWISTOPT_USE_SSL.  */
   int use_ssl;
   int http_version;
+  /* TWISTOPT_TLS_MIN_VERSION and TWISTOPT_TLS_MAX_VERSION; 0 is not set.  */
+  int tls_min;
+  int tls_max;
   int dns_order[4];
   int dns_order_n;
   struct twist_origin_hint *origins;
@@ -622,6 +625,33 @@ void twist_connection_hold_read (struct twist_connection *conn, int hold);
    kept for as long as the connection is, by whatever uses it.  */
 void twist_connection_set_rate (struct twist_connection *conn,
                                 uint64_t recv_limit, uint64_t send_limit);
+/* The TLS versions a connection may speak (TWIST_TLS_V12, TWIST_TLS_V13, or'd;
+   0 is both), which twist_connection_start_tls offers.  */
+#define TWIST_TLS_V12 1u
+#define TWIST_TLS_V13 2u
+void twist_connection_set_tls_versions (struct twist_connection *conn,
+                                        unsigned versions);
+/* The versions that TRANSFER allows: 0 for both, else one of them (a minimum
+   above the maximum gives 0 too: twist_transfer_check_tls says it is wrong).  */
+static inline unsigned
+twist_transfer_tls_versions (const struct twist_transfer *transfer)
+{
+  unsigned v = 0;
+
+  if (transfer->tls_min == TWIST_TLS_1_3)
+    v = TWIST_TLS_V13;
+  if (transfer->tls_max == TWIST_TLS_1_2)
+    v = v != 0 ? 0 : TWIST_TLS_V12;
+  return v;
+}
+/* Whether QUIC, which is TLS 1.3 only, may be used for TRANSFER.  */
+static inline int
+twist_transfer_quic_ok (const struct twist_transfer *transfer)
+{
+  return transfer->tls_max != TWIST_TLS_1_2;
+}
+/* TWIST_ERR_INVAL if the minimum is above the maximum.  */
+int twist_transfer_check_tls (const struct twist_transfer *transfer);
 /* The limits that the transfer was given (--limit-rate), on a connection that
    is made for it.  */
 static inline void
@@ -630,6 +660,7 @@ twist_connection_limit (struct twist_connection *conn,
 {
   twist_connection_set_rate (conn, transfer->max_recv_speed,
                              transfer->max_send_speed);
+  twist_connection_set_tls_versions (conn, twist_transfer_tls_versions (transfer));
 }
 void twist_connection_force_write (struct twist_connection *conn, int force);
 int twist_connection_queue_out (struct twist_connection *conn,
@@ -964,6 +995,9 @@ struct twist_tls_want
      resolver that a DoT or DoQ resolver was discovered from (RFC 9462,
      section 4.2).  NULL: only SERVER_NAME.  */
   const char *also_name;
+  /* The TLS versions that may be used, TWIST_TLS_V12 and TWIST_TLS_V13 or'd;
+     0 is both.  */
+  unsigned versions;
 };
 
 struct gq_tls_config;
@@ -1005,7 +1039,11 @@ extern int (*twist_tls_start_fn) (struct twist_connection *conn,
 extern int (*twist_tls_receive_fn) (struct twist_connection *conn,
                                     const uint8_t *data, size_t len);
 extern int (*twist_tls_send_plain_fn) (struct twist_connection *conn,
-                                       const uint8_t *data, size_t len);
+                                       const uint8_t *data, size_t len);/* The transport reached end of file on a connection that runs TLS.  TWIST_OK
+   if the peer closed it with a close_notify, and TWIST_ERR_TLS if not: what
+   was read is then not known to be all of it, since a FIN can be forged
+   (RFC 8446, section 6.1).  */
+extern int (*twist_tls_eof_fn) (struct twist_connection *conn);
 /* A QUIC connection for the transfer TRANSFER to the address ADDR and PORT,
    which a lookup gave.  The certificate is checked against the host of the
    URL, not against ADDR.  */
@@ -1444,6 +1482,11 @@ size_t twist_dns_sort (struct twist_dns_addr *addrs, size_t n);
    (NULL restores it), and the resolution delay and how long to wait for the
    rest after the first answer (0 restores the 50 ms and 2 s).  */
 void twist_dns_set_nameserver (const char *ip, int port);
+/* For the tests: the first wait before a UDP query that has had no answer is
+   sent again, in milliseconds (0: the default), and forget what was learned
+   about designated resolvers.  */
+void twist_dns_set_retry (long first_ms);
+void twist_dns_ddr_forget (void);
 void twist_dns_set_timing (long resolution_delay_ms, long linger_ms);
 
 int twist_dns_resolve (struct twist_loop *loop, const char *host,
@@ -1472,11 +1515,21 @@ int twist_dns_plan_for (const int *user, size_t nuser, int have_doh,
 int twist_dns_bootstrap_plan (const int *user, size_t nuser, int *out,
                               size_t cap, size_t *n);
 
+struct twist_h2;
 struct twist_doh;
 
 struct twist_doh *twist_doh_new (void (*done) (void *user, int err,
                                                const uint8_t *msg, size_t len),
                                  void *user);
+/* A query over HTTP/2: an object for each, with no HTTP/1 parser, whose answer
+   is given to DONE when its stream ends.  The request opens the stream.  */
+struct twist_doh *twist_doh_new_stream (void (*done) (void *user, int err,
+                                                      const uint8_t *msg,
+                                                      size_t len),
+                                        void *user);
+int twist_doh_h2_request (struct twist_h2 *h2, struct twist_doh *d,
+                          const char *url, const uint8_t *msg, size_t msg_len,
+                          uint8_t **out, size_t *out_len);
 void twist_doh_reset (struct twist_doh *d);
 void twist_doh_free (struct twist_doh *d);
 size_t twist_doh_receive (struct twist_doh *d, const uint8_t *data, size_t len);
@@ -2592,6 +2645,8 @@ void twist_ldap_free (void *ldap);
 size_t twist_ldap_receive (struct twist_ldap *ldap, const uint8_t *data,
                            size_t len);
 const uint8_t *twist_ldap_command (const struct twist_ldap *ldap, size_t *len);
+/* The handshake that followed STARTTLS is done; as twist_imap_tls_done.  */
+void twist_ldap_tls_done (struct twist_ldap *ldap);
 int twist_ldap_attach (struct twist_transfer *transfer);
 
 /* smb:// (src/smb/smb.c): one file from a share, over the session layer.  The
@@ -2723,6 +2778,15 @@ int twist_dns_cache_list (struct twist_dns_cache *cache, const char *name,
 void twist_dns_cache_keep (struct twist_dns_cache *cache, const char *name,
                            int qtype, const struct twist_dns_addr *addrs,
                            int n, uint32_t ttl_sec, uint64_t now_ms);
+/* The HTTPS record of NAME, kept with the addresses.  SVC NULL keeps that
+   there is none.  twist_dns_cache_https gives 1 with the record, 0 for kept as
+   none, -1 for nothing kept.  */
+void twist_dns_cache_keep_https (struct twist_dns_cache *cache,
+                                 const char *name,
+                                 const struct twist_dns_service *svc,
+                                 uint32_t ttl_sec, uint64_t now_ms);
+int twist_dns_cache_https (struct twist_dns_cache *cache, const char *name,
+                           struct twist_dns_service *out, uint64_t now_ms);
 void twist_dns_cache_free (struct twist_dns_cache *cache);
 int twist_dns_cache_put_msg (struct twist_dns_cache *cache, const char *name,
                              int qtype, const uint8_t *msg, size_t len,

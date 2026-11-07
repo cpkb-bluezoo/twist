@@ -98,7 +98,8 @@ add_dir (gq_trust *trust, const char *dir)
 
 /* Fill TRUST.  CAFILE and CAPATH are what the transfer was given (a file and
    a directory, both used); with neither, the environment's: TWIST_CA_BUNDLE
-   as a file, else SSL_CERT_DIR as a directory and SSL_CERT_FILE as a file;
+   as a file, else CURL_CA_BUNDLE (which scripts written for curl set) as a
+   file, else SSL_CERT_DIR as a directory and SSL_CERT_FILE as a file;
    with none of those, the system's.  What was asked for by name must load.
    What came from the environment must when the peer is verified, so that a
    stale variable does not stop a transfer that checks nothing.  */
@@ -113,11 +114,14 @@ twist_trust_load (gq_trust *trust, const char *cafile, const char *capath,
   if (!given)
     {
       const char *bundle = twist_getenv_secure ("TWIST_CA_BUNDLE");
+      const char *curl = twist_getenv_secure ("CURL_CA_BUNDLE");
       const char *dir = twist_getenv_secure ("SSL_CERT_DIR");
       const char *file = twist_getenv_secure ("SSL_CERT_FILE");
 
       if (bundle != NULL && bundle[0] != 0)
         cafile = bundle;
+      else if (curl != NULL && curl[0] != 0)
+        cafile = curl;
       else
         {
           if (dir != NULL && dir[0] != 0)

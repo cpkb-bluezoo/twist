@@ -68,20 +68,14 @@ DNS (src/dns, RFC 8305)
   - HTTP/3 and QUIC under a proxy use one address (IPv4 if there is one) and
     are not raced; nor is a TCP connection through a proxy, whose own address
     is looked up with the one-address resolver.
-  - The cache holds addresses for the sink only when the HTTPS record is not
-    wanted, so an http(s) lookup is never cached.
-  - DoQ and DoH send their queries one after another (three round trips for an
-    http URL); DoT, TCP and UDP send them together.  DoH can only be pipelined
-    over HTTP/2, and DoQ needs a stream for each, since every id is 0.
+  - DoH sends its queries one after another (three round trips for an http
+    URL) to a resolver that does not offer HTTP/2; over HTTP/2, DoQ, DoT, TCP
+    and UDP they go together.
   - RFC 10029: the types in one message, the extra ones in an MQTYPE-Query
     option, and the server says which it included.  None of 1.1.1.1, 8.8.8.8
     and 9.9.9.9 does yet (tried), so the queries go out separately in one
     flight.  gumdrop has the codec (dns/DnsMultiQType.java); a server that
     answers with MQTYPE-Response could be remembered and sent one message.
-  - A UDP query is not sent again when it is lost: it is waited for until the
-    transfer's timeout.
-  - With the default order a discovery query (DDR) is made before every lookup
-    that is not in the cache, and its outcome is not remembered.
   - What has not been answered 2 s after the first address is given up on (the
     lookup is complete then): a very slow nameserver loses its other types.
 
@@ -100,8 +94,6 @@ SMB and SMBS (src/smb)
 Environment
 
   - A configuration file.
-  - A script that sets CURL_CA_BUNDLE gets the system's authorities; whether
-    to read it is undecided.
   - SSL_CERT_DIR is read as a directory of PEM files by name (.pem, .crt, .cer
     or a c_rehash name), not through OpenSSL's rules.
 
