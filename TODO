@@ -71,15 +71,9 @@ HTTP/3 (src/tls/quic.c, src/http)
 
 Found by bench/ (twist against curl), not looked into
 
-  - 100 requests together over HTTP/2 or HTTP/3 (-Z --parallel-max 100): in
-    most runs some of the transfers end with TWIST_ERR_AGAIN (81), "resource
-    temporarily unavailable"; it comes with 60 or more.
-  - An HTTP/3 transfer of 1 KiB costs six times the CPU of curl's (13 ms to
-    2 ms), a fixed cost of about 10 ms for each QUIC connection, and 100
-    requests together over HTTP/3 fourteen to twenty times; a 1 MiB download
-    over HTTP/3 is three times. Over HTTP/1.1 and HTTP/2 twist is 1.3 to 2.4
-    times curl's CPU time in every scenario but the 100 requests together
-    (3.2 times).
+  - 100 requests together cost three to five times the CPU of curl's over
+    HTTP/2 and HTTP/3, and a large download or upload one and a half to two
+    times over every protocol; a small transfer is 1.3 times.
 
 DNS (src/dns, RFC 8305)
 

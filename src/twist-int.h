@@ -1124,6 +1124,10 @@ void twist_storage_free (struct twist_storage *st);
 int twist_storage_submit (struct twist_storage *st, void (*work) (void *),
                           void *arg, void (*done) (void *user, int err),
                           void *user, struct twist_loop *loop);
+/* As twist_storage_submit with no completion, and not refused when the queue
+   is full: for a job that lasts as long as a transfer.  */
+int twist_storage_submit_worker (struct twist_storage *st,
+                                 void (*work) (void *), void *arg);
 size_t twist_storage_threads (const struct twist_storage *st);
 /* How many jobs are waiting for a thread.  */
 size_t twist_storage_queued (struct twist_storage *st);

@@ -202,10 +202,10 @@ twist_storage_queued (struct twist_storage *st)
   return n;
 }
 
-int
-twist_storage_submit (struct twist_storage *st, void (*work) (void *),
-                      void *arg, void (*done) (void *user, int err),
-                      void *user, struct twist_loop *loop)
+static int
+submit_job (struct twist_storage *st, void (*work) (void *), void *arg,
+            void (*done) (void *user, int err), void *user,
+            struct twist_loop *loop, int worker)
 {
   struct twist_job *job;
 
@@ -234,7 +234,7 @@ twist_storage_submit (struct twist_storage *st, void (*work) (void *),
         }
     }
   pthread_mutex_lock (&st->mu);
-  if (st->len >= st->bound)
+  if (!worker && st->len >= st->bound)
     {
       pthread_mutex_unlock (&st->mu);
       if (job->cmd != NULL)
@@ -251,4 +251,23 @@ twist_storage_submit (struct twist_storage *st, void (*work) (void *),
   pthread_cond_signal (&st->cv);
   pthread_mutex_unlock (&st->mu);
   return TWIST_OK;
+}
+
+int
+twist_storage_submit (struct twist_storage *st, void (*work) (void *),
+                      void *arg, void (*done) (void *user, int err),
+                      void *user, struct twist_loop *loop)
+{
+  return submit_job (st, work, arg, done, user, loop, 0);
+}
+
+/* A job that stays for the life of a transfer, as a reader or a writer of a
+   file does, is bounded by the transfers, not by the queue: a hundred
+   downloads to files all start, and the ones that find every thread taken
+   wait in the queue until one is free.  */
+int
+twist_storage_submit_worker (struct twist_storage *st,
+                             void (*work) (void *), void *arg)
+{
+  return submit_job (st, work, arg, NULL, NULL, NULL, 1);
 }

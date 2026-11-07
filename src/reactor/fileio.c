@@ -648,7 +648,7 @@ twist_fio_read_new (struct twist_loop *loop, struct twist_storage *st,
     return TWIST_ERR_NOMEM;
   f->rops = *ops;
   f->user = user;
-  rc = twist_storage_submit (st, read_work, f, NULL, NULL, NULL);
+  rc = twist_storage_submit_worker (st, read_work, f);
   if (rc != TWIST_OK)
     {
       f->live = 0;
@@ -743,8 +743,8 @@ write_work (void *arg)
           if (f->wst != NULL && twist_storage_queued (f->wst) > 0)
             {
               pthread_mutex_unlock (&f->mu);
-              if (twist_storage_submit (f->wst, write_work, f, NULL, NULL,
-                                        NULL) == TWIST_OK)
+              if (twist_storage_submit_worker (f->wst, write_work, f)
+                  == TWIST_OK)
                 return;
               pthread_mutex_lock (&f->mu);
             }
@@ -855,7 +855,7 @@ twist_fio_write_new (struct twist_loop *loop, struct twist_storage *st,
       return TWIST_ERR_NOMEM;
     }
   strcpy (f->path, path);
-  rc = twist_storage_submit (st, write_work, f, NULL, NULL, NULL);
+  rc = twist_storage_submit_worker (st, write_work, f);
   if (rc != TWIST_OK)
     {
       f->live = 0;
@@ -990,7 +990,7 @@ twist_fio_write_fd_new (struct twist_loop *loop, struct twist_storage *st,
       return TWIST_ERR_NOMEM;
     }
   f->path[0] = 0;
-  rc = twist_storage_submit (st, write_work, f, NULL, NULL, NULL);
+  rc = twist_storage_submit_worker (st, write_work, f);
   if (rc != TWIST_OK)
     {
       f->live = 0;

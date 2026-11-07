@@ -540,6 +540,46 @@ test_write_fd (struct twist_loop *loop, struct twist_storage *st)
   free (got);
 }
 
+/* A writer or a reader is a job for the life of its transfer, so as many may
+   be started as there are transfers: more than the pool queues.  A hundred
+   downloads to files at once all begin.  */
+static void
+test_many_workers (struct twist_loop *loop, struct twist_storage *st)
+{
+  enum { N = 100 };
+  static struct wr w[N];
+  int started = 0;
+  int ended = 0;
+  int i;
+
+  for (i = 0; i < N; i++)
+    {
+      int fd = open ("/dev/null", O_WRONLY);
+
+      memset (&w[i], 0, sizeof w[i]);
+      if (fd >= 0
+          && twist_fio_write_fd_new (loop, st, fd, -1, &wr_ops, &w[i],
+                                     &w[i].f) == TWIST_OK)
+        started++;
+      else if (fd >= 0)
+        close (fd);
+    }
+  check (started == N, "every one of a hundred writers starts");
+  for (i = 0; i < N; i++)
+    if (w[i].f != NULL)
+      wr_pump (&w[i]);
+  run_for (loop, 1500);
+  for (i = 0; i < N; i++)
+    {
+      if (w[i].ends == 1 && w[i].end_err == TWIST_OK)
+        ended++;
+      if (w[i].f != NULL)
+        twist_fio_free (w[i].f);
+      free (w[i].msg);
+    }
+  check (ended == started, "and every one of them ends well");
+}
+
 /* Which backend there is: the reads and writes of a loop that can have a ring
    use it, unless the environment says not to.  */
 static void
@@ -648,6 +688,7 @@ run_all (int uring)
   test_write_release (loop, st);
   test_write_fd (loop, st);
   test_writers_yield (loop, st);
+  test_many_workers (loop, st);
   twist_storage_free (st);
   twist_loop_free (loop);
 }
