@@ -19,10 +19,10 @@
 
 # Lookups over DNS-over-QUIC (RFC 9250), against a resolver of aioquic's
 # (doq-peer.py) that answers each query half a second after it arrives: the
-# queries of one lookup (A, AAAA and HTTPS) are each on a stream of their own,
-# and are all out before the first is answered, so the lookup takes one round
-# trip and not three.  Skips, with status 77, without python3 and its aioquic
-# module, openssl or twist.
+# queries of one lookup (A, AAAA and HTTPS) are on one connection, each on a
+# stream of its own, and are all out before the first is answered, so the
+# lookup takes one round trip and not three.  Skips, with status 77, without
+# python3 and its aioquic module, openssl or twist.
 
 TWIST=${TWIST:-../src/twist}
 here=$(cd "$(dirname "$0")" && pwd)
@@ -102,6 +102,9 @@ err=$(cat "$work/err")
 log=$(tr '\n' ';' < "$work/log")
 check "$(is "$status:$out" "0:origin")" "the transfer ($status $out $err; $log)"
 check "$(grep -c '^query ' "$work/log" | grep -q '^3$' && echo ok)" "three queries ($log)"
+check "$(is "$(grep -c '^connection$' "$work/log")" 1)" "over one connection ($log)"
+check "$(is "$(grep '^query ' "$work/log" | cut -d' ' -f3 | sort -u | wc -l | tr -d ' ')" 3)" \
+  "each query on a stream of its own ($log)"
 check "$(grep '^answer ' "$work/log" | head -n 1 | grep -q ' 3$' && echo ok)" \
   "all three queries are in before the first is answered ($log)"
 check "$(grep -q '^bad' "$work/log" || echo ok)" "each query is one message on one stream ($log)"

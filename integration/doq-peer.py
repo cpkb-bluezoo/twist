@@ -24,7 +24,8 @@
 # Each query arrives on a stream of its own, and is answered DELAY_MS later on
 # the same stream: 127.0.0.1 for an A query, and nothing for any other type.
 # What happens is written to LOG, one line each:
-#   query TYPE         a whole query has arrived
+#   connection         a connection was made
+#   query TYPE STREAM  a whole query has arrived, on the stream STREAM
 #   answer TYPE SEEN   it is answered, SEEN queries having arrived by then
 #   bad                a query that was not one stream and one message
 
@@ -69,6 +70,7 @@ class Peer(QuicConnectionProtocol):
     def __init__(self, *a, **kw):
         super().__init__(*a, **kw)
         self._buf = {}
+        note("connection")
 
     def quic_event_received(self, event):
         global seen
@@ -85,7 +87,7 @@ class Peer(QuicConnectionProtocol):
         msg = buf[2:]
         qname, qtype = question(msg)
         seen += 1
-        note("query %d" % qtype)
+        note("query %d %d" % (qtype, event.stream_id))
         asyncio.get_running_loop().call_later(
             delay, self.answer, event.stream_id, msg, qname, qtype)
 
