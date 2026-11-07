@@ -1481,11 +1481,21 @@ int twist_dns_plan_for (const int *user, size_t nuser, int have_doh,
 int twist_dns_bootstrap_plan (const int *user, size_t nuser, int *out,
                               size_t cap, size_t *n);
 
+struct twist_h2;
 struct twist_doh;
 
 struct twist_doh *twist_doh_new (void (*done) (void *user, int err,
                                                const uint8_t *msg, size_t len),
                                  void *user);
+/* A query over HTTP/2: an object for each, with no HTTP/1 parser, whose answer
+   is given to DONE when its stream ends.  The request opens the stream.  */
+struct twist_doh *twist_doh_new_stream (void (*done) (void *user, int err,
+                                                      const uint8_t *msg,
+                                                      size_t len),
+                                        void *user);
+int twist_doh_h2_request (struct twist_h2 *h2, struct twist_doh *d,
+                          const char *url, const uint8_t *msg, size_t msg_len,
+                          uint8_t **out, size_t *out_len);
 void twist_doh_reset (struct twist_doh *d);
 void twist_doh_free (struct twist_doh *d);
 size_t twist_doh_receive (struct twist_doh *d, const uint8_t *data, size_t len);

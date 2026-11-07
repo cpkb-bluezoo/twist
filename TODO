@@ -69,8 +69,8 @@ DNS (src/dns, RFC 8305)
     are not raced; nor is a TCP connection through a proxy, whose own address
     is looked up with the one-address resolver.
   - DoH sends its queries one after another (three round trips for an http
-    URL); DoQ (a stream for each), DoT, TCP and UDP send them together.  DoH
-    can only be pipelined over HTTP/2.
+    URL) to a resolver that does not offer HTTP/2; over HTTP/2, DoQ, DoT, TCP
+    and UDP they go together.
   - RFC 10029: the types in one message, the extra ones in an MQTYPE-Query
     option, and the server says which it included.  None of 1.1.1.1, 8.8.8.8
     and 9.9.9.9 does yet (tried), so the queries go out separately in one

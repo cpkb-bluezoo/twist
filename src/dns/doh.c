@@ -42,6 +42,7 @@ struct twist_doh
   int saw_type;
   int failed;
   int complete;
+  int delivered;
   uint8_t *body;
   size_t len;
   size_t cap;
@@ -62,6 +63,8 @@ contains_ci (const char *s, size_t n, const char *lit)
       return 1;
   return 0;
 }
+
+static int host_header (const struct twist_url *url, char *buf, size_t cap);
 
 static void
 doh_fail (struct twist_doh *d, int err)
@@ -89,6 +92,17 @@ on_header (void *user, const char *name, size_t name_len, const char *value,
 {
   struct twist_doh *d = user;
 
+  /* HTTP/2 gives the status as a header.  */
+  if (name_len == 7 && memcmp (name, ":status", 7) == 0)
+    {
+      int code = 0;
+      size_t i;
+
+      for (i = 0; i < value_len && value[i] >= '0' && value[i] <= '9'; i++)
+        code = code * 10 + (value[i] - '0');
+      d->status = i == value_len ? code : 0;
+      return;
+    }
   if (name_len == 12 && strncasecmp (name, "content-type", 12) == 0)
     {
       d->saw_type = 1;
@@ -165,6 +179,7 @@ arm (struct twist_doh *d)
   d->saw_type = 0;
   d->failed = 0;
   d->complete = 0;
+  d->delivered = 0;
   d->len = 0;
   return d->h1 != NULL ? TWIST_OK : TWIST_ERR_NOMEM;
 }
@@ -206,20 +221,17 @@ twist_doh_free (struct twist_doh *d)
   free (d);
 }
 
-size_t
-twist_doh_receive (struct twist_doh *d, const uint8_t *data, size_t len)
+/* Tell the owner of the answer, once: the message, or why there is none.  */
+static void
+deliver (struct twist_doh *d)
 {
-  size_t n;
   int err;
   const uint8_t *msg;
   size_t msg_len;
 
-  if (d == NULL || d->h1 == NULL)
-    return 0;
-  n = twist_h1_receive (d->h1, data, len);
-  if (!d->complete)
-    return n;
-  d->complete = 0;
+  if (d->delivered)
+    return;
+  d->delivered = 1;
   if (d->failed)
     err = d->status != 0 ? d->status : TWIST_ERR_PROTOCOL;
   else if (d->status != 200 || d->bad_type)
@@ -230,8 +242,110 @@ twist_doh_receive (struct twist_doh *d, const uint8_t *data, size_t len)
   msg_len = err == TWIST_OK ? d->len : 0;
   if (d->done != NULL)
     d->done (d->user, err, msg, msg_len);
+}
+
+size_t
+twist_doh_receive (struct twist_doh *d, const uint8_t *data, size_t len)
+{
+  size_t n;
+
+  if (d == NULL || d->h1 == NULL)
+    return 0;
+  n = twist_h1_receive (d->h1, data, len);
+  if (!d->complete)
+    return n;
+  d->complete = 0;
+  deliver (d);
   arm (d);
   return n;
+}
+
+/* Over HTTP/2 each query is a stream with an object of its own, whose events
+   these are: the answer is given when the stream ends, or has failed.  */
+static void
+h2_done (void *user)
+{
+  struct twist_doh *d = user;
+
+  if (!d->failed)
+    d->complete = 1;
+  deliver (d);
+}
+
+static void
+h2_fail (void *user, int err)
+{
+  struct twist_doh *d = user;
+
+  doh_fail (d, err);
+  deliver (d);
+}
+
+struct twist_doh *
+twist_doh_new_stream (void (*done) (void *user, int err, const uint8_t *msg,
+                                    size_t len),
+                      void *user)
+{
+  struct twist_doh *d = calloc (1, sizeof *d);
+
+  if (d == NULL)
+    return NULL;
+  d->done = done;
+  d->user = user;
+  return d;
+}
+
+int
+twist_doh_h2_request (struct twist_h2 *h2, struct twist_doh *d,
+                      const char *url_text, const uint8_t *msg, size_t msg_len,
+                      uint8_t **out, size_t *out_len)
+{
+  struct twist_url *url = NULL;
+  struct twist_slist *extra = NULL;
+  struct twist_h1_events ev;
+  char host[512];
+  char target[2048];
+  char length[64];
+  const char *path;
+  int rc;
+
+  if (h2 == NULL || d == NULL || url_text == NULL || msg == NULL)
+    return TWIST_ERR_INVAL;
+  rc = twist_url_parse_int (url_text, &url);
+  if (rc != TWIST_OK)
+    return rc;
+  if (url->scheme == NULL || strcmp (url->scheme, "https") != 0
+      || url->host == NULL || url->host[0] == 0
+      || host_header (url, host, sizeof host) != TWIST_OK)
+    {
+      twist_url_free_int (url);
+      return TWIST_ERR_URL;
+    }
+  path = url->path != NULL && url->path[0] != 0 ? url->path : "/";
+  if (snprintf (target, sizeof target, "%s%s%s", path,
+                url->query != NULL ? "?" : "",
+                url->query != NULL ? url->query : "") >= (int) sizeof target)
+    {
+      twist_url_free_int (url);
+      return TWIST_ERR_URL;
+    }
+  snprintf (length, sizeof length, "content-length: %zu", msg_len);
+  extra = twist_slist_append (extra, "accept: application/dns-message");
+  extra = twist_slist_append (extra, "content-type: application/dns-message");
+  extra = twist_slist_append (extra, length);
+  memset (&ev, 0, sizeof ev);
+  ev.user = d;
+  ev.status_line = on_status;
+  ev.header = on_header;
+  ev.body = on_body;
+  ev.message_done = h2_done;
+  ev.failure = h2_fail;
+  twist_h2_set_next_owner (h2, &ev);
+  rc = twist_h2_request (h2, "POST", "https", host, target, extra, msg, msg_len,
+                         0, out, out_len);
+  twist_slist_free_all (extra);
+  twist_url_free_int (url);
+  return rc;
 }
 
 static int

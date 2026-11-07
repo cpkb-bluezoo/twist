@@ -67,6 +67,7 @@ struct dns_sub
   /* Over DoQ the query has a stream of its own, and the answer is whatever
      comes on it: RX holds it until it is whole.  */
   struct dns_query *owner;
+  struct twist_doh *dohr;
   uint8_t *rx;
   size_t rxlen;
 };
@@ -128,6 +129,9 @@ struct dns_query
   const char *keyfile;
   struct twist_url *doh_parsed;
   struct twist_doh *dohp;
+  /* The HTTP/2 session of a DoH resolver that agreed to it: each query is a
+     stream, and they are all out at once.  */
+  struct twist_h2 *h2;
   struct twist_endpoint *ep;
   int user_order[4];
   int user_order_n;
@@ -169,6 +173,7 @@ struct dns_query
 };
 
 static int open_doh (struct dns_query *q);
+static void on_doh_msg (void *user, int err, const uint8_t *msg, size_t len);
 static int open_doq (struct dns_query *q);
 static size_t doq_stream_data (void *user, const uint8_t *data, size_t len,
                                int fin);
@@ -323,7 +328,9 @@ dns_release (struct dns_query *q)
     {
       free (q->sub[i].pkt);
       free (q->sub[i].rx);
+      twist_doh_free (q->sub[i].dohr);
     }
+  twist_h2_free (q->h2);
   if (q->hold != NULL)
     twist_timer_cancel (q->hold);
   if (q->linger != NULL)
@@ -525,6 +532,22 @@ send_one (struct dns_query *q, struct twist_endpoint *ep, struct dns_sub *sub)
       sub->owner = q;
       twist_quic_bind (q->conn, doq_stream_data, sub);
     }
+  if (q->doh && q->h2 != NULL)
+    {
+      uint8_t *http = NULL;
+      size_t hn = 0;
+
+      twist_doh_free (sub->dohr);
+      sub->dohr = twist_doh_new_stream (on_doh_msg, q);
+      if (sub->dohr == NULL)
+        return TWIST_ERR_NOMEM;
+      rc = twist_doh_h2_request (q->h2, sub->dohr, q->doh_text, sub->pkt,
+                                 sub->pktlen, &http, &hn);
+      if (rc == TWIST_OK && twist_endpoint_send (ep, http, hn) != TWIST_OK)
+        rc = TWIST_ERR_RESOLVE;
+      free (http);
+      return rc;
+    }
   if (q->doh)
     {
       uint8_t *http = NULL;
@@ -560,7 +583,7 @@ send_one (struct dns_query *q, struct twist_endpoint *ep, struct dns_sub *sub)
 static void
 send_subs (struct dns_query *q, struct twist_endpoint *ep)
 {
-  int sequential = q->doh;
+  int sequential = q->doh && q->h2 == NULL;
   int i;
 
   if (ensure_subs (q) != TWIST_OK)
@@ -1464,18 +1487,34 @@ on_doh_msg (void *user, int err, const uint8_t *msg, size_t len)
   sub_answered (q, s, q->ep);
 }
 
+static int
+doh_h2_emit (void *user, const uint8_t *data, size_t len)
+{
+  struct dns_query *q = user;
+
+  if (q->ep == NULL)
+    return TWIST_ERR_CONNECT;
+  return twist_endpoint_send (q->ep, data, len);
+}
+
+static void
+doh_h2_failed (void *user, int err)
+{
+  dns_finish (user, err);
+}
+
 static void
 doh_connected (struct twist_endpoint *ep)
 {
   struct dns_query *q = ep->user_data;
-  static const char *alpn[] = { "http/1.1" };
+  static const char *alpn[] = { "h2", "http/1.1" };
   int rc;
 
   q->ep = ep;
   if (q->done)
     return;
   rc = twist_connection_start_tls (q->conn, q->doh_parsed->host,
-                                   q->doh_verifypeer, alpn, 1, q->cainfo, q->capath,
+                                   q->doh_verifypeer, alpn, 2, q->cainfo, q->capath,
                                    q->certfile, q->keyfile);
   if (rc != TWIST_OK)
     dns_finish (q, rc);
@@ -1484,8 +1523,34 @@ doh_connected (struct twist_endpoint *ep)
 static void
 doh_secure (struct twist_endpoint *ep, const char *alpn, size_t alpn_len)
 {
-  (void) alpn;
-  (void) alpn_len;
+  struct dns_query *q = ep->user_data;
+
+  q->ep = ep;
+  if (alpn_len == 2 && alpn != NULL && memcmp (alpn, "h2", 2) == 0
+      && !q->done)
+    {
+      struct twist_h1_events ev;
+      uint8_t *pre = NULL;
+      size_t pn = 0;
+
+      memset (&ev, 0, sizeof ev);
+      ev.user = q;
+      ev.failure = doh_h2_failed;
+      q->h2 = twist_h2_new (&ev);
+      if (q->h2 == NULL || twist_h2_preface (&pre, &pn) != TWIST_OK)
+        {
+          dns_finish (q, TWIST_ERR_NOMEM);
+          return;
+        }
+      twist_h2_set_emit (q->h2, doh_h2_emit, q);
+      if (twist_endpoint_send (ep, pre, pn) != TWIST_OK)
+        {
+          free (pre);
+          dns_finish (q, TWIST_ERR_RESOLVE);
+          return;
+        }
+      free (pre);
+    }
   dns_send (ep);
 }
 
@@ -1495,7 +1560,11 @@ doh_receive (struct twist_endpoint *ep, const uint8_t *data, size_t len)
   struct dns_query *q = ep->user_data;
 
   q->ep = ep;
-  if (q->done || q->dohp == NULL)
+  if (q->done)
+    return len;
+  if (q->h2 != NULL)
+    return twist_h2_receive (q->h2, data, len);
+  if (q->dohp == NULL)
     return len;
   return twist_doh_receive (q->dohp, data, len);
 }
@@ -1618,9 +1687,15 @@ drop_conn (struct dns_query *q)
   q->ddr = 0;
   q->sent = 0;
   q->doq_sent = 0;
+  twist_h2_free (q->h2);
+  q->h2 = NULL;
   for (i = 0; i < q->nsub; i++)
-    if (!q->sub[i].done)
-      q->sub[i].sent = 0;
+    {
+      twist_doh_free (q->sub[i].dohr);
+      q->sub[i].dohr = NULL;
+      if (!q->sub[i].done)
+        q->sub[i].sent = 0;
+    }
 }
 
 static int
