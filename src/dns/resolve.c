@@ -64,6 +64,11 @@ struct dns_sub
   size_t pktlen;
   int sent;
   int done;
+  /* Over DoQ the query has a stream of its own, and the answer is whatever
+     comes on it: RX holds it until it is whole.  */
+  struct dns_query *owner;
+  uint8_t *rx;
+  size_t rxlen;
 };
 
 struct dns_query
@@ -88,6 +93,8 @@ struct dns_query
   struct dns_sub sub[MAX_SUBS];
   int nsub;
   int cur_type;
+  /* The query a DoQ answer is for, when it is known by its stream.  */
+  struct dns_sub *by_stream;
   struct twist_dns_addr got[2][MAX_GOT];
   int ngot[2];
   struct twist_dns_addr tmp[2][MAX_GOT];
@@ -163,6 +170,8 @@ struct dns_query
 
 static int open_doh (struct dns_query *q);
 static int open_doq (struct dns_query *q);
+static size_t doq_stream_data (void *user, const uint8_t *data, size_t len,
+                               int fin);
 static int open_dot (struct dns_query *q);
 static int begin_plan (struct dns_query *q);
 static void fallback_cb (void *user);
@@ -311,7 +320,10 @@ dns_release (struct dns_query *q)
   int i;
 
   for (i = 0; i < q->nsub; i++)
-    free (q->sub[i].pkt);
+    {
+      free (q->sub[i].pkt);
+      free (q->sub[i].rx);
+    }
   if (q->hold != NULL)
     twist_timer_cancel (q->hold);
   if (q->linger != NULL)
@@ -508,7 +520,11 @@ send_one (struct dns_query *q, struct twist_endpoint *ep, struct dns_sub *sub)
     return TWIST_ERR_TLS;
   sub->sent = 1;
   if (q->doq)
-    q->doq_sent = 1;
+    {
+      q->doq_sent = 1;
+      sub->owner = q;
+      twist_quic_bind (q->conn, doq_stream_data, sub);
+    }
   if (q->doh)
     {
       uint8_t *http = NULL;
@@ -544,7 +560,7 @@ send_one (struct dns_query *q, struct twist_endpoint *ep, struct dns_sub *sub)
 static void
 send_subs (struct dns_query *q, struct twist_endpoint *ep)
 {
-  int sequential = q->doq || q->doh;
+  int sequential = q->doh;
   int i;
 
   if (ensure_subs (q) != TWIST_OK)
@@ -1116,7 +1132,7 @@ progress (struct dns_query *q, struct twist_endpoint *ep)
   for (i = 0; i < q->nsub; i++)
     if (!q->sub[i].sent && !q->sub[i].done)
       unsent = 1;
-  if (unsent && (q->doq || q->doh) && (ep != NULL || q->ep != NULL))
+  if (unsent && q->doh && (ep != NULL || q->ep != NULL))
     dns_send (ep != NULL ? ep : q->ep);
 }
 
@@ -1225,6 +1241,15 @@ dns_receive (struct twist_endpoint *ep, const uint8_t *data, size_t len)
           if (!response_matches (q, data + 2, need))
             return 2 + need;
         }
+      else if (q->by_stream != NULL)
+        {
+          /* DoQ: the stream says which query this answers, as every id is 0.  */
+          s = q->by_stream;
+          if (s->done
+              || !twist_dns_response_ok (data + 2, need, 0, q->host))
+            return 2 + need;
+          q->cur_type = s->qtype;
+        }
       else
         {
           s = match_sub (q, data + 2, need);
@@ -1258,6 +1283,42 @@ dns_receive (struct twist_endpoint *ep, const uint8_t *data, size_t len)
     sub_answered (q, s, ep);
   return n;
 }
+/* Data on the stream of one query of a DoQ lookup: kept until the answer is
+   whole (a two-byte length and the message), then taken as that query's.  */
+static size_t
+doq_stream_data (void *user, const uint8_t *data, size_t len, int fin)
+{
+  struct dns_sub *s = user;
+  struct dns_query *q = s->owner;
+  uint8_t *p;
+  size_t need;
+
+  (void) fin;
+  if (q == NULL || q->done || q->ep == NULL || s->done)
+    return len;
+  p = realloc (s->rx, s->rxlen + len);
+  if (p == NULL)
+    {
+      dns_finish (q, TWIST_ERR_NOMEM);
+      return len;
+    }
+  s->rx = p;
+  memcpy (s->rx + s->rxlen, data, len);
+  s->rxlen += len;
+  if (s->rxlen < 2)
+    return len;
+  need = ((size_t) s->rx[0] << 8) | s->rx[1];
+  if (s->rxlen < 2 + need)
+    return len;
+  q->by_stream = s;
+  dns_receive (q->ep, s->rx, s->rxlen);
+  q->by_stream = NULL;
+  free (s->rx);
+  s->rx = NULL;
+  s->rxlen = 0;
+  return len;
+}
+
 static void
 dns_disconnected (struct twist_endpoint *ep, int error)
 {
