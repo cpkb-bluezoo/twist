@@ -1,0 +1,92 @@
+name: Benchmark
+
+# twist against curl on HTTP downloads and uploads over HTTP/1.1, HTTP/2 and
+# HTTP/3, against a local nginx, in the "bench" stage of ci/Dockerfile (see
+# bench/README).  A hosted runner is shared with other jobs, so what is
+# compared is the ratio of twist to curl within this one job, run interleaved,
+# and not the times themselves.  The result is in the job summary and in the
+# artifact.
+#
+# It does not run on every push: by hand, on a schedule, and on a pull request
+# that carries the "benchmark" label.
+
+on:
+  workflow_dispatch:
+    inputs:
+      args:
+        description: 'Arguments for bench.py, e.g. --only get-big --protocols h2'
+        required: false
+        default: ''
+  schedule:
+    - cron: '17 3 * * 1'
+  pull_request:
+    types: [labeled, synchronize]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bench-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  bench:
+    name: twist against curl
+    # Pull requests: only with the label.
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'benchmark')
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Find the commits of quickstep and foxtrot
+        id: deps
+        run: |
+          set -e
+          for r in quickstep foxtrot; do
+            sha=$(git ls-remote "https://github.com/cpkb-bluezoo/$r.git" refs/heads/main | cut -f1)
+            test -n "$sha"
+            echo "$r=$sha" >> "$GITHUB_OUTPUT"
+          done
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Build the bench image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ci/Dockerfile
+          target: bench
+          load: true
+          tags: twist-bench
+          push: false
+          build-args: |
+            QUICKSTEP_REF=${{ steps.deps.outputs.quickstep }}
+            FOXTROT_REF=${{ steps.deps.outputs.foxtrot }}
+            TWIST_CONFIGURE=--with-brotli
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Quiet the machine a little, and give the server cores 0-1 and the
+      # clients core 2 of the runner's four.  The container shares the host's
+      # network, so that nothing sits between the clients and nginx.
+      - name: Run the benchmark
+        env:
+          EXTRA: ${{ github.event.inputs.args }}
+        run: |
+          mkdir -p out
+          nproc
+          docker run --rm --network host --shm-size 3g \
+            -e GITHUB_STEP_SUMMARY=/out/summary.md \
+            -v "$PWD/out:/out" \
+            twist-bench \
+              --require-protocols --big-mb 512 \
+              --server-cpus 0-1 --client-cpus 2 \
+              --json /out/bench.json $EXTRA
+          cat out/summary.md >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+
+      - uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: bench-${{ github.sha }}
+          path: out/

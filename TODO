@@ -69,6 +69,15 @@ HTTP/3 (src/tls/quic.c, src/http)
     the current stream, so a second request cannot begin on the connection
     until the body has gone. HTTP/2 does not do this.
 
+Found by bench/ (twist against curl), not looked into
+
+  - 100 requests together over HTTP/2 or HTTP/3 (-Z --parallel-max 100): in
+    most runs some of the transfers end with TWIST_ERR_AGAIN (81), "resource
+    temporarily unavailable"; it comes with 60 or more.
+  - A 1 MiB download costs four to six times the CPU of curl's (8.8 ms to 2.4
+    ms over HTTP/1.1, 26 ms to 4 ms over HTTP/3), and an HTTP/3 transfer of
+    1 KiB six times (13 ms to 2 ms): the work is somewhere to be found.
+
 DNS (src/dns, RFC 8305)
 
   - HTTP/3 and QUIC under a proxy use one address (IPv4 if there is one) and

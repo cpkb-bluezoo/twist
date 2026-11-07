@@ -66,6 +66,10 @@ struct twist_quic
   void *drained_user;
   gq_path path;
   uint8_t *dg;
+  /* Where datagrams are read into.  Not dg: what is sent is written there, and
+     a send that a callback makes while a datagram is being read would write
+     over it.  */
+  uint8_t *rx;
   size_t dg_len[16];
   int dg_n;
   int dg_i;
@@ -508,7 +512,15 @@ ensure_dg (struct twist_quic *q)
   if (q->dg != NULL)
     return TWIST_OK;
   q->dg = malloc (QUIC_BATCH * QUIC_DG);
-  return q->dg == NULL ? TWIST_ERR_NOMEM : TWIST_OK;
+  q->rx = malloc (QUIC_BATCH * QUIC_DG);
+  if (q->dg == NULL || q->rx == NULL)
+    {
+      free (q->dg);
+      free (q->rx);
+      q->dg = q->rx = NULL;
+      return TWIST_ERR_NOMEM;
+    }
+  return TWIST_OK;
 }
 
 /* The datagrams are the carrier's to take: it is not a socket that can be
@@ -688,9 +700,9 @@ quic_read (void *user, uint8_t *buf, size_t len)
     }
   for (;;)
     {
-      int room = QUIC_BATCH - q->dg_n;
-
-      if (room <= 0)
+      /* Reading goes on only while what is to be sent can be: if the socket
+         will not take it, wait.  */
+      if (q->dg_n >= QUIC_BATCH)
         {
           quic_flush (q, now);
           if (q->dg_n >= QUIC_BATCH)
@@ -698,7 +710,6 @@ quic_read (void *user, uint8_t *buf, size_t len)
               twist_connection_hold_read (q->twist, 1);
               break;
             }
-          room = QUIC_BATCH - q->dg_n;
         }
 #if defined __linux__
       {
@@ -708,14 +719,14 @@ quic_read (void *user, uint8_t *buf, size_t len)
         int i;
 
         memset (msg, 0, sizeof msg);
-        for (i = 0; i < room; i++)
+        for (i = 0; i < QUIC_BATCH; i++)
           {
-            iov[i].iov_base = q->dg + (size_t) (q->dg_n + i) * QUIC_DG;
+            iov[i].iov_base = q->rx + (size_t) i * QUIC_DG;
             iov[i].iov_len = QUIC_DG;
             msg[i].msg_hdr.msg_iov = &iov[i];
             msg[i].msg_hdr.msg_iovlen = 1;
           }
-        got = recvmmsg (q->fd, msg, (unsigned int) room, 0, NULL);
+        got = recvmmsg (q->fd, msg, QUIC_BATCH, 0, NULL);
         if (got < 0)
           {
             if (errno == EAGAIN || errno == EWOULDBLOCK)
@@ -724,15 +735,13 @@ quic_read (void *user, uint8_t *buf, size_t len)
           }
         for (i = 0; i < got; i++)
           gq_endpoint_recv (q->ep, now, &q->path,
-                            q->dg + (size_t) (q->dg_n + i) * QUIC_DG,
-                            msg[i].msg_len);
+                            q->rx + (size_t) i * QUIC_DG, msg[i].msg_len);
         if (got == 0)
           break;
       }
 #else
       {
-        ssize_t n = recv (q->fd, q->dg + (size_t) q->dg_n * QUIC_DG, QUIC_DG,
-                          0);
+        ssize_t n = recv (q->fd, q->rx, QUIC_DG, 0);
 
         if (n < 0)
           {
@@ -742,8 +751,7 @@ quic_read (void *user, uint8_t *buf, size_t len)
           }
         if (n == 0)
           break;
-        gq_endpoint_recv (q->ep, now, &q->path,
-                          q->dg + (size_t) q->dg_n * QUIC_DG, (size_t) n);
+        gq_endpoint_recv (q->ep, now, &q->path, q->rx, (size_t) n);
       }
 #endif
     }
@@ -907,6 +915,7 @@ quic_free (void *p)
   free (q->also_name);
   free (q->server_name);
   free (q->dg);
+  free (q->rx);
   {
     int i;
 
