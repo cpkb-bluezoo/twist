@@ -57,7 +57,7 @@ struct srv
   int max_open;
   pthread_t thread;
   int conns[SRV_MAX];
-  unsigned char buf[SRV_MAX][512];
+  unsigned char buf[SRV_MAX][16400];
   size_t have[SRV_MAX];
   int greeted[SRV_MAX];
   /* HTTP/2: the windows the server keeps to, the response that is sent as the
@@ -69,6 +69,11 @@ struct srv
   long big_left[SRV_MAX];
   long big_win[SRV_MAX];
   unsigned ping_stream[SRV_MAX];
+  /* An upload to /U is taken in and counted, never answered, and its window
+     is never given back.  */
+  unsigned up_stream[SRV_MAX];
+  int grant[SRV_MAX];		/* An upload to /W is answered, and given room.  */
+  long up_got[SRV_MAX];
   int ping_wait[SRV_MAX];
 };
 
@@ -95,6 +100,9 @@ srv_drop (struct srv *s, int i)
   s->greeted[i] = 0;
   s->big_left[i] = 0;
   s->ping_wait[i] = 0;
+  s->up_stream[i] = 0;
+  s->up_got[i] = 0;
+  s->grant[i] = 0;
   __atomic_sub_fetch (&s->open, 1, __ATOMIC_ACQ_REL);
 }
 
@@ -154,7 +162,7 @@ srv_pump (struct srv *s, int i)
 static int
 srv_serve (struct srv *s, int i)
 {
-  unsigned char out[256];
+  unsigned char out[4096];
   int n = 0;
 
   if (!s->h2)
@@ -211,6 +219,36 @@ srv_serve (struct srv *s, int i)
           else if (stream == s->big_stream[i])
             s->big_win[i] += inc;
         }
+      else if (type == 0 && stream != 0 && s->grant[i])
+        {
+          static const unsigned char status200 = 0x88;
+          unsigned char inc[4];
+
+          __atomic_add_fetch (&s->up_got[i], (long) len, __ATOMIC_ACQ_REL);
+          /* Small frames can be many in one read: send what is made.  */
+          if (n > (int) sizeof out - 128)
+            {
+              if (write (s->conns[i], out, (size_t) n) < 0)
+                return -1;
+              n = 0;
+            }
+          inc[0] = (unsigned char) (len >> 24);
+          inc[1] = (unsigned char) (len >> 16);
+          inc[2] = (unsigned char) (len >> 8);
+          inc[3] = (unsigned char) len;
+          if (len > 0 && !(flags & 1))
+            {
+              n += frame (out + n, 8, 0, 0, inc, 4);
+              n += frame (out + n, 8, 0, stream, inc, 4);
+            }
+          if (flags & 1)
+            {
+              n += frame (out + n, 1, 4, stream, &status200, 1);
+              n += frame (out + n, 0, 1, stream, "hello\n", 6);
+            }
+        }
+      else if (type == 0 && stream != 0 && stream == s->up_stream[i])
+        __atomic_add_fetch (&s->up_got[i], (long) len, __ATOMIC_ACQ_REL);
       else if (type == 6 && (flags & 1) && s->ping_wait[i])
         {
           static const unsigned char status = 0x88;
@@ -233,6 +271,8 @@ srv_serve (struct srv *s, int i)
           int big = 0;
           int huge = 0;
           int ping = 0;
+          int upload = 0;
+          int granting = 0;
 
           /* A request for /r is sent to /1, one for /b is answered at length
              as the windows allow, and one for /p waits for the client to
@@ -244,8 +284,14 @@ srv_serve (struct srv *s, int i)
                 big |= s->buf[i][k + 1] == 'b';
                 huge |= s->buf[i][k + 1] == 'Z';
                 ping |= s->buf[i][k + 1] == 'p';
+                upload |= s->buf[i][k + 1] == 'U';
+                granting |= s->buf[i][k + 1] == 'W';
               }
-          if (redirect)
+          if (granting)
+            s->grant[i] = 1;
+          else if (upload)
+            s->up_stream[i] = stream;
+          else if (redirect)
             n += frame (out + n, 1, 5, stream, moved, sizeof moved);
           else if (big || huge)
             {
@@ -791,6 +837,124 @@ test_h2_pause_stream (void)
   srv_stop (&s);
 }
 
+
+struct upl
+{
+  size_t total;
+  size_t sent;			/* What the source has given.  */
+};
+
+static size_t
+up_read (char *buf, size_t size, size_t nmemb, void *user)
+{
+  struct upl *u = user;
+  size_t n = size * nmemb;
+
+  if (n > u->total - u->sent)
+    n = u->total - u->sent;
+  memset (buf, 'u', n);
+  u->sent += n;
+  return n;
+}
+
+/* An upload whose stream window the server never opens again takes no more
+   from its source than the window and a chunk, and is not waiting on the
+   connection: another transfer to the same origin is answered over it while
+   the upload is stuck.  */
+static void
+test_h2_upload_stalled (void)
+{
+  struct srv s;
+  struct run r;
+  struct upl u;
+  size_t at_stall;
+  int k;
+
+  check (srv_start (&s, 1, 0) == 0, "server");
+  check (run_open (&r), "runtime");
+  memset (&u, 0, sizeof u);
+  u.total = 4 * 1024 * 1024;
+  /* The connection is made, and idle.  */
+  run_make (&r, 0, &s, 1, -1);
+  run_go (&r, 0);
+  check (run_wait (&r, 1) && r.job[0].result == TWIST_OK, "the first is answered");
+  run_make (&r, 1, &s, 1, -1);
+  run_path (&r, 1, &s, "/U");
+  twist_transfer_setopt (r.t[1], TWISTOPT_CUSTOMREQUEST, "PUT");
+  twist_transfer_setopt (r.t[1], TWISTOPT_READFUNCTION, up_read);
+  twist_transfer_setopt (r.t[1], TWISTOPT_READDATA, &u);
+  twist_transfer_setopt (r.t[1], TWISTOPT_INFILESIZE, (long) u.total);
+  run_go (&r, 1);
+  for (k = 0; k < 60; k++)
+    twist_runtime_run_once (r.runtime, 10);
+  at_stall = u.sent;
+  for (k = 0; k < 30; k++)
+    twist_runtime_run_once (r.runtime, 10);
+  check (u.sent > 0 && u.sent < u.total, "the upload has begun, and is not over");
+  check (u.sent == at_stall, "and takes no more from its source while stuck");
+  check (u.sent <= 65535 + 2 * 16384,
+         "no more than the window and a chunk or two");
+  check (ld (&s.accepts) == 1, "over the one connection");
+  /* Another stream on the connection.  */
+  run_make (&r, 2, &s, 1, -1);
+  run_go (&r, 2);
+  for (k = 0; k < 200 && !r.job[2].done; k++)
+    twist_runtime_run_once (r.runtime, 10);
+  check (r.job[2].done && r.job[2].result == TWIST_OK && r.got[2] == 6,
+         "another transfer is answered while the upload is stuck");
+  check (ld (&s.accepts) == 1, "over the same connection");
+  check (!r.job[1].done, "and the upload is still waiting");
+  twist_runtime_cancel (r.runtime, r.t[1]);
+  check (run_wait (&r, 3), "cancelled, it ends");
+  run_close (&r, 3);
+  srv_stop (&s);
+}
+/* Two uploads under way on one connection, each larger than the windows, and a
+   third transfer beside them: all end, over the one connection, and the server
+   has every byte of both.  */
+static void
+test_h2_uploads_together (void)
+{
+  struct srv s;
+  struct run r;
+  struct upl u[2];
+  int i;
+
+  check (srv_start (&s, 1, 0) == 0, "server");
+  check (run_open (&r), "runtime");
+  for (i = 0; i < 2; i++)
+    {
+      memset (&u[i], 0, sizeof u[i]);
+      u[i].total = 400000 + (size_t) i * 1000;
+      run_make (&r, i, &s, 1, -1);
+      run_path (&r, i, &s, "/W");
+      twist_transfer_setopt (r.t[i], TWISTOPT_CUSTOMREQUEST, "PUT");
+      twist_transfer_setopt (r.t[i], TWISTOPT_READFUNCTION, up_read);
+      twist_transfer_setopt (r.t[i], TWISTOPT_READDATA, &u[i]);
+      twist_transfer_setopt (r.t[i], TWISTOPT_INFILESIZE, (long) u[i].total);
+    }
+  run_make (&r, 2, &s, 1, -1);
+  run_go (&r, 0);
+  run_go (&r, 1);
+  run_go (&r, 2);
+  check (run_wait (&r, 3), "all three end");
+  check (r.job[0].result == TWIST_OK && r.job[1].result == TWIST_OK
+         && r.job[2].result == TWIST_OK, "all three are answered");
+  check (u[0].sent == u[0].total && u[1].sent == u[1].total,
+         "both uploads are read to the end");
+  check (ld (&s.accepts) == 1, "over one connection");
+  {
+    long got = 0;
+
+    for (i = 0; i < SRV_MAX; i++)
+      got += __atomic_load_n (&s.up_got[i], __ATOMIC_ACQUIRE);
+    check (got == (long) (u[0].total + u[1].total),
+           "and the server has every byte of both");
+  }
+  run_close (&r, 3);
+  srv_stop (&s);
+}
+
 /* The server pings after the first transfer has ended, while the second is
    waiting for its answer, which is not sent until the ping is.  */
 static void
@@ -1090,6 +1254,10 @@ main (void)
   test_h2_window ();
   announce ("test_h2_pause_stream");
   test_h2_pause_stream ();
+  announce ("test_h2_upload_stalled");
+  test_h2_upload_stalled ();
+  announce ("test_h2_uploads_together");
+  test_h2_uploads_together ();
   announce ("test_h2_ping");
   test_h2_ping ();
   announce ("test_leader_fails");

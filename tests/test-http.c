@@ -501,9 +501,9 @@ test_h2_tunnel (void)
 /* The body of a request is sent by the caller a chunk at a time
    (twist_h2_send_body): as much as the windows allow, then the rest when the
    writable callback says they have grown, and the end of the request
-   (END_STREAM) when all has gone.  While it is sent no other request is begun
-   on the session (twist_h2_hold), and a stream that has been closed meanwhile,
-   by the server's answer, is told as such.  */
+   (END_STREAM) when all has gone.  While it is sent other requests go on the
+   session, and a stream that has been closed meanwhile, by the server's
+   answer, is told as such.  */
 static void
 test_h2_body (void)
 {
@@ -526,10 +526,11 @@ test_h2_body (void)
          && n > 9 && (out[4] & 1) == 0,
          "a request whose body is to come leaves the stream open");
   free (out);
-  twist_h2_hold (h, 1);
-  check (!twist_h2_can_open (h), "and nothing else is begun meanwhile");
+  check (twist_h2_can_open (h), "and another can be begun meanwhile");
   check (twist_h2_request (h, "GET", "https", "example.org", "/", NULL, NULL, 0,
-                           0, &out, &n) == TWIST_ERR_AGAIN, "or asked for");
+                           0, &out, &n) == TWIST_OK && n > 9,
+         "and asked for");
+  free (out);
 
   tun_out_n = 0;
   sent = twist_h2_send_body (h, 1, data, sizeof data, 0);
@@ -545,9 +546,6 @@ test_h2_body (void)
   n = twist_h2_send_body (h, 1, data + sent, sizeof data - sent, 1);
   check (n == sizeof data - sent && tun_frames (mark, 1, &ends) == (long) n
          && ends == 1, "the rest goes, and the end of the request");
-  check (!twist_h2_can_open (h), "the session is still held");
-  twist_h2_hold (h, 0);
-  check (twist_h2_can_open (h), "until it is let go");
   check (twist_h2_send_body (h, 1, data, 10, 0) == (size_t) -1,
          "a stream that has ended takes no more");
   twist_h2_free (h);

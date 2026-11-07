@@ -1804,18 +1804,24 @@ int twist_h2_preface (uint8_t **out, size_t *out_len);
 uint32_t twist_h2_last_stream (const struct twist_h2 *h2);
 size_t twist_h2_send_data (struct twist_h2 *h2, uint32_t id,
                            const uint8_t *data, size_t len, int end);
+/* Several can wait at once (a body is sent on each of several streams): CB is
+   added for USER, or replaces USER's; a NULL CB takes USER out, or all of them
+   if USER is NULL.  WAKE_WRITERS calls them, as the windows growing does, and
+   WRITERS says how many there are.  */
+int twist_h2_writers (const struct twist_h2 *h2);
+void twist_h2_wake_writers (struct twist_h2 *h2);
 void twist_h2_set_writable (struct twist_h2 *h2, void (*cb) (void *),
                             void *user);
 /* The body of a request is sent by the caller, a chunk at a time, on the
    stream the request (with KEEP_OPEN, and no body) opened.  SEND_BODY is as
    send_data, and the END of the request is the end of the stream, after which
    the response is awaited; it returns (size_t) -1 if the stream is not there
-   (the server answered, or reset it) and no more is to be sent.  While it is
-   sent the session is HELD: no other request is begun on it.  CANCEL ends a
+   (the server answered, or reset it) and no more is to be sent.  Other
+   requests go on the session meanwhile: the stream waits for its own window
+   and the connection's, and no other stream waits for it.  CANCEL ends a
    stream whose body will not be sent in full.  */
 size_t twist_h2_send_body (struct twist_h2 *h2, uint32_t id,
                            const uint8_t *data, size_t len, int end);
-void twist_h2_hold (struct twist_h2 *h2, int hold);
 /* While HOLD is non-zero the receive window of stream ID is not given back as
    data arrives, so the peer stops when it has used it: a consumer that cannot
    take more yet does not have to buffer without limit.  Letting go gives

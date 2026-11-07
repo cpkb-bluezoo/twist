@@ -265,9 +265,15 @@ The loop drains the command queue at the top of every iteration.
   credit (`MAX_STREAM_DATA`) with `gq_conn_stream_hold`, which needs a quickstep
   that has it. Without it, `twist_http_pause_body` reports
   `TWIST_ERR_UNSUPPORTED` on HTTP/3.
-- An upload on HTTP/2 or HTTP/3 already waits for the stream's send window and
-  for room in the connection's queue, and pauses its source while it waits;
-  it never pauses the connection's read.
+- An upload on HTTP/2 or HTTP/3 waits for the stream's send window and for room
+  in the connection's queue, and pauses its source while it waits; it never
+  pauses the connection's read. On HTTP/2 other requests go on the session
+  meanwhile, and several uploads can be under way on it: each waits in the
+  session's list of writers (`twist_h2_set_writable`), and the connection's one
+  hook for room in its queue wakes them all. A frame is handed to the
+  connection whole, so that what a woken writer sends cannot come between a
+  frame's header and its payload. An HTTP/3 upload still has the session to
+  itself, since QUIC sends on the current stream (`twist_quic_hold_stream`).
 
 ### The Application's Side of Upload and Download
 

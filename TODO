@@ -63,6 +63,16 @@ Progress meter (see HACKING)
     the meter is on.
 
 
+HTTP/3 (src/tls/quic.c, src/http)
+
+  - An HTTP/3 upload has its connection to itself while it is sent: QUIC sends on
+    the current stream, so a second request cannot begin on the connection
+    until the body has gone. HTTP/2 does not do this.
+  - A download of several MiB from a peer of aioquic's, in the podman lab,
+    stalls part-way (a stream's flow-control credit is not raised again) or ends
+    with the connection closed by an internal error. A body of 600000 bytes
+    goes. Not looked into.
+
 DNS (src/dns, RFC 8305)
 
   - HTTP/3 and QUIC under a proxy use one address (IPv4 if there is one) and

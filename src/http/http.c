@@ -1791,13 +1791,13 @@ pump_full (struct twist_http *h)
   return twist_endpoint_full (twist_connection_endpoint (h->conn));
 }
 
+/* The connection has written what it queued: every body that waits for room
+   on this session goes on.  The hook is the session's, not a request's, as
+   several uploads can be under way on it.  */
 static void
 pump_drained (struct twist_endpoint *ep)
 {
-  struct body_pump *p = ep->write_user;
-
-  if (p != NULL)
-    pump_run (p->h);
+  twist_h2_wake_writers (ep->write_user);
 }
 
 /* The pump is over: the session is let go, and the connection no longer
@@ -1823,16 +1823,16 @@ pump_stop (struct twist_http *h, int whole)
     }
   else if (h->h2 != NULL)
     {
-      twist_h2_set_writable (h->h2, NULL, NULL);
+      twist_h2_set_writable (h->h2, NULL, p);
       if (!whole)
         twist_h2_cancel (h->h2, p->id);
-      twist_h2_hold (h->h2, 0);
     }
-  if (h->conn != NULL && h->mode != HTTP_H3)
+  if (h->conn != NULL && h->mode != HTTP_H3 && h->h2 != NULL)
     {
       struct twist_endpoint *ep = twist_connection_endpoint (h->conn);
 
-      if (ep->write_user == p)
+      /* The last upload on the session lets go of the connection's hook.  */
+      if (ep->write_user == h->h2 && twist_h2_writers (h->h2) == 0)
         {
           ep->on_write_ready = NULL;
           ep->write_user = NULL;
@@ -2033,8 +2033,7 @@ pump_start (struct twist_http *h, const uint8_t *mem, size_t mem_len,
     {
       ep = twist_connection_endpoint (h->conn);
       ep->on_write_ready = pump_drained;
-      ep->write_user = p;
-      twist_h2_hold (h->h2, 1);
+      ep->write_user = h->h2;
       twist_h2_set_writable (h->h2, pump_wake, p);
     }
   pump_run (h);

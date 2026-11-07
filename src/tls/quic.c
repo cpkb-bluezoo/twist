@@ -374,8 +374,13 @@ twist_quic_hold_recv (struct twist_connection *conn, uint64_t id, int hold)
   if (q == NULL || q->conn == NULL)
     return TWIST_ERR_INVAL;
 #ifdef HAVE_GQ_CONN_STREAM_HOLD
-  return gq_conn_stream_hold (q->conn, id, hold) == GQ_OK ? TWIST_OK
-                                                           : TWIST_ERR_INVAL;
+  if (gq_conn_stream_hold (q->conn, id, hold) != GQ_OK)
+    return TWIST_ERR_INVAL;
+  /* Giving the credit back queues the frame that says so: send it now, not
+     when something else next sends.  */
+  if (!hold)
+    quic_flush (q, twist_loop_now (q->loop) * 1000u);
+  return TWIST_OK;
 #else
   (void) id;
   (void) hold;

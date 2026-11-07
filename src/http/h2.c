@@ -95,11 +95,17 @@ struct twist_h2
   size_t pending_len;
   uint32_t pending_id;
   int pending_end;
-  int hold;			/* A body is being sent: nothing else begins.  */
   struct twist_h1_events next_ev;
   int have_next;
-  void (*writable) (void *);
-  void *writable_user;
+  /* Whoever is waiting for room to send a body on a stream: called when the
+     windows grow (twist_h2_set_writable).  */
+#define H2_WRITERS 8
+  struct
+  {
+    void (*cb) (void *);
+    void *user;
+  } writer[H2_WRITERS];
+  int n_writers;
 };
 
 static void
@@ -205,6 +211,33 @@ emit_bytes (struct twist_h2 *h, const uint8_t *p, size_t n)
   if (h->emit == NULL || n == 0)
     return TWIST_OK;
   return h->emit (h->emit_user, p, n);
+}
+
+/* A frame is emitted whole: the emit can write at once and so call a writer
+   back, and what that sends must not come between a header and its payload.  */
+static int
+emit_frame (struct twist_h2 *h, const uint8_t *hdr, const uint8_t *data,
+            size_t n)
+{
+  uint8_t small[9 + 4096];
+  uint8_t *buf = small;
+  int rc;
+
+  if (h->emit == NULL)
+    return TWIST_OK;
+  if (n > sizeof small - 9)
+    {
+      buf = malloc (9 + n);
+      if (buf == NULL)
+        return TWIST_ERR_NOMEM;
+    }
+  memcpy (buf, hdr, 9);
+  if (n > 0)
+    memcpy (buf + 9, data, n);
+  rc = h->emit (h->emit_user, buf, 9 + n);
+  if (buf != small)
+    free (buf);
+  return rc;
 }
 
 static void
@@ -397,7 +430,7 @@ twist_h2_can_open (const struct twist_h2 *h)
   const struct twist_h2_stream *s;
   size_t live = 0;
 
-  if (h == NULL || h->failed || h->pending != NULL || h->hold)
+  if (h == NULL || h->failed || h->pending != NULL)
     return 0;
   for (s = h->active; s != NULL; s = s->next)
     if (s->live)
@@ -622,8 +655,7 @@ flush_pending (struct twist_h2 *h)
       end = h->pending_end && n == h->pending_len;
       frame_hdr (hdr, (uint32_t) n, H2_DATA, end ? H2_END_STREAM : 0,
                  h->pending_id);
-      if (emit_bytes (h, hdr, sizeof hdr) != TWIST_OK
-          || emit_bytes (h, h->pending, n) != TWIST_OK)
+      if (emit_frame (h, hdr, h->pending, n) != TWIST_OK)
         {
           h2_fail (h, TWIST_ERR_CONNECT);
           return;
@@ -685,8 +717,8 @@ on_settings (struct twist_h2 *h, const uint8_t *p, size_t len)
                 s->send_left = (int32_t) now;
               }
           h->peer_init = (int32_t) val;
-          if (h->writable != NULL && delta > 0)
-            h->writable (h->writable_user);
+          if (delta > 0)
+            twist_h2_wake_writers (h);
         }
       else if (id == 5)
         {
@@ -854,8 +886,8 @@ dispatch_frame (struct twist_h2 *h, uint8_t type, uint8_t flags,
             }
         }
       flush_pending (h);
-      if (h->writable != NULL && !h->failed)
-        h->writable (h->writable_user);
+      if (!h->failed)
+        twist_h2_wake_writers (h);
       return;
     }
   if (type == H2_DATA)
@@ -951,8 +983,65 @@ queue_data (uint8_t **buf, size_t *n, size_t *cap, const uint8_t *p, size_t len)
 void
 twist_h2_set_writable (struct twist_h2 *h, void (*cb) (void *), void *user)
 {
-  h->writable = cb;
-  h->writable_user = user;
+  int i;
+
+  if (h == NULL)
+    return;
+  for (i = 0; i < h->n_writers; i++)
+    if (h->writer[i].user == user)
+      break;
+  if (cb == NULL)
+    {
+      /* Out: the user's entry, or with no user all of them.  */
+      for (i = 0; i < h->n_writers; )
+        if (user == NULL || h->writer[i].user == user)
+          h->writer[i] = h->writer[--h->n_writers];
+        else
+          i++;
+      return;
+    }
+  if (i == h->n_writers)
+    {
+      if (i == H2_WRITERS)
+        return;
+      h->n_writers++;
+    }
+  h->writer[i].cb = cb;
+  h->writer[i].user = user;
+}
+
+int
+twist_h2_writers (const struct twist_h2 *h)
+{
+  return h != NULL ? h->n_writers : 0;
+}
+
+/* Each writer is told, once; one may take itself out, or another, as it runs.  */
+void
+twist_h2_wake_writers (struct twist_h2 *h)
+{
+  void (*cb[H2_WRITERS]) (void *);
+  void *user[H2_WRITERS];
+  int n, i;
+
+  if (h == NULL)
+    return;
+  n = h->n_writers;
+  for (i = 0; i < n; i++)
+    {
+      cb[i] = h->writer[i].cb;
+      user[i] = h->writer[i].user;
+    }
+  for (i = 0; i < n; i++)
+    {
+      int k, live = 0;
+
+      for (k = 0; k < h->n_writers; k++)
+        if (h->writer[k].user == user[i])
+          live = 1;
+      if (live && !h->failed)
+        cb[i] (user[i]);
+    }
 }
 
 uint32_t
@@ -985,8 +1074,7 @@ twist_h2_send_data (struct twist_h2 *h, uint32_t id, const uint8_t *data,
       if (n > (size_t) s->send_left)
         n = (size_t) s->send_left;
       frame_hdr (hdr, (uint32_t) n, H2_DATA, 0, id);
-      if (emit_bytes (h, hdr, sizeof hdr) != TWIST_OK
-          || emit_bytes (h, data + sent, n) != TWIST_OK)
+      if (emit_frame (h, hdr, data + sent, n) != TWIST_OK)
         {
           h2_fail (h, TWIST_ERR_CONNECT);
           return sent;
@@ -1038,13 +1126,6 @@ twist_h2_send_body (struct twist_h2 *h, uint32_t id, const uint8_t *data,
 }
 
 void
-twist_h2_hold (struct twist_h2 *h, int hold)
-{
-  if (h != NULL)
-    h->hold = hold;
-}
-
-void
 twist_h2_cancel (struct twist_h2 *h, uint32_t id)
 {
   struct twist_h2_stream *s;
@@ -1085,7 +1166,7 @@ twist_h2_request (struct twist_h2 *h, const char *method, const char *scheme,
 
   if (h == NULL)
     return TWIST_ERR_INVAL;
-  if (h->pending != NULL || h->hold)
+  if (h->pending != NULL)
     return TWIST_ERR_AGAIN;
   rc = twist_hpack_encode_request (h->hp, method, scheme, authority, path,
                                    extra, &block, &blen);
