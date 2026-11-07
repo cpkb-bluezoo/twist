@@ -23,6 +23,7 @@
 #include "hpack_tab.h"
 #include "twist-int.h"
 
+#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -105,70 +106,95 @@ read_int (const uint8_t *p, size_t len, size_t *off, unsigned prefix,
   return 1;
 }
 
+/* The code of appendix B is canonical: codes of one length are consecutive,
+   in the order of the symbols, and the first of a length follows the last of
+   the one before it, shifted.  So a code is found by reading a bit at a time
+   and asking, for each length, whether the bits so far are one of the codes
+   of that length.  COUNT is how many codes there are of each length, SYM the
+   symbols by length, then by code.  */
+#define HUFF_MAXLEN 30
+
+static pthread_once_t huff_once = PTHREAD_ONCE_INIT;
+static uint16_t huff_count[HUFF_MAXLEN + 1];
+static uint16_t huff_sym[257];
+
+static void
+huff_init (void)
+{
+  uint16_t offs[HUFF_MAXLEN + 2];
+  int s, len;
+
+  for (s = 0; s < 257; s++)
+    huff_count[twist_huff_bits[s]]++;
+  offs[1] = 0;
+  for (len = 1; len <= HUFF_MAXLEN; len++)
+    offs[len + 1] = (uint16_t) (offs[len] + huff_count[len]);
+  /* The symbols are in code order within a length already.  */
+  for (s = 0; s < 257; s++)
+    huff_sym[offs[twist_huff_bits[s]]++] = (uint16_t) s;
+}
+
 int
 twist_huff_decode (const uint8_t *in, size_t in_len, uint8_t **out,
                    size_t *out_len)
 {
-  uint64_t acc = 0;
-  int nbits = 0;
-  size_t i = 0;
   uint8_t *buf;
   size_t n = 0;
   size_t cap = in_len * 2 + 1;
+  size_t i = 0;
+  unsigned bit = 0;		/* The next bit of in[i], from the top.  */
+  uint32_t code = 0, first = 0;
+  unsigned index = 0;
+  int len = 0;
 
+  pthread_once (&huff_once, huff_init);
   buf = twist_xmalloc (cap);
   if (buf == NULL)
     return TWIST_ERR_NOMEM;
-  while (i < in_len || nbits >= 5)
+  while (i < in_len)
     {
-      int matched = 0;
-      int bits;
+      uint32_t count;
 
-      while (nbits < 30 && i < in_len)
+      code |= (in[i] >> (7 - bit)) & 1u;
+      if (++bit == 8)
         {
-          acc = (acc << 8) | in[i++];
-          nbits += 8;
+          bit = 0;
+          i++;
         }
-      for (bits = 5; bits <= 30 && bits <= nbits; bits++)
+      len++;
+      count = huff_count[len];
+      if (code - first < count)
         {
-          uint32_t mask = bits == 32 ? 0xffffffffu : (1u << bits) - 1u;
-          uint32_t code = (uint32_t) ((acc >> (nbits - bits)) & mask);
-          int s;
+          unsigned sym = huff_sym[index + (code - first)];
 
-          for (s = 0; s < 257; s++)
-            if (twist_huff_bits[s] == bits && twist_huff_code[s] == code)
-              {
-                if (s == 256)
-                  {
-                    nbits = 0;
-                    matched = 1;
-                    i = in_len;
-                    break;
-                  }
-                if (n + 1 >= cap)
-                  {
-                    free (buf);
-                    return TWIST_ERR_PROTOCOL;
-                  }
-                buf[n++] = (uint8_t) s;
-                nbits -= bits;
-                if (nbits == 0)
-                  acc = 0;
-                else
-                  acc &= (1ull << nbits) - 1ull;
-                matched = 1;
-                break;
-              }
-          if (matched)
-            break;
+          if (sym == 256)
+            break;		/* The end of the string, early.  */
+          if (n + 1 >= cap)
+            {
+              free (buf);
+              return TWIST_ERR_PROTOCOL;
+            }
+          buf[n++] = (uint8_t) sym;
+          code = first = 0;
+          index = 0;
+          len = 0;
+          continue;
         }
-      if (!matched)
+      index += count;
+      first += count;
+      first <<= 1;
+      code <<= 1;
+      if (len == HUFF_MAXLEN)
         {
-          if (i >= in_len && nbits < 8)
-            break;
           free (buf);
           return TWIST_ERR_PROTOCOL;
         }
+    }
+  /* What is left over is the padding: fewer than 8 bits.  */
+  if (i >= in_len && len >= 8)
+    {
+      free (buf);
+      return TWIST_ERR_PROTOCOL;
     }
   buf[n] = 0;
   *out = buf;

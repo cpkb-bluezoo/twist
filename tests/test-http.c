@@ -23,10 +23,12 @@
 #include "check.h"
 #include "twist-int.h"
 #include "http-ev.h"
+#include "http/hpack_tab.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 static uint8_t h2_emitted[64];
 static size_t h2_emitted_n;
@@ -1727,9 +1729,61 @@ test_http_status (void)
   check (twist_http_status_result (1, 400) == TWIST_ERR_HTTP, "400 fail");
 }
 
+/* Huffman strings (RFC 7541, appendix B) come off the wire in every header
+   block: every byte of a long string, whatever its code length, decodes back,
+   and does so in time that grows with the length (a search of the whole code
+   table for each symbol took long enough to be the largest cost of a hundred
+   small responses together).  */
+static void
+test_huffman_decode (void)
+{
+  enum { N = 200000 };
+  uint8_t *plain = malloc (N);
+  uint8_t *enc = malloc (N * 4 + 8);
+  uint8_t *dec = NULL;
+  size_t dec_len = 0;
+  size_t en = 0;
+  uint64_t acc = 0;
+  int nbits = 0;
+  uint32_t r = 12345;
+  struct timespec t0, t1;
+  long ms;
+  int i;
+
+  for (i = 0; i < N; i++)
+    {
+      r = r * 1103515245u + 12345u;
+      plain[i] = (uint8_t) (i < 256 ? (uint32_t) i : (r >> 16));
+    }
+  for (i = 0; i < N; i++)
+    {
+      acc = (acc << twist_huff_bits[plain[i]]) | twist_huff_code[plain[i]];
+      nbits += twist_huff_bits[plain[i]];
+      while (nbits >= 8)
+        {
+          enc[en++] = (uint8_t) (acc >> (nbits - 8));
+          nbits -= 8;
+        }
+    }
+  if (nbits > 0)		/* Padded with the most significant bits of EOS.  */
+    enc[en++] = (uint8_t) ((acc << (8 - nbits)) | (0xffu >> nbits));
+  clock_gettime (CLOCK_MONOTONIC, &t0);
+  check (twist_huff_decode (enc, en, &dec, &dec_len) == TWIST_OK,
+         "a long Huffman string decodes");
+  clock_gettime (CLOCK_MONOTONIC, &t1);
+  ms = (t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_nsec - t0.tv_nsec) / 1000000;
+  check (dec_len == N && memcmp (dec, plain, N) == 0,
+         "to the bytes that were encoded, every value of them");
+  check (ms < 100, "in a time that does not search the table for each byte");
+  free (dec);
+  free (enc);
+  free (plain);
+}
+
 int
 main (void)
 {
+  test_huffman_decode ();
   test_h1 ();
   test_h1_no_body ();
   test_h2 ();

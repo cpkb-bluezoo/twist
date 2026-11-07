@@ -83,12 +83,16 @@ struct twist_quic
     size_t pend_len;
     size_t pend_off;
     int pend_finish;
-  } st[16];
-  int nst;
+  } *st;
+  int nst;			/* Slots in use, live or free to reuse.  */
+  int nlive;			/* Streams not yet closed.  */
+  int cap;
   int cur;
 };
 
-#define QUIC_STREAMS 16
+/* Streams a connection has open at once, at most; the peer's limit is the one
+   that mostly applies.  */
+#define QUIC_STREAMS 1024
 
 #define QUIC_DG 2048
 #define QUIC_BATCH 16
@@ -118,12 +122,33 @@ qs_find (struct twist_quic *q, uint64_t id)
 static int
 qs_add (struct twist_quic *q, uint64_t id)
 {
-  if (q->nst >= QUIC_STREAMS)
+  int i;
+
+  if (q->nlive >= QUIC_STREAMS)
     return -1;
-  q->st[q->nst].id = id;
-  q->st[q->nst].live = 1;
-  q->cur = q->nst;
-  q->nst++;
+  /* A stream that has closed gives its place to the next.  */
+  for (i = 0; i < q->nst; i++)
+    if (!q->st[i].live)
+      break;
+  if (i == q->nst)
+    {
+      if (q->nst == q->cap)
+        {
+          int cap = q->cap ? q->cap * 2 : 16;
+          struct quic_stream *grown = realloc (q->st, (size_t) cap * sizeof *grown);
+
+          if (grown == NULL)
+            return -1;
+          q->st = grown;
+          q->cap = cap;
+        }
+      q->nst++;
+    }
+  memset (&q->st[i], 0, sizeof q->st[i]);
+  q->st[i].id = id;
+  q->st[i].live = 1;
+  q->cur = i;
+  q->nlive++;
   return 0;
 }
 
@@ -313,8 +338,18 @@ ev_stream_writable (void *user, uint64_t id)
 static void
 ev_stream_closed (void *user, uint64_t id)
 {
-  (void) user;
-  (void) id;
+  struct twist_quic *q = user;
+  struct quic_stream *s = qs_find (q, id);
+
+  if (s == NULL)
+    return;
+  free (s->pend);
+  s->pend = NULL;
+  s->pend_len = s->pend_off = 0;
+  s->on_data = NULL;
+  s->on_user = NULL;
+  s->live = 0;
+  q->nlive--;
 }
 
 static void
@@ -921,6 +956,7 @@ quic_free (void *p)
 
     for (i = 0; i < q->nst; i++)
       free (q->st[i].pend);
+    free (q->st);
   }
   free (q);
 }
@@ -1028,7 +1064,7 @@ twist_quic_open_stream (struct twist_connection *conn)
   q = twist_connection_tls (conn);
   if (q == NULL || q->conn == NULL)
     return TWIST_ERR_TLS;
-  if (q->nst >= QUIC_STREAMS)
+  if (q->nlive >= QUIC_STREAMS)
     return TWIST_ERR_AGAIN;
   if (q->conn != NULL && q->nst > 0
       && gq_conn_streams_available (q->conn, 1) == 0)
@@ -1087,7 +1123,7 @@ twist_quic_can_open (struct twist_connection *conn)
   if (conn == NULL)
     return 0;
   q = twist_connection_tls (conn);
-  if (q == NULL || q->nst >= QUIC_STREAMS)
+  if (q == NULL || q->nlive >= QUIC_STREAMS)
     return 0;
   /* A stream that is held (a WebSocket, a body being sent) is the one that
      sends are for until it is let go.  */

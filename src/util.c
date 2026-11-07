@@ -102,6 +102,7 @@ twist_status_code (const char *s)
 }
 
 static int privileged_override = -1;
+static int privileged_cache = -1;
 
 void
 twist_set_privileged (int how)
@@ -115,15 +116,23 @@ twist_set_privileged (int how)
 static int
 privileged (void)
 {
+  int p;
+
   if (privileged_override >= 0)
     return privileged_override;
-  if (getuid () != geteuid () || getgid () != getegid ())
-    return 1;
+  /* How the process was started does not change, and every transfer looks at
+     a dozen variables: four system calls each time were a tenth of a hundred
+     small transfers together.  */
+  p = __atomic_load_n (&privileged_cache, __ATOMIC_RELAXED);
+  if (p >= 0)
+    return p;
+  p = getuid () != geteuid () || getgid () != getegid ();
 #ifdef __linux__
-  return getauxval (AT_SECURE) != 0;
-#else
-  return 0;
+  if (!p)
+    p = getauxval (AT_SECURE) != 0;
 #endif
+  __atomic_store_n (&privileged_cache, p, __ATOMIC_RELAXED);
+  return p;
 }
 
 const char *
