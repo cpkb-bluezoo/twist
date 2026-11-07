@@ -143,6 +143,7 @@ static void
 clear_ca_env (void)
 {
   unsetenv ("TWIST_CA_BUNDLE");
+  unsetenv ("CURL_CA_BUNDLE");
   unsetenv ("SSL_CERT_FILE");
   unsetenv ("SSL_CERT_DIR");
 }
@@ -211,6 +212,36 @@ test_trust (void)
   clear_ca_env ();
   setenv ("SSL_CERT_FILE", "", 1);
   setenv ("SSL_CERT_DIR", "", 1);
+
+  /* CURL_CA_BUNDLE, which a script written for curl sets: after TWIST_CA_BUNDLE
+     and before SSL_CERT_FILE.  */
+  clear_ca_env ();
+  setenv ("CURL_CA_BUNDLE", bundle, 1);
+  check (trusts (NULL, NULL, 1, &rc) && rc == TWIST_OK, "CURL_CA_BUNDLE");
+  setenv ("SSL_CERT_FILE", missing, 1);
+  check (trusts (NULL, NULL, 1, &rc) && rc == TWIST_OK,
+         "CURL_CA_BUNDLE, and not SSL_CERT_FILE");
+  clear_ca_env ();
+  setenv ("CURL_CA_BUNDLE", junk, 1);
+  setenv ("TWIST_CA_BUNDLE", bundle, 1);
+  check (trusts (NULL, NULL, 1, &rc) && rc == TWIST_OK,
+         "TWIST_CA_BUNDLE, and not CURL_CA_BUNDLE");
+  clear_ca_env ();
+  setenv ("CURL_CA_BUNDLE", bundle, 1);
+  check (!trusts (junk, NULL, 1, &rc), "a file given: not CURL_CA_BUNDLE");
+  clear_ca_env ();
+  setenv ("CURL_CA_BUNDLE", "", 1);
+  setenv ("SSL_CERT_FILE", bundle, 1);
+  check (trusts (NULL, NULL, 1, &rc) && rc == TWIST_OK,
+         "an empty CURL_CA_BUNDLE is not set");
+  clear_ca_env ();
+  setenv ("CURL_CA_BUNDLE", missing, 1);
+  setenv ("SSL_CERT_FILE", bundle, 1);
+  check (!trusts (NULL, NULL, 1, &rc) && rc == TWIST_ERR_TLS,
+         "CURL_CA_BUNDLE that is not there is an error, and no fall through");
+  trusts (NULL, NULL, 0, &rc);
+  check (rc == TWIST_OK, "and is no matter when nothing is checked");
+  clear_ca_env ();
 
   /* What is given is not mixed with the environment.  */
   clear_ca_env ();

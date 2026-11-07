@@ -94,8 +94,6 @@ SMB and SMBS (src/smb)
 Environment
 
   - A configuration file.
-  - A script that sets CURL_CA_BUNDLE gets the system's authorities; whether
-    to read it is undecided.
   - SSL_CERT_DIR is read as a directory of PEM files by name (.pem, .crt, .cer
     or a c_rehash name), not through OpenSSL's rules.
 

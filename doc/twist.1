@@ -1426,6 +1426,19 @@ value, and
 and
 .B SSL_CERT_FILE
 are not looked at.
+.TP
+.B CURL_CA_BUNDLE file name
+Like
+.BR TWIST_CA_BUNDLE ,
+for a script written for curl, which sets this one: it is used as the
+.B \-\-cacert
+value, and
+.B SSL_CERT_DIR
+and
+.B SSL_CERT_FILE
+are not looked at.
+.B TWIST_CA_BUNDLE
+comes first.  An empty value is not set.
 .PP
 The names of the certificate variables are looked at only when neither
 .B \-\-cacert
@@ -1442,6 +1455,7 @@ the proxy variables and
 .BR NO_PROXY ,
 .BR QLOGDIR ,
 .BR SSH_AUTH_SOCK ,
+.BR CURL_CA_BUNDLE ,
 .BR SSL_CERT_DIR ,
 .BR SSL_CERT_FILE ,
 .B SSLKEYLOGFILE

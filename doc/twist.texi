@@ -2025,6 +2025,11 @@ encryption of the connections: it is for debugging.
 @item TWIST_CA_BUNDLE file name
 If set, it is used as the @option{--cacert} value, and @env{SSL_CERT_DIR} and
 @env{SSL_CERT_FILE} are not looked at.
+@item CURL_CA_BUNDLE file name
+Like @env{TWIST_CA_BUNDLE}, for a script written for curl, which sets this one:
+it is used as the @option{--cacert} value, and @env{SSL_CERT_DIR} and
+@env{SSL_CERT_FILE} are not looked at.  @env{TWIST_CA_BUNDLE} comes first.
+An empty value is not set.
 @end table
 
 The names of the certificate variables are looked at only when neither
@@ -2034,7 +2039,7 @@ they name and that cannot be read is an error.
 A process that has more rights than the user who started it does not read the
 environment at all, for any of the variables above that name a file, a
 directory, a socket or a server: @env{HOME}, the proxy variables and
-@env{NO_PROXY}, @env{QLOGDIR}, @env{SSH_AUTH_SOCK}, @env{SSL_CERT_DIR},
+@env{NO_PROXY}, @env{QLOGDIR}, @env{SSH_AUTH_SOCK}, @env{CURL_CA_BUNDLE}, @env{SSL_CERT_DIR},
 @env{SSL_CERT_FILE}, @env{SSLKEYLOGFILE} and @env{TWIST_CA_BUNDLE}.  That is
 a program that is set-user-ID or set-group-ID, one whose real and effective
 IDs differ, and one that the kernel started with more rights (file
