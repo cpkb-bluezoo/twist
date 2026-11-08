@@ -329,3 +329,12 @@ not a size is ignored).  Each is read once, by the first use, and ignored by a
 setuid program.  A write holds up to four buffers of its size, and the sink one
 more; a read holds up to four chunks.  bench/run.sh passes the environment to
 twist, so TWIST_READ_CHUNK=1m bench/run.sh compares sizes.
+
+The loopback has an MTU of 65536, and a server sends a client that takes them
+datagrams far larger than any network carries: nginx sent curl 127000 datagrams
+for 256 MiB over HTTP/3 and twist, which takes 1452 bytes, 287000, and a large
+download cost twist 1.9 times the CPU of curl's.  Run the benchmark with
+MTU=1500 bench/run.sh (or bench.py --mtu 1500, which needs root, unshare and
+ip) for a network of its own whose loopback has an MTU of 1500: the same
+download is then 0.97 times.  The setting changes the benchmark's own network
+namespace only.

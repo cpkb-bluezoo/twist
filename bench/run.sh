@@ -24,6 +24,9 @@
 #   bench/run.sh                              everything
 #   bench/run.sh --only get-big --protocols h2
 #   ENGINE=docker bench/run.sh                (default: podman, else docker)
+#   MTU=1500 bench/run.sh                     (the loopback of a network of its
+#                                              own has this MTU, as a network
+#                                              has: needs --privileged)
 #   TWIST_WRITE_CHUNK=128k bench/run.sh       (the size of a write to a file;
 #                                              TWIST_READ_CHUNK and
 #                                              TWIST_NO_URING go in too)
@@ -53,6 +56,12 @@ $engine build --target bench -f ci/Dockerfile \
   --build-arg "QUICKSTEP_REF=$QUICKSTEP_REF" \
   --build-arg "FOXTROT_REF=$FOXTROT_REF" \
   -t "$image" . || exit 1
+mtu=
+priv=
+if [ -n "${MTU:-}" ]; then
+  mtu="--mtu $MTU"
+  priv=--privileged
+fi
 # Memory for the files, and the host's network: no translation between the
 # clients and nginx.
-exec $engine run --rm -e TWIST_WRITE_CHUNK -e TWIST_READ_CHUNK -e TWIST_NO_URING --network host --shm-size "${SHM:-2g}" "$image" "$@"
+exec $engine run --rm $priv -e TWIST_WRITE_CHUNK -e TWIST_READ_CHUNK -e TWIST_NO_URING --network host --shm-size "${SHM:-2g}" "$image" $mtu "$@"

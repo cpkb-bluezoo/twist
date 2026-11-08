@@ -409,11 +409,30 @@ def main():
     ap.add_argument("--require-protocols", action="store_true",
                     help="fail, not leave a protocol out, if a client cannot "
                          "speak it")
+    ap.add_argument("--mtu", type=int, default=0,
+                    help="run in a network namespace of its own whose loopback "
+                         "has this MTU, such as 1500 (needs root, unshare and "
+                         "ip); the loopback's own is 65536, on which a server "
+                         "sends a client that takes them datagrams far larger "
+                         "than any network does")
     ap.add_argument("--json", default="", help="write the results here")
     ap.add_argument("--max-ratio", type=float, default=0.0,
                     help="exit 1 if a wall or cpu ratio's whole interval is "
                          "above this")
     args = ap.parse_args()
+
+    if args.mtu and os.environ.get("TWIST_BENCH_MTU") != str(args.mtu):
+        for tool in ("unshare", "ip"):
+            if shutil.which(tool) is None:
+                raise Fail("--mtu needs %s" % tool)
+        env = dict(os.environ, TWIST_BENCH_MTU=str(args.mtu))
+        try:
+            os.execvpe("unshare", ["unshare", "-n", "sh", "-c",
+                                   'ip link set lo up && ip link set lo mtu '
+                                   '"$0" && exec "$@"', str(args.mtu),
+                                   sys.executable] + sys.argv, env)
+        except OSError as e:
+            raise Fail("--mtu: %s" % e)
 
     nginx = find_nginx(args.nginx)
     curl = shutil.which(args.curl) or args.curl
@@ -427,8 +446,10 @@ def main():
     rng = random.Random(20260101)
     meta = {"curl": version_line(curl), "twist": version_line(twist),
             "nginx": run_quiet([nginx, "-v"]).stderr.decode().strip(),
-            "host": "%s %s, %d cpus" % (platform.system(), platform.machine(),
-                                        os.cpu_count() or 0)}
+            "host": "%s %s, %d cpus%s" % (platform.system(), platform.machine(),
+                                          os.cpu_count() or 0,
+                                          ", loopback MTU %d" % args.mtu
+                                          if args.mtu else "")}
     helper_dir = build_helper()
     origin = Origin(nginx, args.big_mb, args.server_cpus)
     results = []

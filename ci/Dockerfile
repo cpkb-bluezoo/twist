@@ -156,7 +156,7 @@ RUN apt-get update \
     && echo "deb [signed-by=/usr/share/keyrings/nginx.gpg] https://nginx.org/packages/mainline/ubuntu noble nginx" \
          > /etc/apt/sources.list.d/nginx.list \
     && apt-get update \
-    && apt-get install -y --no-install-recommends nginx \
+    && apt-get install -y --no-install-recommends nginx iproute2 \
     && rm -rf /var/lib/apt/lists/* /tmp/nginx.asc
 RUN case "$TARGETARCH" in \
       amd64) arch=x86_64; sha=$CURL_SHA256_AMD64 ;; \
