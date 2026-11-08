@@ -48,8 +48,8 @@ struct fd_src
   long long discard;		/* Of the rest: bytes to read and throw away.  */
   struct twist_fd_source *fs;
   struct twist_fio *fio;
-  uint8_t pend[TWIST_FIO_CHUNK];	/* A chunk of a file, being pushed.  */
-  size_t pend_len, pend_off;
+  uint8_t *pend;		/* A chunk of a file, being pushed.  */
+  size_t pend_cap, pend_len, pend_off;
   int ended;			/* The file is over; PEND is the last.  */
   int started;
 };
@@ -103,8 +103,15 @@ in_chunk (void *user, uint8_t *data, size_t len)
   struct fio_in *in = user;
   struct fd_src *s = in->src;
 
-  if (len > sizeof s->pend)
-    return TWIST_ERR_ABORTED;
+  if (len > s->pend_cap)
+    {
+      uint8_t *grown = realloc (s->pend, len);
+
+      if (grown == NULL)
+        return TWIST_ERR_NOMEM;
+      s->pend = grown;
+      s->pend_cap = len;
+    }
   memcpy (s->pend, data, len);
   s->pend_len = len;
   s->pend_off = 0;
@@ -294,6 +301,7 @@ src_release (void *user)
 
   twist_fio_free (s->fio);
   twist_fd_source_free (s->fs);
+  free (s->pend);
   free (s);
 }
 
@@ -348,6 +356,14 @@ struct fd_wsink
   int ended;			/* The writer is done (the file is closed).  */
   int closing;
   int failed;
+  size_t writes;		/* Calls to the writer.  */
+  /* The body waits here until there is a good deal of it, or the end of the
+     batch of events it came in: a hand-over to the writer's thread (or to the
+     ring) for each record of a download cost more than the writing.  */
+  uint8_t *stage;
+  size_t stage_len;
+  struct twist_timer *flush_timer;
+  int end_pending;		/* To end the writer when the stage is out.  */
 };
 
 static void
@@ -357,6 +373,44 @@ wsink_failed (struct fd_wsink *w, int err)
     return;
   w->failed = 1;
   twist_transfer_finish (w->t, err);
+}
+
+/* Give the writer what waits in the stage: TWIST_OK, 1 if it has no room (it
+   says when it has), or why it has failed.  */
+static int
+wsink_flush (struct fd_wsink *w)
+{
+  int rc;
+
+  if (w->stage_len == 0)
+    return TWIST_OK;
+  rc = twist_fio_write_swap (w->fio, &w->stage, w->stage_len);
+  if (rc == TWIST_OK)
+    {
+      w->writes++;
+      w->stage_len = 0;
+      if (w->flush_timer != NULL)
+        {
+          twist_timer_cancel (w->flush_timer);
+          w->flush_timer = NULL;
+        }
+    }
+  return rc;
+}
+
+/* The end of the batch of events the body came in.  */
+static void
+wsink_flush_timer (void *user)
+{
+  struct fd_wsink *w = user;
+  int rc;
+
+  w->flush_timer = NULL;
+  if (w->failed)
+    return;
+  rc = wsink_flush (w);
+  if (rc < 0)
+    wsink_failed (w, rc);
 }
 
 static size_t
@@ -370,15 +424,46 @@ wsink_cb (char *ptr, size_t size, size_t nmemb, void *user)
     return 0;
   if (w->fio != NULL)
     {
-      if (len > TWIST_FIO_CHUNK)
-        len = TWIST_FIO_CHUNK;
-      rc = twist_fio_write (w->fio, (const uint8_t *) ptr, len);
-      if (rc == 1)
+      if (len > twist_fio_wchunk ())
+        len = twist_fio_wchunk ();
+      if (w->stage == NULL)
         {
-          w->waiting = 1;
-          return TWIST_WRITEFUNC_PAUSE;
+          w->stage = twist_xmalloc (twist_fio_wchunk ());
+          if (w->stage == NULL)
+            return 0;
         }
-      return rc == TWIST_OK ? len : 0;
+      if (w->stage_len + len > twist_fio_wchunk ())
+        {
+          rc = wsink_flush (w);
+          if (rc == 1)
+            {
+              w->waiting = 1;
+              return TWIST_WRITEFUNC_PAUSE;
+            }
+          if (rc != TWIST_OK)
+            return 0;
+        }
+      memcpy (w->stage + w->stage_len, ptr, len);
+      w->stage_len += len;
+      if (w->stage_len == twist_fio_wchunk ())
+        {
+          /* Full.  If the writer has no room, the next piece waits for it.  */
+          if (wsink_flush (w) < 0)
+            return 0;
+        }
+      else if (w->flush_timer == NULL)
+        {
+          /* Not at once, but when what is ready has been seen to.  */
+          if (twist_loop_schedule (w->t->loop, twist_loop_now (w->t->loop),
+                                   wsink_flush_timer, w, &w->flush_timer)
+              != TWIST_OK)
+            {
+              w->flush_timer = NULL;
+              if (wsink_flush (w) < 0)
+                return 0;
+            }
+        }
+      return len;
     }
   if (twist_fd_sink_full (w->sink))
     {
@@ -395,6 +480,23 @@ wsink_ready (void *user)
 {
   struct fd_wsink *w = user;
 
+  if (w->stage_len > 0)
+    {
+      int rc = wsink_flush (w);
+
+      if (rc == 1)
+        return;
+      if (rc != TWIST_OK)
+        {
+          wsink_failed (w, rc);
+          return;
+        }
+    }
+  if (w->end_pending)
+    {
+      w->end_pending = 0;
+      twist_fio_write_end (w->fio);
+    }
   if (w->waiting)
     {
       w->waiting = 0;
@@ -497,9 +599,18 @@ twist_wsink_free (struct twist_transfer *t)
   if (w == NULL)
     return;
   t->wsink = NULL;
+  if (w->flush_timer != NULL)
+    twist_timer_cancel (w->flush_timer);
+  free (w->stage);
   twist_fio_free (w->fio);
   twist_fd_sink_free (w->sink);
   free (w);
+}
+
+size_t
+twist_wsink_writes (const struct twist_transfer *t)
+{
+  return t->wsink != NULL ? ((const struct fd_wsink *) t->wsink)->writes : 0;
 }
 
 /* Whether the writer still has body to put on its descriptor.  */
@@ -526,5 +637,14 @@ twist_wsink_close (struct twist_transfer *t)
     return;
   w->closing = 1;
   if (w->fio != NULL)
-    twist_fio_write_end (w->fio);
+    {
+      int rc = wsink_flush (w);
+
+      if (rc == TWIST_OK)
+        twist_fio_write_end (w->fio);
+      else if (rc == 1)
+        w->end_pending = 1;	/* When the writer has room.  */
+      else
+        wsink_failed (w, rc);
+    }
 }

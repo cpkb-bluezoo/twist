@@ -760,7 +760,11 @@ feed_buf (struct twist_connection *c, uint8_t **buf, size_t *boff, size_t *len,
 {
   size_t off = 0;
 
-  while (off < n && !c->failed && !c->paused)
+  /* Paused or not, what comes is kept: the TLS layer hands over the plaintext
+     of a read a record at a time, and when the first record pauses the
+     handler the rest is still to come and has nowhere else to wait.  It is
+     given when the read is resumed.  */
+  while (off < n && !c->failed)
     {
       size_t room;
       size_t take;
@@ -783,7 +787,7 @@ feed_buf (struct twist_connection *c, uint8_t **buf, size_t *boff, size_t *len,
         }
       off += take;
       deliver (c, buf, boff, len, cap);
-      if (c->failed || c->paused)
+      if (c->failed)
         return;
       if (*len > before && *len >= TWIST_IN_CEILING)
         {

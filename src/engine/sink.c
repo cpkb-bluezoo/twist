@@ -36,8 +36,6 @@
 
 #define SINK_HELD_MAX (4u * 1024u * 1024u)
 
-/* Pieces of this size go to the callback, as they always have.  */
-#define SINK_PIECE 512
 
 static int
 hold (struct twist_transfer *t, const uint8_t *data, size_t len)
@@ -72,7 +70,7 @@ give (struct twist_transfer *t, const uint8_t *data, size_t len, int *paused)
   *paused = 0;
   while (off < len)
     {
-      char buf[SINK_PIECE];
+      char buf[TWIST_SINK_PIECE];
       size_t n = len - off;
       size_t got;
 

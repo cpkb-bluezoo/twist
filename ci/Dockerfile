@@ -133,3 +133,41 @@ WORKDIR /src
 # A peer that is not installed makes a test skip (exit 77); in the lab that is
 # a failure, so the result is checked for skips.
 CMD ["integration/lab-init.sh"]
+
+# ---- Bench: twist against curl ----------------------------------------------
+# bench/bench.py, with what it needs: nginx with HTTP/3 and WebDAV (nginx.org's
+# packages; Ubuntu's has no HTTP/3), a curl that speaks HTTP/3 (a static build
+# of stunnel/static-curl, checked against its hash), and twist installed, since
+# the wrapper that libtool leaves in src/ would be measured with it.  Run by
+# bench/run.sh and by the bench workflow, with --network host and --shm-size.
+FROM build AS bench
+ARG TARGETARCH
+ARG CURL_RELEASE=8.23.0-1
+ARG CURL_SHA256_AMD64=a9f5d72eb245623f82a649bf64acae0c935af3510700d2167857964c47fe9e5b
+ARG CURL_SHA256_ARM64=434dace1222adbf0fa5de5069e36aae20069ad0d70495a409cbafed1cab0f6a5
+# The fingerprint that nginx.org publishes for its signing key.
+ARG NGINX_KEY_FPR=573BFD6B3D8FBC641079A6ABABF5BD827BD9BF62
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+         ca-certificates curl gnupg openssl python3 util-linux xz-utils \
+    && curl -fsSL https://nginx.org/keys/nginx_signing.key -o /tmp/nginx.asc \
+    && gpg --show-keys --with-colons /tmp/nginx.asc | grep -q "^fpr:::::::::$NGINX_KEY_FPR:" \
+    && gpg --dearmor < /tmp/nginx.asc > /usr/share/keyrings/nginx.gpg \
+    && echo "deb [signed-by=/usr/share/keyrings/nginx.gpg] https://nginx.org/packages/mainline/ubuntu noble nginx" \
+         > /etc/apt/sources.list.d/nginx.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends nginx iproute2 \
+    && rm -rf /var/lib/apt/lists/* /tmp/nginx.asc
+RUN case "$TARGETARCH" in \
+      amd64) arch=x86_64; sha=$CURL_SHA256_AMD64 ;; \
+      arm64) arch=aarch64; sha=$CURL_SHA256_ARM64 ;; \
+      *) echo "no static curl for $TARGETARCH"; exit 1 ;; \
+    esac \
+    && curl -fsSL -o /tmp/curl.tar.xz "https://github.com/stunnel/static-curl/releases/download/$CURL_RELEASE/curl-linux-$arch-glibc-$CURL_RELEASE.tar.xz" \
+    && echo "$sha  /tmp/curl.tar.xz" | sha256sum -c - \
+    && mkdir -p /opt/curl && tar -C /opt/curl -xf /tmp/curl.tar.xz \
+    && rm /tmp/curl.tar.xz
+RUN make install && ldconfig
+WORKDIR /src
+ENTRYPOINT ["python3", "bench/bench.py", "--nginx", "/usr/sbin/nginx", \
+            "--curl", "/opt/curl/curl", "--twist", "/usr/local/bin/twist"]

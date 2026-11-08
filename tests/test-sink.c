@@ -30,9 +30,12 @@
 /* A write callback that says it is full: the bytes it was not given are held
    and given again, in order, when the transfer is resumed.  */
 
+/* Several pieces: what is given to the callback goes a piece at a time.  */
+#define N 40000
+
 struct sink
 {
-  uint8_t got[16384];
+  uint8_t got[65536];
   size_t n;
   int calls;
   int pause_on_call;		/* Return PAUSE on this call (0: never).  */
@@ -103,23 +106,23 @@ test_pause_resume (void)
 {
   struct sink s;
   struct twist_transfer *t;
-  uint8_t *data = pattern (3000);
+  uint8_t *data = pattern (N);
   size_t first;
 
   memset (&s, 0, sizeof s);
   s.pause_on_call = 2;
   t = make (&s);
-  check (twist_deliver (t, data, 3000) == 3000,
+  check (twist_deliver (t, data, N) == N,
          "all of it is accepted, taken or held");
   first = s.n;
-  check (first == 512 && s.pauses == 1 && t->sink_paused,
+  check (first == TWIST_SINK_PIECE && s.pauses == 1 && t->sink_paused,
          "the callback that is full is paused once, after what it took");
   check (twist_deliver (t, data, 100) == 100 && s.n == first && s.calls == 2,
          "more that comes meanwhile is held, not given");
   check (twist_transfer_resume (t) == TWIST_OK, "resumed");
   check (s.resumes == 1 && !t->sink_paused, "the handler is told");
-  check (s.n == 3100 && memcmp (s.got, data, 3000) == 0
-         && memcmp (s.got + 3000, data, 100) == 0,
+  check (s.n == (N + 100) && memcmp (s.got, data, N) == 0
+         && memcmp (s.got + N, data, 100) == 0,
          "and the held bytes are given in order, the one it refused again");
   twist_transfer_free (t);
 
@@ -128,9 +131,9 @@ test_pause_resume (void)
   s.pause_on_call = 2;
   s.pause_again_on = 4;
   t = make (&s);
-  twist_deliver (t, data, 3000);
+  twist_deliver (t, data, N);
   twist_transfer_resume (t);
-  check (t->sink_paused && s.n < 3000 && s.n > 512,
+  check (t->sink_paused && s.n < N && s.n > TWIST_SINK_PIECE,
          "paused again part way through what was held");
   /* The peer is let go (its window, its credit) for what the callback has
      taken, not for what is only held: otherwise a callback that takes a
@@ -138,7 +141,7 @@ test_pause_resume (void)
   check (s.pauses == 1 && s.resumes == 0,
          "and the peer is not let go while some is still held");
   twist_transfer_resume (t);
-  check (!t->sink_paused && s.n == 3000 && memcmp (s.got, data, 3000) == 0,
+  check (!t->sink_paused && s.n == N && memcmp (s.got, data, N) == 0,
          "and the rest comes on the next resume");
   check (s.pauses == 1 && s.resumes == 1,
          "and then the peer is let go, once");
@@ -153,12 +156,12 @@ test_end_waits (void)
 {
   struct sink s;
   struct twist_transfer *t;
-  uint8_t *data = pattern (1500);
+  uint8_t *data = pattern (N);
 
   memset (&s, 0, sizeof s);
   s.pause_on_call = 2;
   t = make (&s);
-  twist_deliver (t, data, 1500);
+  twist_deliver (t, data, N);
   twist_transfer_finish (t, TWIST_OK);
   check (!t->done, "a transfer with body held is not over");
   twist_transfer_finish (t, TWIST_ERR_ABORTED);
@@ -169,10 +172,10 @@ test_end_waits (void)
   memset (&s, 0, sizeof s);
   s.pause_on_call = 2;
   t = make (&s);
-  twist_deliver (t, data, 1500);
+  twist_deliver (t, data, N);
   twist_transfer_finish (t, TWIST_OK);
   twist_transfer_resume (t);
-  check (t->done && t->result == TWIST_OK && s.n == 1500,
+  check (t->done && t->result == TWIST_OK && s.n == N,
          "it is over once the held body has been given");
   twist_transfer_free (t);
   free (data);
@@ -183,13 +186,13 @@ test_short_and_bound (void)
 {
   struct sink s;
   struct twist_transfer *t;
-  uint8_t *data = pattern (3000);
+  uint8_t *data = pattern (N);
   uint8_t *big = calloc (1, 5u * 1024u * 1024u);
 
   memset (&s, 0, sizeof s);
   s.short_on_call = 2;
   t = make (&s);
-  check (twist_deliver (t, data, 3000) < 3000,
+  check (twist_deliver (t, data, N) < N,
          "a callback that takes less than it was given stops the transfer");
   twist_transfer_free (t);
 
@@ -204,9 +207,31 @@ test_short_and_bound (void)
   free (big);
 }
 
+/* A body goes to the callback in pieces as large as the writer behind it takes,
+   and not a few hundred bytes at a time: with a thread or a ring behind the
+   callback each piece is a job, and a download of 100 MiB was 200000 of
+   them.  */
+static void
+test_piece_size (void)
+{
+  struct sink s;
+  struct twist_transfer *t;
+  uint8_t *data = pattern (60000);
+
+  memset (&s, 0, sizeof s);
+  t = make (&s);
+  check (twist_deliver (t, data, 60000) == 60000 && s.n == 60000,
+         "all of it is given");
+  check (s.calls <= 60000 / 16000 + 1,
+         "in a few large pieces, not many small ones");
+  twist_transfer_free (t);
+  free (data);
+}
+
 int
 main (void)
 {
+  test_piece_size ();
   test_pause_resume ();
   test_end_waits ();
   test_short_and_bound ();

@@ -86,6 +86,7 @@ struct rd
   uint8_t *got;
   size_t n;
   int chunks;
+  size_t maxchunk;
   long long size;
   int sizes;
   int ends;
@@ -133,6 +134,8 @@ rd_chunk (void *user, uint8_t *data, size_t len)
     memcpy (r->got + r->n, data, len);
   r->n += len;
   r->chunks++;
+  if (len > r->maxchunk)
+    r->maxchunk = len;
   return TWIST_OK;
 }
 
@@ -173,6 +176,8 @@ test_read (struct twist_loop *loop, struct twist_storage *st)
   check (r.n == FILE_SIZE && memcmp (r.got, content, FILE_SIZE) == 0,
          "and delivered the file, in order");
   check (r.sizes == 0, "a read to the end has no size to tell");
+  check (r.maxchunk == twist_fio_chunk (),
+         "in chunks of the size the environment gave");
   twist_fio_free (f);
   free (r.got);
   free (r.msg);
@@ -501,6 +506,83 @@ test_writers_yield (struct twist_loop *loop, struct twist_storage *st)
     }
 }
 
+/* A buffer handed over, not copied: what is written is what was in it, the
+   caller gets another to fill, and when the writer has no room the buffer is
+   the caller's still.  */
+static void
+swap_credit (void *user)
+{
+  (void) user;
+}
+
+static const struct twist_fio_write_ops swap_ops = { swap_credit, wr_end,
+                                                     NULL };
+
+static void
+test_write_swap (struct twist_loop *loop, struct twist_storage *st)
+{
+  enum { PIECES = 12 };
+  const size_t PIECE = twist_fio_wchunk ();
+  char out[64];
+  struct wr w;
+  uint8_t *buf = twist_xmalloc (twist_fio_wchunk ());
+  uint8_t *b;
+  size_t n;
+  int fd;
+  int sent = 0;
+  int full = 0;
+  int ok = 1;
+
+  snprintf (out, sizeof out, "/tmp/twist-test-fio-out-XXXXXX");
+  fd = mkstemp (out);
+  close (fd);
+  memset (&w, 0, sizeof w);
+  check (twist_fio_write_new (loop, st, out, 0, &swap_ops, &w, &w.f)
+         == TWIST_OK, "a write is begun");
+  while (sent < PIECES)
+    {
+      uint8_t *mine = buf;
+      int rc;
+
+      memset (buf, 'a' + sent, PIECE);
+      rc = twist_fio_write_swap (w.f, &buf, PIECE);
+      if (rc == 1)
+        {
+          full++;
+          if (buf != mine)
+            ok = 0;		/* Not taken: it must still be ours.  */
+          run_for (loop, 20);
+          continue;
+        }
+      if (rc != TWIST_OK || buf == mine || buf == NULL)
+        ok = 0;
+      sent++;
+    }
+  check (ok, "a buffer is swapped for another, or kept when there is no room");
+  check (full > 0, "and the writer did fill up");
+  twist_fio_write_end (w.f);
+  run_for (loop, 800);
+  check (w.ends == 1 && w.end_err == TWIST_OK, "it ends once, with no error");
+  b = malloc ((size_t) PIECES * PIECE);
+  {
+    FILE *fp = fopen (out, "rb");
+
+    n = fp != NULL ? fread (b, 1, (size_t) PIECES * PIECE, fp) : 0;
+    if (fp != NULL)
+      fclose (fp);
+  }
+  ok = n == (size_t) PIECES * PIECE;
+  for (fd = 0; ok && fd < PIECES; fd++)
+    ok = b[(size_t) fd * PIECE] == 'a' + fd
+         && b[(size_t) fd * PIECE + PIECE - 1] == 'a' + fd;
+  check (ok, "and the file has the pieces, in order");
+  free (b);
+  twist_fio_free (w.f);
+  free (w.msg);
+  free (buf);
+  unlink (out);
+}
+
 /* A descriptor written to, from an offset, through whichever backend there is:
    what was there before the offset stays, and the position is not moved.  */
 static void
@@ -538,6 +620,46 @@ test_write_fd (struct twist_loop *loop, struct twist_storage *st)
   close (fd);
   unlink (out);
   free (got);
+}
+
+/* A writer or a reader is a job for the life of its transfer, so as many may
+   be started as there are transfers: more than the pool queues.  A hundred
+   downloads to files at once all begin.  */
+static void
+test_many_workers (struct twist_loop *loop, struct twist_storage *st)
+{
+  enum { N = 100 };
+  static struct wr w[N];
+  int started = 0;
+  int ended = 0;
+  int i;
+
+  for (i = 0; i < N; i++)
+    {
+      int fd = open ("/dev/null", O_WRONLY);
+
+      memset (&w[i], 0, sizeof w[i]);
+      if (fd >= 0
+          && twist_fio_write_fd_new (loop, st, fd, -1, &wr_ops, &w[i],
+                                     &w[i].f) == TWIST_OK)
+        started++;
+      else if (fd >= 0)
+        close (fd);
+    }
+  check (started == N, "every one of a hundred writers starts");
+  for (i = 0; i < N; i++)
+    if (w[i].f != NULL)
+      wr_pump (&w[i]);
+  run_for (loop, 1500);
+  for (i = 0; i < N; i++)
+    {
+      if (w[i].ends == 1 && w[i].end_err == TWIST_OK)
+        ended++;
+      if (w[i].f != NULL)
+        twist_fio_free (w[i].f);
+      free (w[i].msg);
+    }
+  check (ended == started, "and every one of them ends well");
 }
 
 /* Which backend there is: the reads and writes of a loop that can have a ring
@@ -647,16 +769,59 @@ run_all (int uring)
   test_write_fail (loop, st);
   test_write_release (loop, st);
   test_write_fd (loop, st);
+  test_write_swap (loop, st);
   test_writers_yield (loop, st);
+  test_many_workers (loop, st);
   twist_storage_free (st);
   twist_loop_free (loop);
+}
+
+/* The size of a piece for the writer is the environment's, within bounds.  */
+static void
+test_wchunk (void)
+{
+  check (twist_fio_wchunk_parse (NULL) == TWIST_FIO_WCHUNK_DEFAULT,
+         "no setting is the default");
+  check (twist_fio_wchunk_parse ("") == TWIST_FIO_WCHUNK_DEFAULT
+         && twist_fio_wchunk_parse ("x") == TWIST_FIO_WCHUNK_DEFAULT
+         && twist_fio_wchunk_parse ("-5") == TWIST_FIO_WCHUNK_DEFAULT
+         && twist_fio_wchunk_parse ("64kb") == TWIST_FIO_WCHUNK_DEFAULT,
+         "what is not a size is the default");
+  check (twist_fio_wchunk_parse ("131072") == 131072,
+         "a number of bytes");
+  check (twist_fio_wchunk_parse ("128k") == 131072
+         && twist_fio_wchunk_parse ("128K") == 131072
+         && twist_fio_wchunk_parse ("1m") == 1048576,
+         "with k or m for KiB and MiB");
+  check (twist_fio_wchunk_parse ("1") == TWIST_FIO_WCHUNK_MIN
+         && twist_fio_wchunk_parse ("100m") == TWIST_FIO_WCHUNK_MAX
+         && twist_fio_wchunk_parse ("99999999999999999999")
+            == TWIST_FIO_WCHUNK_MAX,
+         "and kept within the least and the most");
+  check (TWIST_FIO_WCHUNK_MIN >= TWIST_SINK_PIECE,
+         "the least takes a whole piece from the sink");
+  check (twist_fio_wchunk () == 32768,
+         "the size in use is the one the environment gave at the start");
+  check (twist_fio_chunk_parse (NULL) == TWIST_FIO_RCHUNK_DEFAULT
+         && twist_fio_chunk_parse ("x") == TWIST_FIO_RCHUNK_DEFAULT,
+         "a read chunk with no size is the default");
+  check (twist_fio_chunk_parse ("256k") == 262144
+         && twist_fio_chunk_parse ("1") == TWIST_FIO_RCHUNK_MIN
+         && twist_fio_chunk_parse ("100m") == TWIST_FIO_RCHUNK_MAX,
+         "a read chunk is kept within the least and the most");
+  check (twist_fio_chunk () == 65536,
+         "and the one in use is the environment's");
 }
 
 int
 main (void)
 {
+  /* Before anything asks, so the tests run with other than the default.  */
+  setenv ("TWIST_WRITE_CHUNK", "32k", 1);
+  setenv ("TWIST_READ_CHUNK", "64k", 1);
   if (make_file () != 0)
     return 77;
+  test_wchunk ();
   run_all (0);
   run_all (1);
   test_pools_apart ();

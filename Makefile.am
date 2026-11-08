@@ -27,7 +27,8 @@ include_HEADERS = include/twist.h
 pkgconfigdir = $(libdir)/pkgconfig
 pkgconfig_DATA = twist.pc
 
-EXTRA_DIST = HACKING ARCHITECTURE.md TODO build-aux/config.rpath
+EXTRA_DIST = HACKING ARCHITECTURE.md TODO build-aux/config.rpath \
+  bench/README bench/bench.py bench/nginx.conf.in bench/rusage.c bench/run.sh
 
 ## integration/ is distributed but not built by 'make check'.
 .PHONY: check-integration check-lab check-fuzz

@@ -755,6 +755,51 @@ test_receive_reentrancy (void)
   twist_loop_free (loop);
 }
 
+/* Decrypted data that comes while the connection is paused.  The TLS layer
+   decrypts a read of several records in one call, and hands the plaintext on a
+   record at a time; if the handler's first record pauses the connection, the
+   later records are still to come and were dropped, so a body written to a
+   file was short.  They are kept, and given on resume.  */
+static uint8_t paused_seen[64];
+static size_t paused_n;
+static int paused_calls;
+
+static size_t
+paused_receive (struct twist_endpoint *ep, const uint8_t *data, size_t len)
+{
+  memcpy (paused_seen + paused_n, data, len);
+  paused_n += len;
+  paused_calls++;
+  if (paused_calls == 1)
+    twist_endpoint_pause_read (ep);
+  return len;
+}
+
+static const struct twist_protocol_handler paused_handler = {
+  NULL, paused_receive, NULL, NULL, NULL, NULL, NULL
+};
+
+static void
+test_deliver_while_paused (void)
+{
+  struct twist_loop *loop = twist_loop_new (1);
+  struct twist_connection *c = twist_connection_new (loop);
+
+  paused_n = 0;
+  paused_calls = 0;
+  twist_connection_set_handler (c, &paused_handler);
+  twist_connection_deliver_app (c, (const uint8_t *) "one,", 4);
+  check (paused_n == 4 && paused_calls == 1, "the first is given, and pauses");
+  twist_connection_deliver_app (c, (const uint8_t *) "two,", 4);
+  twist_connection_deliver_app (c, (const uint8_t *) "three", 5);
+  check (paused_n == 4, "what comes while it is paused is not given yet");
+  twist_endpoint_resume_read (twist_connection_endpoint (c));
+  check (paused_n == 13 && memcmp (paused_seen, "one,two,three", 13) == 0,
+         "and is given, in order, once it is resumed");
+  twist_connection_free (c);
+  twist_loop_free (loop);
+}
+
 /* A command that drains the queue itself.  The inner drain freed the node the
    outer one held and ran what was behind it inside the first command; the
    outer then read the freed node.  What is queued runs in order, one at a
@@ -1006,6 +1051,7 @@ main (void)
   test_write_to_gone_peer ();
   test_inbound_ceiling_socket ();
   test_receive_reentrancy ();
+  test_deliver_while_paused ();
   test_cmdq_nested_drain ();
   test_timer_slot ();
   test_close_deadline ();

@@ -29,6 +29,7 @@
 #include <arpa/inet.h>
 #include <dirent.h>
 #include <netinet/in.h>
+#include <poll.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -278,6 +279,69 @@ test_trust (void)
   rmdir (dir);
 }
 
+/* The Initial of a QUIC connection is more than one datagram, and a peer gets
+   each of them whole, whether or not the kernel was asked to cut one send into
+   them (UDP segmentation offload).  */
+static void
+test_gso (void)
+{
+  struct twist_loop *loop = twist_loop_new (1);
+  struct twist_connection *conn = NULL;
+  struct twist_dns_addr addr;
+  struct sockaddr_in sin;
+  socklen_t sl = sizeof sin;
+  int udp = socket (AF_INET, SOCK_DGRAM, 0);
+  size_t sent = 0;
+  size_t gso = 0;
+  size_t got = 0;
+  size_t whole = 0;
+  uint8_t buf[2048];
+  ssize_t n;
+  int i;
+
+  memset (&sin, 0, sizeof sin);
+  sin.sin_family = AF_INET;
+  inet_pton (AF_INET, "127.0.0.1", &sin.sin_addr);
+  check (loop != NULL && udp >= 0
+         && bind (udp, (struct sockaddr *) &sin, sl) == 0
+         && getsockname (udp, (struct sockaddr *) &sin, &sl) == 0, "a port");
+  memset (&addr, 0, sizeof addr);
+  addr.family = 4;
+  inet_pton (AF_INET, "127.0.0.1", addr.addr);
+  unsetenv ("QLOGDIR");
+  check (twist_quic_dial (loop, "example.test", "h3", &addr,
+                          ntohs (sin.sin_port), NULL, NULL, NULL, NULL, 1,
+                          NULL, &conn) == TWIST_OK && conn != NULL,
+         "dial for the Initial");
+  twist_quic_send_stats (conn, &sent, &gso);
+  for (i = 0; i < 50; i++)
+    {
+      struct pollfd pf;
+
+      pf.fd = udp;
+      pf.events = POLLIN;
+      if (poll (&pf, 1, got < sent ? 500 : 50) <= 0)
+        break;
+      n = recv (udp, buf, sizeof buf, MSG_DONTWAIT);
+      if (n < 0)
+        break;
+      got++;
+      whole += n >= 1200;	/* The Initial is padded to 1200.  */
+    }
+  check (sent >= 1, "the Initial was sent");
+  check (got == sent && whole == got,
+         "and arrived as the datagrams it was, whole");
+#if defined __linux__
+  check (sent < 2 || gso >= 1,
+         "several datagrams of one size go in one send");
+#else
+  check (gso == 0, "and no segmentation offload where there is none");
+#endif
+  twist_connection_free (conn);
+  close (udp);
+  twist_loop_free (loop);
+}
+
 /* A QUIC connection to a port where nothing answers still sends its Initial,
    and that is events enough.  */
 static void
@@ -515,6 +579,7 @@ main (void)
 {
   test_keylog_writer ();
   test_trust ();
+  test_gso ();
   test_qlog ();
   test_quic_server_name ();
   test_quic_stream_action ();

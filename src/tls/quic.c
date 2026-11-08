@@ -36,12 +36,29 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+/* The datagrams are sent and read in batches of QUIC_BATCH, each in a buffer of
+   QUIC_DG bytes.  */
+#define QUIC_DG 2048
+#define QUIC_BATCH 16
+
 struct twist_quic
 {
   /* A second name the certificate must be valid for, or NULL.  */
   char *also_name;
   struct twist_connection *twist;
   struct twist_loop *loop;
+  /* The time quic_read took when it began, for what its datagrams make
+     happen (an acknowledgement frees a stream to write, and the write sends):
+     the clock was read for each one, and a call costs more than that in a
+     virtual machine.  */
+  int reading;
+  uint64_t read_now;
+  /* Datagrams sent, and the sends that were several of them cut up by the
+     kernel; GSO_OFF once it has refused, or is not wanted.  */
+  size_t n_sent;
+  size_t n_gso;
+  int gso_off;
+  int gso_checked;
   gq_endpoint *ep;
   gq_conn *conn;
   gq_trust *trust;
@@ -66,7 +83,11 @@ struct twist_quic
   void *drained_user;
   gq_path path;
   uint8_t *dg;
-  size_t dg_len[16];
+  /* Where datagrams are read into.  Not dg: what is sent is written there, and
+     a send that a callback makes while a datagram is being read would write
+     over it.  */
+  uint8_t *rx;
+  size_t dg_len[QUIC_BATCH];
   int dg_n;
   int dg_i;
   struct quic_stream
@@ -79,15 +100,16 @@ struct twist_quic
     size_t pend_len;
     size_t pend_off;
     int pend_finish;
-  } st[16];
-  int nst;
+  } *st;
+  int nst;			/* Slots in use, live or free to reuse.  */
+  int nlive;			/* Streams not yet closed.  */
+  int cap;
   int cur;
 };
 
-#define QUIC_STREAMS 16
-
-#define QUIC_DG 2048
-#define QUIC_BATCH 16
+/* Streams a connection has open at once, at most; the peer's limit is the one
+   that mostly applies.  */
+#define QUIC_STREAMS 1024
 
 static int quic_flush (struct twist_quic *q, uint64_t now_us);
 static int ensure_dg (struct twist_quic *q);
@@ -114,12 +136,33 @@ qs_find (struct twist_quic *q, uint64_t id)
 static int
 qs_add (struct twist_quic *q, uint64_t id)
 {
-  if (q->nst >= QUIC_STREAMS)
+  int i;
+
+  if (q->nlive >= QUIC_STREAMS)
     return -1;
-  q->st[q->nst].id = id;
-  q->st[q->nst].live = 1;
-  q->cur = q->nst;
-  q->nst++;
+  /* A stream that has closed gives its place to the next.  */
+  for (i = 0; i < q->nst; i++)
+    if (!q->st[i].live)
+      break;
+  if (i == q->nst)
+    {
+      if (q->nst == q->cap)
+        {
+          int cap = q->cap ? q->cap * 2 : 16;
+          struct quic_stream *grown = realloc (q->st, (size_t) cap * sizeof *grown);
+
+          if (grown == NULL)
+            return -1;
+          q->st = grown;
+          q->cap = cap;
+        }
+      q->nst++;
+    }
+  memset (&q->st[i], 0, sizeof q->st[i]);
+  q->st[i].id = id;
+  q->st[i].live = 1;
+  q->cur = i;
+  q->nlive++;
   return 0;
 }
 
@@ -295,7 +338,7 @@ ev_stream_writable (void *user, uint64_t id)
       twist_connection_fail (q->twist, TWIST_ERR_TLS);
       return;
     }
-  now = twist_loop_now (q->loop) * 1000u;
+  now = q->reading ? q->read_now : twist_loop_now (q->loop) * 1000u;
   quic_flush (q, now);
   if (q->drained != NULL)
     {
@@ -309,8 +352,18 @@ ev_stream_writable (void *user, uint64_t id)
 static void
 ev_stream_closed (void *user, uint64_t id)
 {
-  (void) user;
-  (void) id;
+  struct twist_quic *q = user;
+  struct quic_stream *s = qs_find (q, id);
+
+  if (s == NULL)
+    return;
+  free (s->pend);
+  s->pend = NULL;
+  s->pend_len = s->pend_off = 0;
+  s->on_data = NULL;
+  s->on_user = NULL;
+  s->live = 0;
+  q->nlive--;
 }
 
 static void
@@ -508,7 +561,15 @@ ensure_dg (struct twist_quic *q)
   if (q->dg != NULL)
     return TWIST_OK;
   q->dg = malloc (QUIC_BATCH * QUIC_DG);
-  return q->dg == NULL ? TWIST_ERR_NOMEM : TWIST_OK;
+  q->rx = malloc (QUIC_BATCH * QUIC_DG);
+  if (q->dg == NULL || q->rx == NULL)
+    {
+      free (q->dg);
+      free (q->rx);
+      q->dg = q->rx = NULL;
+      return TWIST_ERR_NOMEM;
+    }
+  return TWIST_OK;
 }
 
 /* The datagrams are the carrier's to take: it is not a socket that can be
@@ -527,6 +588,79 @@ carrier_queued (struct twist_quic *q)
   return TWIST_OK;
 }
 
+#if defined __linux__
+# ifndef SOL_UDP
+#  define SOL_UDP 17
+# endif
+# ifndef UDP_SEGMENT
+#  define UDP_SEGMENT 103
+# endif
+/* The kernel takes at most this many segments in one send, and this many bytes
+   in all.  */
+# define GSO_SEGMENTS 64
+# define GSO_BYTES 65000
+
+/* How many of the datagrams waiting go in one send cut up by the kernel: they
+   must all be of the size of the first, but the last, which may be less.  1
+   if they cannot.  */
+static int
+gso_group (const struct twist_quic *q, size_t *size)
+{
+  size_t first = q->dg_len[q->dg_i];
+  size_t total = first;
+  int k = 1;
+
+  *size = first;
+  while (q->dg_i + k < q->dg_n && k < GSO_SEGMENTS)
+    {
+      size_t len = q->dg_len[q->dg_i + k];
+
+      if (len > first || total + len > GSO_BYTES)
+        break;
+      total += len;
+      k++;
+      if (len < first)
+        break;
+    }
+  return k;
+}
+
+/* Send K datagrams of SIZE as one, for the kernel to cut up: -1 and errno
+   as send's.  */
+static int
+gso_send (struct twist_quic *q, int k, size_t size)
+{
+  struct iovec iov[GSO_SEGMENTS];
+  union
+  {
+    char buf[CMSG_SPACE (sizeof (uint16_t))];
+    struct cmsghdr align;
+  } ctl;
+  struct msghdr mh;
+  struct cmsghdr *cm;
+  uint16_t seg = (uint16_t) size;
+  int i;
+
+  for (i = 0; i < k; i++)
+    {
+      iov[i].iov_base = q->dg + (size_t) (q->dg_i + i) * QUIC_DG;
+      iov[i].iov_len = q->dg_len[q->dg_i + i];
+    }
+  memset (&mh, 0, sizeof mh);
+  memset (&ctl, 0, sizeof ctl);
+  mh.msg_iov = iov;
+  mh.msg_iovlen = (size_t) k;
+  mh.msg_control = ctl.buf;
+  mh.msg_controllen = sizeof ctl.buf;
+  cm = CMSG_FIRSTHDR (&mh);
+  cm->cmsg_level = SOL_UDP;
+  cm->cmsg_type = UDP_SEGMENT;
+  cm->cmsg_len = CMSG_LEN (sizeof seg);
+  memcpy (CMSG_DATA (cm), &seg, sizeof seg);
+  return sendmsg (q->fd, &mh, 0) < 0 ? -1 : 0;
+}
+#endif
+
 static int
 send_queued (struct twist_quic *q)
 {
@@ -543,6 +677,36 @@ send_queued (struct twist_quic *q)
       return TWIST_OK;
     }
 #if defined __linux__
+  if (!q->gso_checked)
+    {
+      q->gso_checked = 1;
+      q->gso_off = twist_getenv_secure ("TWIST_NO_GSO") != NULL;
+    }
+  while (!q->gso_off && q->dg_n - q->dg_i >= 2)
+    {
+      size_t size;
+      int k = gso_group (q, &size);
+
+      if (k < 2)
+        break;
+      if (gso_send (q, k, size) < 0)
+        {
+          if (errno == EAGAIN || errno == EWOULDBLOCK)
+            {
+              twist_connection_force_write (q->twist, 1);
+              return TWIST_OK;
+            }
+          /* A kernel or a device that will not do it: the datagrams go as
+             they did.  */
+          q->gso_off = 1;
+          break;
+        }
+      q->dg_i += k;
+      q->n_sent += (size_t) k;
+      q->n_gso++;
+    }
+  left = q->dg_n - q->dg_i;
+  if (left > 0)
   {
     struct mmsghdr msg[QUIC_BATCH];
     struct iovec iov[QUIC_BATCH];
@@ -568,6 +732,7 @@ send_queued (struct twist_quic *q)
         return TWIST_ERR_CONNECT;
       }
     q->dg_i += sent;
+    q->n_sent += (size_t) sent;
   }
 #else
   while (q->dg_i < q->dg_n)
@@ -585,6 +750,7 @@ send_queued (struct twist_quic *q)
           return TWIST_ERR_CONNECT;
         }
       q->dg_i++;
+      q->n_sent++;
     }
 #endif
   if (q->dg_i >= q->dg_n)
@@ -672,15 +838,27 @@ quic_fire (void *user, uint64_t now_us)
   quic_flush (q, now_us);
 }
 
+static ssize_t quic_read_batch (struct twist_quic *q, uint64_t now);
+
 static ssize_t
 quic_read (void *user, uint8_t *buf, size_t len)
 {
   struct twist_quic *q = user;
-  uint64_t now;
+  uint64_t now = twist_loop_now (q->loop) * 1000u;
+  ssize_t rc;
 
   (void) buf;
   (void) len;
-  now = twist_loop_now (q->loop) * 1000u;
+  q->read_now = now;
+  q->reading = 1;
+  rc = quic_read_batch (q, now);
+  q->reading = 0;
+  return rc;
+}
+
+static ssize_t
+quic_read_batch (struct twist_quic *q, uint64_t now)
+{
   if (ensure_dg (q) != TWIST_OK)
     {
       errno = ENOMEM;
@@ -688,9 +866,9 @@ quic_read (void *user, uint8_t *buf, size_t len)
     }
   for (;;)
     {
-      int room = QUIC_BATCH - q->dg_n;
-
-      if (room <= 0)
+      /* Reading goes on only while what is to be sent can be: if the socket
+         will not take it, wait.  */
+      if (q->dg_n >= QUIC_BATCH)
         {
           quic_flush (q, now);
           if (q->dg_n >= QUIC_BATCH)
@@ -698,7 +876,6 @@ quic_read (void *user, uint8_t *buf, size_t len)
               twist_connection_hold_read (q->twist, 1);
               break;
             }
-          room = QUIC_BATCH - q->dg_n;
         }
 #if defined __linux__
       {
@@ -708,14 +885,14 @@ quic_read (void *user, uint8_t *buf, size_t len)
         int i;
 
         memset (msg, 0, sizeof msg);
-        for (i = 0; i < room; i++)
+        for (i = 0; i < QUIC_BATCH; i++)
           {
-            iov[i].iov_base = q->dg + (size_t) (q->dg_n + i) * QUIC_DG;
+            iov[i].iov_base = q->rx + (size_t) i * QUIC_DG;
             iov[i].iov_len = QUIC_DG;
             msg[i].msg_hdr.msg_iov = &iov[i];
             msg[i].msg_hdr.msg_iovlen = 1;
           }
-        got = recvmmsg (q->fd, msg, (unsigned int) room, 0, NULL);
+        got = recvmmsg (q->fd, msg, QUIC_BATCH, 0, NULL);
         if (got < 0)
           {
             if (errno == EAGAIN || errno == EWOULDBLOCK)
@@ -724,15 +901,13 @@ quic_read (void *user, uint8_t *buf, size_t len)
           }
         for (i = 0; i < got; i++)
           gq_endpoint_recv (q->ep, now, &q->path,
-                            q->dg + (size_t) (q->dg_n + i) * QUIC_DG,
-                            msg[i].msg_len);
+                            q->rx + (size_t) i * QUIC_DG, msg[i].msg_len);
         if (got == 0)
           break;
       }
 #else
       {
-        ssize_t n = recv (q->fd, q->dg + (size_t) q->dg_n * QUIC_DG, QUIC_DG,
-                          0);
+        ssize_t n = recv (q->fd, q->rx, QUIC_DG, 0);
 
         if (n < 0)
           {
@@ -742,8 +917,7 @@ quic_read (void *user, uint8_t *buf, size_t len)
           }
         if (n == 0)
           break;
-        gq_endpoint_recv (q->ep, now, &q->path,
-                          q->dg + (size_t) q->dg_n * QUIC_DG, (size_t) n);
+        gq_endpoint_recv (q->ep, now, &q->path, q->rx, (size_t) n);
       }
 #endif
     }
@@ -860,6 +1034,16 @@ quic_app_send (struct twist_endpoint *ep, const uint8_t *data, size_t len)
 }
 
 void
+twist_quic_send_stats (struct twist_connection *conn, size_t *datagrams,
+                       size_t *gso_sends)
+{
+  struct twist_quic *q = twist_connection_tls (conn);
+
+  *datagrams = q != NULL ? q->n_sent : 0;
+  *gso_sends = q != NULL ? q->n_gso : 0;
+}
+
+void
 twist_quic_hold_stream (struct twist_connection *conn)
 {
   struct twist_quic *q = twist_connection_tls (conn);
@@ -907,11 +1091,13 @@ quic_free (void *p)
   free (q->also_name);
   free (q->server_name);
   free (q->dg);
+  free (q->rx);
   {
     int i;
 
     for (i = 0; i < q->nst; i++)
       free (q->st[i].pend);
+    free (q->st);
   }
   free (q);
 }
@@ -1019,7 +1205,7 @@ twist_quic_open_stream (struct twist_connection *conn)
   q = twist_connection_tls (conn);
   if (q == NULL || q->conn == NULL)
     return TWIST_ERR_TLS;
-  if (q->nst >= QUIC_STREAMS)
+  if (q->nlive >= QUIC_STREAMS)
     return TWIST_ERR_AGAIN;
   if (q->conn != NULL && q->nst > 0
       && gq_conn_streams_available (q->conn, 1) == 0)
@@ -1078,7 +1264,7 @@ twist_quic_can_open (struct twist_connection *conn)
   if (conn == NULL)
     return 0;
   q = twist_connection_tls (conn);
-  if (q == NULL || q->nst >= QUIC_STREAMS)
+  if (q == NULL || q->nlive >= QUIC_STREAMS)
     return 0;
   /* A stream that is held (a WebSocket, a body being sent) is the one that
      sends are for until it is let go.  */

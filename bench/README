@@ -1,0 +1,66 @@
+Benchmark: twist against curl
+=============================
+
+bench.py runs twist and curl on the same HTTP downloads and uploads over
+HTTP/1.1, HTTP/2 and HTTP/3, against one local nginx, and prints how twist
+compares.
+
+  bench/run.sh                      build the image, run everything
+  bench/run.sh --only get-big       one scenario (a substring of its name)
+  bench/run.sh --protocols h2,h3    some protocols
+
+or, with nginx (1.25 or later, built with the HTTP/3 and WebDAV modules, as
+nginx.org's packages are), a curl that does HTTP/3, and a C compiler:
+
+  python3 bench/bench.py --nginx nginx --curl ./curl --twist ../src/twist
+
+Running it
+----------
+
+The numbers are for the machine they were made on.  On a laptop, anything else
+that runs disturbs them, which is why the workflow (.github/workflows/bench.yml)
+runs it on a hosted runner, where nothing else of ours does: by hand, weekly,
+and on a pull request that has the "benchmark" label.  The result is in the
+job summary and in the artifact (bench.json, every run).
+
+What is measured
+----------------
+
+Every scenario is run for each protocol, and for both clients, in turn: curl,
+twist, twist, curl, and so on, so that whatever the machine does meanwhile
+happens to both.  Each run is a process, and bench/rusage.c, a small program
+that starts it, reports its wall time, its CPU time (user and system) and its
+peak resident set.  Before anything is timed each client gets the body, or
+sends it, once, and the hash is compared: a client does not look fast by
+dropping data.
+
+The scenarios (a run is one process; "cold" means a connection of its own):
+
+  get-small         1 KiB, one request, cold: start-up and the handshake
+  get-small-x50     1 KiB, 50 requests one after another on one connection
+  get-small-par100  1 KiB, 100 requests together (HTTP/2 and HTTP/3)
+  get-medium        1 MiB
+  get-big           256 MiB (--big-mb)
+  put-small, put-medium, put-big    the same, uploaded with PUT
+
+What is reported is the ratio twist/curl, as the median of the ratios of the
+pairs, and in brackets the 95% interval of that median (bootstrap).  Below 1
+twist is better.  The medians of each client's times follow.  The ratio of
+the CPU time is the steadier: wall time on a shared machine wanders.
+
+Read them as follows.  A ratio whose interval lies on one side of 1 is a
+difference; one that straddles 1 is not.  Differences of a few percent on a
+hosted runner are noise.  --max-ratio N makes the exit status 1 if the whole
+interval of a wall or CPU ratio is above N.
+
+Limits
+------
+
+- curl is a static build, which starts faster than a program with shared
+  libraries, as twist is.  get-small and the first request of the others
+  carry that.
+- Loopback has no latency or loss: this measures the cost of the programs,
+  and not how they do on a long path.
+- nginx's certificate is for 127.0.0.1 and both clients verify it.
+- HTTP/3 needs both clients to speak it; one that cannot is left out, or
+  with --require-protocols fails the run.

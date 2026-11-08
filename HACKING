@@ -316,3 +316,31 @@ test-fio runs its tests through both and says which it used.  No dependency
 other than quickstep, foxtrot (and so libgcrypt), zlib, libbrotli, liburing, and
 GNU readline is added without explicit approval.  Readline links into the twist
 program only.
+
+A file is written and read in big pieces, because each hand-over to a thread
+(or to the ring) costs more than the copying it saves: the body of a download is
+handed to the writer in pieces of 256 KiB (TWIST_FIO_WCHUNK_DEFAULT in
+twist-int.h), and a file to upload, or a file:// URL, is read in chunks of
+256 KiB (TWIST_FIO_RCHUNK_DEFAULT).  To find a better size on a machine or a
+file system, set TWIST_WRITE_CHUNK or TWIST_READ_CHUNK in the environment: a
+number of bytes, with k or m after it for KiB or MiB, between 16k and 4m for
+writing and 4k and 4m for reading (outside, it is held to the nearest; what is
+not a size is ignored).  Each is read once, by the first use, and ignored by a
+setuid program.  A write holds up to four buffers of its size, and the sink one
+more; a read holds up to four chunks.  bench/run.sh passes the environment to
+twist, so TWIST_READ_CHUNK=1m bench/run.sh compares sizes.
+
+The loopback has an MTU of 65536, and a server sends a client that takes them
+datagrams far larger than any network carries: nginx sent curl 127000 datagrams
+for 256 MiB over HTTP/3 and twist, which takes 1452 bytes, 287000, and a large
+download cost twist 1.9 times the CPU of curl's.  Run the benchmark with
+MTU=1500 bench/run.sh (or bench.py --mtu 1500, which needs root, unshare and
+ip) for a network of its own whose loopback has an MTU of 1500: the same
+download is then 0.97 times.  The setting changes the benchmark's own network
+namespace only.
+
+On Linux, twist sends the datagrams of a QUIC connection that wait together and
+are of one size (up to 16, QUIC_BATCH in tls/quic.c) as a single send for the
+kernel to cut up (UDP segmentation offload, UDP_SEGMENT), as curl does; a
+kernel or device that refuses it is not asked again.  TWIST_NO_GSO in the
+environment turns it off, to compare.  A batch of 32 or 64 was slower.

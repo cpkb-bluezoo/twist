@@ -434,7 +434,7 @@ read_pump (struct twist_uio *u)
   while (u->left != 0)
     {
       struct uslot *s = NULL;
-      size_t want = TWIST_FIO_CHUNK;
+      size_t want = twist_fio_chunk ();
       struct io_uring_sqe *sqe;
       size_t i;
 
@@ -675,14 +675,15 @@ write_submit (struct twist_uio *u, struct uslot *s)
 }
 
 int
-twist_uio_write (struct twist_fio *f, const uint8_t *data, size_t len)
+twist_uio_write (struct twist_fio *f, const uint8_t *data, size_t len,
+                 uint8_t **swap)
 {
   struct twist_uio *u = (struct twist_uio *) f;
   struct uslot *s = NULL;
   size_t i;
   int busy = 0;
 
-  if (len > TWIST_FIO_CHUNK)
+  if (len > twist_fio_wchunk ())
     return TWIST_ERR_INVAL;
   if (u->end_req)
     return TWIST_ERR_INVAL;
@@ -699,13 +700,27 @@ twist_uio_write (struct twist_fio *f, const uint8_t *data, size_t len)
      the ring does not keep requests in order.  */
   if (s == NULL || (u->plain && busy > 0))
     return 1;
-  if (s->buf == NULL)
+  if (s->buf == NULL || swap != NULL)
     {
-      s->buf = twist_xmalloc (TWIST_FIO_CHUNK);
-      if (s->buf == NULL)
-        return TWIST_ERR_NOMEM;
+      /* A buffer to fill, and, if the caller's goes, the one it gets.  */
+      uint8_t *fresh = s->buf;
+
+      if (fresh == NULL)
+        {
+          fresh = twist_xmalloc (twist_fio_wchunk ());
+          if (fresh == NULL)
+            return TWIST_ERR_NOMEM;
+        }
+      if (swap != NULL)
+        {
+          s->buf = *swap;
+          *swap = fresh;
+          data = s->buf;
+        }
+      else
+        s->buf = fresh;
     }
-  if (len > 0)
+  if (len > 0 && data != s->buf)
     memcpy (s->buf, data, len);
   s->want = len;
   s->done = 0;
@@ -718,8 +733,16 @@ twist_uio_write (struct twist_fio *f, const uint8_t *data, size_t len)
   write_submit (u, s);
   if (s->state != SL_SUBMITTED)
     {
-      /* No room in the ring now: hold it, and say there is no room.  */
+      /* No room in the ring now: hold it, and say there is no room.  The
+         caller's buffer is the caller's still.  */
       u->woff -= (long long) len;
+      if (swap != NULL)
+        {
+          uint8_t *mine = s->buf;
+
+          s->buf = *swap;
+          *swap = mine;
+        }
       return 1;
     }
   return TWIST_OK;
@@ -978,11 +1001,13 @@ twist_uio_write_fd_new (struct twist_loop *loop, struct twist_storage *st,
 }
 
 int
-twist_uio_write (struct twist_fio *f, const uint8_t *data, size_t len)
+twist_uio_write (struct twist_fio *f, const uint8_t *data, size_t len,
+                 uint8_t **swap)
 {
   (void) f;
   (void) data;
   (void) len;
+  (void) swap;
   return TWIST_ERR_INVAL;
 }
 

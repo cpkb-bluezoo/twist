@@ -580,7 +580,7 @@ read_work (void *arg)
     }
   while (left != 0)
     {
-      size_t want = TWIST_FIO_CHUNK;
+      size_t want = twist_fio_chunk ();
       uint8_t *buf;
       ssize_t n;
       int stopped;
@@ -648,7 +648,7 @@ twist_fio_read_new (struct twist_loop *loop, struct twist_storage *st,
     return TWIST_ERR_NOMEM;
   f->rops = *ops;
   f->user = user;
-  rc = twist_storage_submit (st, read_work, f, NULL, NULL, NULL);
+  rc = twist_storage_submit_worker (st, read_work, f);
   if (rc != TWIST_OK)
     {
       f->live = 0;
@@ -743,8 +743,8 @@ write_work (void *arg)
           if (f->wst != NULL && twist_storage_queued (f->wst) > 0)
             {
               pthread_mutex_unlock (&f->mu);
-              if (twist_storage_submit (f->wst, write_work, f, NULL, NULL,
-                                        NULL) == TWIST_OK)
+              if (twist_storage_submit_worker (f->wst, write_work, f)
+                  == TWIST_OK)
                 return;
               pthread_mutex_lock (&f->mu);
             }
@@ -855,7 +855,7 @@ twist_fio_write_new (struct twist_loop *loop, struct twist_storage *st,
       return TWIST_ERR_NOMEM;
     }
   strcpy (f->path, path);
-  rc = twist_storage_submit (st, write_work, f, NULL, NULL, NULL);
+  rc = twist_storage_submit_worker (st, write_work, f);
   if (rc != TWIST_OK)
     {
       f->live = 0;
@@ -867,15 +867,97 @@ twist_fio_write_new (struct twist_loop *loop, struct twist_storage *st,
   return TWIST_OK;
 }
 
-int
-twist_fio_write (struct twist_fio *f, const uint8_t *data, size_t len)
+/* A size from the environment: a number of bytes, with k or m for KiB or MiB,
+   held between LO and HI; DFLT if it is not one.  */
+static size_t
+size_setting (const char *setting, size_t dflt, size_t lo, size_t hi)
+{
+  char *end;
+  unsigned long long v;
+
+  if (setting == NULL || *setting < '0' || *setting > '9')
+    return dflt;
+  errno = 0;
+  v = strtoull (setting, &end, 10);
+  if (errno == ERANGE)
+    return hi;
+  if (*end == 'k' || *end == 'K')
+    {
+      v = v > hi ? hi : v * 1024;
+      end++;
+    }
+  else if (*end == 'm' || *end == 'M')
+    {
+      v = v > hi ? hi : v * 1048576;
+      end++;
+    }
+  if (*end != '\0')
+    return dflt;
+  if (v < lo)
+    return lo;
+  if (v > hi)
+    return hi;
+  return (size_t) v;
+}
+
+size_t
+twist_fio_wchunk_parse (const char *setting)
+{
+  return size_setting (setting, TWIST_FIO_WCHUNK_DEFAULT,
+                       TWIST_FIO_WCHUNK_MIN, TWIST_FIO_WCHUNK_MAX);
+}
+
+size_t
+twist_fio_chunk_parse (const char *setting)
+{
+  return size_setting (setting, TWIST_FIO_RCHUNK_DEFAULT, TWIST_FIO_RCHUNK_MIN,
+                       TWIST_FIO_RCHUNK_MAX);
+}
+
+static size_t rchunk_size;
+static pthread_once_t rchunk_once = PTHREAD_ONCE_INIT;
+
+static void
+rchunk_init (void)
+{
+  rchunk_size = twist_fio_chunk_parse (twist_getenv_secure
+                                       ("TWIST_READ_CHUNK"));
+}
+
+size_t
+twist_fio_chunk (void)
+{
+  pthread_once (&rchunk_once, rchunk_init);
+  return rchunk_size;
+}
+
+static size_t wchunk_size;
+static pthread_once_t wchunk_once = PTHREAD_ONCE_INIT;
+
+static void
+wchunk_init (void)
+{
+  wchunk_size = twist_fio_wchunk_parse (twist_getenv_secure
+                                        ("TWIST_WRITE_CHUNK"));
+}
+
+size_t
+twist_fio_wchunk (void)
+{
+  pthread_once (&wchunk_once, wchunk_init);
+  return wchunk_size;
+}
+
+static int
+fio_write (struct twist_fio *f, const uint8_t *data, size_t len,
+           uint8_t **swap)
 {
   struct fio_chunk *c = NULL;
   int i;
 
   if (twist_uio_is (f))
-    return twist_uio_write (f, data, len);
-  if (f == NULL || f->dir != FIO_WRITE || len > TWIST_FIO_CHUNK)
+    return twist_uio_write (f, data, len, swap);
+  if (f == NULL || f->dir != FIO_WRITE || len > twist_fio_wchunk ())
     return TWIST_ERR_INVAL;
   pthread_mutex_lock (&f->mu);
   if (f->end_req)
@@ -906,14 +988,28 @@ twist_fio_write (struct twist_fio *f, const uint8_t *data, size_t len)
       pthread_mutex_unlock (&f->mu);
       return 1;
     }
-  if (c->data == NULL)
+  if (c->data == NULL || swap != NULL)
     {
-      c->data = twist_xmalloc (TWIST_FIO_CHUNK);
-      if (c->data == NULL)
+      /* A buffer to fill, and, if the caller's goes, the one it gets.  */
+      uint8_t *fresh = c->data;
+
+      if (fresh == NULL)
         {
-          pthread_mutex_unlock (&f->mu);
-          return TWIST_ERR_NOMEM;
+          fresh = twist_xmalloc (twist_fio_wchunk ());
+          if (fresh == NULL)
+            {
+              pthread_mutex_unlock (&f->mu);
+              return TWIST_ERR_NOMEM;
+            }
         }
+      if (swap != NULL)
+        {
+          c->data = *swap;
+          *swap = fresh;
+          data = c->data;
+        }
+      else
+        c->data = fresh;
     }
   c->busy = 1;
   c->f = f;
@@ -922,7 +1018,7 @@ twist_fio_write (struct twist_fio *f, const uint8_t *data, size_t len)
   c->msg = NULL;
   c->final_note = 0;
   c->next = NULL;
-  if (len > 0)
+  if (len > 0 && data != c->data)
     memcpy (c->data, data, len);
   f->inflight++;
   if (f->wq_tail != NULL)
@@ -933,6 +1029,18 @@ twist_fio_write (struct twist_fio *f, const uint8_t *data, size_t len)
   pthread_cond_broadcast (&f->cv);
   pthread_mutex_unlock (&f->mu);
   return TWIST_OK;
+}
+
+int
+twist_fio_write (struct twist_fio *f, const uint8_t *data, size_t len)
+{
+  return fio_write (f, data, len, NULL);
+}
+
+int
+twist_fio_write_swap (struct twist_fio *f, uint8_t **buf, size_t len)
+{
+  return fio_write (f, *buf, len, buf);
 }
 
 void
@@ -990,7 +1098,7 @@ twist_fio_write_fd_new (struct twist_loop *loop, struct twist_storage *st,
       return TWIST_ERR_NOMEM;
     }
   f->path[0] = 0;
-  rc = twist_storage_submit (st, write_work, f, NULL, NULL, NULL);
+  rc = twist_storage_submit_worker (st, write_work, f);
   if (rc != TWIST_OK)
     {
       f->live = 0;

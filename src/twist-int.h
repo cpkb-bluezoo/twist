@@ -1071,6 +1071,12 @@ int twist_quic_dial (struct twist_loop *loop, const char *server_name,
                      const char *certfile, const char *keyfile, int verify,
                      const struct twist_quic_opts *opts,
                      struct twist_connection **out);
+/* What a QUIC connection has sent on its socket: the datagrams, and how many
+   of the calls that sent them were one send of several datagrams cut up by
+   the kernel (UDP segmentation offload, on Linux; TWIST_NO_GSO in the
+   environment says no to it).  */
+void twist_quic_send_stats (struct twist_connection *conn, size_t *datagrams,
+                            size_t *gso_sends);
 /* Datagrams of a QUIC connection made with opts->datagrams: send one, the
    largest that can be sent now (0: not allowed yet), and who is given the
    ones that arrive.  */
@@ -1124,6 +1130,10 @@ void twist_storage_free (struct twist_storage *st);
 int twist_storage_submit (struct twist_storage *st, void (*work) (void *),
                           void *arg, void (*done) (void *user, int err),
                           void *user, struct twist_loop *loop);
+/* As twist_storage_submit with no completion, and not refused when the queue
+   is full: for a job that lasts as long as a transfer.  */
+int twist_storage_submit_worker (struct twist_storage *st,
+                                 void (*work) (void *), void *arg);
 size_t twist_storage_threads (const struct twist_storage *st);
 /* How many jobs are waiting for a thread.  */
 size_t twist_storage_queued (struct twist_storage *st);
@@ -1143,7 +1153,32 @@ size_t twist_storage_queued (struct twist_storage *st);
    is no cancellation of a read that is under way; it holds a worker of the
    pool until it returns.  A full queue fails the submit at once.  */
 #define TWIST_FIO_CHUNK 16384
+/* What the sink gives the application's write callback at a time: no more
+   than the least a write takes in one job.  */
+#define TWIST_SINK_PIECE 16384
+/* The size of a chunk a reader gives its callback is
+   TWIST_FIO_RCHUNK_DEFAULT unless TWIST_READ_CHUNK in the environment says
+   otherwise (as TWIST_WRITE_CHUNK does for writing, below), between these.  Up to TWIST_FIO_PIPELINE chunks
+   are held for a reader.  Whatever takes the chunks must not assume a size.  */
+#define TWIST_FIO_RCHUNK_DEFAULT 262144
+#define TWIST_FIO_RCHUNK_MIN 4096
+#define TWIST_FIO_RCHUNK_MAX (4u * 1024 * 1024)
+size_t twist_fio_chunk_parse (const char *setting);
+size_t twist_fio_chunk (void);
 #define TWIST_FIO_PIPELINE 4
+/* The most a write to a file takes: the body comes in pieces of a record,
+   and goes out in pieces of this, so that a hand-over to a thread (or to the
+   ring) is made once for many.  It is TWIST_FIO_WCHUNK_DEFAULT unless
+   TWIST_WRITE_CHUNK in the environment says otherwise: a number of bytes,
+   with k or m after it for KiB or MiB, kept between the least (a whole piece
+   from the sink) and the most.  Each write holds up to TWIST_FIO_PIPELINE
+   buffers of it, and the sink one more.  twist_fio_wchunk_parse gives what a
+   setting means (NULL or what is not a size: the default).  */
+#define TWIST_FIO_WCHUNK_DEFAULT 262144
+#define TWIST_FIO_WCHUNK_MIN TWIST_SINK_PIECE
+#define TWIST_FIO_WCHUNK_MAX (4u * 1024 * 1024)
+size_t twist_fio_wchunk_parse (const char *setting);
+size_t twist_fio_wchunk (void);
 struct twist_fio;
 
 /* Reading.  OPEN runs on the worker, and gives the descriptor, the offset to
@@ -1192,9 +1227,14 @@ int twist_fio_write_fd_new (struct twist_loop *loop, struct twist_storage *st,
                             int fd, long long at,
                             const struct twist_fio_write_ops *ops, void *user,
                             struct twist_fio **out);
-/* Queue LEN (at most TWIST_FIO_CHUNK) bytes, copied: TWIST_OK, 1 if there is
-   no room (CREDIT says when there is), or why the write has failed.  */
+/* Queue LEN (at most twist_fio_wchunk ()) bytes, copied: TWIST_OK, 1 if there
+   is no room (CREDIT says when there is), or why the write has failed.  */
 int twist_fio_write (struct twist_fio *f, const uint8_t *data, size_t len);
+/* As twist_fio_write, without the copy: *BUF is a buffer of twist_fio_wchunk
+   () bytes (from twist_xmalloc) holding LEN of them, and on TWIST_OK it has
+   gone to the writer and *BUF is another of the same size to fill.  Otherwise
+   it is the caller's still.  */
+int twist_fio_write_swap (struct twist_fio *f, uint8_t **buf, size_t len);
 /* No more will be written; the file is closed once what was queued is.  */
 void twist_fio_write_end (struct twist_fio *f);
 
@@ -1216,7 +1256,8 @@ int twist_uio_write_fd_new (struct twist_loop *loop, struct twist_storage *st,
                             int fd, long long at,
                             const struct twist_fio_write_ops *ops, void *user,
                             struct twist_fio **out);
-int twist_uio_write (struct twist_fio *f, const uint8_t *data, size_t len);
+int twist_uio_write (struct twist_fio *f, const uint8_t *data, size_t len,
+                     uint8_t **swap);
 void twist_uio_write_end (struct twist_fio *f);
 void twist_uio_pause (struct twist_fio *f);
 void twist_uio_resume (struct twist_fio *f);
@@ -2846,6 +2887,8 @@ int twist_has_ctl (const char *s);
    privileged, 0 as not, -1 asks the system.  */
 const char *twist_getenv_secure (const char *name);
 void twist_set_privileged (int how);
+/* Make the process's table of descriptors big while it has one thread.  */
+void twist_fdtable_grow (void);
 /* The status code in the first three bytes of S: -1 unless they are three
    digits, from 100 to 599.  */
 int twist_status_code (const char *s);
@@ -2875,6 +2918,9 @@ void twist_sink_gate_check (struct twist_transfer *transfer);
 struct twist_upload *twist_fd_upload_new (struct twist_transfer *transfer);
 void twist_wsink_free (struct twist_transfer *transfer);
 int twist_wsink_busy (struct twist_transfer *transfer);
+/* How many writes have been made to the writer of the body (for tests: the
+   body goes in as few as it can).  */
+size_t twist_wsink_writes (const struct twist_transfer *transfer);
 void twist_wsink_close (struct twist_transfer *transfer);
 /* Free what is held.  */
 void twist_sink_clear (struct twist_transfer *transfer);

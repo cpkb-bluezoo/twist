@@ -23,7 +23,7 @@ noinst_HEADERS = check.h http-ev.h feed.h body.h
 PROGRAM_TESTS = test-reactor test-engine test-http test-auth test-asn1 test-ntlm test-spnego test-smb test-smb-session test-smb-xfer test-dns test-resolve test-race test-conn-rate test-conn-out test-push test-fio test-fd test-upload test-relay test-sink test-fdopt test-route \
 	test-ftp test-mail test-mqtt test-ldap test-ws test-gopher test-rtsp test-dict test-telnet \
 	test-tftp test-file test-tls test-errors test-coding test-ssh \
-	test-quote test-rate test-glob test-vars test-progress test-bar test-meter test-origin test-runtime-threads test-proxyenv test-env test-template test-masque test-threads
+	test-quote test-rate test-glob test-vars test-progress test-bar test-meter test-origin test-runtime-threads test-proxyenv test-env test-template test-masque test-threads test-fdtable
 ## The tool itself, on local files.
 SCRIPT_TESTS = cli-glob.sh cli-vars.sh cli-progress.sh cli-misc.sh cli-parallel.sh cli-output.sh cli-negate.sh cli-fdio.sh
 TESTS = $(PROGRAM_TESTS) $(SCRIPT_TESTS)
@@ -81,6 +81,7 @@ test_env_SOURCES = test-env.c check.c
 test_template_SOURCES = test-template.c check.c
 test_masque_SOURCES = test-masque.c check.c
 test_threads_SOURCES = test-threads.c check.c
+test_fdtable_SOURCES = test-fdtable.c check.c
 test_origin_SOURCES = test-origin.c check.c
 test_runtime_threads_SOURCES = test-runtime-threads.c check.c
 test_runtime_threads_LDADD = $(LDADD) -lpthread
