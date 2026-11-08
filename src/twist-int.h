@@ -1159,7 +1159,7 @@ size_t twist_storage_queued (struct twist_storage *st);
    from the sink) and the most.  Each write holds up to TWIST_FIO_PIPELINE
    buffers of it, and the sink one more.  twist_fio_wchunk_parse gives what a
    setting means (NULL or what is not a size: the default).  */
-#define TWIST_FIO_WCHUNK_DEFAULT 65536
+#define TWIST_FIO_WCHUNK_DEFAULT 262144
 #define TWIST_FIO_WCHUNK_MIN TWIST_SINK_PIECE
 #define TWIST_FIO_WCHUNK_MAX (4u * 1024 * 1024)
 size_t twist_fio_wchunk_parse (const char *setting);

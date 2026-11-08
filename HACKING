@@ -317,7 +317,7 @@ other than quickstep, foxtrot (and so libgcrypt), zlib, libbrotli, liburing, and
 GNU readline is added without explicit approval.  Readline links into the twist
 program only.
 
-The body of a download to a file is handed to the writer in pieces of 64 KiB
+The body of a download to a file is handed to the writer in pieces of 256 KiB
 (TWIST_FIO_WCHUNK_DEFAULT in twist-int.h).  To find a better size on a machine
 or a file system, set TWIST_WRITE_CHUNK in the environment: a number of bytes,
 with k or m after it for KiB or MiB, between 16k and 4m (outside, it is held to
