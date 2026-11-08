@@ -86,6 +86,7 @@ struct rd
   uint8_t *got;
   size_t n;
   int chunks;
+  size_t maxchunk;
   long long size;
   int sizes;
   int ends;
@@ -133,6 +134,8 @@ rd_chunk (void *user, uint8_t *data, size_t len)
     memcpy (r->got + r->n, data, len);
   r->n += len;
   r->chunks++;
+  if (len > r->maxchunk)
+    r->maxchunk = len;
   return TWIST_OK;
 }
 
@@ -173,6 +176,8 @@ test_read (struct twist_loop *loop, struct twist_storage *st)
   check (r.n == FILE_SIZE && memcmp (r.got, content, FILE_SIZE) == 0,
          "and delivered the file, in order");
   check (r.sizes == 0, "a read to the end has no size to tell");
+  check (r.maxchunk == twist_fio_chunk (),
+         "in chunks of the size the environment gave");
   twist_fio_free (f);
   free (r.got);
   free (r.msg);
@@ -797,6 +802,15 @@ test_wchunk (void)
          "the least takes a whole piece from the sink");
   check (twist_fio_wchunk () == 32768,
          "the size in use is the one the environment gave at the start");
+  check (twist_fio_chunk_parse (NULL) == TWIST_FIO_RCHUNK_DEFAULT
+         && twist_fio_chunk_parse ("x") == TWIST_FIO_RCHUNK_DEFAULT,
+         "a read chunk with no size is the default");
+  check (twist_fio_chunk_parse ("256k") == 262144
+         && twist_fio_chunk_parse ("1") == TWIST_FIO_RCHUNK_MIN
+         && twist_fio_chunk_parse ("100m") == TWIST_FIO_RCHUNK_MAX,
+         "a read chunk is kept within the least and the most");
+  check (twist_fio_chunk () == 65536,
+         "and the one in use is the environment's");
 }
 
 int
@@ -804,6 +818,7 @@ main (void)
 {
   /* Before anything asks, so the tests run with other than the default.  */
   setenv ("TWIST_WRITE_CHUNK", "32k", 1);
+  setenv ("TWIST_READ_CHUNK", "64k", 1);
   if (make_file () != 0)
     return 77;
   test_wchunk ();

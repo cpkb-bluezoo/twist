@@ -580,7 +580,7 @@ read_work (void *arg)
     }
   while (left != 0)
     {
-      size_t want = TWIST_FIO_CHUNK;
+      size_t want = twist_fio_chunk ();
       uint8_t *buf;
       ssize_t n;
       int stopped;
@@ -867,35 +867,68 @@ twist_fio_write_new (struct twist_loop *loop, struct twist_storage *st,
   return TWIST_OK;
 }
 
-size_t
-twist_fio_wchunk_parse (const char *setting)
+/* A size from the environment: a number of bytes, with k or m for KiB or MiB,
+   held between LO and HI; DFLT if it is not one.  */
+static size_t
+size_setting (const char *setting, size_t dflt, size_t lo, size_t hi)
 {
   char *end;
   unsigned long long v;
 
   if (setting == NULL || *setting < '0' || *setting > '9')
-    return TWIST_FIO_WCHUNK_DEFAULT;
+    return dflt;
   errno = 0;
   v = strtoull (setting, &end, 10);
   if (errno == ERANGE)
-    return TWIST_FIO_WCHUNK_MAX;
+    return hi;
   if (*end == 'k' || *end == 'K')
     {
-      v = v > TWIST_FIO_WCHUNK_MAX ? TWIST_FIO_WCHUNK_MAX : v * 1024;
+      v = v > hi ? hi : v * 1024;
       end++;
     }
   else if (*end == 'm' || *end == 'M')
     {
-      v = v > TWIST_FIO_WCHUNK_MAX ? TWIST_FIO_WCHUNK_MAX : v * 1048576;
+      v = v > hi ? hi : v * 1048576;
       end++;
     }
   if (*end != '\0')
-    return TWIST_FIO_WCHUNK_DEFAULT;
-  if (v < TWIST_FIO_WCHUNK_MIN)
-    return TWIST_FIO_WCHUNK_MIN;
-  if (v > TWIST_FIO_WCHUNK_MAX)
-    return TWIST_FIO_WCHUNK_MAX;
+    return dflt;
+  if (v < lo)
+    return lo;
+  if (v > hi)
+    return hi;
   return (size_t) v;
+}
+
+size_t
+twist_fio_wchunk_parse (const char *setting)
+{
+  return size_setting (setting, TWIST_FIO_WCHUNK_DEFAULT,
+                       TWIST_FIO_WCHUNK_MIN, TWIST_FIO_WCHUNK_MAX);
+}
+
+size_t
+twist_fio_chunk_parse (const char *setting)
+{
+  return size_setting (setting, TWIST_FIO_RCHUNK_DEFAULT, TWIST_FIO_RCHUNK_MIN,
+                       TWIST_FIO_RCHUNK_MAX);
+}
+
+static size_t rchunk_size;
+static pthread_once_t rchunk_once = PTHREAD_ONCE_INIT;
+
+static void
+rchunk_init (void)
+{
+  rchunk_size = twist_fio_chunk_parse (twist_getenv_secure
+                                       ("TWIST_READ_CHUNK"));
+}
+
+size_t
+twist_fio_chunk (void)
+{
+  pthread_once (&rchunk_once, rchunk_init);
+  return rchunk_size;
 }
 
 static size_t wchunk_size;

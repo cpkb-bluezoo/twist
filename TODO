@@ -71,14 +71,14 @@ HTTP/3 (src/tls/quic.c, src/http)
 
 Found by bench/ (twist against curl), not looked into
 
-  - A large upload costs 1.4 to 1.9 times the CPU of curl's over every
-    protocol, and a large download over HTTP/3 1.6 to 1.9 times (over HTTP/1.1
-    and HTTP/2, 1.1 to 1.4 times, with or without io_uring). The upload reads
-    the file in chunks of 16 KiB, each a hand-over to a thread or the ring;
-    reading in larger pieces, as the download now writes, is the first thing to
-    try. A small transfer costs 1.3 times, and 100 requests together over
-    HTTP/2 and HTTP/3 1.05 to 1.1 times, where io_uring is available (measured
-    in a container that allows it).
+  - HTTP/3 costs more than the other two for a large transfer: 1.9 times the
+    CPU of curl's for a download and 1.4 for an upload (HTTP/1.1 and HTTP/2,
+    1.1 to 1.3).  For a download, much of it is libgcrypt's AES-GCM, which does
+    the counter and the hash in two passes where OpenSSL does one.  A small
+    request costs 1.3 times (start-up and the handshake); a medium one over
+    HTTP/1.1 and HTTP/2, in either direction, 1.3 to 1.4.  100 requests
+    together over HTTP/2 and HTTP/3 are 1.1 times, where io_uring is available
+    (measured in a container that allows it).
 
 DNS (src/dns, RFC 8305)
 

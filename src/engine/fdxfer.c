@@ -48,8 +48,8 @@ struct fd_src
   long long discard;		/* Of the rest: bytes to read and throw away.  */
   struct twist_fd_source *fs;
   struct twist_fio *fio;
-  uint8_t pend[TWIST_FIO_CHUNK];	/* A chunk of a file, being pushed.  */
-  size_t pend_len, pend_off;
+  uint8_t *pend;		/* A chunk of a file, being pushed.  */
+  size_t pend_cap, pend_len, pend_off;
   int ended;			/* The file is over; PEND is the last.  */
   int started;
 };
@@ -103,8 +103,15 @@ in_chunk (void *user, uint8_t *data, size_t len)
   struct fio_in *in = user;
   struct fd_src *s = in->src;
 
-  if (len > sizeof s->pend)
-    return TWIST_ERR_ABORTED;
+  if (len > s->pend_cap)
+    {
+      uint8_t *grown = realloc (s->pend, len);
+
+      if (grown == NULL)
+        return TWIST_ERR_NOMEM;
+      s->pend = grown;
+      s->pend_cap = len;
+    }
   memcpy (s->pend, data, len);
   s->pend_len = len;
   s->pend_off = 0;
@@ -294,6 +301,7 @@ src_release (void *user)
 
   twist_fio_free (s->fio);
   twist_fd_source_free (s->fs);
+  free (s->pend);
   free (s);
 }
 

@@ -434,7 +434,7 @@ read_pump (struct twist_uio *u)
   while (u->left != 0)
     {
       struct uslot *s = NULL;
-      size_t want = TWIST_FIO_CHUNK;
+      size_t want = twist_fio_chunk ();
       struct io_uring_sqe *sqe;
       size_t i;
 

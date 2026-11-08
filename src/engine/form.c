@@ -575,8 +575,8 @@ struct form_src
   struct twist_fd_source *fs;
   struct form_fs *fsctx;
   int held;			/* The body source is paused for the writer.  */
-  uint8_t pend[TWIST_FIO_CHUNK];
-  size_t pend_len, pend_off;
+  uint8_t *pend;
+  size_t pend_cap, pend_len, pend_off;
   int in_pump, again, failed;
 };
 
@@ -692,8 +692,17 @@ in_chunk (void *user, uint8_t *data, size_t len)
   struct form_in *in = user;
   struct form_src *s = in->src;
 
-  if (s == NULL || len > sizeof s->pend)
+  if (s == NULL)
     return TWIST_ERR_ABORTED;
+  if (len > s->pend_cap)
+    {
+      uint8_t *grown = realloc (s->pend, len);
+
+      if (grown == NULL)
+        return TWIST_ERR_NOMEM;
+      s->pend = grown;
+      s->pend_cap = len;
+    }
   memcpy (s->pend, data, len);
   s->pend_len = len;
   s->pend_off = 0;
@@ -1107,6 +1116,7 @@ src_release (void *user)
   body_stop (s);
   twist_mime_free (s->mime);
   twist_form_unref (s->form);
+  free (s->pend);
   free (s);
 }
 

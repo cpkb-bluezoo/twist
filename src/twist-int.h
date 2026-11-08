@@ -1148,8 +1148,17 @@ size_t twist_storage_queued (struct twist_storage *st);
    pool until it returns.  A full queue fails the submit at once.  */
 #define TWIST_FIO_CHUNK 16384
 /* What the sink gives the application's write callback at a time: no more
-   than the writer behind it takes (TWIST_FIO_CHUNK) in one job.  */
-#define TWIST_SINK_PIECE TWIST_FIO_CHUNK
+   than the least a write takes in one job.  */
+#define TWIST_SINK_PIECE 16384
+/* The size of a chunk a reader gives its callback is
+   TWIST_FIO_RCHUNK_DEFAULT unless TWIST_READ_CHUNK in the environment says
+   otherwise (as TWIST_WRITE_CHUNK does for writing, below), between these.  Up to TWIST_FIO_PIPELINE chunks
+   are held for a reader.  Whatever takes the chunks must not assume a size.  */
+#define TWIST_FIO_RCHUNK_DEFAULT 262144
+#define TWIST_FIO_RCHUNK_MIN 4096
+#define TWIST_FIO_RCHUNK_MAX (4u * 1024 * 1024)
+size_t twist_fio_chunk_parse (const char *setting);
+size_t twist_fio_chunk (void);
 #define TWIST_FIO_PIPELINE 4
 /* The most a write to a file takes: the body comes in pieces of a record,
    and goes out in pieces of this, so that a hand-over to a thread (or to the

@@ -317,11 +317,15 @@ other than quickstep, foxtrot (and so libgcrypt), zlib, libbrotli, liburing, and
 GNU readline is added without explicit approval.  Readline links into the twist
 program only.
 
-The body of a download to a file is handed to the writer in pieces of 256 KiB
-(TWIST_FIO_WCHUNK_DEFAULT in twist-int.h).  To find a better size on a machine
-or a file system, set TWIST_WRITE_CHUNK in the environment: a number of bytes,
-with k or m after it for KiB or MiB, between 16k and 4m (outside, it is held to
-the nearest; what is not a size is ignored).  It is read once, by the first
-write, and ignored by a setuid program.  Each write holds up to four buffers
-of that size, and the sink one more.  bench/run.sh passes the environment to
-twist, so TWIST_WRITE_CHUNK=128k bench/run.sh compares sizes.
+A file is written and read in big pieces, because each hand-over to a thread
+(or to the ring) costs more than the copying it saves: the body of a download is
+handed to the writer in pieces of 256 KiB (TWIST_FIO_WCHUNK_DEFAULT in
+twist-int.h), and a file to upload, or a file:// URL, is read in chunks of
+256 KiB (TWIST_FIO_RCHUNK_DEFAULT).  To find a better size on a machine or a
+file system, set TWIST_WRITE_CHUNK or TWIST_READ_CHUNK in the environment: a
+number of bytes, with k or m after it for KiB or MiB, between 16k and 4m for
+writing and 4k and 4m for reading (outside, it is held to the nearest; what is
+not a size is ignored).  Each is read once, by the first use, and ignored by a
+setuid program.  A write holds up to four buffers of its size, and the sink one
+more; a read holds up to four chunks.  bench/run.sh passes the environment to
+twist, so TWIST_READ_CHUNK=1m bench/run.sh compares sizes.
