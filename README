@@ -75,6 +75,33 @@ The same applies to foxtrot, with --with-foxtrot=/prefix.
 See INSTALL for the GNU build instructions, and TODO for what is
 not yet implemented.
 
+Performance
+-----------
+
+bench/ compares twist with curl on downloads and uploads over HTTP/1.1,
+HTTP/2 and HTTP/3 against a local nginx, and reports wall time, CPU time and
+memory (bench/run.sh runs it in a container; see HACKING for the options,
+including the MTU of the loopback, which matters for HTTP/3).
+
+For anything but a small request the two are close.  For a small one the
+difference is start-up, and what makes it is how the two programs are linked,
+not the code that runs.  The curl the benchmark uses is a single static binary.
+Twist is dynamically linked, and loading its 22 shared libraries costs about
+half a millisecond before it does anything, most of it the GnuTLS chain.  Linked
+statically (everything but the C library, libm, libp11-kit and libffi, since
+Debian has no static libp11-kit) twist takes 0.9 to 1.0 times curl's CPU for
+small and medium requests, and large transfers are within about 15%, with a
+large upload over HTTP/1.1, about 1.2 times, the one that is further.  Dynamic
+against dynamic the picture is the same or better: on one test machine an
+HTTPS request took 2.3 ms with twist and 3.2 ms with the distribution's curl
+8.5.0.
+
+These figures are from one machine (aarch64, in a container, over the
+loopback) and will differ on others; the benchmark is there to be run.  The
+build system makes the dynamic program.  A static one is made by linking the
+objects of src/ with the static libraries of its dependencies, and its
+licensing (the libraries are LGPL) is for whoever distributes it to consider.
+
 License
 -------
 
