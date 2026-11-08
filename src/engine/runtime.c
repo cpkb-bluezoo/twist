@@ -163,9 +163,11 @@ static struct twist_runtime *
 runtime_new (int embedded, twist_watch_callback watch,
              twist_timer_callback timer, void *user)
 {
-  struct twist_runtime *runtime = calloc (1, sizeof *runtime);
+  struct twist_runtime *runtime;
   struct twist_lane *lane;
 
+  twist_fdtable_grow ();
+  runtime = calloc (1, sizeof *runtime);
   if (runtime == NULL)
     return NULL;
   runtime->threads = 1;

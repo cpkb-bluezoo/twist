@@ -2872,6 +2872,8 @@ int twist_has_ctl (const char *s);
    privileged, 0 as not, -1 asks the system.  */
 const char *twist_getenv_secure (const char *name);
 void twist_set_privileged (int how);
+/* Make the process's table of descriptors big while it has one thread.  */
+void twist_fdtable_grow (void);
 /* The status code in the first three bytes of S: -1 unless they are three
    digits, from 100 to 599.  */
 int twist_status_code (const char *s);

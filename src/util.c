@@ -22,6 +22,7 @@
 
 #include "twist-int.h"
 
+#include <fcntl.h>
 #include <pwd.h>
 #include <stdlib.h>
 #include <string.h>
@@ -29,6 +30,7 @@
 #include <unistd.h>
 #ifdef __linux__
 # include <sys/auxv.h>
+# include <sys/resource.h>
 #endif
 
 void *
@@ -263,4 +265,39 @@ twist_text_sanitize (uint8_t *out, const uint8_t *in, size_t n)
         }
     }
   return o;
+}
+
+/* Make the table of descriptors big before there are threads.  In a process
+   with more than one thread the kernel waits for a grace period of its own
+   (some milliseconds) every time the table has to grow, at 64, 128, 256
+   descriptors and so on, and does not wait when there is only one.  A run of
+   parallel transfers that each open a file passes 64 at about the thirtieth,
+   and the loop's thread stood still in the middle of the handshake.  The
+   table does not shrink, and 1024 slots are some 8 KiB.  */
+void
+twist_fdtable_grow (void)
+{
+#ifdef __linux__
+  static int done;
+  struct rlimit rl;
+  int want = 1024;
+  int fd;
+  int big;
+
+  if (done)
+    return;
+  done = 1;
+  if (getrlimit (RLIMIT_NOFILE, &rl) == 0 && rl.rlim_cur != RLIM_INFINITY
+      && rl.rlim_cur <= (rlim_t) want)
+    want = (int) rl.rlim_cur - 1;
+  if (want < 64)
+    return;
+  fd = open ("/dev/null", O_RDONLY | O_CLOEXEC);
+  if (fd < 0)
+    return;
+  big = fcntl (fd, F_DUPFD_CLOEXEC, want);
+  if (big >= 0)
+    close (big);
+  close (fd);
+#endif
 }
