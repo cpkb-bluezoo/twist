@@ -39,9 +39,18 @@ if [ -z "$engine" ]; then
 fi
 [ -n "$engine" ] || { echo "bench: neither podman nor docker is installed" >&2; exit 1; }
 image=twist-bench
+# The commit, not "main": the layer that builds a dependency is cached by the
+# text of its arguments, and a cache from before a fix in quickstep or foxtrot
+# would be measured as if it were current.
+tip () {
+  git ls-remote "https://github.com/cpkb-bluezoo/$1.git" main 2>/dev/null \
+    | cut -c1-40 | grep -E '^[0-9a-f]{40}$' || echo main
+}
+QUICKSTEP_REF=${QUICKSTEP_REF:-$(tip quickstep)}
+FOXTROT_REF=${FOXTROT_REF:-$(tip foxtrot)}
 $engine build --target bench -f ci/Dockerfile \
-  --build-arg "QUICKSTEP_REF=${QUICKSTEP_REF:-main}" \
-  --build-arg "FOXTROT_REF=${FOXTROT_REF:-main}" \
+  --build-arg "QUICKSTEP_REF=$QUICKSTEP_REF" \
+  --build-arg "FOXTROT_REF=$FOXTROT_REF" \
   -t "$image" . || exit 1
 # Memory for the files, and the host's network: no translation between the
 # clients and nginx.
