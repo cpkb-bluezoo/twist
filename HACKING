@@ -338,3 +338,9 @@ MTU=1500 bench/run.sh (or bench.py --mtu 1500, which needs root, unshare and
 ip) for a network of its own whose loopback has an MTU of 1500: the same
 download is then 0.97 times.  The setting changes the benchmark's own network
 namespace only.
+
+On Linux, twist sends the datagrams of a QUIC connection that wait together and
+are of one size (up to 16, QUIC_BATCH in tls/quic.c) as a single send for the
+kernel to cut up (UDP segmentation offload, UDP_SEGMENT), as curl does; a
+kernel or device that refuses it is not asked again.  TWIST_NO_GSO in the
+environment turns it off, to compare.  A batch of 32 or 64 was slower.

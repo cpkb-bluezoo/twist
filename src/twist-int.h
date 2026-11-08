@@ -1071,6 +1071,12 @@ int twist_quic_dial (struct twist_loop *loop, const char *server_name,
                      const char *certfile, const char *keyfile, int verify,
                      const struct twist_quic_opts *opts,
                      struct twist_connection **out);
+/* What a QUIC connection has sent on its socket: the datagrams, and how many
+   of the calls that sent them were one send of several datagrams cut up by
+   the kernel (UDP segmentation offload, on Linux; TWIST_NO_GSO in the
+   environment says no to it).  */
+void twist_quic_send_stats (struct twist_connection *conn, size_t *datagrams,
+                            size_t *gso_sends);
 /* Datagrams of a QUIC connection made with opts->datagrams: send one, the
    largest that can be sent now (0: not allowed yet), and who is given the
    ones that arrive.  */
